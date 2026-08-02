@@ -32,8 +32,10 @@ fn main() {
         format!("{signal}/ws")
     };
     let room = arg(&args, "--room").unwrap_or_else(|| "demo".into());
+    let encoder = arg(&args, "--encoder").unwrap_or_else(|| "pcap".into());
 
     match role.as_str() {
+        "publisher" if encoder == "x264" => publisher_x264(&signal, &room),
         "publisher" => publisher(&signal, &room),
         "viewer" => viewer(&signal, &room),
         other => panic!("unknown role {other}"),
@@ -62,6 +64,23 @@ fn connect(
     room: &str,
     role: Role,
 ) -> (WsSignalClient, Endpoint, UdpSocket, str0m::media::Mid) {
+    connect_inner(signal_url, room, role, false)
+}
+
+fn connect_h264(
+    signal_url: &str,
+    room: &str,
+    role: Role,
+) -> (WsSignalClient, Endpoint, UdpSocket, str0m::media::Mid) {
+    connect_inner(signal_url, room, role, true)
+}
+
+fn connect_inner(
+    signal_url: &str,
+    room: &str,
+    role: Role,
+    h264_only: bool,
+) -> (WsSignalClient, Endpoint, UdpSocket, str0m::media::Mid) {
     let mut signal = WsSignalClient::connect(signal_url).expect("signal connect");
     let (peer_id, turn) = signal.join(room, role, None).expect("join");
     info!("joined room {room} as {peer_id}");
@@ -70,7 +89,11 @@ fn connect(
     let addr = socket.local_addr().unwrap();
     info!("local UDP addr: {addr}");
 
-    let mut endpoint = Endpoint::new();
+    let mut endpoint = if h264_only {
+        Endpoint::new_h264()
+    } else {
+        Endpoint::new()
+    };
     endpoint
         .add_local_candidate(addr, Protocol::Udp)
         .expect("candidate");
@@ -280,6 +303,99 @@ fn viewer(signal_url: &str, room: &str) {
             info!("RECEIVED: {frames} frames, {bytes} bytes, {keyframes} keyframes");
             last_report = Instant::now();
         }
+        std::thread::sleep(Duration::from_millis(2));
+        let _ = &mut signal;
+    }
+}
+
+/// x264 发布端：合成帧 → H.264 编码 → SFU。
+fn publisher_x264(signal_url: &str, room: &str) {
+    use aerodesk_macos::encoder::X264Encoder;
+    use aerodesk_macos::synthetic::SyntheticSource;
+
+    const W: u32 = 640;
+    const H: u32 = 360;
+    const FPS: u32 = 30;
+
+    let (mut signal, mut endpoint, socket, video_mid) =
+        connect_h264(signal_url, room, Role::Publisher);
+    let mut encoder = X264Encoder::new(W, H, FPS, 800).expect("x264 encoder");
+    let mut source = SyntheticSource::new(W, H);
+    let mut connected = false;
+    let mut next_frame = Instant::now();
+    let mut pts = 0i64;
+
+    loop {
+        let wait = Duration::from_millis(5);
+        socket.set_read_timeout(Some(wait)).ok();
+        let mut buf = [0u8; 2000];
+        match socket.recv_from(&mut buf) {
+            Ok((n, source)) => {
+                if let Ok(contents) = buf[..n].try_into() {
+                    let input = Input::Receive(
+                        Instant::now(),
+                        Receive {
+                            proto: Protocol::Udp,
+                            source,
+                            destination: socket.local_addr().unwrap(),
+                            contents,
+                        },
+                    );
+                    let _ = endpoint.handle_input(input);
+                }
+            }
+            Err(_) => {}
+        }
+        let _ = endpoint.handle_timeout(Instant::now());
+
+        let mut deadline = Instant::now() + Duration::from_secs(1);
+        while let Some(output) = endpoint.poll_output() {
+            match output {
+                Output::Transmit(t) => {
+                    let _ = socket.send_to(&t.contents, t.destination);
+                }
+                Output::Timeout(t) => {
+                    deadline = deadline.min(t);
+                    break;
+                }
+                Output::Event(_) => {}
+            }
+        }
+
+        while let Some(ev) = endpoint.poll_event() {
+            match ev {
+                ClientEvent::IceConnected => {
+                    info!("ICE connected, starting x264 stream");
+                    connected = true;
+                    next_frame = Instant::now();
+                }
+                ClientEvent::Closed => {
+                    info!("connection closed");
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // 30fps 节奏编码发送
+        if connected && Instant::now() >= next_frame {
+            next_frame += Duration::from_millis(1000 / FPS as u64);
+            let rgb = source.next_frame();
+            if let Some(frame) = encoder.encode(rgb).expect("encode") {
+                let rtp_time = str0m::media::MediaTime::new(
+                    (pts as u64 * 3000) as u64,
+                    str0m::media::Frequency::NINETY_KHZ,
+                );
+                if let Err(e) = endpoint.send_video_frame(video_mid, frame.data, rtp_time) {
+                    warn!("send frame failed: {e:?}");
+                }
+                if frame.keyframe {
+                    info!("sent keyframe (pts {pts})");
+                }
+            }
+            pts += 1;
+        }
+
         std::thread::sleep(Duration::from_millis(2));
         let _ = &mut signal;
     }

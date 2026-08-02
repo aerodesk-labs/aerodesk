@@ -1,0 +1,13 @@
+[package]
+name = "aerodesk-macos"
+description = "AeroDesk macOS platform adapter: H.264 encoder (x264), synthetic test source, CGEvent input injection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+x264 = "0.5"
+core-graphics = "0.25"
+core-graphics-types = "0.2"
+aerodesk-protocol.workspace = true
+tracing.workspace = true

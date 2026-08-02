@@ -6,6 +6,7 @@ members = [
     "crates/aerodesk-core",
     "crates/aerodesk-signal",
     "crates/aerodesk-cli",
+    "crates/aerodesk-macos",
 ]
 
 [workspace.package]

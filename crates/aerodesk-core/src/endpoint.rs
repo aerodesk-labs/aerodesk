@@ -56,6 +56,27 @@ impl Endpoint {
         }
     }
 
+    /// 仅启用 H.264 的端点（配合 x264/VideoToolbox 编码器）。
+    pub fn new_h264() -> Self {
+        let mut config = Rtc::builder();
+        {
+            let cfg = config.codec_config();
+            cfg.clear();
+            cfg.add_h264(
+                str0m::media::Pt::new_with_value(96),
+                None,
+                true,
+                0x42e01f, // Constrained Baseline
+            );
+        }
+        Self {
+            rtc: config.build(Instant::now()),
+            events: VecDeque::new(),
+            channel_labels: HashMap::new(),
+            want_video: false,
+        }
+    }
+
     /// 添加本地 host candidate（调用方绑定 UDP socket 后调用）。
     pub fn add_local_candidate(
         &mut self,

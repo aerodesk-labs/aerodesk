@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 str0m = { workspace = true, features = ["rust-crypto"] }
 aerodesk-core = { path = "../aerodesk-core" }
+aerodesk-macos = { path = "../aerodesk-macos" }
 aerodesk-protocol.workspace = true
 tungstenite = "0.30"
 serde.workspace = true
