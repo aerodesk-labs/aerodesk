@@ -34,6 +34,19 @@ impl VtEncoder {
         })
     }
 
+    /// 零拷贝编码：直接硬编 ScreenCaptureKit 输出的 IOSurface。
+    pub fn encode_surface(&mut self, surface: &IOSurface) -> Result<Option<EncodedFrame>, String> {
+        let frame = self
+            .session
+            .encode(surface, (self.pts, 90_000))
+            .map_err(|e| format!("vt encode: {e:?}"))?;
+        self.pts += 3000;
+        if frame.data.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(frame))
+    }
+
     /// 编码一帧 BGRA 像素（写 IOSurface → 硬编）。
     pub fn encode_bgra(&mut self, bgra: &[u8]) -> Result<Option<EncodedFrame>, String> {
         if bgra.len() != (self.width * self.height * 4) as usize {

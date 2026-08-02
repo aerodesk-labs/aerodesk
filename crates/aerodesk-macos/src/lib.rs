@@ -7,6 +7,7 @@
 //! 屏幕采集（ScreenCaptureKit → VideoToolbox 硬编）为 P2 后续项：
 //! screen-capture-kit crate 已就绪，接入时注意 macOS 屏幕录制权限（TCC）。
 
+pub mod capture;
 pub mod encoder;
 pub mod inject;
 pub mod synthetic;

@@ -35,6 +35,7 @@ fn main() {
     let encoder = arg(&args, "--encoder").unwrap_or_else(|| "pcap".into());
 
     match role.as_str() {
+        "publisher" if encoder == "screen" => publisher_capture(&signal, &room),
         "publisher" if encoder == "vt" => publisher_vt(&signal, &room),
         "publisher" if encoder == "x264" => publisher_x264(&signal, &room),
         "publisher" => publisher(&signal, &room),
@@ -480,6 +481,102 @@ fn publisher_vt(signal_url: &str, room: &str) {
                 }
                 Ok(None) => {}
                 Err(e) => warn!("vt encode: {e}"),
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(2));
+        let _ = &mut signal;
+    }
+}
+
+/// 真实屏幕采集发布端：ScreenCaptureKit → VideoToolbox 硬编（零拷贝）→ SFU。
+/// 需要屏幕录制权限（TCC）。
+fn publisher_capture(signal_url: &str, room: &str) {
+    use aerodesk_macos::capture::ScreenCapture;
+    use aerodesk_macos::vt_encoder::{VtEncoder, avcc_to_annexb};
+
+    const W: u32 = 1920;
+    const H: u32 = 1080;
+    const FPS: u32 = 30;
+
+    let (mut signal, mut endpoint, socket, video_mid) =
+        connect_h264(signal_url, room, Role::Publisher);
+    let mut capture = match ScreenCapture::start(0, FPS, W, H) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("screen capture init failed: {e}");
+            info!("grant Screen Recording permission in System Settings > Privacy & Security");
+            return;
+        }
+    };
+    let mut encoder = VtEncoder::new(W, H, FPS, 8_000_000).expect("vt encoder");
+    let mut connected = false;
+
+    loop {
+        let wait = Duration::from_millis(5);
+        socket.set_read_timeout(Some(wait)).ok();
+        let mut buf = [0u8; 2000];
+        if let Ok((n, source)) = socket.recv_from(&mut buf)
+            && let Ok(contents) = buf[..n].try_into()
+        {
+            let input = Input::Receive(
+                Instant::now(),
+                Receive {
+                    proto: Protocol::Udp,
+                    source,
+                    destination: socket.local_addr().unwrap(),
+                    contents,
+                },
+            );
+            let _ = endpoint.handle_input(input);
+        }
+        let _ = endpoint.handle_timeout(Instant::now());
+
+        let mut deadline = Instant::now() + Duration::from_secs(1);
+        while let Some(output) = endpoint.poll_output() {
+            match output {
+                Output::Transmit(t) => {
+                    let _ = socket.send_to(&t.contents, t.destination);
+                }
+                Output::Timeout(t) => {
+                    deadline = deadline.min(t);
+                    break;
+                }
+                Output::Event(_) => {}
+            }
+        }
+
+        while let Some(ev) = endpoint.poll_event() {
+            match ev {
+                ClientEvent::IceConnected => {
+                    info!("ICE connected, starting screen capture stream");
+                    connected = true;
+                }
+                ClientEvent::Closed => {
+                    info!("connection closed");
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        if connected
+            && let Some(surface) = capture.next_frame(Duration::from_millis(50))
+        {
+                match encoder.encode_surface(&surface) {
+                    Ok(Some(frame)) => {
+                        let annexb = avcc_to_annexb(&frame.data);
+                        let rtp_time = str0m::media::MediaTime::new(
+                            frame.presentation_time.0 as u64,
+                            str0m::media::Frequency::NINETY_KHZ,
+                        );
+                        if let Err(e) = endpoint.send_video_frame(video_mid, annexb, rtp_time) {
+                            warn!("send frame failed: {e:?}");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => warn!("vt encode: {e}"),
+                }
             }
         }
 
