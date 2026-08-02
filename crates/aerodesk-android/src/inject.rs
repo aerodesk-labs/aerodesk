@@ -7,10 +7,24 @@
 /// 输入事件（与 aerodesk-protocol::input 对齐，后续自动生成）。
 #[derive(Debug, Clone)]
 pub enum InputEvent {
-    MouseMove { x: f32, y: f32 },
-    MouseButton { x: f32, y: f32, button: u8, down: bool },
-    Wheel { dx: f32, dy: f32 },
-    Key { code: u32, down: bool },
+    MouseMove {
+        x: f32,
+        y: f32,
+    },
+    MouseButton {
+        x: f32,
+        y: f32,
+        button: u8,
+        down: bool,
+    },
+    Wheel {
+        dx: f32,
+        dy: f32,
+    },
+    Key {
+        code: u32,
+        down: bool,
+    },
 }
 
 /// 注入抽象（被控端）。
