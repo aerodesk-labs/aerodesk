@@ -2,7 +2,7 @@
 <html>
 
 <head>
-    <title>rd-sfu — Remote Desktop</title>
+    <title>AeroDesk — Remote Desktop</title>
     <style>
         body { background: #111; color: #eee; font-family: sans-serif; margin: 16px; }
         video { width: 100%; max-width: 1280px; background: #000; }
@@ -12,7 +12,7 @@
 </head>
 
 <body>
-    <h1>rd-sfu prototype</h1>
+    <h1>AeroDesk prototype</h1>
     <p>Role: <span id="role"></span> — ICE: <span id="ice_status">new</span>
         <span id="chan_status"></span>
     </p>
@@ -22,11 +22,21 @@
     <script>
         const params = new URLSearchParams(location.search);
         const ROLE = params.get('role') || 'viewer';
-        byId('role').innerText = ROLE;
+        const ROOM = params.get('room') || 'default';
+        byId('role').innerText = ROLE + ' (room: ' + ROOM + ')';
 
         let dataChannel;      // "offer/answer" signaling channel
         let inputChannel;     // "input" event channel (viewer -> publisher)
         let rtc;              // created in startRtc() with TURN iceServers
+        let ws;               // WSS signaling connection
+        let pending = [];     // pending signal message resolvers
+
+        function sendSignal(msg) {
+            ws.send(JSON.stringify(msg));
+        }
+        function nextSignal() {
+            return new Promise((resolve) => pending.push(resolve));
+        }
 
         const byId = (id) => document.getElementById(id);
         let callback = null;
@@ -122,20 +132,37 @@
         async function startRtc() {
             byId('rtc').disabled = true;
 
-            // 先取 TURN 配置（企业网 NAT 兜底），再建连接
+            // WSS 信令连接（aerodesk-signal :3001）
+            await new Promise((resolve, reject) => {
+                ws = new WebSocket('wss://' + location.hostname + ':3001/ws', 'aerodesk');
+                ws.onopen = resolve;
+                ws.onerror = () => reject(new Error('signal connect failed'));
+            });
+            ws.onmessage = (e) => {
+                const msg = JSON.parse(e.data);
+                if (pending.length) pending.shift()(msg);
+                else log('signal: ' + e.data);
+            };
+            log('signaling connected');
+
+            // Join 房间
+            sendSignal({ type: 'join', room: ROOM, role: ROLE, auth_token: null });
+            const joined = await nextSignal();
+            if (joined.type === 'error') {
+                log('join failed: ' + joined.message);
+                return;
+            }
+            log('joined as ' + joined.peer_id);
+
+            // TURN iceServers（企业网 NAT 兜底）
             let iceServers = [];
-            try {
-                const cfg = await (await fetch('/config')).json();
-                if (cfg.turn) {
-                    iceServers = [{
-                        urls: cfg.turn.urls,
-                        username: cfg.turn.username,
-                        credential: cfg.turn.credential,
-                    }];
-                    log('TURN relay configured: ' + cfg.turn.urls.join(', '));
-                }
-            } catch (e) {
-                log('no TURN config: ' + e);
+            if (joined.turn) {
+                iceServers = [{
+                    urls: joined.turn.urls,
+                    username: joined.turn.username,
+                    credential: joined.turn.credential,
+                }];
+                log('TURN relay configured: ' + joined.turn.urls.join(', '));
             }
             rtc = new RTCPeerConnection({ iceServers });
 
@@ -167,13 +194,18 @@
 
             const offer = await rtc.createOffer();
             rtc.setLocalDescription(offer);
-
-            const res = await fetch('/start', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(offer),
+            sendSignal({
+                type: 'description',
+                from: joined.peer_id,
+                to: 'sfu',
+                description: JSON.stringify(offer),
             });
-            const answer = await res.json();
+            const resp = await nextSignal();
+            if (resp.type !== 'description') {
+                log('signal error: ' + JSON.stringify(resp));
+                return;
+            }
+            const answer = JSON.parse(resp.description);
             rtc.setRemoteDescription(answer);
             log('connected, awaiting peer');
         }

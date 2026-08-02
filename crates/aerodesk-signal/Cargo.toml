@@ -1,17 +1,15 @@
 [package]
-name = "aerodesk-sfu"
-description = "Remote desktop SFU server (str0m-based)"
+name = "aerodesk-signal"
+description = "AeroDesk signaling server (WSS): rooms, auth, TURN credentials, SFU proxy"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-str0m = { workspace = true, features = ["aws-lc-rs"] }
-rouille.workspace = true
+rouille = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-systemstat.workspace = true
 aerodesk-protocol.workspace = true
-socket2 = { version = "0.5", features = ["all"] }
+ureq = { version = "2", features = ["tls"] }

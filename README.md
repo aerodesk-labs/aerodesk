@@ -1,6 +1,8 @@
-# rd — Remote Desktop（workspace）
+# AeroDesk — Remote Desktop（workspace）
 
 全平台远程桌面的 Rust workspace：**WebRTC SFU 服务端 + 共享协议 + 跨平台客户端核心**。
+
+> 仓库：<https://github.com/aerodesk-labs/aerodesk>
 服务端与客户端共用 str0m（含 PulseBeam bwe-fixes fork）作为协议底座。
 
 > 平台矩阵、技术选型与路线图见 [`docs/PRODUCT-PLAN.md`](docs/PRODUCT-PLAN.md)。
@@ -10,12 +12,13 @@
 ## Workspace 结构
 
 ```
-rd/
+aerodesk/
 ├── crates/
 │   ├── aerodesk-sfu/        # SFU 服务端（当前唯一可运行组件）
 │   │   ├── src/main.rs   # run loop + 媒体/输入事件转发 + HTTPS 信令
 │   │   └── src/tcp.rs    # UnifiedSocket：TCP + SSL-TCP（fake-SSL）+ RFC 4571
-│   ├── aerodesk-protocol/   # 共享协议：输入事件（input）+ 信令消息（signal）✅ 已定义
+│   ├── aerodesk-signal/     # 独立信令服务：房间/认证/TURN 凭证/SFU 代理
+│   ├── aerodesk-protocol/   # 共享协议：输入事件（input）+ 信令消息（signal）+ TURN 配置 ✅ 已定义
 │   └── aerodesk-core/       # 客户端核心骨架：端点/媒体管线/信令 trait（P2 填充）
 ├── web/index.html     # 浏览器端（publisher=屏幕采集 / viewer=观看+输入）
 ├── certs/             # str0m.test 自签证书（开发用）
@@ -24,9 +27,9 @@ rd/
 ## TURN 配置
 
 ```sh
-TURN_SECRET=<coturn static-auth-secret> cargo run -p aerodesk-sfu
+TURN_SECRET=<coturn static-auth-secret> cargo run -p aerodesk-sfu      # SFU（UDP/TCP/SSL-TCP 3478 + 内部 API 3002）
+cargo run -p aerodesk-signal   # 信令（WSS 3001）
 # 客户端 GET /config 自动获取 iceServers
-```
 ```
 
 ## 架构
@@ -39,7 +42,8 @@ native   (publisher) ─┼─ WebRTC ─▶ aerodesk-sfu ─┼─ native   (vi
                       └── input 数据通道（观看端→被控端）──┘
 ```
 
-- 信令：初始 offer/answer 走 HTTPS `POST /start`；轨道增删走 `offer/answer` 数据通道
+- 信令：浏览器连 WSS（aerodesk-signal :3001）→ Join → offer/answer 代理到 SFU
+  内部接口（127.0.0.1:3002）；轨道增删走 `offer/answer` 数据通道
 - 媒体：`MediaData` 选择性转发（不重编码）；simulcast 选层点已标注
 - 输入：`input` 通道 JSON 事件（协议类型在 `aerodesk-protocol::input`）
 

@@ -23,7 +23,6 @@ use str0m::{Candidate, Rtc, net::Protocol};
 mod router;
 mod shard;
 mod tcp;
-mod turn;
 mod util;
 
 use aerodesk_protocol::signal::TurnConfig;
@@ -32,6 +31,8 @@ use shard::{Shard, ShardCommand, Shared};
 /// 统一媒体端口（UDP + TCP + SSL-TCP 复用）。生产用 443。
 const MEDIA_PORT: u16 = 3478;
 const SIGNAL_PORT: u16 = 3000;
+/// SFU 内部接口（信令服务代理用，仅本机回环）。
+const INTERNAL_PORT: u16 = 3002;
 
 fn init_log() {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -85,7 +86,7 @@ pub fn main() {
             .duration_since(UNIX_EPOCH)
             .expect("system time")
             .as_secs();
-        let creds = turn::generate_turn_credentials(&secret, "aerodesk", 3600, now);
+        let creds = aerodesk_protocol::turn::generate_turn_credentials(&secret, "aerodesk", 3600, now);
         TurnConfig {
             urls,
             username: creds.username,
@@ -198,6 +199,31 @@ pub fn main() {
     // 5. 信令（HTTPS）
     let shard_txs_web = shard_txs.clone();
     let router_web = router.clone();
+    let internal_token = std::env::var("INTERNAL_TOKEN").ok();
+    let internal_shard_txs = shard_txs_web.clone();
+    let internal_router = router_web.clone();
+    let internal_turn = turn.clone();
+
+    let internal = Server::new(format!("127.0.0.1:{INTERNAL_PORT}"), move |request| {
+        if let Some(token) = &internal_token
+            && request.header("X-Internal-Token") != Some(token.as_str())
+        {
+            return Response::text("forbidden").with_status_code(403);
+        }
+        web_request(
+            request,
+            media_addr,
+            tcp_addr,
+            internal_shard_txs.clone(),
+            internal_router.clone(),
+            internal_turn.clone(),
+        )
+    })
+    .expect("starting internal server");
+    let internal_port = internal.server_addr().port();
+    info!("SFU internal API (HTTP) on 127.0.0.1:{internal_port}");
+    std::thread::spawn(move || internal.run());
+
     let server = Server::new_ssl(
         format!("0.0.0.0:{SIGNAL_PORT}"),
         move |request| {
