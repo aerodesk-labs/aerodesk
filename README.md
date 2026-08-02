@@ -3,6 +3,7 @@
 全平台远程桌面的 Rust workspace：**WebRTC SFU 服务端 + 共享协议 + 跨平台客户端核心**。
 
 > 仓库：<https://github.com/aerodesk-labs/aerodesk>
+
 服务端与客户端共用 str0m（含 PulseBeam bwe-fixes fork）作为协议底座。
 
 > 平台矩阵、技术选型与路线图见 [`docs/PRODUCT-PLAN.md`](docs/PRODUCT-PLAN.md)。
