@@ -14,3 +14,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 systemstat.workspace = true
 aerodesk-protocol.workspace = true
+socket2 = { version = "0.5", features = ["all"] }

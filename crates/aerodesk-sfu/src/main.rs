@@ -1,120 +1,223 @@
-//! aerodesk-sfu — Remote Desktop SFU prototype built on str0m.
+//! AeroDesk SFU 服务端。
 //!
-//! Architecture (prototype stage):
-//!   * One UDP socket multiplexes all WebRTC traffic.
-//!   * Each browser client gets an `Rtc` instance; media is forwarded between
-//!     clients by the run loop (selective forwarding, no re-encode).
-//!   * Signaling: initial offer/answer over HTTPS POST; later track
-//!     additions are negotiated over the "offer/answer" data channel.
-//!   * Input events (mouse/keyboard) travel on the "input" data channel and
-//!     are forwarded to the publisher client.
-//!
-//! Roles in web/index.html:
-//!   * ?role=publisher — captures the screen (getDisplayMedia), sends video,
-//!     receives "input" channel events.
-//!   * ?role=viewer — receives video, sends "input" channel events.
+//! 多核分片架构（P1）：
+//! - 每分片一个线程 + 一个 SO_REUSEPORT UDP socket（同一端口 3478）
+//! - 房间 → 分片哈希路由（同房间同分片优先）
+//! - 跨分片：媒体/关键帧/输入通道事件 + UDP 包转投
+//! - TCP/SSL-TCP：全局 accept/读线程，按路由表分发到分片
 
 #[macro_use]
 extern crate tracing;
 
-use std::collections::{HashMap, VecDeque};
-use std::io::{ErrorKind, Write};
-use std::net::{Shutdown, SocketAddr, TcpStream, UdpSocket};
-use std::ops::Deref;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
-use std::sync::{Arc, Weak};
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rouille::Server;
 use rouille::{Request, Response};
-use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
-use str0m::channel::{ChannelData, ChannelId};
 use str0m::crypto::from_feature_flags;
-use str0m::media::{Direction, KeyframeRequest, MediaData, Mid, Rid};
-use str0m::media::{KeyframeRequestKind, MediaKind};
-use str0m::net::{Protocol, TcpType};
-use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcError, net::Receive};
+use str0m::net::TcpType;
+use str0m::{Candidate, Rtc, net::Protocol};
 
+mod router;
+mod shard;
 mod tcp;
 mod util;
 
-/// Unified media port: UDP + TCP + SSL-TCP all multiplexed here.
-/// Dev: 3478 (no root needed). Production: 443.
-const MEDIA_PORT: u16 = 3478;
+use shard::{Shard, ShardCommand, Shared};
 
-const SIGNAL_CHANNEL: &str = "offer/answer";
+/// 统一媒体端口（UDP + TCP + SSL-TCP 复用）。生产用 443。
+const MEDIA_PORT: u16 = 3478;
+const SIGNAL_PORT: u16 = 3000;
 
 fn init_log() {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
-
     let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("rd_sfu=info,str0m=info,dimpl=info"));
-
+        .unwrap_or_else(|_| EnvFilter::new("aerodesk_sfu=info,str0m=info,dimpl=info"));
     tracing_subscriber::registry()
         .with(fmt::layer())
         .with(env_filter)
         .init();
 }
 
+/// 创建 SO_REUSEPORT UDP socket（同端口多 socket，内核按流哈希分发）。
+fn bind_udp_reuseport(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    let domain = if addr.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+    sock.set_reuse_address(true)?;
+    sock.set_reuse_port(true)?;
+    sock.bind(&addr.into())?;
+    Ok(std::net::UdpSocket::from(sock))
+}
+
 pub fn main() {
     init_log();
-
     from_feature_flags().install_process_default();
+
+    let shard_count = std::thread::available_parallelism()
+        .map(|n| n.get().min(8))
+        .unwrap_or(1);
+    info!("Shards: {shard_count}");
 
     let certificate = include_bytes!("../../../certs/cer.pem").to_vec();
     let private_key = include_bytes!("../../../certs/key.pem").to_vec();
 
-    // Firefox will not accept 127.0.0.1 for WebRTC traffic.
     let host_addr = util::select_host_address();
-
-    let (tx, rx) = mpsc::sync_channel(1);
-
-    // UnifiedSocket: UDP + TCP + SSL-TCP share one port.
     let media_addr = SocketAddr::new(host_addr, MEDIA_PORT);
-    let socket = UdpSocket::bind(media_addr).expect("binding UDP media socket");
-    let addr = socket.local_addr().expect("a local socket address");
-    info!("Bound UDP media port: {}", addr);
+    let tcp_listen_addr = media_addr;
 
-    let (tcp_addr, tcp_rx) = tcp::spawn_tcp_listener(media_addr);
-    info!("Bound TCP/SSL-TCP media port: {}", tcp_addr);
+    // 1. UDP：每分片一个 SO_REUSEPORT socket
+    let mut udp_sockets = Vec::new();
+    for _ in 0..shard_count {
+        udp_sockets.push(bind_udp_reuseport(media_addr).expect("bind UDP media socket"));
+    }
+    info!("Bound UDP media port: {media_addr} (x{shard_count} SO_REUSEPORT)");
 
-    thread::spawn(move || run(socket, tcp_addr, tcp_rx, rx));
+    // 2. TCP/SSL-TCP：单个 listener + 全局读线程
+    let (tcp_addr, tcp_rx) = tcp::spawn_tcp_listener(tcp_listen_addr);
+    info!("Bound TCP/SSL-TCP media port: {tcp_addr}");
 
+    // 3. 分片通道（先建 channel，后启线程）
+    let shared = Shared::new();
+    let mut shard_txs: Vec<mpsc::Sender<ShardCommand>> = Vec::new();
+    let mut shard_rxs = Vec::new();
+    for _ in 0..shard_count {
+        let (tx, rx) = mpsc::channel::<ShardCommand>();
+        shard_txs.push(tx);
+        shard_rxs.push(rx);
+    }
+    let (manager_tx, manager_rx) = mpsc::channel::<(usize, usize)>();
+    let router = Arc::new(Mutex::new(router::ShardRouter::new(shard_count)));
+
+    for i in 0..shard_count {
+        let rx = shard_rxs.remove(0);
+        let _handle = Shard::spawn(
+            i,
+            udp_sockets.remove(0),
+            rx,
+            shared.clone(),
+            shard_txs.clone(),
+            manager_tx.clone(),
+        );
+    }
+
+    // 4. manager 线程：TCP 事件分发 + 分片负载更新
+    {
+        let shared = shared.clone();
+        let shard_txs = shard_txs.clone();
+        let router = router.clone();
+        thread::Builder::new()
+            .name("rd-manager".into())
+            .spawn(move || {
+                loop {
+                    for ev in tcp_rx.try_iter() {
+                        match ev {
+                            tcp::TcpEvent::New { source, stream } => {
+                                shared.tcp_streams.lock().unwrap().insert(source, stream);
+                            }
+                            tcp::TcpEvent::Close { source } => {
+                                shared.tcp_streams.lock().unwrap().remove(&source);
+                                shared
+                                    .route_table
+                                    .write()
+                                    .unwrap()
+                                    .remove(&(Protocol::Tcp, source));
+                                shared
+                                    .route_table
+                                    .write()
+                                    .unwrap()
+                                    .remove(&(Protocol::SslTcp, source));
+                            }
+                            tcp::TcpEvent::Packet {
+                                source,
+                                proto,
+                                data,
+                            } => {
+                                if let Some(target) = shared.lookup_route(proto, source) {
+                                    let _ = shard_txs[target].send(ShardCommand::TcpPacket {
+                                        source,
+                                        proto,
+                                        data,
+                                    });
+                                } else {
+                                    // 未知：广播到所有分片（首个包认领后登记路由）
+                                    for tx in &shard_txs {
+                                        let _ = tx.send(ShardCommand::Cross(
+                                            shard::CrossShardEvent::Packet {
+                                                source,
+                                                proto,
+                                                data: data.clone(),
+                                            },
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for (shard, clients) in manager_rx.try_iter() {
+                        router.lock().unwrap().set_load(shard, clients);
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+            })
+            .expect("spawn manager thread");
+    }
+
+    // 5. 信令（HTTPS）
+    let shard_txs_web = shard_txs.clone();
+    let router_web = router.clone();
     let server = Server::new_ssl(
-        "0.0.0.0:3000",
-        move |request| web_request(request, addr, tcp_addr, tx.clone()),
+        format!("0.0.0.0:{SIGNAL_PORT}"),
+        move |request| {
+            web_request(
+                request,
+                media_addr,
+                tcp_addr,
+                shard_txs_web.clone(),
+                router_web.clone(),
+            )
+        },
         certificate,
         private_key,
     )
     .expect("starting the web server");
 
     let port = server.server_addr().port();
-    info!("Connect a browser to https://{:?}:{:?}", addr.ip(), port);
-
+    info!("Connect a browser to https://{:?}:{:?}", host_addr, port);
     server.run();
 }
 
 fn web_request(
     request: &Request,
-    addr: SocketAddr,
+    udp_addr: SocketAddr,
     tcp_addr: SocketAddr,
-    tx: SyncSender<Rtc>,
+    shard_txs: Vec<mpsc::Sender<ShardCommand>>,
+    router: Arc<Mutex<router::ShardRouter>>,
 ) -> Response {
     if request.method() == "GET" {
         return Response::html(include_str!("../../../web/index.html"));
     }
 
-    // Expected POST SDP Offers.
+    // POST /start?room=xxx
+    let room = request
+        .raw_query_string()
+        .split('&')
+        .find(|kv| kv.starts_with("room="))
+        .map(|kv| kv[5..].to_string())
+        .unwrap_or_else(|| "default".to_string());
+
     let mut data = request.data().expect("body to be available");
+    let offer: str0m::change::SdpOffer =
+        serde_json::from_reader(&mut data).expect("serialized offer");
 
-    let offer: SdpOffer = serde_json::from_reader(&mut data).expect("serialized offer");
-    let mut rtc = Rtc::builder().build(Instant::now());
-
-    let candidate = Candidate::host(addr, "udp").expect("a host candidate");
+    let mut rtc = Rtc::builder().build(std::time::Instant::now());
+    let candidate = Candidate::host(udp_addr, "udp").expect("a host candidate");
     rtc.add_local_candidate(candidate).unwrap();
-
     let tcp_candidate = Candidate::builder()
         .tcp()
         .host(tcp_addr)
@@ -122,7 +225,6 @@ fn web_request(
         .build()
         .expect("a TCP host candidate");
     rtc.add_local_candidate(tcp_candidate).unwrap();
-
     let ssltcp_candidate = Candidate::builder()
         .ssl_tcp()
         .host(tcp_addr)
@@ -136,692 +238,14 @@ fn web_request(
         .accept_offer(offer)
         .expect("offer to be accepted");
 
-    tx.send(rtc).expect("to send Rtc instance");
+    // 房间 → 分片路由（哈希 locality + 负载级联）
+    let shard = router.lock().unwrap().choose(&room);
+    info!("POST /start room={room} -> shard {shard}");
+    let res = shard_txs[shard].send(ShardCommand::AddClient { rtc, room });
+    if res.is_err() {
+        warn!("Failed to deliver client to shard {shard}");
+    }
 
     let body = serde_json::to_vec(&answer).expect("answer to serialize");
     Response::from_data("application/json", body)
-}
-
-/// Main run loop: handles all clients, reads/writes the UDP socket and
-/// forwards media + input events between clients.
-fn run(
-    socket: UdpSocket,
-    tcp_listen_addr: SocketAddr,
-    tcp_rx: mpsc::Receiver<tcp::TcpEvent>,
-    rx: Receiver<Rtc>,
-) -> Result<(), RtcError> {
-    let mut clients: Vec<Client> = vec![];
-    let mut to_propagate: VecDeque<Propagated> = VecDeque::new();
-    let mut tcp_streams: HashMap<SocketAddr, TcpStream> = HashMap::new();
-    let mut buf = vec![0; 2000];
-
-    loop {
-        clients.retain(|c| c.rtc.is_alive());
-
-        // Spawn new incoming clients from the web server thread.
-        if let Some(mut client) = spawn_new_client(&rx) {
-            for track in clients.iter().flat_map(|c| c.tracks_in.iter()) {
-                let weak = Arc::downgrade(&track.id);
-                client.handle_track_open(weak);
-            }
-            clients.push(client);
-        }
-
-        let mut timeout = Instant::now() + Duration::from_millis(100);
-        for client in clients.iter_mut() {
-            let t = poll_until_timeout(client, &mut to_propagate, &socket, &mut tcp_streams);
-            timeout = timeout.min(t);
-        }
-
-        if let Some(p) = to_propagate.pop_front() {
-            propagate(&p, &mut clients);
-            continue;
-        }
-
-        let duration = (timeout - Instant::now()).max(Duration::from_millis(1));
-
-        socket
-            .set_read_timeout(Some(duration))
-            .expect("setting socket read timeout");
-
-        // Drain TCP events (new connections, packets, closes).
-        for ev in tcp_rx.try_iter() {
-            match ev {
-                tcp::TcpEvent::New { source, stream } => {
-                    tcp_streams.insert(source, stream);
-                    debug!("TCP connected: {:?}", source);
-                }
-                tcp::TcpEvent::Packet {
-                    source,
-                    proto,
-                    data,
-                } => {
-                    let Ok(contents) = data.as_slice().try_into() else {
-                        continue;
-                    };
-                    let input = Input::Receive(
-                        Instant::now(),
-                        Receive {
-                            proto,
-                            source,
-                            destination: tcp_listen_addr,
-                            contents,
-                        },
-                    );
-                    if let Some(client) = clients.iter_mut().find(|c| c.accepts(&input)) {
-                        client.handle_input(input);
-                    } else {
-                        debug!("No client accepts TCP input: {:?}", source);
-                    }
-                }
-                tcp::TcpEvent::Close { source } => {
-                    if let Some(stream) = tcp_streams.remove(&source) {
-                        let _ = stream.shutdown(Shutdown::Both);
-                    }
-                    debug!("TCP closed: {:?}", source);
-                }
-            }
-        }
-
-        if let Some(input) = read_socket_input(&socket, &mut buf) {
-            if let Some(client) = clients.iter_mut().find(|c| c.accepts(&input)) {
-                client.handle_input(input);
-            } else {
-                debug!("No client accepts UDP input: {:?}", input);
-            }
-        }
-
-        let now = Instant::now();
-        for client in &mut clients {
-            client.handle_input(Input::Timeout(now));
-        }
-    }
-}
-
-fn spawn_new_client(rx: &Receiver<Rtc>) -> Option<Client> {
-    match rx.try_recv() {
-        Ok(rtc) => Some(Client::new(rtc)),
-        Err(TryRecvError::Empty) => None,
-        _ => panic!("Receiver<Rtc> disconnected"),
-    }
-}
-
-fn poll_until_timeout(
-    client: &mut Client,
-    queue: &mut VecDeque<Propagated>,
-    socket: &UdpSocket,
-    tcp_streams: &mut HashMap<SocketAddr, TcpStream>,
-) -> Instant {
-    loop {
-        if !client.rtc.is_alive() {
-            return Instant::now();
-        }
-
-        let propagated = client.poll_output(socket, tcp_streams);
-
-        if let Propagated::Timeout(t) = propagated {
-            return t;
-        }
-
-        queue.push_back(propagated)
-    }
-}
-
-/// Sends one "propagated" to all clients, if relevant.
-fn propagate(propagated: &Propagated, clients: &mut [Client]) {
-    let Some(client_id) = propagated.client_id() else {
-        return;
-    };
-
-    for client in &mut *clients {
-        if client.id == client_id {
-            continue;
-        }
-
-        match &propagated {
-            Propagated::TrackOpen(_, track_in) => client.handle_track_open(track_in.clone()),
-            Propagated::MediaData(_, data) => client.handle_media_data_out(client_id, data),
-            Propagated::ChannelData(_, label, data) => {
-                client.handle_channel_data_out(label, data);
-            }
-            Propagated::KeyframeRequest(_, req, origin, mid_in) => {
-                if *origin == client.id {
-                    client.handle_keyframe_request(*req, *mid_in)
-                }
-            }
-            Propagated::Noop | Propagated::Timeout(_) => {}
-        }
-    }
-}
-
-fn read_socket_input<'a>(socket: &UdpSocket, buf: &'a mut Vec<u8>) -> Option<Input<'a>> {
-    buf.resize(2000, 0);
-
-    match socket.recv_from(buf) {
-        Ok((n, source)) => {
-            buf.truncate(n);
-
-            let Ok(contents) = buf.as_slice().try_into() else {
-                return None;
-            };
-
-            Some(Input::Receive(
-                Instant::now(),
-                Receive {
-                    proto: Protocol::Udp,
-                    source,
-                    destination: socket.local_addr().unwrap(),
-                    contents,
-                },
-            ))
-        }
-        Err(e) => match e.kind() {
-            ErrorKind::WouldBlock | ErrorKind::TimedOut => None,
-            _ => panic!("UdpSocket read failed: {e:?}"),
-        },
-    }
-}
-
-#[derive(Debug)]
-struct Client {
-    id: ClientId,
-    rtc: Rtc,
-    pending: Option<SdpPendingOffer>,
-    cid: Option<ChannelId>,
-    /// All open data channels: label -> channel id (local to this client).
-    channels: HashMap<String, ChannelId>,
-    tracks_in: Vec<TrackInEntry>,
-    tracks_out: Vec<TrackOut>,
-    chosen_rid: Option<Rid>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ClientId(u64);
-
-impl Deref for ClientId {
-    type Target = u64;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-#[derive(Debug)]
-struct TrackIn {
-    origin: ClientId,
-    mid: Mid,
-    kind: MediaKind,
-}
-
-#[derive(Debug)]
-struct TrackInEntry {
-    id: Arc<TrackIn>,
-    last_keyframe_request: Option<Instant>,
-}
-
-#[derive(Debug)]
-struct TrackOut {
-    track_in: Weak<TrackIn>,
-    state: TrackOutState,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TrackOutState {
-    ToOpen,
-    Negotiating(Mid),
-    Open(Mid),
-    ToStop(Mid),
-    NegotiatingStop(Mid),
-}
-
-impl TrackOut {
-    fn mid(&self) -> Option<Mid> {
-        match self.state {
-            TrackOutState::ToOpen => None,
-            TrackOutState::Negotiating(m)
-            | TrackOutState::Open(m)
-            | TrackOutState::ToStop(m)
-            | TrackOutState::NegotiatingStop(m) => Some(m),
-        }
-    }
-}
-
-impl Client {
-    fn new(rtc: Rtc) -> Client {
-        static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
-        let next_id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-        Client {
-            id: ClientId(next_id),
-            rtc,
-            pending: None,
-            cid: None,
-            channels: HashMap::new(),
-            tracks_in: vec![],
-            tracks_out: vec![],
-            chosen_rid: None,
-        }
-    }
-
-    fn accepts(&self, input: &Input) -> bool {
-        self.rtc.accepts(input)
-    }
-
-    fn handle_input(&mut self, input: Input) {
-        if !self.rtc.is_alive() {
-            return;
-        }
-
-        if let Err(e) = self.rtc.handle_input(input) {
-            warn!("Client ({}) disconnected: {:?}", *self.id, e);
-            self.rtc.disconnect();
-        }
-    }
-
-    fn poll_output(
-        &mut self,
-        socket: &UdpSocket,
-        tcp_streams: &mut HashMap<SocketAddr, TcpStream>,
-    ) -> Propagated {
-        if !self.rtc.is_alive() {
-            return Propagated::Noop;
-        }
-
-        // Incoming tracks from other clients cause new entries in track_out that
-        // need SDP negotiation with the remote peer.
-        if self.negotiate_if_needed() {
-            return Propagated::Noop;
-        }
-
-        match self.rtc.poll_output() {
-            Ok(output) => self.handle_output(output, socket, tcp_streams),
-            Err(e) => {
-                warn!("Client ({}) poll_output failed: {:?}", *self.id, e);
-                self.rtc.disconnect();
-                Propagated::Noop
-            }
-        }
-    }
-
-    fn handle_output(
-        &mut self,
-        output: Output,
-        socket: &UdpSocket,
-        tcp_streams: &mut HashMap<SocketAddr, TcpStream>,
-    ) -> Propagated {
-        match output {
-            Output::Transmit(transmit) => {
-                match transmit.proto {
-                    Protocol::Udp => {
-                        socket
-                            .send_to(&transmit.contents, transmit.destination)
-                            .expect("sending UDP data");
-                    }
-                    Protocol::Tcp | Protocol::SslTcp => {
-                        let Some(stream) = tcp_streams.get_mut(&transmit.destination) else {
-                            warn!(
-                                "No TCP stream for {}, dropping {} bytes",
-                                transmit.destination,
-                                transmit.contents.len()
-                            );
-                            return Propagated::Noop;
-                        };
-                        // RFC 4571: RTP/RTCP over TCP carry a 2-byte length prefix.
-                        let is_media = transmit.contents.first().is_some_and(|b| b & 0xC0 == 0x80);
-                        let res = if is_media {
-                            let len = (transmit.contents.len() as u16).to_be_bytes();
-                            stream
-                                .write_all(&len)
-                                .and_then(|_| stream.write_all(&transmit.contents))
-                        } else {
-                            stream.write_all(&transmit.contents)
-                        };
-                        if let Err(e) = res {
-                            warn!("TCP write to {} failed: {:?}", transmit.destination, e);
-                            tcp_streams.remove(&transmit.destination);
-                        }
-                    }
-                    p => warn!("Unsupported transmit protocol: {:?}", p),
-                }
-                Propagated::Noop
-            }
-            Output::Timeout(t) => Propagated::Timeout(t),
-            Output::Event(e) => match e {
-                Event::IceConnectionStateChange(v) => {
-                    if v == IceConnectionState::Disconnected {
-                        self.rtc.disconnect();
-                    }
-                    Propagated::Noop
-                }
-                Event::MediaAdded(e) => self.handle_media_added(e.mid, e.kind),
-                Event::MediaData(data) => self.handle_media_data_in(data),
-                Event::KeyframeRequest(req) => self.handle_incoming_keyframe_req(req),
-                Event::ChannelOpen(cid, label) => {
-                    self.channels.insert(label, cid);
-                    if self.cid.is_none() {
-                        self.cid = Some(cid);
-                    }
-                    Propagated::Noop
-                }
-                Event::ChannelData(data) => self.handle_channel_data(data),
-                Event::ChannelClose(cid) => {
-                    self.channels.retain(|_, v| *v != cid);
-                    if self.cid == Some(cid) {
-                        self.cid = None;
-                    }
-                    Propagated::Noop
-                }
-                Event::MediaIngressStats(data) => {
-                    info!("{:?}", data);
-                    Propagated::Noop
-                }
-                Event::MediaEgressStats(data) => {
-                    info!("{:?}", data);
-                    Propagated::Noop
-                }
-                Event::PeerStats(data) => {
-                    info!("{:?}", data);
-                    Propagated::Noop
-                }
-                _ => Propagated::Noop,
-            },
-        }
-    }
-
-    fn handle_media_added(&mut self, mid: Mid, kind: MediaKind) -> Propagated {
-        let track_in = TrackInEntry {
-            id: Arc::new(TrackIn {
-                origin: self.id,
-                mid,
-                kind,
-            }),
-            last_keyframe_request: None,
-        };
-
-        // The Client instance owns the strong reference to the incoming
-        // track, all other clients have a weak reference.
-        let weak = Arc::downgrade(&track_in.id);
-        self.tracks_in.push(track_in);
-
-        Propagated::TrackOpen(self.id, weak)
-    }
-
-    fn handle_media_data_in(&mut self, data: MediaData) -> Propagated {
-        if !data.contiguous {
-            self.request_keyframe_throttled(data.mid, data.rid, KeyframeRequestKind::Fir);
-        }
-
-        Propagated::MediaData(self.id, data)
-    }
-
-    fn request_keyframe_throttled(
-        &mut self,
-        mid: Mid,
-        rid: Option<Rid>,
-        kind: KeyframeRequestKind,
-    ) {
-        let Some(mut writer) = self.rtc.writer(mid) else {
-            return;
-        };
-
-        let Some(track_entry) = self.tracks_in.iter_mut().find(|t| t.id.mid == mid) else {
-            return;
-        };
-
-        if track_entry
-            .last_keyframe_request
-            .map(|t| t.elapsed() < Duration::from_secs(1))
-            .unwrap_or(false)
-        {
-            return;
-        }
-
-        _ = writer.request_keyframe(rid, kind);
-
-        track_entry.last_keyframe_request = Some(Instant::now());
-    }
-
-    fn handle_incoming_keyframe_req(&self, mut req: KeyframeRequest) -> Propagated {
-        let Some(track_out) = self.tracks_out.iter().find(|t| t.mid() == Some(req.mid)) else {
-            return Propagated::Noop;
-        };
-        let Some(track_in) = track_out.track_in.upgrade() else {
-            return Propagated::Noop;
-        };
-
-        req.rid = self.chosen_rid;
-
-        Propagated::KeyframeRequest(self.id, req, track_in.origin, track_in.mid)
-    }
-
-    fn negotiate_if_needed(&mut self) -> bool {
-        if self.cid.is_none() || self.pending.is_some() {
-            return false;
-        }
-
-        for track in &mut self.tracks_out {
-            if let TrackOutState::Open(m) = track.state
-                && track.track_in.upgrade().is_none()
-            {
-                track.state = TrackOutState::ToStop(m);
-            }
-        }
-
-        let mut change = self.rtc.sdp_api();
-
-        for track in &mut self.tracks_out {
-            match track.state {
-                TrackOutState::ToOpen => {
-                    if let Some(track_in) = track.track_in.upgrade() {
-                        let stream_id = track_in.origin.to_string();
-                        let mid = change.add_media(
-                            track_in.kind,
-                            Direction::SendOnly,
-                            Some(stream_id),
-                            None,
-                            None,
-                        );
-                        track.state = TrackOutState::Negotiating(mid);
-                    }
-                }
-                TrackOutState::ToStop(mid) => {
-                    change.stop_media(mid);
-                    track.state = TrackOutState::NegotiatingStop(mid);
-                }
-                _ => {}
-            }
-        }
-
-        if !change.has_changes() {
-            return false;
-        }
-
-        let Some((offer, pending)) = change.apply() else {
-            return false;
-        };
-
-        let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) else {
-            return false;
-        };
-
-        let json = serde_json::to_string(&offer).unwrap();
-        channel
-            .write(false, json.as_bytes())
-            .expect("to write offer");
-
-        self.pending = Some(pending);
-
-        true
-    }
-
-    fn handle_channel_data(&mut self, d: ChannelData) -> Propagated {
-        if let Ok(offer) = serde_json::from_slice::<'_, SdpOffer>(&d.data) {
-            self.handle_offer(offer);
-            return Propagated::Noop;
-        }
-        if let Ok(answer) = serde_json::from_slice::<'_, SdpAnswer>(&d.data) {
-            self.handle_answer(answer);
-            return Propagated::Noop;
-        }
-
-        // User data (e.g. "input" channel): forward to the same channel on
-        // every other client.
-        let Some(label) = self
-            .channels
-            .iter()
-            .find(|(_, v)| **v == d.id)
-            .map(|(l, _)| l.clone())
-        else {
-            return Propagated::Noop;
-        };
-        if label == SIGNAL_CHANNEL {
-            warn!("Unrecognized data on signal channel");
-            return Propagated::Noop;
-        }
-
-        Propagated::ChannelData(self.id, label, d)
-    }
-
-    fn handle_channel_data_out(&mut self, label: &str, data: &ChannelData) {
-        let Some(cid) = self.channels.get(label).copied() else {
-            return;
-        };
-        let Some(mut channel) = self.rtc.channel(cid) else {
-            return;
-        };
-        if let Err(e) = channel.write(data.binary, &data.data) {
-            warn!("Client ({}) channel write failed: {:?}", *self.id, e);
-        }
-    }
-
-    fn handle_offer(&mut self, offer: SdpOffer) {
-        let answer = self
-            .rtc
-            .sdp_api()
-            .accept_offer(offer)
-            .expect("offer to be accepted");
-
-        for track in &mut self.tracks_out {
-            match track.state {
-                TrackOutState::Negotiating(_) => track.state = TrackOutState::ToOpen,
-                TrackOutState::NegotiatingStop(m) => {
-                    track.state = TrackOutState::ToStop(m);
-                }
-                _ => {}
-            }
-        }
-
-        let mut channel = self
-            .cid
-            .and_then(|id| self.rtc.channel(id))
-            .expect("channel to be open");
-
-        let json = serde_json::to_string(&answer).unwrap();
-        channel
-            .write(false, json.as_bytes())
-            .expect("to write answer");
-    }
-
-    fn handle_answer(&mut self, answer: SdpAnswer) {
-        if let Some(pending) = self.pending.take() {
-            self.rtc
-                .sdp_api()
-                .accept_answer(pending, answer)
-                .expect("answer to be accepted");
-
-            for track in &mut self.tracks_out {
-                if let TrackOutState::Negotiating(m) = track.state {
-                    track.state = TrackOutState::Open(m);
-                }
-            }
-
-            self.tracks_out
-                .retain(|t| !matches!(t.state, TrackOutState::NegotiatingStop(_)));
-        }
-    }
-
-    fn handle_track_open(&mut self, track_in: Weak<TrackIn>) {
-        let track_out = TrackOut {
-            track_in,
-            state: TrackOutState::ToOpen,
-        };
-        self.tracks_out.push(track_out);
-    }
-
-    fn handle_media_data_out(&mut self, origin: ClientId, data: &MediaData) {
-        let Some(mid) = self
-            .tracks_out
-            .iter()
-            .find(|o| {
-                o.track_in
-                    .upgrade()
-                    .filter(|i| i.origin == origin && i.mid == data.mid)
-                    .is_some()
-            })
-            .and_then(|o| o.mid())
-        else {
-            return;
-        };
-
-        if data.rid.is_some() && data.rid != Some("h".into()) {
-            // Simulcast selection point: currently only the "h" layer passes.
-            return;
-        }
-
-        if self.chosen_rid != data.rid {
-            self.chosen_rid = data.rid;
-        }
-
-        let Some(writer) = self.rtc.writer(mid) else {
-            return;
-        };
-
-        let Some(pt) = writer.match_params(data.params) else {
-            return;
-        };
-
-        if let Err(e) = writer.write(pt, data.network_time, data.time, data.data.clone()) {
-            warn!("Client ({}) failed: {:?}", *self.id, e);
-            self.rtc.disconnect();
-        }
-    }
-
-    fn handle_keyframe_request(&mut self, req: KeyframeRequest, mid_in: Mid) {
-        let has_incoming_track = self.tracks_in.iter().any(|i| i.id.mid == mid_in);
-
-        if !has_incoming_track {
-            return;
-        }
-
-        let Some(mut writer) = self.rtc.writer(mid_in) else {
-            return;
-        };
-
-        if let Err(e) = writer.request_keyframe(req.rid, req.kind) {
-            info!("request_keyframe failed: {:?}", e);
-        }
-    }
-}
-
-/// Events propagated between clients.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug)]
-enum Propagated {
-    Noop,
-    Timeout(Instant),
-    TrackOpen(ClientId, Weak<TrackIn>),
-    MediaData(ClientId, MediaData),
-    ChannelData(ClientId, String, ChannelData),
-    KeyframeRequest(ClientId, KeyframeRequest, ClientId, Mid),
-}
-
-impl Propagated {
-    fn client_id(&self) -> Option<ClientId> {
-        match self {
-            Propagated::TrackOpen(c, _)
-            | Propagated::MediaData(c, _)
-            | Propagated::ChannelData(c, _, _)
-            | Propagated::KeyframeRequest(c, _, _, _) => Some(*c),
-            _ => None,
-        }
-    }
 }
