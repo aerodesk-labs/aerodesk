@@ -12,7 +12,7 @@ extern crate tracing;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rouille::Server;
 use rouille::{Request, Response};
@@ -23,8 +23,10 @@ use str0m::{Candidate, Rtc, net::Protocol};
 mod router;
 mod shard;
 mod tcp;
+mod turn;
 mod util;
 
+use aerodesk_protocol::signal::TurnConfig;
 use shard::{Shard, ShardCommand, Shared};
 
 /// 统一媒体端口（UDP + TCP + SSL-TCP 复用）。生产用 443。
@@ -70,6 +72,31 @@ pub fn main() {
     let host_addr = util::select_host_address();
     let media_addr = SocketAddr::new(host_addr, MEDIA_PORT);
     let tcp_listen_addr = media_addr;
+
+    // TURN 配置（coturn REST secret；未设置则不下发）
+    let turn = std::env::var("TURN_SECRET").ok().map(|secret| {
+        let urls = std::env::var("TURN_URLS").unwrap_or_else(|_| {
+            format!(
+                "turn:{host_addr}:3478?transport=udp,turn:{host_addr}:3478?transport=tcp,turns:{host_addr}:5349?transport=tcp"
+            )
+        });
+        let urls = urls.split(',').map(|u| u.to_string()).collect();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_secs();
+        let creds = turn::generate_turn_credentials(&secret, "aerodesk", 3600, now);
+        TurnConfig {
+            urls,
+            username: creds.username,
+            credential: creds.credential,
+        }
+    });
+    if turn.is_some() {
+        info!("TURN relay configured (coturn REST credentials)");
+    } else {
+        warn!("TURN_SECRET not set: no TURN relay config will be issued");
+    }
 
     // 1. UDP：每分片一个 SO_REUSEPORT socket
     let mut udp_sockets = Vec::new();
@@ -180,6 +207,7 @@ pub fn main() {
                 tcp_addr,
                 shard_txs_web.clone(),
                 router_web.clone(),
+                turn.clone(),
             )
         },
         certificate,
@@ -198,7 +226,14 @@ fn web_request(
     tcp_addr: SocketAddr,
     shard_txs: Vec<mpsc::Sender<ShardCommand>>,
     router: Arc<Mutex<router::ShardRouter>>,
+    turn: Option<TurnConfig>,
 ) -> Response {
+    if request.method() == "GET" && request.url() == "/config" {
+        let body =
+            serde_json::to_vec(&serde_json::json!({ "turn": turn })).expect("serialize config");
+        return Response::from_data("application/json", body);
+    }
+
     if request.method() == "GET" {
         return Response::html(include_str!("../../../web/index.html"));
     }

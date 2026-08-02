@@ -15,3 +15,6 @@ tracing-subscriber.workspace = true
 systemstat.workspace = true
 aerodesk-protocol.workspace = true
 socket2 = { version = "0.5", features = ["all"] }
+hmac = "0.12"
+sha1 = "0.10"
+base64ct = "1"

@@ -42,9 +42,12 @@ name = "aerodesk-sfu"
 version = "0.1.0"
 dependencies = [
  "aerodesk-protocol",
+ "base64ct",
+ "hmac",
  "rouille",
  "serde",
  "serde_json",
+ "sha1",
  "socket2",
  "str0m",
  "systemstat",

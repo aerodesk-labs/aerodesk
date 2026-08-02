@@ -26,7 +26,7 @@
 
         let dataChannel;      // "offer/answer" signaling channel
         let inputChannel;     // "input" event channel (viewer -> publisher)
-        let rtc = new RTCPeerConnection();
+        let rtc;              // created in startRtc() with TURN iceServers
 
         const byId = (id) => document.getElementById(id);
         let callback = null;
@@ -121,6 +121,23 @@
         // ---------- Connect ----------
         async function startRtc() {
             byId('rtc').disabled = true;
+
+            // 先取 TURN 配置（企业网 NAT 兜底），再建连接
+            let iceServers = [];
+            try {
+                const cfg = await (await fetch('/config')).json();
+                if (cfg.turn) {
+                    iceServers = [{
+                        urls: cfg.turn.urls,
+                        username: cfg.turn.username,
+                        credential: cfg.turn.credential,
+                    }];
+                    log('TURN relay configured: ' + cfg.turn.urls.join(', '));
+                }
+            } catch (e) {
+                log('no TURN config: ' + e);
+            }
+            rtc = new RTCPeerConnection({ iceServers });
 
             dataChannel = rtc.createDataChannel("offer/answer");
             dataChannel.onmessage = (event) => {

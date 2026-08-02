@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn demux_dtls() {
-        let mut rec = vec![0x16, 0xfe, 0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 1, 2, 3, 4];
+        let rec = vec![0x16, 0xfe, 0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 1, 2, 3, 4];
         let (pkt, consumed) = demux(&rec).unwrap();
         assert_eq!(pkt.len(), 17);
         assert_eq!(consumed, 17);
