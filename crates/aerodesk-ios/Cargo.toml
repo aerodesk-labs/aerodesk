@@ -1,0 +1,16 @@
+[package]
+name = "aerodesk-ios"
+description = "AeroDesk iOS adapter: VideoToolbox H.264 hardware decode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+videotoolbox = { version = "0.18", features = ["decompression"] }
+apple-cf = "0.9"
+aerodesk-core = { path = "../aerodesk-core" }
+str0m = { workspace = true, features = ["rust-crypto"] }
+tracing.workspace = true
+
+[dev-dependencies]
+aerodesk-macos = { path = "../aerodesk-macos" }

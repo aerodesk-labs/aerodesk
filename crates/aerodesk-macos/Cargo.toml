@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-x264 = "0.5"
+x264 = { path = "../x264" }
 core-graphics = "0.25"
 core-graphics-types = "0.2"
 core-foundation = "0.10"
