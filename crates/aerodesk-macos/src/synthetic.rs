@@ -54,8 +54,8 @@ impl SyntheticSource {
 
         // 移动方块（模拟鼠标指针/内容变化）
         let size = (w / 12).max(8);
-        let bx = ((t as usize * (w / 20)) % (w - size)) as usize;
-        let by = ((t as usize * (h / 30)) % (h - size)) as usize;
+        let bx = (t as usize * (w / 20)) % (w - size);
+        let by = (t as usize * (h / 30)) % (h - size);
         for y in by..(by + size).min(h) {
             for x in bx..(bx + size).min(w) {
                 let idx = (y * w + x) * 3;
