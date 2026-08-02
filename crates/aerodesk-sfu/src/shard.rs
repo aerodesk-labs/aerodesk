@@ -20,6 +20,7 @@ use str0m::net::Protocol;
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcError, net::Receive};
 
 /// 发往分片的命令。
+#[allow(clippy::large_enum_variant)]
 pub enum ShardCommand {
     /// 新客户端（信令线程创建 Rtc 后送入）。
     AddClient { rtc: Rtc, room: String },
@@ -220,10 +221,10 @@ fn run_shard(
                     proto,
                     data,
                 } => {
-                    if let Some(input) = build_input(source, proto, &data) {
-                        if let Some(idx) = clients.iter().position(|c| c.rtc.accepts(&input)) {
-                            clients[idx].handle_input(input);
-                        }
+                    if let Some(input) = build_input(source, proto, &data)
+                        && let Some(idx) = clients.iter().position(|c| c.rtc.accepts(&input))
+                    {
+                        clients[idx].handle_input(input);
                     }
                 }
             }
