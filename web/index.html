@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>rd-sfu — Remote Desktop</title>
+    <style>
+        body { background: #111; color: #eee; font-family: sans-serif; margin: 16px; }
+        video { width: 100%; max-width: 1280px; background: #000; }
+        #log { white-space: pre-wrap; font-size: 12px; opacity: .8; max-height: 200px; overflow: auto; }
+        button { margin: 4px; }
+    </style>
+</head>
+
+<body>
+    <h1>rd-sfu prototype</h1>
+    <p>Role: <span id="role"></span> — ICE: <span id="ice_status">new</span>
+        <span id="chan_status"></span>
+    </p>
+    <button id="rtc" onClick="startRtc()">Connect</button>
+    <div id="media"></div>
+    <div id="log"></div>
+    <script>
+        const params = new URLSearchParams(location.search);
+        const ROLE = params.get('role') || 'viewer';
+        byId('role').innerText = ROLE;
+
+        let dataChannel;      // "offer/answer" signaling channel
+        let inputChannel;     // "input" event channel (viewer -> publisher)
+        let rtc = new RTCPeerConnection();
+
+        const byId = (id) => document.getElementById(id);
+        let callback = null;
+
+        function log(msg) {
+            byId('log').innerText += new Date().toISOString().slice(11, 19) + ' ' + msg + '\n';
+            console.log(msg);
+        }
+
+        rtc.oniceconnectionstatechange = () => {
+            byId('ice_status').innerText = rtc.iceConnectionState;
+            if (rtc.iceConnectionState == 'disconnected' || rtc.iceConnectionState == 'failed') {
+                rtc.close();
+                byId('rtc').disabled = true;
+            }
+        };
+
+        // ---------- SDP negotiation over the "offer/answer" channel ----------
+        async function negotiate() {
+            const offer = await rtc.createOffer();
+            rtc.setLocalDescription(offer);
+            await dataChannel.send(JSON.stringify(offer));
+            const json = await new Promise((rs) => { callback = rs; });
+            rtc.setRemoteDescription(JSON.parse(json));
+        }
+
+        async function handleOffer(json) {
+            const offer = JSON.parse(json);
+            rtc.setRemoteDescription(offer);
+            const answer = await rtc.createAnswer();
+            rtc.setLocalDescription(answer);
+            await dataChannel.send(JSON.stringify(answer));
+        }
+
+        // ---------- Input events (viewer) ----------
+        function sendInput(type, ev) {
+            if (!inputChannel || inputChannel.readyState != 'open') return;
+            inputChannel.send(JSON.stringify({
+                type,
+                x: ev.clientX, y: ev.clientY,
+                button: ev.button, buttons: ev.buttons,
+                key: ev.key, code: ev.code, ctrl: ev.ctrlKey, shift: ev.shiftKey, alt: ev.altKey, meta: ev.metaKey,
+                wheel: ev.deltaY || 0,
+                t: performance.now()
+            }));
+        }
+
+        // ---------- Screen capture (publisher) ----------
+        async function startScreen() {
+            try {
+                const stream = await navigator.mediaDevices.getDisplayMedia({
+                    video: { frameRate: 60, width: 3840, height: 2160 },
+                    audio: false,
+                });
+                rtc.addTransceiver(stream.getVideoTracks()[0], {
+                    direction: "sendonly",
+                    streams: [stream],
+                });
+                stream.getVideoTracks()[0].addEventListener('ended', () => log('screen share ended'));
+                await negotiate();
+                log('screen capture started');
+            } catch (e) {
+                log('screen capture failed: ' + e);
+            }
+        }
+
+        // ---------- Incoming video (viewer) ----------
+        rtc.ontrack = (e) => {
+            const track = e.track;
+            const el = document.createElement('video');
+            el.id = 'video-' + track.id;
+            el.autoplay = true;
+            el.controls = false;
+            byId('media').appendChild(el);
+            const media = new MediaStream();
+            media.addTrack(track);
+            el.srcObject = media;
+            log('received track ' + track.kind + ' ' + track.id);
+
+            // The real (visible) video element carries the input event listeners.
+            if (ROLE == 'viewer') {
+                el.addEventListener('mousemove', (e) => sendInput('mousemove', e));
+                el.addEventListener('mousedown', (e) => sendInput('mousedown', e));
+                el.addEventListener('mouseup', (e) => sendInput('mouseup', e));
+                el.addEventListener('wheel', (e) => sendInput('wheel', e));
+                el.addEventListener('contextmenu', (e) => { e.preventDefault(); sendInput('contextmenu', e); });
+                window.addEventListener('keydown', (e) => sendInput('keydown', e));
+                window.addEventListener('keyup', (e) => sendInput('keyup', e));
+            }
+        };
+
+        // ---------- Connect ----------
+        async function startRtc() {
+            byId('rtc').disabled = true;
+
+            dataChannel = rtc.createDataChannel("offer/answer");
+            dataChannel.onmessage = (event) => {
+                const json = JSON.parse(event.data);
+                if (json.type == 'offer') {
+                    handleOffer(event.data);
+                } else if (json.type == 'answer') {
+                    callback(event.data);
+                    callback = null;
+                }
+            };
+
+            dataChannel.onopen = () => {
+                byId('chan_status').innerText = 'connected';
+
+                // The input channel carries mouse/keyboard events.
+                inputChannel = rtc.createDataChannel("input");
+                inputChannel.onopen = () => log('input channel open');
+                inputChannel.onmessage = (e) => log('input event: ' + e.data);
+
+                if (ROLE == 'publisher') {
+                    startScreen();
+                } else {
+                    log('viewer ready — move/click the video to send input');
+                }
+            };
+
+            const offer = await rtc.createOffer();
+            rtc.setLocalDescription(offer);
+
+            const res = await fetch('/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(offer),
+            });
+            const answer = await res.json();
+            rtc.setRemoteDescription(answer);
+            log('connected, awaiting peer');
+        }
+    </script>
+</body>
+
+</html>

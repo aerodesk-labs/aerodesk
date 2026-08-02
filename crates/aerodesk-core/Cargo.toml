@@ -1,0 +1,13 @@
+[package]
+name = "aerodesk-core"
+description = "Cross-platform remote desktop client core (str0m endpoint + media pipeline abstraction)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+str0m = { workspace = true, features = ["rust-crypto"] }
+aerodesk-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aerodesk-sfu",
+    "crates/aerodesk-protocol",
+    "crates/aerodesk-core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/your-org/rd"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# PulseBeam's str0m fork (feat/bwe-fixes, pinned): production-grade BWE fixes
+# (pacer/padding, probe robustness, set_current_bitrate). Same MIT/Apache license.
+str0m = { git = "https://github.com/PulseBeamDev/str0m.git", rev = "7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084", default-features = false }
+rouille = { version = "3.6.2", features = ["rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "std"] }
+systemstat = "0.2.2"
+aerodesk-protocol = { path = "crates/aerodesk-protocol" }
+
+[profile.release]
+lto = "thin"
