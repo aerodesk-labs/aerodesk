@@ -8,6 +8,10 @@ members = [
     "crates/aerodesk-cli",
     "crates/aerodesk-macos",
     "crates/aerodesk-ios",
+    "crates/aerodesk-android",
+    "crates/aerodesk-linux",
+    "crates/aerodesk-windows",
+    "crates/aerodesk-ohos",
 ]
 
 [workspace.package]

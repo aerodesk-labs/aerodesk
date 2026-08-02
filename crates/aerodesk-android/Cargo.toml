@@ -1,0 +1,12 @@
+[package]
+name = "aerodesk-android"
+description = "AeroDesk Android adapter: MediaCodec decode, MediaProjection capture, AccessibilityService input injection (P3 skeleton)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aerodesk-core = { path = "../aerodesk-core" }
+str0m = { workspace = true, features = ["rust-crypto"] }
+tracing.workspace = true

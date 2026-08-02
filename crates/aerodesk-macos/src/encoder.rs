@@ -61,9 +61,10 @@ impl X264Encoder {
             .fps(fps, 1)
             .bitrate(bitrate_kbps as i32)
             .annexb(true)
-            // 单 slice（关闭 slice 线程）：帧级多线程仍开启，
-            // 输出确定且与 VideoToolbox 硬解兼容
+            // 单 slice + 单线程：实时编码必须立即输出（帧级多线程会缓冲
+            // 前若干帧导致首帧延迟），且输出确定、与 VideoToolbox 硬解兼容
             .sliced_threads(false)
+            .threads(1)
             .max_keyframe_interval((fps * 2) as i32) // 每 2 秒一个关键帧
             .build(Colorspace::I420, width as i32, height as i32)
             .map_err(|e| format!("x264 init: {e:?}"))?;

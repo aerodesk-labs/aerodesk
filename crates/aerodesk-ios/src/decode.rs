@@ -244,24 +244,20 @@ mod tests {
 
     #[test]
     fn decodes_x264_frames() {
-        // 生成 H.264 关键帧 + 若干 P 帧
+        // 生成 H.264 关键帧 + 若干 P 帧（模拟真实会话：关键帧重建 session，P 帧续解）
         let mut enc = X264Encoder::new(320, 180, 30, 500).expect("x264");
         let mut decoder = H264Decoder::new();
         let mut frame = vec![0u8; 320 * 180 * 3];
         let mut decoded_frames = 0;
+        let mut saw_keyframe = false;
 
         for i in 0..8 {
             for (j, px) in frame.iter_mut().enumerate() {
                 *px = (i * 30 + j / 100) as u8;
             }
             if let Some(out) = enc.encode(&frame).expect("encode") {
-                if i == 0 {
-                    std::fs::write("/tmp/x264_test_f1.h264", &out.data).expect("write");
-                    let n0 = parse_annexb_nal(&out.data);
-                    eprintln!(
-                        "TESTDBG f1 nals: {:?}",
-                        n0.iter().map(|(t, p)| (*t, p.len())).collect::<Vec<_>>()
-                    );
+                if out.keyframe {
+                    saw_keyframe = true;
                 }
                 match decoder.decode_annexb(&out.data, (i * 3000) as i64) {
                     Ok(Some(pb)) => {
@@ -273,6 +269,11 @@ mod tests {
                 }
             }
         }
-        assert!(decoded_frames >= 1, "expected at least one decoded frame");
+        assert!(saw_keyframe, "expected at least one keyframe");
+        // 关键帧 + 全部 P 帧都应解出（真实会话中首帧起即为连续画面）
+        assert_eq!(
+            decoded_frames, 8,
+            "expected all 8 frames decoded, got {decoded_frames}"
+        );
     }
 }

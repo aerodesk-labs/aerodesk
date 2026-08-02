@@ -1,0 +1,11 @@
+[package]
+name = "aerodesk-linux"
+description = "AeroDesk Linux adapter: PipeWire capture, VAAPI encode, XTest/uinput injection (P4 skeleton)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aerodesk-core = { path = "../aerodesk-core" }
+tracing.workspace = true

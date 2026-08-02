@@ -1,0 +1,22 @@
+//! AeroDesk Windows 适配器（P4 骨架）。
+//!
+//! 角色：被控端 + 观看端。
+//! - 采集：Windows Graphics Capture（Win11）/ DXGI Desktop Duplication（Win10 回退）
+//! - 编码：Media Foundation H.264/HEVC（或 NVENC/QSV/AMF）
+//! - 注入：SendInput / mouse_event + keybd_event
+//!
+//! `windows` crate 依赖仅 Windows 目标启用；非 Windows 主机上本 crate 编译为
+//! 纯 trait 骨架（用于 workspace 测试与文档）。
+
+pub mod capture;
+pub mod encode;
+pub mod inject;
+
+/// 采集帧（BGRA，DXGI 输出格式）。
+#[derive(Debug, Clone)]
+pub struct CapturedFrame {
+    pub bgra: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub pts_us: i64,
+}

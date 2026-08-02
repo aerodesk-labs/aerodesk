@@ -63,9 +63,9 @@
 |---|---|---|---|
 | **P0 当前** | SFU 原型 + Web 验证 | aerodesk-sfu 单线程 SFU、UnifiedSocket(3478)、ICE-TCP/SSL-TCP、Web publisher/viewer | 已完成（待浏览器双端实测） |
 | **P1 服务端生产化** | 可商用的服务端底座 | 多核分片(SO_REUSEPORT) + 批量接收；coturn 接入；信令服务（认证/房间/TURN 凭证）；BitrateController + simulcast/SVC 选层；turmoil 模拟测试；metrics | P0 |
-| **P2 桌面客户端** | Windows/macOS/Linux 被控端+观看端 | ✅ aerodesk-core 核心完成（Endpoint/信令/VP8 媒体源，CLI 端到端验证）；🔜 平台适配器与 UI | P1 |
-| **P3 移动端** | Android 双角色、iOS 观看端 | Android MediaProjection/Accessibility 适配；iOS ReplayKit 观看；移动网络优化（码率自适应） | P2 |
-| **P4 鸿蒙 + 全平台收口** | HarmonyOS 双角色、Web 观看端完善 | 鸿蒙 NAPI 桥接 + AVScreenCapture + OH_Input_*（权限评估）；Web 端观看体验（H.264/VP8 兼容）；多显示器/触控/剪贴板增强 | P3 |
+| **P2 桌面客户端** | Windows/macOS/Linux 被控端+观看端 | ✅ aerodesk-core + aerodesk-macos 完成（ScreenCaptureKit 真实采集 → VT 硬编 → SFU → CLI viewer E2E；CGEvent 注入）；🔜 Windows/Linux 适配器（P4 骨架已建） | P1 |
+| **P3 移动端** | Android 双角色、iOS 观看端 | ✅ aerodesk-ios 解码器完成（VideoToolbox H.264 硬解，x264 关键帧+P 帧全序列测试）；🔜 Android 适配器骨架（MediaCodec/MediaProjection/Accessibility，需 NDK 真机实现）；移动网络优化 | P2 |
+| **P4 鸿蒙 + 全平台收口** | HarmonyOS 双角色、Web 观看端完善 | 🔨 适配器骨架已建（aerodesk-linux/windows/ohos）；鸿蒙 NAPI + AVScreenCapture + OH_Input_*（权限评估）；Windows WGC/DXGI + MF；Linux PipeWire/VAAPI/XTest；Web 观看体验完善 | P3 |
 
 每个阶段验收标准：自动化测试（模拟器确定性测试）+ 真机冒烟 + 质量指标（p99 抖动 <2ms、端到端延迟 40-80ms@4K60）。
 
