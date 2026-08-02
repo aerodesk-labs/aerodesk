@@ -63,7 +63,7 @@
 |---|---|---|---|
 | **P0 当前** | SFU 原型 + Web 验证 | aerodesk-sfu 单线程 SFU、UnifiedSocket(3478)、ICE-TCP/SSL-TCP、Web publisher/viewer | 已完成（待浏览器双端实测） |
 | **P1 服务端生产化** | 可商用的服务端底座 | 多核分片(SO_REUSEPORT) + 批量接收；coturn 接入；信令服务（认证/房间/TURN 凭证）；BitrateController + simulcast/SVC 选层；turmoil 模拟测试；metrics | P0 |
-| **P2 桌面客户端** | Windows/macOS/Linux 被控端+观看端 | aerodesk-core Rust 核心（str0m 端点+管线抽象）；三平台采集/编码/注入适配器；Flutter UI；信令集成 | P1 |
+| **P2 桌面客户端** | Windows/macOS/Linux 被控端+观看端 | ✅ aerodesk-core 核心完成（Endpoint/信令/VP8 媒体源，CLI 端到端验证）；🔜 平台适配器与 UI | P1 |
 | **P3 移动端** | Android 双角色、iOS 观看端 | Android MediaProjection/Accessibility 适配；iOS ReplayKit 观看；移动网络优化（码率自适应） | P2 |
 | **P4 鸿蒙 + 全平台收口** | HarmonyOS 双角色、Web 观看端完善 | 鸿蒙 NAPI 桥接 + AVScreenCapture + OH_Input_*（权限评估）；Web 端观看体验（H.264/VP8 兼容）；多显示器/触控/剪贴板增强 | P3 |
 

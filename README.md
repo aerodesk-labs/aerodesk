@@ -19,6 +19,7 @@ aerodesk/
 │   │   ├── src/main.rs   # run loop + 媒体/输入事件转发 + HTTPS 信令
 │   │   └── src/tcp.rs    # UnifiedSocket：TCP + SSL-TCP（fake-SSL）+ RFC 4571
 │   ├── aerodesk-signal/     # 独立信令服务：房间/认证/TURN 凭证/SFU 代理
+│   ├── aerodesk-cli/        # CLI 客户端（publisher/viewer，真实 VP8 流验证）✅ P2 核心
 │   ├── aerodesk-protocol/   # 共享协议：输入事件（input）+ 信令消息（signal）+ TURN 配置 ✅ 已定义
 │   └── aerodesk-core/       # 客户端核心骨架：端点/媒体管线/信令 trait（P2 填充）
 ├── web/index.html     # 浏览器端（publisher=屏幕采集 / viewer=观看+输入）
@@ -72,6 +73,7 @@ ICE-TCP candidate 输出（tcptype passive）。
 - P0 原型：✅ 完成（SFU + Web 双端）
 - P1 服务端生产化：✅ 完成（多核分片、coturn TURN、独立信令、BitrateController、
   simulcast/SVC 选层、netem 模拟器测试、/metrics 指标）
-- P2 桌面客户端：Windows/macOS/Linux（aerodesk-core + 平台适配器）
+- P2 桌面客户端：✅ 核心完成（rd-core Endpoint + 信令客户端 + CLI 验证真实媒体流）；
+  平台适配器（采集/编码/注入）进行中
 - P3 移动端：Android 双角色、iOS 观看端
 - P4 鸿蒙 + Web 收口
