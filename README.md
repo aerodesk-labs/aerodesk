@@ -20,7 +20,7 @@ aerodesk/
 │   │   └── src/tcp.rs    # UnifiedSocket：TCP + SSL-TCP（fake-SSL）+ RFC 4571
 │   ├── aerodesk-signal/     # 独立信令服务：房间/认证/TURN 凭证/SFU 代理
 │   ├── aerodesk-cli/        # CLI 客户端（publisher/viewer，VP8 + x264 流验证）
-│   ├── aerodesk-macos/      # macOS 适配器：x264 编码器 + 合成帧源 + CGEvent 注入 ✅
+│   ├── aerodesk-macos/      # macOS 适配器：VideoToolbox 硬编 + x264 + 合成帧源 + CGEvent 注入 ✅
 │   ├── aerodesk-protocol/   # 共享协议：输入事件（input）+ 信令消息（signal）+ TURN 配置 ✅ 已定义
 │   └── aerodesk-core/       # 客户端核心骨架：端点/媒体管线/信令 trait（P2 填充）
 ├── web/index.html     # 浏览器端（publisher=屏幕采集 / viewer=观看+输入）

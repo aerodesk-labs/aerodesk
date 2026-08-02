@@ -1,0 +1,119 @@
+//! VideoToolbox 硬件编码器（H.264，IOSurface 输入，零拷贝路径）。
+//!
+//! 输入 BGRA IOSurface（与 ScreenCaptureKit 输出格式一致），输出 AnnexB
+//! H.264（str0m packetizer 兼容）。
+
+use apple_cf::iosurface::{IOSurface, IOSurfaceLockOptions};
+use videotoolbox::Codec;
+use videotoolbox::compression::{CompressionSession, CompressionSessionBuilder, EncodedFrame};
+
+const BGRA: u32 = 0x42475241; // 'BGRA'
+
+/// VideoToolbox H.264 编码器。
+pub struct VtEncoder {
+    session: CompressionSession,
+    width: u32,
+    height: u32,
+    pts: i64,
+}
+
+impl VtEncoder {
+    pub fn new(width: u32, height: u32, fps: u32, bitrate_bps: u32) -> Result<Self, String> {
+        let session = CompressionSessionBuilder::new(width as i32, height as i32, Codec::H264)
+            .with_real_time(true)
+            .with_average_bit_rate(bitrate_bps as i32)
+            .with_expected_frame_rate(fps as f64)
+            .with_max_keyframe_interval((fps * 2) as i32)
+            .build()
+            .map_err(|e| format!("vt init: {e:?}"))?;
+        Ok(Self {
+            session,
+            width,
+            height,
+            pts: 0,
+        })
+    }
+
+    /// 编码一帧 BGRA 像素（写 IOSurface → 硬编）。
+    pub fn encode_bgra(&mut self, bgra: &[u8]) -> Result<Option<EncodedFrame>, String> {
+        if bgra.len() != (self.width * self.height * 4) as usize {
+            return Err("bgra size mismatch".into());
+        }
+        let surface = IOSurface::create(self.width as usize, self.height as usize, BGRA, 4)
+            .ok_or("iosurface create")?;
+        {
+            let mut guard = surface
+                .lock(IOSurfaceLockOptions::NONE)
+                .map_err(|_| "iosurface lock")?;
+            let dst = guard.base_address_mut().ok_or("base address")?;
+            unsafe {
+                std::ptr::copy_nonoverlapping(bgra.as_ptr(), dst, bgra.len());
+            }
+        }
+        let frame = self
+            .session
+            .encode(&surface, (self.pts, 90_000))
+            .map_err(|e| format!("vt encode: {e:?}"))?;
+        self.pts += 3000; // 90kHz / 30fps
+        if frame.data.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(frame))
+    }
+}
+
+/// VideoToolbox 输出 AVCC（4 字节长度前缀）→ str0m 需要的 AnnexB（起始码）。
+pub fn avcc_to_annexb(avcc: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(avcc.len() + 64);
+    let mut i = 0;
+    while i + 4 <= avcc.len() {
+        let len = u32::from_be_bytes([avcc[i], avcc[i + 1], avcc[i + 2], avcc[i + 3]]) as usize;
+        i += 4;
+        if i + len > avcc.len() {
+            break;
+        }
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(&avcc[i..i + len]);
+        i += len;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn avcc_to_annexb_conversion() {
+        // 两个 NAL：3 字节和 2 字节
+        let avcc = [0, 0, 0, 3, 0x67, 0x01, 0x02, 0, 0, 0, 2, 0x68, 0x03];
+        let annexb = avcc_to_annexb(&avcc);
+        assert_eq!(&annexb[..4], &[0, 0, 0, 1]);
+        assert_eq!(&annexb[4..7], &[0x67, 0x01, 0x02]);
+        assert_eq!(&annexb[7..11], &[0, 0, 0, 1]);
+        assert_eq!(&annexb[11..13], &[0x68, 0x03]);
+    }
+
+    #[test]
+    fn vt_encodes_synthetic_bgra() {
+        // 跳过：无硬件加速环境（CI/虚拟机）可能失败；本机有 Metal 时通过。
+        let Ok(mut enc) = VtEncoder::new(320, 180, 30, 800_000) else {
+            eprintln!("VideoToolbox unavailable, skipping");
+            return;
+        };
+        let mut frame = vec![0u8; 320 * 180 * 4];
+        for (i, px) in frame.chunks_exact_mut(4).enumerate() {
+            let v = (i / 100) as u8;
+            px.copy_from_slice(&[v, v, v, 255]);
+        }
+        let out = enc.encode_bgra(&frame).expect("encode");
+        let Some(out) = out else {
+            return;
+        };
+        let annexb = avcc_to_annexb(&out.data);
+        assert!(
+            annexb.windows(4).any(|w| w == [0, 0, 0, 1]),
+            "expected AnnexB start codes"
+        );
+    }
+}

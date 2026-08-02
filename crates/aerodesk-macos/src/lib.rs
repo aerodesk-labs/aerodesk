@@ -10,3 +10,4 @@
 pub mod encoder;
 pub mod inject;
 pub mod synthetic;
+pub mod vt_encoder;

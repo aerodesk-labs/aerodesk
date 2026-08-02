@@ -9,5 +9,7 @@ license.workspace = true
 x264 = "0.5"
 core-graphics = "0.25"
 core-graphics-types = "0.2"
+videotoolbox = "0.18"
+apple-cf = "0.9"
 aerodesk-protocol.workspace = true
 tracing.workspace = true

@@ -35,6 +35,7 @@ fn main() {
     let encoder = arg(&args, "--encoder").unwrap_or_else(|| "pcap".into());
 
     match role.as_str() {
+        "publisher" if encoder == "vt" => publisher_vt(&signal, &room),
         "publisher" if encoder == "x264" => publisher_x264(&signal, &room),
         "publisher" => publisher(&signal, &room),
         "viewer" => viewer(&signal, &room),
@@ -394,6 +395,95 @@ fn publisher_x264(signal_url: &str, room: &str) {
                 }
             }
             pts += 1;
+        }
+
+        std::thread::sleep(Duration::from_millis(2));
+        let _ = &mut signal;
+    }
+}
+
+/// VideoToolbox 硬编发布端：合成 BGRA → 硬编 → SFU。
+fn publisher_vt(signal_url: &str, room: &str) {
+    use aerodesk_macos::synthetic::SyntheticSource;
+    use aerodesk_macos::vt_encoder::{VtEncoder, avcc_to_annexb};
+
+    const W: u32 = 640;
+    const H: u32 = 360;
+    const FPS: u32 = 30;
+
+    let (mut signal, mut endpoint, socket, video_mid) =
+        connect_h264(signal_url, room, Role::Publisher);
+    let mut encoder = VtEncoder::new(W, H, FPS, 800_000).expect("vt encoder");
+    let mut source = SyntheticSource::new(W, H);
+    let mut connected = false;
+    let mut next_frame = Instant::now();
+
+    loop {
+        let wait = Duration::from_millis(5);
+        socket.set_read_timeout(Some(wait)).ok();
+        let mut buf = [0u8; 2000];
+        if let Ok((n, source)) = socket.recv_from(&mut buf)
+            && let Ok(contents) = buf[..n].try_into()
+        {
+            let input = Input::Receive(
+                Instant::now(),
+                Receive {
+                    proto: Protocol::Udp,
+                    source,
+                    destination: socket.local_addr().unwrap(),
+                    contents,
+                },
+            );
+            let _ = endpoint.handle_input(input);
+        }
+        let _ = endpoint.handle_timeout(Instant::now());
+
+        let mut deadline = Instant::now() + Duration::from_secs(1);
+        while let Some(output) = endpoint.poll_output() {
+            match output {
+                Output::Transmit(t) => {
+                    let _ = socket.send_to(&t.contents, t.destination);
+                }
+                Output::Timeout(t) => {
+                    deadline = deadline.min(t);
+                    break;
+                }
+                Output::Event(_) => {}
+            }
+        }
+
+        while let Some(ev) = endpoint.poll_event() {
+            match ev {
+                ClientEvent::IceConnected => {
+                    info!("ICE connected, starting VideoToolbox stream");
+                    connected = true;
+                    next_frame = Instant::now();
+                }
+                ClientEvent::Closed => {
+                    info!("connection closed");
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        if connected && Instant::now() >= next_frame {
+            next_frame += Duration::from_millis(1000 / FPS as u64);
+            let bgra = source.next_frame_bgra();
+            match encoder.encode_bgra(bgra) {
+                Ok(Some(frame)) => {
+                    let annexb = avcc_to_annexb(&frame.data);
+                    let rtp_time = str0m::media::MediaTime::new(
+                        frame.presentation_time.0 as u64,
+                        str0m::media::Frequency::NINETY_KHZ,
+                    );
+                    if let Err(e) = endpoint.send_video_frame(video_mid, annexb, rtp_time) {
+                        warn!("send frame failed: {e:?}");
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => warn!("vt encode: {e}"),
+            }
         }
 
         std::thread::sleep(Duration::from_millis(2));

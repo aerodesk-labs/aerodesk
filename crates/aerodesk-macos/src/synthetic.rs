@@ -5,6 +5,7 @@ pub struct SyntheticSource {
     height: u32,
     frame: u64,
     buf: Vec<u8>,
+    bgra: Vec<u8>,
 }
 
 impl SyntheticSource {
@@ -14,6 +15,7 @@ impl SyntheticSource {
             height,
             frame: 0,
             buf: vec![0; (width * height * 3) as usize],
+            bgra: vec![0; (width * height * 4) as usize],
         }
     }
 
@@ -76,6 +78,18 @@ impl SyntheticSource {
 
         self.frame += 1;
         &self.buf
+    }
+
+    /// 生成下一帧 BGRA32（VideoToolbox 硬编输入）。
+    pub fn next_frame_bgra(&mut self) -> &[u8] {
+        let rgb = self.next_frame().to_vec();
+        for (dst, src) in self.bgra.chunks_exact_mut(4).zip(rgb.chunks_exact(3)) {
+            dst[0] = src[2]; // B
+            dst[1] = src[1]; // G
+            dst[2] = src[0]; // R
+            dst[3] = 255; // A
+        }
+        &self.bgra
     }
 }
 
