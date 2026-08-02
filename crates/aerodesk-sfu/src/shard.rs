@@ -292,12 +292,12 @@ fn route_udp(
 ) {
     let proto = Protocol::Udp;
 
-    if let Some(input) = build_input(source, proto, &data) {
-        if let Some(idx) = clients.iter().position(|c| c.rtc.accepts(&input)) {
-            shared.register_route(proto, source, index);
-            clients[idx].handle_input(input);
-            return;
-        }
+    if let Some(input) = build_input(source, proto, &data)
+        && let Some(idx) = clients.iter().position(|c| c.rtc.accepts(&input))
+    {
+        shared.register_route(proto, source, index);
+        clients[idx].handle_input(input);
+        return;
     }
 
     if let Some(target) = shared.lookup_route(proto, source) {
@@ -975,6 +975,7 @@ impl Client {
 }
 
 /// 客户端间传播的事件。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Propagated {
     Noop,
