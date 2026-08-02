@@ -70,7 +70,8 @@ ICE-TCP candidate 输出（tcptype passive）。
 ## 路线图摘要
 
 - P0 原型：✅ 完成（SFU + Web 双端）
-- P1 服务端生产化：多核分片、coturn、独立信令、BitrateController、SVC 选层、模拟器测试
+- P1 服务端生产化：✅ 完成（多核分片、coturn TURN、独立信令、BitrateController、
+  simulcast/SVC 选层、netem 模拟器测试、/metrics 指标）
 - P2 桌面客户端：Windows/macOS/Linux（aerodesk-core + 平台适配器）
 - P3 移动端：Android 双角色、iOS 观看端
 - P4 鸿蒙 + Web 收口
