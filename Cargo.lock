@@ -56,6 +56,7 @@ dependencies = [
  "serde_json",
  "socket2",
  "str0m",
+ "str0m-netem",
  "systemstat",
  "tracing",
  "tracing-subscriber",
@@ -1032,7 +1033,7 @@ source = "git+https://github.com/PulseBeamDev/str0m.git?rev=7db621fe6da657b4ba4a
 dependencies = [
  "crc",
  "serde",
- "str0m-proto",
+ "str0m-proto 0.6.0 (git+https://github.com/PulseBeamDev/str0m.git?rev=7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084)",
  "subtle",
  "tracing",
 ]
@@ -1892,7 +1893,7 @@ dependencies = [
  "sctp-proto",
  "serde",
  "str0m-aws-lc-rs",
- "str0m-proto",
+ "str0m-proto 0.6.0 (git+https://github.com/PulseBeamDev/str0m.git?rev=7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084)",
  "str0m-rust-crypto",
  "subtle",
  "time",
@@ -1906,7 +1907,26 @@ source = "git+https://github.com/PulseBeamDev/str0m.git?rev=7db621fe6da657b4ba4a
 dependencies = [
  "aws-lc-rs",
  "dimpl",
- "str0m-proto",
+ "str0m-proto 0.6.0 (git+https://github.com/PulseBeamDev/str0m.git?rev=7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084)",
+ "time",
+]
+
+[[package]]
+name = "str0m-netem"
+version = "0.3.0"
+dependencies = [
+ "fastrand",
+ "str0m-proto 0.6.0",
+]
+
+[[package]]
+name = "str0m-proto"
+version = "0.6.0"
+dependencies = [
+ "base64ct",
+ "fastrand",
+ "serde",
+ "subtle",
  "time",
 ]
 
@@ -1936,7 +1956,7 @@ dependencies = [
  "p256",
  "sha1",
  "sha2",
- "str0m-proto",
+ "str0m-proto 0.6.0 (git+https://github.com/PulseBeamDev/str0m.git?rev=7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084)",
  "time",
 ]
 

@@ -8,16 +8,19 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::ops::Deref;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use str0m::bwe::BweKind;
 use str0m::channel::{ChannelData, ChannelId};
 use str0m::media::{Direction, KeyframeRequest, MediaData, Mid, Rid};
 use str0m::media::{KeyframeRequestKind, MediaKind};
 use str0m::net::Protocol;
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcError, net::Receive};
+
+use crate::bitrate::{BitrateController, Layer};
 
 /// 发往分片的命令。
 #[allow(clippy::large_enum_variant)]
@@ -67,6 +70,27 @@ pub enum CrossShardEvent {
     },
 }
 
+/// 分片指标（原子计数，供 /metrics 读取）。
+pub struct ShardMetrics {
+    pub clients: AtomicUsize,
+    pub rx_packets: AtomicU64,
+    pub rx_bytes: AtomicU64,
+    pub tx_packets: AtomicU64,
+    pub tx_bytes: AtomicU64,
+}
+
+impl ShardMetrics {
+    pub fn new() -> Self {
+        Self {
+            clients: AtomicUsize::new(0),
+            rx_packets: AtomicU64::new(0),
+            rx_bytes: AtomicU64::new(0),
+            tx_packets: AtomicU64::new(0),
+            tx_bytes: AtomicU64::new(0),
+        }
+    }
+}
+
 /// 全局共享状态（所有分片可见）。
 #[derive(Clone)]
 pub struct Shared {
@@ -76,14 +100,17 @@ pub struct Shared {
     pub room_registry: Arc<RwLock<HashMap<String, HashSet<usize>>>>,
     /// TCP 写句柄（destination → stream），各分片发送时加锁写。
     pub tcp_streams: Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
+    /// 每分片指标（索引 = shard id）。
+    pub metrics: Arc<Vec<ShardMetrics>>,
 }
 
 impl Shared {
-    pub fn new() -> Self {
+    pub fn new(shard_count: usize) -> Self {
         Self {
             route_table: Arc::new(RwLock::new(HashMap::new())),
             room_registry: Arc::new(RwLock::new(HashMap::new())),
             tcp_streams: Arc::new(Mutex::new(HashMap::new())),
+            metrics: Arc::new((0..shard_count).map(|_| ShardMetrics::new()).collect()),
         }
     }
 
@@ -170,6 +197,7 @@ fn run_shard(
     let mut room_counts: HashMap<String, usize> = HashMap::new();
 
     let mut last_heartbeat = Instant::now();
+    let metrics = &shared.metrics[index];
     let cross = |target: usize, ev: CrossShardEvent| {
         if target != index {
             let _ = cross_tx[target].send(ShardCommand::Cross(ev));
@@ -185,7 +213,7 @@ fn run_shard(
          tcp_streams: &Arc<Mutex<HashMap<SocketAddr, TcpStream>>>| {
             let mut timeout = Instant::now() + Duration::from_millis(100);
             for client in clients.iter_mut() {
-                let t = poll_until_timeout(client, to_propagate, socket, tcp_streams);
+                let t = poll_until_timeout(client, to_propagate, socket, tcp_streams, metrics);
                 timeout = timeout.min(t);
             }
             while let Some(p) = to_propagate.pop_front() {
@@ -249,6 +277,7 @@ fn run_shard(
         // 心跳：向 manager 汇报客户端数（负载路由用）
         if last_heartbeat.elapsed() >= Duration::from_secs(5) {
             last_heartbeat = Instant::now();
+            metrics.clients.store(clients.len(), Ordering::Relaxed);
             let _ = manager_tx.send((index, clients.len()));
         }
 
@@ -270,7 +299,15 @@ fn run_shard(
         // 4. UDP 收包
         if let Ok((n, source)) = socket.recv_from(&mut buf) {
             let data = buf[..n].to_vec();
-            route_udp(index, source, data, &mut clients, &shared, &cross_tx);
+            route_udp(
+                index,
+                source,
+                data,
+                &mut clients,
+                &shared,
+                &cross_tx,
+                metrics,
+            );
         }
 
         // 5. 时间推进
@@ -289,8 +326,14 @@ fn route_udp(
     clients: &mut [Client],
     shared: &Shared,
     cross_tx: &[mpsc::Sender<ShardCommand>],
+    metrics: &ShardMetrics,
 ) {
     let proto = Protocol::Udp;
+
+    metrics.rx_packets.fetch_add(1, Ordering::Relaxed);
+    metrics
+        .rx_bytes
+        .fetch_add(data.len() as u64, Ordering::Relaxed);
 
     if let Some(input) = build_input(source, proto, &data)
         && let Some(idx) = clients.iter().position(|c| c.rtc.accepts(&input))
@@ -522,12 +565,13 @@ fn poll_until_timeout(
     queue: &mut VecDeque<Propagated>,
     socket: &UdpSocket,
     tcp_streams: &Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
+    metrics: &ShardMetrics,
 ) -> Instant {
     loop {
         if !client.rtc.is_alive() {
             return Instant::now();
         }
-        let propagated = client.poll_output(socket, tcp_streams);
+        let propagated = client.poll_output(socket, tcp_streams, metrics);
         if let Propagated::Timeout(t) = propagated {
             return t;
         }
@@ -594,6 +638,8 @@ impl TrackOut {
 pub struct Client {
     pub id: ClientId,
     pub room: String,
+    /// 码率控制器：远端估计 → 目标码率 + simulcast 选层。
+    pub bwe: BitrateController,
     pub rtc: Rtc,
     pub pending: Option<str0m::change::SdpPendingOffer>,
     pub cid: Option<ChannelId>,
@@ -610,6 +656,7 @@ impl Client {
         Client {
             id: ClientId(next_id),
             room: String::new(),
+            bwe: BitrateController::default(),
             rtc,
             pending: None,
             cid: None,
@@ -634,6 +681,7 @@ impl Client {
         &mut self,
         socket: &UdpSocket,
         tcp_streams: &Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
+        metrics: &ShardMetrics,
     ) -> Propagated {
         if !self.rtc.is_alive() {
             return Propagated::Noop;
@@ -642,7 +690,7 @@ impl Client {
             return Propagated::Noop;
         }
         match self.rtc.poll_output() {
-            Ok(output) => self.handle_output(output, socket, tcp_streams),
+            Ok(output) => self.handle_output(output, socket, tcp_streams, metrics),
             Err(e) => {
                 warn!("Client ({}) poll_output failed: {:?}", *self.id, e);
                 self.rtc.disconnect();
@@ -656,9 +704,14 @@ impl Client {
         output: Output,
         socket: &UdpSocket,
         tcp_streams: &Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
+        metrics: &ShardMetrics,
     ) -> Propagated {
         match output {
             Output::Transmit(transmit) => {
+                metrics.tx_packets.fetch_add(1, Ordering::Relaxed);
+                metrics
+                    .tx_bytes
+                    .fetch_add(transmit.contents.len() as u64, Ordering::Relaxed);
                 match transmit.proto {
                     Protocol::Udp => {
                         socket
@@ -719,6 +772,21 @@ impl Client {
                     if self.cid == Some(cid) {
                         self.cid = None;
                     }
+                    Propagated::Noop
+                }
+                Event::EgressBitrateEstimate(v) => {
+                    let estimate = match v {
+                        BweKind::Twcc(b) => b,
+                        BweKind::Remb(_, b) => b,
+                        _ => return Propagated::Noop,
+                    };
+                    self.bwe.update_estimate(estimate);
+                    self.rtc.bwe().set_current_bitrate(self.bwe.target());
+                    trace!(
+                        "client {} bwe estimate {estimate:?} target {:?}",
+                        *self.id,
+                        self.bwe.target()
+                    );
                     Propagated::Noop
                 }
                 Event::MediaIngressStats(data) => {
@@ -942,8 +1010,13 @@ impl Client {
         else {
             return;
         };
-        if data.rid.is_some() && data.rid != Some("h".into()) {
-            return;
+        // simulcast/SVC 选层：按控制器目标码率选择 rid（q/h/f）。
+        match (&data.rid, self.bwe.selected_layer()) {
+            (None, _) => {}
+            (Some(r), Layer::Low) if *r == "q".into() => {}
+            (Some(r), Layer::Medium) if *r == "h".into() => {}
+            (Some(r), Layer::High) if *r == "f".into() => {}
+            _ => return,
         }
         if self.chosen_rid != data.rid {
             self.chosen_rid = data.rid;

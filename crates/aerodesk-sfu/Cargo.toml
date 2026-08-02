@@ -15,3 +15,6 @@ tracing-subscriber.workspace = true
 systemstat.workspace = true
 aerodesk-protocol.workspace = true
 socket2 = { version = "0.5", features = ["all"] }
+
+[dev-dependencies]
+str0m-netem = { path = "../../../str0m/crates/netem" }

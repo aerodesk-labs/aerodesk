@@ -20,6 +20,7 @@ use str0m::crypto::from_feature_flags;
 use str0m::net::TcpType;
 use str0m::{Candidate, Rtc, net::Protocol};
 
+mod bitrate;
 mod router;
 mod shard;
 mod tcp;
@@ -111,7 +112,7 @@ pub fn main() {
     info!("Bound TCP/SSL-TCP media port: {tcp_addr}");
 
     // 3. 分片通道（先建 channel，后启线程）
-    let shared = Shared::new();
+    let shared = Shared::new(shard_count);
     let mut shard_txs: Vec<mpsc::Sender<ShardCommand>> = Vec::new();
     let mut shard_rxs = Vec::new();
     for _ in 0..shard_count {
@@ -198,6 +199,7 @@ pub fn main() {
 
     // 5. 信令（HTTPS）
     let shard_txs_web = shard_txs.clone();
+    let shared_web = shared.clone();
     let router_web = router.clone();
     let internal_token = std::env::var("INTERNAL_TOKEN").ok();
     let internal_shard_txs = shard_txs_web.clone();
@@ -217,6 +219,7 @@ pub fn main() {
             internal_shard_txs.clone(),
             internal_router.clone(),
             internal_turn.clone(),
+            shared.clone(),
         )
     })
     .expect("starting internal server");
@@ -234,6 +237,7 @@ pub fn main() {
                 shard_txs_web.clone(),
                 router_web.clone(),
                 turn.clone(),
+                shared_web.clone(),
             )
         },
         certificate,
@@ -253,7 +257,33 @@ fn web_request(
     shard_txs: Vec<mpsc::Sender<ShardCommand>>,
     router: Arc<Mutex<router::ShardRouter>>,
     turn: Option<TurnConfig>,
+    shared: Shared,
 ) -> Response {
+    if request.method() == "GET" && request.url() == "/metrics" {
+        let metrics = shared.metrics.clone();
+        let shards: Vec<serde_json::Value> = metrics
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                serde_json::json!({
+                    "shard": i,
+                    "clients": m.clients.load(std::sync::atomic::Ordering::Relaxed),
+                    "rx_packets": m.rx_packets.load(std::sync::atomic::Ordering::Relaxed),
+                    "rx_bytes": m.rx_bytes.load(std::sync::atomic::Ordering::Relaxed),
+                    "tx_packets": m.tx_packets.load(std::sync::atomic::Ordering::Relaxed),
+                    "tx_bytes": m.tx_bytes.load(std::sync::atomic::Ordering::Relaxed),
+                })
+            })
+            .collect();
+        let total: serde_json::Value = serde_json::json!({
+            "shards": shards,
+        });
+        return Response::from_data(
+            "application/json",
+            serde_json::to_vec(&total).expect("serialize metrics"),
+        );
+    }
+
     if request.method() == "GET" && request.url() == "/config" {
         let body =
             serde_json::to_vec(&serde_json::json!({ "turn": turn })).expect("serialize config");

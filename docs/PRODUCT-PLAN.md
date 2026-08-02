@@ -100,9 +100,9 @@ aerodesk-sfu（服务端）                 ← 与客户端共享协议/媒体�
 ## 七、待办队列（按 P1 展开）
 
 1. aerodesk-sfu 多核分片骨架（thread-per-core + SO_REUSEPORT + 房间哈希路由）
-2. coturn 接入（信令下发 TURN 凭证 + ICE relay candidate 验证）
+2. ~~coturn 接入~~ ✅ 已实现
 3. 信令服务独立化（WSS + 认证 + 房间 + 会话管理）
-4. BitrateController + set_current_bitrate 集成
-5. simulcast/SVC 选层（按观看端能力+带宽）
-6. turmoil 模拟器测试框架（BWE/丢包/延迟场景）
-7. 指标与可观测性（每会话延迟/码率/丢包上报）
+4. ~~BitrateController + set_current_bitrate~~ ✅ 已实现
+5. ~~simulcast/SVC 选层~~ ✅ 已实现（q/h/f 按目标码率）
+6. ~~模拟器测试框架~~ ✅ 已实现（netem：丢包/延迟/抖动/确定性）
+7. ~~指标与可观测性~~ ✅ 已实现（/metrics per-shard 计数）
