@@ -5,6 +5,7 @@
 
 > 平台矩阵、技术选型与路线图见 [`docs/PRODUCT-PLAN.md`](docs/PRODUCT-PLAN.md)。
 > PulseBeam 架构借鉴见 [`docs/borrow-from-pulsebeam.md`](docs/borrow-from-pulsebeam.md)。
+> TURN 中继部署见 [`docs/TURN.md`](docs/TURN.md)。
 
 ## Workspace 结构
 
@@ -19,6 +20,13 @@ rd/
 ├── web/index.html     # 浏览器端（publisher=屏幕采集 / viewer=观看+输入）
 ├── certs/             # str0m.test 自签证书（开发用）
 └── docs/              # 规划与调研
+
+## TURN 配置
+
+```sh
+TURN_SECRET=<coturn static-auth-secret> cargo run -p aerodesk-sfu
+# 客户端 GET /config 自动获取 iceServers
+```
 ```
 
 ## 架构
