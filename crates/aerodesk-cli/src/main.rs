@@ -560,23 +560,20 @@ fn publisher_capture(signal_url: &str, room: &str) {
             }
         }
 
-        if connected
-            && let Some(surface) = capture.next_frame(Duration::from_millis(50))
-        {
-                match encoder.encode_surface(&surface) {
-                    Ok(Some(frame)) => {
-                        let annexb = avcc_to_annexb(&frame.data);
-                        let rtp_time = str0m::media::MediaTime::new(
-                            frame.presentation_time.0 as u64,
-                            str0m::media::Frequency::NINETY_KHZ,
-                        );
-                        if let Err(e) = endpoint.send_video_frame(video_mid, annexb, rtp_time) {
-                            warn!("send frame failed: {e:?}");
-                        }
+        if connected && let Some(surface) = capture.next_frame(Duration::from_millis(50)) {
+            match encoder.encode_surface(&surface) {
+                Ok(Some(frame)) => {
+                    let annexb = avcc_to_annexb(&frame.data);
+                    let rtp_time = str0m::media::MediaTime::new(
+                        frame.presentation_time.0 as u64,
+                        str0m::media::Frequency::NINETY_KHZ,
+                    );
+                    if let Err(e) = endpoint.send_video_frame(video_mid, annexb, rtp_time) {
+                        warn!("send frame failed: {e:?}");
                     }
-                    Ok(None) => {}
-                    Err(e) => warn!("vt encode: {e}"),
                 }
+                Ok(None) => {}
+                Err(e) => warn!("vt encode: {e}"),
             }
         }
 
