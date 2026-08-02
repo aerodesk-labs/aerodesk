@@ -330,22 +330,19 @@ fn publisher_x264(signal_url: &str, room: &str) {
         let wait = Duration::from_millis(5);
         socket.set_read_timeout(Some(wait)).ok();
         let mut buf = [0u8; 2000];
-        match socket.recv_from(&mut buf) {
-            Ok((n, source)) => {
-                if let Ok(contents) = buf[..n].try_into() {
-                    let input = Input::Receive(
-                        Instant::now(),
-                        Receive {
-                            proto: Protocol::Udp,
-                            source,
-                            destination: socket.local_addr().unwrap(),
-                            contents,
-                        },
-                    );
-                    let _ = endpoint.handle_input(input);
-                }
-            }
-            Err(_) => {}
+        if let Ok((n, source)) = socket.recv_from(&mut buf)
+            && let Ok(contents) = buf[..n].try_into()
+        {
+            let input = Input::Receive(
+                Instant::now(),
+                Receive {
+                    proto: Protocol::Udp,
+                    source,
+                    destination: socket.local_addr().unwrap(),
+                    contents,
+                },
+            );
+            let _ = endpoint.handle_input(input);
         }
         let _ = endpoint.handle_timeout(Instant::now());
 
@@ -384,7 +381,7 @@ fn publisher_x264(signal_url: &str, room: &str) {
             let rgb = source.next_frame();
             if let Some(frame) = encoder.encode(rgb).expect("encode") {
                 let rtp_time = str0m::media::MediaTime::new(
-                    (pts as u64 * 3000) as u64,
+                    pts as u64 * 3000,
                     str0m::media::Frequency::NINETY_KHZ,
                 );
                 if let Err(e) = endpoint.send_video_frame(video_mid, frame.data, rtp_time) {
