@@ -249,7 +249,8 @@ fn run_shard(
                     proto,
                     data,
                 } => {
-                    if let Some(input) = build_input(source, proto, &data)
+                    if let Some(input) =
+                        build_input(source, proto, socket.local_addr().unwrap(), &data)
                         && let Some(idx) = clients.iter().position(|c| c.rtc.accepts(&input))
                     {
                         clients[idx].handle_input(input);
@@ -307,6 +308,7 @@ fn run_shard(
                 &shared,
                 &cross_tx,
                 metrics,
+                &socket,
             );
         }
 
@@ -319,6 +321,7 @@ fn run_shard(
 }
 
 /// UDP 包路由：本地认领 → 路由表转投 → 广播。
+#[allow(clippy::too_many_arguments)]
 fn route_udp(
     index: usize,
     source: SocketAddr,
@@ -327,6 +330,7 @@ fn route_udp(
     shared: &Shared,
     cross_tx: &[mpsc::Sender<ShardCommand>],
     metrics: &ShardMetrics,
+    socket: &UdpSocket,
 ) {
     let proto = Protocol::Udp;
 
@@ -335,7 +339,7 @@ fn route_udp(
         .rx_bytes
         .fetch_add(data.len() as u64, Ordering::Relaxed);
 
-    if let Some(input) = build_input(source, proto, &data)
+    if let Some(input) = build_input(source, proto, socket.local_addr().unwrap(), &data)
         && let Some(idx) = clients.iter().position(|c| c.rtc.accepts(&input))
     {
         shared.register_route(proto, source, index);
@@ -367,14 +371,19 @@ fn route_udp(
 }
 
 /// 用原始字节构建 Input（解析失败返回 None）。
-fn build_input(source: SocketAddr, proto: Protocol, data: &[u8]) -> Option<Input<'_>> {
+fn build_input(
+    source: SocketAddr,
+    proto: Protocol,
+    destination: SocketAddr,
+    data: &[u8],
+) -> Option<Input<'_>> {
     let contents = data.try_into().ok()?;
     Some(Input::Receive(
         Instant::now(),
         Receive {
             proto,
             source,
-            destination: source,
+            destination,
             contents,
         },
     ))
@@ -396,10 +405,18 @@ fn handle_cross_event(
             data,
         } => {
             // 转投来的包：本地尝试认领（认领成功登记路由）
-            let Some(input) = build_input(source, proto, &data) else {
+            let Some(input) = build_input(source, proto, socket.local_addr().unwrap(), &data)
+            else {
+                debug!("cross packet {}:{} unparseable", proto, source);
                 return;
             };
             let Some(idx) = clients.iter().position(|c| c.rtc.accepts(&input)) else {
+                debug!(
+                    "cross packet {}:{} no client accepts ({} clients)",
+                    proto,
+                    source,
+                    clients.len()
+                );
                 return;
             };
             clients[idx].handle_input(input);
@@ -708,6 +725,12 @@ impl Client {
     ) -> Propagated {
         match output {
             Output::Transmit(transmit) => {
+                debug!(
+                    "TX {} bytes to {} type={:#04x}",
+                    transmit.contents.len(),
+                    transmit.destination,
+                    transmit.contents.first().copied().unwrap_or(0)
+                );
                 metrics.tx_packets.fetch_add(1, Ordering::Relaxed);
                 metrics
                     .tx_bytes

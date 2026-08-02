@@ -1,15 +1,17 @@
 [package]
-name = "aerodesk-core"
-description = "Cross-platform remote desktop client core (str0m endpoint + media pipeline abstraction)"
+name = "aerodesk-cli"
+description = "AeroDesk CLI client: publisher (VP8 test stream) / viewer (stats)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 str0m = { workspace = true, features = ["rust-crypto"] }
+aerodesk-core = { path = "../aerodesk-core" }
 aerodesk-protocol.workspace = true
+tungstenite = "0.30"
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-tungstenite = "0.30"
+tracing-subscriber.workspace = true
 pcap-file = "2.0.0"

@@ -48,6 +48,20 @@ fn main() {
     let cert = include_bytes!("../../../certs/cer.pem").to_vec();
     let key = include_bytes!("../../../certs/key.pem").to_vec();
 
+    // 明文 WS（开发用；生产只开 WSS 端口）
+    let plain_port: u16 = std::env::var("SIGNAL_PLAIN_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3003);
+    let plain_config = config.clone();
+    let plain_rooms = rooms.clone();
+    let plain = rouille::Server::new(format!("0.0.0.0:{plain_port}"), move |request| {
+        handle(request, plain_config.clone(), plain_rooms.clone())
+    })
+    .expect("start plain signaling server");
+    std::thread::spawn(move || plain.run());
+    info!("Signaling (WS plain) listening on :{plain_port}");
+
     let server = rouille::Server::new_ssl(
         format!("0.0.0.0:{port}"),
         move |request| handle(request, config.clone(), rooms.clone()),
@@ -110,7 +124,7 @@ fn load_config() -> Config {
 
 fn handle(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
     if request.method() == "GET" && request.url() == "/ws" {
-        return match websocket::start(request, Some("aerodesk")) {
+        return match websocket::start(request, None::<&str>) {
             Ok((response, rx)) => {
                 std::thread::spawn(move || session_loop(rx, config, rooms));
                 response
