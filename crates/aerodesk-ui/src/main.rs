@@ -5,8 +5,6 @@
 
 slint::include_modules!();
 
-
-
 fn main() -> Result<(), slint::PlatformError> {
     init_log();
     let ui = AppWindow::new()?;
