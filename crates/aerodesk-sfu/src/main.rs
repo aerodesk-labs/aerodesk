@@ -58,6 +58,8 @@ fn bind_udp_reuseport(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> 
     };
     let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
     sock.set_reuse_address(true)?;
+    // SO_REUSEPORT 仅 Unix；Windows 用 SO_REUSEADDR（set_reuse_address）近似。
+    #[cfg(unix)]
     sock.set_reuse_port(true)?;
     sock.bind(&addr.into())?;
     Ok(std::net::UdpSocket::from(sock))
