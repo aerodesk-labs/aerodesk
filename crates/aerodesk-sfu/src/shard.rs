@@ -20,6 +20,8 @@ use str0m::media::{KeyframeRequestKind, MediaKind};
 use str0m::net::Protocol;
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcError, net::Receive};
 
+use aerodesk_protocol::signal::Role;
+
 use crate::bitrate::{BitrateController, Layer};
 use crate::recorder::Recorder;
 
@@ -27,7 +29,8 @@ use crate::recorder::Recorder;
 #[allow(clippy::large_enum_variant)]
 pub enum ShardCommand {
     /// 新客户端（信令线程创建 Rtc 后送入）。
-    AddClient { rtc: Rtc, room: String },
+    /// role 用于 #12 角色校验：viewer 禁止发布媒体。
+    AddClient { rtc: Rtc, room: String, role: Role },
     /// 跨分片事件（媒体/控制/UDP 转投）。
     Cross(CrossShardEvent),
     /// TCP 数据包（由 manager 按路由表分发）。
@@ -230,8 +233,8 @@ fn run_shard(
         // 1. 命令队列
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
-                ShardCommand::AddClient { rtc, room } => {
-                    let mut client = Client::new(rtc);
+                ShardCommand::AddClient { rtc, room, role } => {
+                    let mut client = Client::new(rtc, role);
                     client.recorder = shared.recorder.clone();
                     client.room = room.clone();
                     let id = client.id;
@@ -660,6 +663,8 @@ impl TrackOut {
 pub struct Client {
     pub id: ClientId,
     pub room: String,
+    /// #12：加入时的授权角色（信令 JWT 校验后传入）。
+    pub role: Role,
     /// 码率控制器：远端估计 → 目标码率 + simulcast 选层。
     pub bwe: BitrateController,
     pub rtc: Rtc,
@@ -674,12 +679,13 @@ pub struct Client {
 }
 
 impl Client {
-    fn new(rtc: Rtc) -> Client {
+    fn new(rtc: Rtc, role: Role) -> Client {
         static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
         let next_id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
         Client {
             id: ClientId(next_id),
             room: String::new(),
+            role,
             bwe: BitrateController::default(),
             rtc,
             pending: None,
@@ -985,6 +991,15 @@ impl Client {
     }
 
     fn handle_offer(&mut self, offer: str0m::change::SdpOffer) {
+        // #12：viewer 禁止通过重协商发布媒体（初始 offer 在 /start 处同样校验）。
+        if self.role == Role::Viewer && offer_sends_media(&offer.to_sdp_string()) {
+            warn!(
+                "Client ({}) role=viewer 尝试发布媒体，按 #12 断开",
+                *self.id
+            );
+            self.rtc.disconnect();
+            return;
+        }
         let answer = self
             .rtc
             .sdp_api()
@@ -1091,4 +1106,78 @@ pub enum Propagated {
     MediaData(ClientId, MediaData),
     ChannelData(ClientId, String, ChannelData),
     KeyframeRequest(ClientId, KeyframeRequest, ClientId, Mid),
+}
+
+// ---------- #12 角色校验工具 ----------
+
+/// 判断 offer SDP 是否包含发送方向（sendonly/sendrecv）的媒体 m-line。
+///
+/// `m=application`（数据通道）不算媒体。viewer 的 offer 不允许出现媒体发送方向。
+pub(crate) fn offer_sends_media(sdp: &str) -> bool {
+    let mut in_media = false;
+    for line in sdp.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("m=") {
+            let mtype = rest.split_whitespace().next().unwrap_or("");
+            in_media = mtype != "application";
+            continue;
+        }
+        if in_media && (line.starts_with("a=sendonly") || line.starts_with("a=sendrecv")) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::offer_sends_media;
+
+    fn sdp(m_lines: &str) -> String {
+        format!("v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n{m_lines}")
+    }
+
+    #[test]
+    fn sendonly_video_detected() {
+        let s = sdp("m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=sendonly\r\n");
+        assert!(offer_sends_media(&s));
+    }
+
+    #[test]
+    fn sendrecv_video_detected() {
+        let s = sdp("m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=sendrecv\r\n");
+        assert!(offer_sends_media(&s));
+    }
+
+    #[test]
+    fn recvonly_not_detected() {
+        let s = sdp("m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=recvonly\r\n");
+        assert!(!offer_sends_media(&s));
+    }
+
+    #[test]
+    fn inactive_not_detected() {
+        let s = sdp("m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=inactive\r\n");
+        assert!(!offer_sends_media(&s));
+    }
+
+    #[test]
+    fn data_channel_only_not_detected() {
+        let s = sdp("m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n");
+        assert!(!offer_sends_media(&s));
+    }
+
+    #[test]
+    fn second_media_line_sending_detected() {
+        // 第一条 recvonly（如观看端），第二条 sendonly → 判定为发送。
+        let s = sdp(
+            "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=recvonly\r\n             m=video 9 UDP/TLS/RTP/SAVPF 97\r\na=sendonly\r\n",
+        );
+        assert!(offer_sends_media(&s));
+    }
+
+    #[test]
+    fn empty_sdp_not_detected() {
+        assert!(!offer_sends_media(""));
+    }
 }

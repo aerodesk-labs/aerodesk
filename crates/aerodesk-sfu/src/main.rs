@@ -30,7 +30,7 @@ mod shard;
 mod tcp;
 mod util;
 
-use aerodesk_protocol::signal::TurnConfig;
+use aerodesk_protocol::signal::{Role, TurnConfig};
 use shard::{Shard, ShardCommand, Shared};
 
 /// 统一媒体端口（UDP + TCP + SSL-TCP 复用）。生产用 443。
@@ -323,17 +323,31 @@ fn web_request(
         return Response::html(include_str!("../../../web/index.html"));
     }
 
-    // POST /start?room=xxx
-    let room = request
-        .raw_query_string()
-        .split('&')
-        .find(|kv| kv.starts_with("room="))
-        .map(|kv| kv[5..].to_string())
-        .unwrap_or_else(|| "default".to_string());
+    // POST /start?room=xxx&role=xxx
+    let query = request.raw_query_string();
+    let param = |key: &str| {
+        query
+            .split('&')
+            .find(|kv| kv.starts_with(&format!("{key}=")))
+            .map(|kv| kv[key.len() + 1..].to_string())
+    };
+    let room = param("room").unwrap_or_else(|| "default".to_string());
+    // #12：角色必填（信令代理必带）；viewer 禁止发布媒体。
+    let role = match param("role").as_deref() {
+        Some("publisher") => Role::Publisher,
+        Some("viewer") => Role::Viewer,
+        _ => {
+            return Response::text("role required (publisher|viewer)").with_status_code(403);
+        }
+    };
 
     let mut data = request.data().expect("body to be available");
     let offer: str0m::change::SdpOffer =
         serde_json::from_reader(&mut data).expect("serialized offer");
+    if role == Role::Viewer && shard::offer_sends_media(&offer.to_sdp_string()) {
+        warn!("拒绝 viewer 发布媒体：room={room}（#12）");
+        return Response::text("viewer cannot publish media").with_status_code(403);
+    }
 
     let mut rtc = Rtc::builder().build(std::time::Instant::now());
     let candidate = Candidate::host(udp_addr, "udp").expect("a host candidate");
@@ -361,7 +375,7 @@ fn web_request(
     // 房间 → 分片路由（哈希 locality + 负载级联）
     let shard = router.lock().unwrap().choose(&room);
     info!("POST /start room={room} -> shard {shard}");
-    let res = shard_txs[shard].send(ShardCommand::AddClient { rtc, room });
+    let res = shard_txs[shard].send(ShardCommand::AddClient { rtc, room, role });
     if res.is_err() {
         warn!("Failed to deliver client to shard {shard}");
     }
