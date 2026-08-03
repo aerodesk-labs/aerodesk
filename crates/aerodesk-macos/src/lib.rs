@@ -10,5 +10,6 @@
 pub mod capture;
 pub mod encoder;
 pub mod inject;
+pub mod permissions;
 pub mod synthetic;
 pub mod vt_encoder;
