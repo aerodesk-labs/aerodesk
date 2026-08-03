@@ -1,5 +1,5 @@
 // AeroDesk 桌面 UI（#22 主页：侧边栏 + 连接区 + 最近会话）。
-import { Button, LineEdit, ScrollView } from "std-widgets.slint";
+import { Button, CheckBox, LineEdit, ScrollView } from "std-widgets.slint";
 
 export component AppWindow inherits Window {
     in-out property <int> tab: 0;                 // 0=连接 1=设置
@@ -15,6 +15,12 @@ export component AppWindow inherits Window {
     in-out property <image> video-frame: @image-url("");
     in-out property <string> session-status: "";
     in-out property <string> input-mode: "键鼠已释放";
+    in-out property <int> settings-tab: 0;          // 0=显示 1=网络 2=安全 3=快捷键
+    in-out property <int> quality: 1;               // 0=清晰 1=平衡 2=流畅
+    in-out property <string> server-default: "wss://signal.aerodesk.io";
+    in-out property <bool> remember-token: false;
+    in-out property <string> token-default: "";
+    in-out property <string> settings-status: "";
 
     callback connect();
     callback disconnect();
@@ -25,6 +31,9 @@ export component AppWindow inherits Window {
     callback toggle-display();
     callback toggle-quality();
     callback toggle-input();
+    callback set-settings-tab(int);
+    callback set-quality(int);
+    callback save-settings();
 
     title: "AeroDesk";
     width: 760px;
@@ -115,9 +124,47 @@ export component AppWindow inherits Window {
                     }
                 }
                 if root.tab == 1: VerticalLayout {
-                    spacing: 12px;
+                    spacing: 10px;
                     Text { text: "设置"; font-size: 18px; font-weight: 600; }
-                    Text { text: "显示（质量/帧率/码率）· 网络 · 安全（密码/权限）· 快捷键 —— 见 #24"; color: gray; }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Button { text: "显示"; checked: root.settings-tab == 0; clicked => { root.set-settings-tab(0); } }
+                        Button { text: "网络"; checked: root.settings-tab == 1; clicked => { root.set-settings-tab(1); } }
+                        Button { text: "安全"; checked: root.settings-tab == 2; clicked => { root.set-settings-tab(2); } }
+                        Button { text: "快捷键"; checked: root.settings-tab == 3; clicked => { root.set-settings-tab(3); } }
+                    }
+                    Rectangle { height: 1px; background: #2a2a2a; }
+
+                    if root.settings-tab == 0: VerticalLayout {
+                        spacing: 8px;
+                        Text { text: "显示质量（对应码率档位）"; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Button { text: "清晰"; checked: root.quality == 0; clicked => { root.set-quality(0); } }
+                            Button { text: "平衡"; checked: root.quality == 1; clicked => { root.set-quality(1); } }
+                            Button { text: "流畅"; checked: root.quality == 2; clicked => { root.set-quality(2); } }
+                        }
+                        Text { text: "质量 → 目标码率：清晰 8Mbps / 平衡 4Mbps / 流畅 1.5Mbps（对接 SFU 选层）"; font-size: 11px; color: gray; }
+                    }
+                    if root.settings-tab == 1: VerticalLayout {
+                        spacing: 8px;
+                        Text { text: "默认信令服务器"; }
+                        LineEdit { text <=> root.server-default; placeholder-text: "wss://…"; }
+                        Text { text: "中继偏好：自动（直连失败走 TURN）"; font-size: 11px; color: gray; }
+                    }
+                    if root.settings-tab == 2: VerticalLayout {
+                        spacing: 8px;
+                        CheckBox { text: "记住密码 / JWT"; checked <=> root.remember-token; }
+                        LineEdit { text <=> root.token-default; placeholder-text: "默认密码 / JWT（可选）"; }
+                    }
+                    if root.settings-tab == 3: VerticalLayout {
+                        spacing: 8px;
+                        Text { text: "全屏：F11（待绑定）"; }
+                        Text { text: "输入捕获/释放：Esc（待绑定）"; }
+                        Text { text: "断开：Ctrl+Alt+D（待绑定）"; }
+                    }
+                    Button { text: "保存设置"; clicked => { root.save-settings(); } }
+                    Text { text: root.settings-status; color: #2ea043; font-size: 12px; }
                 }
 
                 // ---- 会话视图（#23）----

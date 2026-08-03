@@ -5,6 +5,7 @@
 slint::include_modules!();
 use slint::Model;
 
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -20,6 +21,19 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // 最近会话（本地持久化）
     ui.set_recents(slint::ModelRc::new(slint::VecModel::from(load_recents())));
+
+    // 设置（本地持久化）
+    let settings = load_settings();
+    ui.set_quality(settings.quality);
+    ui.set_server_default(settings.server_default.clone().into());
+    ui.set_remember_token(settings.remember_token);
+    ui.set_token_default(settings.token_default.clone().into());
+    if !settings.server_default.is_empty() {
+        ui.set_server_input(settings.server_default.into());
+    }
+    if settings.remember_token && !settings.token_default.is_empty() {
+        ui.set_token_input(settings.token_default.into());
+    }
     // 会话帧线程运行标志
     let session_running = Arc::new(AtomicBool::new(false));
 
@@ -150,6 +164,34 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // ---- #24 设置 ----
+    ui.on_set_settings_tab({
+        let ui = ui.as_weak();
+        move |t| { ui.unwrap().set_settings_tab(t); }
+    });
+    ui.on_set_quality({
+        let ui = ui.as_weak();
+        move |q| {
+            let ui = ui.unwrap();
+            ui.set_quality(q);
+            ui.set_settings_status(format!("质量：{}", match q { 0 => "清晰 8Mbps", 1 => "平衡 4Mbps", _ => "流畅 1.5Mbps" }).into());
+        }
+    });
+    ui.on_save_settings({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            let settings = AppSettings {
+                server_default: ui.get_server_default().to_string(),
+                quality: ui.get_quality(),
+                remember_token: ui.get_remember_token(),
+                token_default: ui.get_token_default().to_string(),
+            };
+            save_settings(&settings);
+            ui.set_settings_status("已保存".into());
+        }
+    });
+
     ui.run()
 }
 
@@ -252,5 +294,35 @@ mod tests {
         let (r, s) = parse_recent("plain");
         assert_eq!(r, "plain");
         assert_eq!(s, "wss://signal.aerodesk.io");
+    }
+}
+
+
+/// 应用设置（本地持久化）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct AppSettings {
+    server_default: String,
+    quality: i32,
+    remember_token: bool,
+    token_default: String,
+}
+
+fn settings_path() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".aerodesk-settings.json")
+}
+
+fn load_settings() -> AppSettings {
+    std::fs::read_to_string(settings_path())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn save_settings(s: &AppSettings) {
+    if let Ok(json) = serde_json::to_string_pretty(s) {
+        let _ = std::fs::write(settings_path(), json);
     }
 }
