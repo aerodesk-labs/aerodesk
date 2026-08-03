@@ -7,8 +7,8 @@ use slint::Model;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const MAX_RECENTS: usize = 10;
@@ -144,37 +144,66 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     ui.on_toggle_audio({
         let ui = ui.as_weak();
-        move || { ui.unwrap().set_session_status("音频：待接入（数据通道/媒体轨道）".into()); }
+        move || {
+            ui.unwrap()
+                .set_session_status("音频：待接入（数据通道/媒体轨道）".into());
+        }
     });
     ui.on_toggle_display({
         let ui = ui.as_weak();
-        move || { ui.unwrap().set_session_status("显示器切换：待接入（SFU simulcast 选层）".into()); }
+        move || {
+            ui.unwrap()
+                .set_session_status("显示器切换：待接入（SFU simulcast 选层）".into());
+        }
     });
     ui.on_toggle_quality({
         let ui = ui.as_weak();
-        move || { ui.unwrap().set_session_status("画质：待接入（码率/帧率档位）".into()); }
+        move || {
+            ui.unwrap()
+                .set_session_status("画质：待接入（码率/帧率档位）".into());
+        }
     });
     ui.on_toggle_input({
         let ui = ui.as_weak();
         move || {
             let ui = ui.unwrap();
             let captured = ui.get_input_mode().contains("捕获");
-            ui.set_input_mode(if captured { "键鼠已释放".into() } else { "键鼠捕获中".into() });
-            ui.set_session_status(if captured { "输入已释放".into() } else { "输入捕获中（Esc 可释放）".into() });
+            ui.set_input_mode(if captured {
+                "键鼠已释放".into()
+            } else {
+                "键鼠捕获中".into()
+            });
+            ui.set_session_status(if captured {
+                "输入已释放".into()
+            } else {
+                "输入捕获中（Esc 可释放）".into()
+            });
         }
     });
 
     // ---- #24 设置 ----
     ui.on_set_settings_tab({
         let ui = ui.as_weak();
-        move |t| { ui.unwrap().set_settings_tab(t); }
+        move |t| {
+            ui.unwrap().set_settings_tab(t);
+        }
     });
     ui.on_set_quality({
         let ui = ui.as_weak();
         move |q| {
             let ui = ui.unwrap();
             ui.set_quality(q);
-            ui.set_settings_status(format!("质量：{}", match q { 0 => "清晰 8Mbps", 1 => "平衡 4Mbps", _ => "流畅 1.5Mbps" }).into());
+            ui.set_settings_status(
+                format!(
+                    "质量：{}",
+                    match q {
+                        0 => "清晰 8Mbps",
+                        1 => "平衡 4Mbps",
+                        _ => "流畅 1.5Mbps",
+                    }
+                )
+                .into(),
+            );
         }
     });
     ui.on_save_settings({
@@ -296,7 +325,6 @@ mod tests {
         assert_eq!(s, "wss://signal.aerodesk.io");
     }
 }
-
 
 /// 应用设置（本地持久化）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
