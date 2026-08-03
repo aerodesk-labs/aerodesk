@@ -13,12 +13,12 @@ jobs:
         include:
           # macOS：全量（含 macos/ios/cli 适配器）
           - os: macos-latest
-            exclude: ""
+            skip_crates: ""
           # Linux/Windows：跳过 macOS 专属 crate
           - os: ubuntu-latest
-            exclude: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli
+            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli
           - os: windows-latest
-            exclude: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli
+            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli
     runs-on: ${{ matrix.os }}
     env:
       CARGO_TERM_COLOR: always
@@ -53,10 +53,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: clippy
-        run: cargo clippy --workspace ${{ matrix.exclude }} --all-targets
+        run: cargo clippy --workspace ${{ matrix.skip_crates }} --all-targets
 
       - name: test
-        run: cargo test --workspace ${{ matrix.exclude }}
+        run: cargo test --workspace ${{ matrix.skip_crates }}
 
       # 平台适配器编译验证（骨架在各自宿主上必须可编译）
       - name: windows adapter
