@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Write, sink};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,7 +24,8 @@ const MAGIC: &[u8] = b"ADREC1\n";
 struct Recording {
     room: String,
     path: PathBuf,
-    writer: BufWriter<File>,
+    // Box<dyn Write + Send>：失败哨兵用内存 sink，避免依赖 /dev/null（#15）。
+    writer: BufWriter<Box<dyn Write + Send>>,
     started_at: u64,
     packets: u64,
     bytes: u64,
@@ -37,7 +38,8 @@ impl Recording {
     fn open(root: &Path, room: &str, ts: u64) -> std::io::Result<Recording> {
         let safe = safe_name(room);
         let path = root.join(format!("{safe}.adrec"));
-        let mut writer = BufWriter::new(File::create(&path)?);
+        let file = File::create(&path)?;
+        let mut writer: BufWriter<Box<dyn Write + Send>> = BufWriter::new(Box::new(file));
         writer.write_all(MAGIC)?;
         Ok(Recording {
             room: room.to_string(),
@@ -55,7 +57,8 @@ impl Recording {
         Recording {
             room: room.to_string(),
             path: PathBuf::new(),
-            writer: BufWriter::new(File::open("/dev/null").expect("/dev/null")),
+            // 内存 sink：任何环境都不依赖 /dev/null，绝不 panic。
+            writer: BufWriter::new(Box::new(sink())),
             started_at: ts,
             packets: 0,
             bytes: 0,
@@ -157,7 +160,7 @@ impl Recorder {
             entry.packets += 1;
             entry.bytes += len as u64;
             // 周期性落盘，避免崩溃丢太多。
-            if entry.packets % 128 == 0 {
+            if entry.packets & 127 == 0 {
                 let _ = entry.writer.flush();
             }
         }
@@ -266,6 +269,17 @@ mod tests {
         );
         assert!(dir.join("ok-room.adrec").exists(), "正常房间不受影响");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_sink_never_panics() {
+        // #15：失败哨兵不依赖 /dev/null，写入全部丢弃且不 panic。
+        let mut rec = Recording::failed("room-x", 1);
+        assert!(rec.failed);
+        assert!(rec.writer.write_all(b"anything").is_ok());
+        assert!(rec.writer.flush().is_ok());
+        rec.packets += 1;
+        assert_eq!(rec.packets, 1);
     }
 
     #[test]
