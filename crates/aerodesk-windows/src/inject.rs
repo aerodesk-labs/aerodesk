@@ -143,7 +143,7 @@ fn wheel(dy: f32) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
 #[cfg(windows)]
 fn key(code: u32, down: bool) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
     INPUT {
         r#type: INPUT_KEYBOARD,

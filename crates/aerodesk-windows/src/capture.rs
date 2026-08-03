@@ -31,10 +31,10 @@ impl DxgiCapturer {
             D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
             ID3D11Texture2D,
         };
-        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-        use windows::Win32::Graphics::Dxgi::{
-            CreateDXGIFactory1, DXGI_SAMPLE_DESC, IDXGIAdapter1, IDXGIOutput1,
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
         };
+        use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter1, IDXGIOutput1};
         use windows::core::Interface;
 
         unsafe {
