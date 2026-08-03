@@ -72,8 +72,8 @@ pub fn main() {
         .unwrap_or(1);
     info!("Shards: {shard_count}");
 
-    let certificate = include_bytes!("../../../certs/cer.pem").to_vec();
-    let private_key = include_bytes!("../../../certs/key.pem").to_vec();
+    let tls = aerodesk_protocol::tls::TlsIdentity::load();
+    info!("TLS identity source: {}", tls.source);
 
     let host_addr = util::select_host_address();
     let media_addr = SocketAddr::new(host_addr, MEDIA_PORT);
@@ -264,8 +264,8 @@ pub fn main() {
                 shared_web.clone(),
             )
         },
-        certificate,
-        private_key,
+        tls.cert,
+        tls.key,
     )
     .expect("starting the web server");
 

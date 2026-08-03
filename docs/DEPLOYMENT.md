@@ -31,9 +31,28 @@
 
 生产只开 WSS/443 + SSL-TCP 443，证书自动续期：
 
-**Let's Encrypt（推荐，公网）**：Caddy 或 nginx 反代终止 TLS，
-或 `certbot` 续期后把 cert/key 落到固定路径，signal/SFU 用 `CERT_FILE`/`KEY_FILE`
-（当前实现用 `certs/` 内嵌自签证书，生产改为从文件读取 —— 待实现）。
+**Let's Encrypt（推荐，公网）**：Caddy 或 nginx 反代终止 TLS；
+也可以让 signal/SFU 直接终止 —— 已支持 `CERT_FILE`/`KEY_FILE` 从文件读取
+（未设置时回退到仓库内嵌开发证书），配合 certbot deploy-hook 自动安装+重启：
+
+```sh
+certbot certonly --standalone -d signal.aerodesk.io   --deploy-hook scripts/cert-renew-hook.sh
+# 之后：
+certbot renew --deploy-hook scripts/cert-renew-hook.sh
+```
+
+`scripts/cert-renew-hook.sh` 会把新证书复制到 `CERT_DEST`（默认
+`/etc/aerodesk/tls`）并重启 signal/sfu 服务。systemd 服务示例：
+
+```ini
+# /etc/systemd/system/aerodesk-signal.service
+[Service]
+ExecStart=/opt/aerodesk/aerodesk-signal
+Environment=CERT_FILE=/etc/aerodesk/tls/cer.pem
+Environment=KEY_FILE=/etc/aerodesk/tls/key.pem
+Environment=JWT_SECRET=...
+Restart=on-failure
+```
 
 Caddy 示例：
 
@@ -105,5 +124,5 @@ JWT_SECRET=$JWT_SECRET cargo run -p aerodesk-cli -- --issue-token \
 - [x] 信令 JWT 认证（用户/设备/房间/角色）
 - [x] 房间录制/审计（SFU 侧，RECORD_DIR）
 - [ ] 多 PoP 部署文档（本节即文档；跨 PoP 媒体桥待评估）
-- [ ] TLS 自动化落地（Caddy 方案可行；signal/SFU 证书热重载待实现）
+- [x] TLS 自动化落地（CERT_FILE/KEY_FILE + certbot deploy-hook；建议生产走 Caddy 边终止）
 - [ ] 压测：4K60 × N 房间（见压测工具章节）

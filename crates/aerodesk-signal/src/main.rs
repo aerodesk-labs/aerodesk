@@ -47,8 +47,8 @@ fn main() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3001);
-    let cert = include_bytes!("../../../certs/cer.pem").to_vec();
-    let key = include_bytes!("../../../certs/key.pem").to_vec();
+    let tls = aerodesk_protocol::tls::TlsIdentity::load();
+    info!("TLS identity source: {}", tls.source);
 
     // 明文 WS（开发用；生产只开 WSS 端口）
     let plain_port: u16 = std::env::var("SIGNAL_PLAIN_PORT")
@@ -67,8 +67,8 @@ fn main() {
     let server = rouille::Server::new_ssl(
         format!("0.0.0.0:{port}"),
         move |request| handle(request, config.clone(), rooms.clone()),
-        cert,
-        key,
+        tls.cert,
+        tls.key,
     )
     .expect("start signaling server");
     info!("Signaling (WSS) listening on :{port}");
