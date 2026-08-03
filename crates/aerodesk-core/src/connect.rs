@@ -60,14 +60,19 @@ impl LiveSession {
 
 /// 连接并保留活跃会话（观看端）。
 pub fn connect_live(server: &str, room: &str) -> Result<LiveSession, String> {
-    connect_live_role(server, room, Role::Viewer)
+    connect_live_role(server, room, Role::Viewer, None)
 }
 
-/// 连接并保留活跃会话（任意角色）。
-pub fn connect_live_role(server: &str, room: &str, role: Role) -> Result<LiveSession, String> {
+/// 连接并保留活跃会话（任意角色）。`auth` 为 JWT/静态 token（可选）。
+pub fn connect_live_role(
+    server: &str,
+    room: &str,
+    role: Role,
+    auth: Option<&str>,
+) -> Result<LiveSession, String> {
     let mut signal = WsSignalClient::connect(server).map_err(|e| format!("signal connect: {e}"))?;
     let (peer_id, _turn) = signal
-        .join(room, role, None)
+        .join(room, role, auth)
         .map_err(|e| format!("join: {e}"))?;
 
     let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("udp bind: {e}"))?;
@@ -140,12 +145,31 @@ pub fn connect_live_role(server: &str, room: &str, role: Role) -> Result<LiveSes
 
 /// 观看端连接：WSS join → SDP 交换 → ICE 泵（5s 超时）。/// 观看端连接：WSS join → SDP 交换 → ICE 泵（5s 超时）。
 pub fn connect_viewer(server: &str, room: &str) -> Result<ConnectResult, String> {
-    connect(server, room, Role::Viewer)
+    connect_viewer_auth(server, room, None)
+}
+
+/// 观看端连接（带认证 token）。
+pub fn connect_viewer_auth(
+    server: &str,
+    room: &str,
+    auth: Option<&str>,
+) -> Result<ConnectResult, String> {
+    connect_role(server, room, Role::Viewer, auth)
 }
 
 /// 发布端连接（参数化角色）。
 pub fn connect(server: &str, room: &str, role: Role) -> Result<ConnectResult, String> {
-    let live = connect_live_role(server, room, role)?;
+    connect_role(server, room, role, None)
+}
+
+/// 连接（任意角色 + 认证 token）。
+pub fn connect_role(
+    server: &str,
+    room: &str,
+    role: Role,
+    auth: Option<&str>,
+) -> Result<ConnectResult, String> {
+    let live = connect_live_role(server, room, role, auth)?;
     Ok(ConnectResult {
         room: live.room.clone(),
         peer_id: live.peer_id.clone(),

@@ -1,74 +1,114 @@
-// AeroDesk 通用 UI（Slint）：连接/房间/状态。7 平台一套代码。
+// AeroDesk 桌面 UI（#22 主页：侧边栏 + 连接区 + 最近会话）。
 import { Button, LineEdit, ScrollView } from "std-widgets.slint";
 
 export component AppWindow inherits Window {
-    in-out property <string> server-input: "wss://signal.aerodesk.io";
+    in-out property <int> tab: 0;                 // 0=连接 1=设置
     in-out property <string> room-input: "demo";
+    in-out property <string> token-input: "";
+    in-out property <string> server-input: "wss://signal.aerodesk.io";
     in-out property <string> status: "未连接";
     in-out property <string> log: "";
     in-out property <bool> connecting: false;
+    in-out property <[string]> recents: [];
 
     callback connect();
     callback disconnect();
+    callback set-tab(int);
+    callback connect-recent(string);
 
     title: "AeroDesk";
-    width: 460px;
-    height: 600px;
+    width: 760px;
+    height: 560px;
 
-    VerticalLayout {
-        padding: 16px;
-        spacing: 12px;
-
-        Text {
-            text: "AeroDesk";
-            font-size: 28px;
-            font-weight: 700;
-            horizontal-alignment: center;
-        }
-        Text {
-            text: "Remote Desktop · 5 个原生平台一套 UI（Slint）";
-            font-size: 12px;
-            color: gray;
-            horizontal-alignment: center;
-        }
-
-        HorizontalLayout {
-            spacing: 8px;
-            LineEdit {
-                text <=> root.server-input;
-                placeholder-text: "信令服务器（wss://…）";
-            }
-            LineEdit {
-                text <=> root.room-input;
-                placeholder-text: "房间";
-                width: 110px;
-            }
-        }
-
-        HorizontalLayout {
-            spacing: 8px;
-            Button {
-                text: connecting ? "连接中…" : "连接";
-                enabled: !connecting;
-                clicked => { root.connect(); }
-            }
-            Button {
-                text: "断开";
-                enabled: connecting;
-                clicked => { root.disconnect(); }
+    HorizontalLayout {
+        // ---- 侧边栏 ----
+        Rectangle {
+            width: 190px;
+            background: #151515;
+            VerticalLayout {
+                padding: 14px;
+                spacing: 8px;
+                Text { text: "AeroDesk"; font-size: 22px; font-weight: 700; }
+                Text { text: "Remote Desktop"; font-size: 11px; color: gray; }
+                Rectangle { height: 1px; background: #2a2a2a; }
+                Button { text: "连接"; checked: root.tab == 0; clicked => { root.set-tab(0); } }
+                Button { text: "设置"; checked: root.tab == 1; clicked => { root.set-tab(1); } }
+                Rectangle { height: 1px; background: #2a2a2a; }
+                Text { text: "最近会话"; font-size: 11px; color: gray; }
+                ScrollView {
+                    VerticalLayout {
+                        for item in root.recents: Rectangle {
+                            height: 32px;
+                            border-radius: 4px;
+                            background: #222;
+                            Text {
+                                text: item;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            TouchArea {
+                                clicked => { root.connect-recent(item); }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        Text {
-            text: root.status;
-            color: #2ea043;
-        }
+        // ---- 主区域 ----
+        Rectangle {
+            background: #1a1a1a;
+            VerticalLayout {
+                padding: 20px;
+                spacing: 14px;
 
-        ScrollView {
-            Text {
-                text: root.log;
-                font-size: 11px;
-                font-family: "monospace";
+                if root.tab == 0: VerticalLayout {
+                    spacing: 12px;
+                    Text { text: "连接远程桌面"; font-size: 18px; font-weight: 600; }
+                    LineEdit {
+                        text <=> root.room-input;
+                        placeholder-text: "房间 ID（对端标识）";
+                        font-size: 16px;
+                    }
+                    LineEdit {
+                        text <=> root.token-input;
+                        placeholder-text: "密码 / JWT（可选）";
+                    }
+                    LineEdit {
+                        text <=> root.server-input;
+                        placeholder-text: "信令服务器（wss://…）";
+                        font-size: 11px;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button {
+                            text: connecting ? "连接中…" : "连接";
+                            enabled: !connecting;
+                            primary: true;
+                            clicked => { root.connect(); }
+                        }
+                        Button {
+                            text: "断开";
+                            enabled: connecting;
+                            clicked => { root.disconnect(); }
+                        }
+                    }
+                    Text { text: root.status; color: #2ea043; }
+                    ScrollView {
+                        height: 180px;
+                        Text {
+                            text: root.log;
+                            font-size: 11px;
+                            font-family: "monospace";
+                        }
+                    }
+                }
+                if root.tab == 1: VerticalLayout {
+                    spacing: 12px;
+                    Text { text: "设置"; font-size: 18px; font-weight: 600; }
+                    Text { text: "显示（质量/帧率/码率）· 网络 · 安全（密码/权限）· 快捷键 —— 见 #24"; color: gray; }
+                }
             }
         }
     }
