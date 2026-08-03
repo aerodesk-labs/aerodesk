@@ -1,7 +1,8 @@
 //! 编码器（骨架）。
 //!
 //! 真机路径：Media Foundation `H.264 Encoder MFT` / `HEVC Encoder MFT`；
-//! 回退 NVENC（ffmpeg 静态库）或软编 x264（复用 aerodesk-macos::encoder）。
+//! 回退 NVENC（ffmpeg 静态库）或软编 x264（aerodesk-softenc，需 Windows 系统 x264/
+//! vendored 支持后接入——当前 CI 的 x264-sys 走 pkg-config，Windows 无系统 x264）。
 
 /// 编码输出（AnnexB）。
 #[derive(Debug, Clone)]

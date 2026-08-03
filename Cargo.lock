@@ -167,6 +167,7 @@ dependencies = [
  "aerodesk-core",
  "aerodesk-macos",
  "aerodesk-protocol",
+ "aerodesk-softenc",
  "pcap-file",
  "serde",
  "serde_json",
@@ -194,7 +195,7 @@ name = "aerodesk-ios"
 version = "0.1.0"
 dependencies = [
  "aerodesk-core",
- "aerodesk-macos",
+ "aerodesk-softenc",
  "apple-cf",
  "str0m",
  "tracing",
@@ -206,6 +207,7 @@ name = "aerodesk-linux"
 version = "0.1.0"
 dependencies = [
  "aerodesk-core",
+ "aerodesk-softenc",
  "tracing",
  "x11rb",
 ]
@@ -215,6 +217,7 @@ name = "aerodesk-macos"
 version = "0.1.0"
 dependencies = [
  "aerodesk-protocol",
+ "aerodesk-softenc",
  "apple-cf",
  "core-foundation 0.10.1",
  "core-graphics 0.25.0",
@@ -273,6 +276,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+]
+
+[[package]]
+name = "aerodesk-softenc"
+version = "0.1.0"
+dependencies = [
+ "x264",
 ]
 
 [[package]]
