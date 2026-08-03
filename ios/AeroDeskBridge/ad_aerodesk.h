@@ -39,6 +39,10 @@ void ad_viewer_destroy(void *viewer);
 /// 取最新解码帧：0=有新帧（*out 为 +1 CVPixelBufferRef，调用方 CVBufferRelease），1=暂无。
 int ad_viewer_take_frame(void *viewer, void **out);
 
+/// 发送输入事件（JSON InputFrame）到 input 数据通道。返回 0=入队，<0=错误。
+int ad_viewer_send_input(void *viewer, const char *json);
+
+
 
 #ifdef __cplusplus
 }

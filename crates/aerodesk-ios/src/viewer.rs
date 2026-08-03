@@ -4,7 +4,7 @@
 //! Swift 轮询 `ad_viewer_take_frame` 取最新 CVPixelBuffer 渲染。
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -24,6 +24,8 @@ unsafe extern "C" {
 pub struct ViewerSession {
     /// 最新解码帧（+1 retained，调用方 take 后转移所有权）。
     latest: Arc<Mutex<Option<CVPixelBuffer>>>,
+    /// 输入事件发送通道（viewer → publisher，经 input 数据通道）。
+    input_tx: mpsc::Sender<Vec<u8>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -34,16 +36,25 @@ impl ViewerSession {
         let session = aerodesk_core::connect::connect_live(server, room)?;
         let latest = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
+        let (input_tx, input_rx) = mpsc::channel();
         let pump = {
             let latest = latest.clone();
             let stop = stop.clone();
-            thread::spawn(move || pump_media(session, latest, stop))
+            thread::spawn(move || pump_media(session, latest, stop, input_rx))
         };
         Ok(ViewerSession {
             latest,
+            input_tx,
             stop,
             thread: Some(pump),
         })
+    }
+}
+
+impl ViewerSession {
+    /// 发送输入事件（JSON InputFrame）。失败返回 false（通道未开/已断开）。
+    pub fn send_input(&self, json: &[u8]) -> bool {
+        self.input_tx.send(json.to_vec()).is_ok()
     }
 }
 
@@ -56,14 +67,20 @@ impl Drop for ViewerSession {
     }
 }
 
-/// 后台收流循环：UDP → endpoint → 事件 → 解码 → 最新帧槽。
+/// 后台收流循环：UDP → endpoint → 事件 → 解码 → 最新帧槽；并转发输入事件。
 fn pump_media(
     mut session: LiveSession,
     latest: Arc<Mutex<Option<CVPixelBuffer>>>,
     stop: Arc<AtomicBool>,
+    input_rx: mpsc::Receiver<Vec<u8>>,
 ) {
     let mut decoder = H264Decoder::new();
     while !stop.load(Ordering::SeqCst) {
+        // 输入事件：观看端捕获 → input 数据通道 → SFU → 被控端。
+        while let Ok(json) = input_rx.try_recv() {
+            session.endpoint.send_channel_data("input", false, &json);
+        }
+
         session
             .socket
             .set_read_timeout(Some(Duration::from_millis(10)))

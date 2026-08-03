@@ -2,13 +2,13 @@ name: AeroDesk
 options:
   bundleIdPrefix: io.aerodesk
   deploymentTarget:
-    iOS: "15.0"
+    iOS: "17.0"
   createIntermediateGroups: true
 settings:
   base:
     SWIFT_VERSION: "5.9"
     GENERATE_INFOPLIST_FILE: YES
-    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
 targets:
   AeroDesk:
     type: application

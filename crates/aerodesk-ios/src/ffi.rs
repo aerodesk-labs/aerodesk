@@ -175,3 +175,21 @@ pub unsafe extern "C" fn ad_viewer_take_frame(
     }
     unsafe { crate::viewer::take_frame(unsafe { &*v }, out) }
 }
+
+/// 发送输入事件（JSON InputFrame）到 input 数据通道。
+/// 返回 0=已入队，<0=参数错误/会话无效。
+///
+/// # Safety
+/// `v` 必须来自 `ad_viewer_create`；`json` 必须是以 NUL 结尾的 C 字符串。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ad_viewer_send_input(v: *mut ViewerSession, json: *const c_char) -> c_int {
+    if v.is_null() || json.is_null() {
+        return -1;
+    }
+    let json = unsafe { std::ffi::CStr::from_ptr(json) }.to_bytes();
+    if unsafe { &*v }.send_input(json) {
+        0
+    } else {
+        -2
+    }
+}

@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var viewer: UnsafeMutableRawPointer?
     @State private var timer: Timer?
     @State private var frameImage: UIImage?
+    @State private var inputSeq: UInt64 = 0
 
     var body: some View {
         VStack(spacing: 18) {
@@ -64,12 +65,37 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
 
             if let img = frameImage {
-                Image(uiImage: img)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxHeight: 360)
-                    .background(Color.black)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                GeometryReader { geo in
+                    Image(uiImage: img)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxHeight: 360)
+                        .background(Color.black)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .contentShape(Rectangle())
+                        .focusable()
+                        .onKeyPress(.space) {
+                            sendInput(["type": "key", "code": "space", "state": "pressed"])
+                            return .handled
+                        }
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { g in
+                                    let x = Double(g.location.x / max(geo.size.width, 1))
+                                    let y = Double(g.location.y / max(geo.size.height, 1))
+                                    sendInput(["type": "mouse_move", "x": x, "y": y])
+                                }
+                                .onEnded { g in
+                                    let x = Double(g.location.x / max(geo.size.width, 1))
+                                    let y = Double(g.location.y / max(geo.size.height, 1))
+                                    sendInput(["type": "mouse_button", "button": "left", "state": "released", "x": x, "y": y])
+                                }
+                        )
+                        .onTapGesture {
+                            sendInput(["type": "mouse_button", "button": "left", "state": "pressed", "x": 0.5, "y": 0.5])
+                        }
+                }
+                .frame(height: 360)
             } else {
                 Rectangle()
                     .fill(Color.black.opacity(0.2))
@@ -121,6 +147,24 @@ struct ContentView: View {
             frameImage = UIImage(cgImage: cg)
         }
         Unmanaged<AnyObject>.fromOpaque(buf).release()
+    }
+
+    /// 发送输入事件（InputFrame JSON）到 input 数据通道。
+    private func sendInput(_ event: [String: Any]) {
+        guard let viewer else { return }
+        let frame: [String: Any] = [
+            "version": 1,
+            "seq": inputSeq,
+            "timestamp_ms": Int(Date().timeIntervalSince1970 * 1000),
+            "event": event,
+        ]
+        inputSeq += 1
+        guard let data = try? JSONSerialization.data(withJSONObject: frame),
+              let s = String(data: data, encoding: .utf8)
+        else { return }
+        s.withCString {
+            _ = ad_viewer_send_input(viewer, UnsafeMutablePointer(mutating: $0))
+        }
     }
 
     private func stopViewer() {
