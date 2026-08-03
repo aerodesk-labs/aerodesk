@@ -31,9 +31,9 @@ impl DxgiCapturer {
             D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
             ID3D11Texture2D,
         };
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
         use windows::Win32::Graphics::Dxgi::{
-            CreateDXGIFactory1, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC, IDXGIAdapter1,
-            IDXGIOutput1,
+            CreateDXGIFactory1, DXGI_SAMPLE_DESC, IDXGIAdapter1, IDXGIOutput1,
         };
         use windows::core::Interface;
 
@@ -91,9 +91,11 @@ impl DxgiCapturer {
                 CPUAccessFlags: D3D11_CPU_ACCESS_READ,
                 MiscFlags: 0,
             };
-            let staging: ID3D11Texture2D = device
-                .CreateTexture2D(&staging_desc, None)
+            let mut staging: Option<ID3D11Texture2D> = None;
+            device
+                .CreateTexture2D(&staging_desc, None, Some(&mut staging))
                 .map_err(|e| format!("CreateTexture2D: {e}"))?;
+            let staging = staging.ok_or("no staging texture")?;
 
             Ok(Self {
                 device,
