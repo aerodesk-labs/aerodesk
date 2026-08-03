@@ -34,6 +34,8 @@ pub struct BitrateController {
     hysteresis: Bitrate,
     target: Bitrate,
     estimate: Option<Bitrate>,
+    /// 客户端显式选层（#29）：Some 时覆盖 BWE 选层；None 回到 BWE 自动。
+    requested_layer: Option<Layer>,
 }
 
 impl Default for BitrateController {
@@ -53,6 +55,7 @@ impl BitrateController {
             hysteresis: Bitrate::kbps(150),
             target: initial.clamp(min, max),
             estimate: None,
+            requested_layer: None,
         }
     }
 
@@ -84,8 +87,16 @@ impl BitrateController {
         self.target
     }
 
-    /// 按目标码率选择 simulcast 层。
+    /// 客户端显式选层（#29）；None 表示回到 BWE 自动。
+    pub fn set_requested_layer(&mut self, layer: Option<Layer>) {
+        self.requested_layer = layer;
+    }
+
+    /// 按目标码率选择 simulcast 层（客户端显式选层优先）。
     pub fn selected_layer(&self) -> Layer {
+        if let Some(l) = self.requested_layer {
+            return l;
+        }
         let bps = self.target.as_f64();
         if bps >= Layer::High.seed_bitrate() as f64 {
             Layer::High
@@ -157,4 +168,25 @@ mod tests {
         c.update_estimate(Bitrate::kbps(200));
         assert_eq!(c.selected_layer(), Layer::Low);
     }
+}
+
+#[test]
+fn requested_layer_overrides_bwe() {
+    let mut bc = BitrateController::default();
+    // 低带宽估计 → BWE 选 Low
+    bc.update_estimate(Bitrate::kbps(200));
+    assert_eq!(bc.selected_layer(), Layer::Low);
+    // 客户端显式选 High → 覆盖
+    bc.set_requested_layer(Some(Layer::High));
+    assert_eq!(bc.selected_layer(), Layer::High);
+    // 取消覆盖 → 回到 BWE
+    bc.set_requested_layer(None);
+    assert_eq!(bc.selected_layer(), Layer::Low);
+}
+
+#[test]
+fn high_bandwidth_selects_high_without_override() {
+    let mut bc = BitrateController::default();
+    bc.update_estimate(Bitrate::mbps(8));
+    assert_eq!(bc.selected_layer(), Layer::High);
 }

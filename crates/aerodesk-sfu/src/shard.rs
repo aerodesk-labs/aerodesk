@@ -975,6 +975,16 @@ impl Client {
             warn!("Unrecognized data on signal channel");
             return Propagated::Noop;
         }
+        // #29 画质/显示切换：control 通道的选层请求（观看端 → SFU），不转发。
+        if label == "control" {
+            if let Ok(req) = serde_json::from_slice::<LayerRequest>(&d.data) {
+                info!("Client ({}) layer request: {:?}", *self.id, req.layer());
+                self.bwe.set_requested_layer(req.layer());
+            } else {
+                warn!("Client ({}) 未知 control 消息", *self.id);
+            }
+            return Propagated::Noop;
+        }
         Propagated::ChannelData(self.id, label, d)
     }
 
@@ -1106,6 +1116,26 @@ pub enum Propagated {
     MediaData(ClientId, MediaData),
     ChannelData(ClientId, String, ChannelData),
     KeyframeRequest(ClientId, KeyframeRequest, ClientId, Mid),
+}
+
+// ---------- #29 选层控制 ----------
+
+/// 观看端经 control 通道发送的选层请求。
+#[derive(Debug, serde::Deserialize)]
+struct LayerRequest {
+    /// "q" | "h" | "f"；None/缺省 = 回到 BWE 自动。
+    layer: Option<String>,
+}
+
+impl LayerRequest {
+    fn layer(&self) -> Option<Layer> {
+        self.layer.as_deref().and_then(|s| match s {
+            "q" => Some(Layer::Low),
+            "h" => Some(Layer::Medium),
+            "f" => Some(Layer::High),
+            _ => None,
+        })
+    }
 }
 
 // ---------- #12 角色校验工具 ----------

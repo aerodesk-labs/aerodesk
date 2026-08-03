@@ -59,7 +59,12 @@ fn main() {
         }
         "publisher" if encoder == "x264" => publisher_x264(&signal, &room, token.as_deref()),
         "publisher" => publisher(&signal, &room, token.as_deref()),
-        "viewer" => viewer(&signal, &room, token.as_deref()),
+        "viewer" => viewer(
+            &signal,
+            &room,
+            token.as_deref(),
+            arg(&args, "--layer").as_deref(),
+        ),
         other => panic!("unknown role {other}"),
     }
 }
@@ -329,7 +334,7 @@ fn publisher(signal_url: &str, room: &str, auth: Option<&str>) {
     }
 }
 
-fn viewer(signal_url: &str, room: &str, auth: Option<&str>) {
+fn viewer(signal_url: &str, room: &str, auth: Option<&str>, layer: Option<&str>) {
     let (mut signal, mut endpoint, socket, _) = connect(signal_url, room, Role::Viewer, auth);
     let mut frames = 0u64;
     let mut bytes = 0u64;
@@ -338,6 +343,7 @@ fn viewer(signal_url: &str, room: &str, auth: Option<&str>) {
     let mut input_open = false;
     let mut input_seq = 0u64;
     let mut last_input = Instant::now();
+    let mut layer_sent = layer.is_none();
 
     loop {
         let wait = Duration::from_millis(50);
@@ -393,6 +399,15 @@ fn viewer(signal_url: &str, room: &str, auth: Option<&str>) {
                 ClientEvent::ChannelOpen(label, _) if label == "input" => {
                     info!("input channel open");
                     input_open = true;
+                    // #29：可选显式选层（--layer q|h|f），经 control 通道发 SFU。
+                    if !layer_sent {
+                        let req = serde_json::json!({ "layer": layer });
+                        let data = serde_json::to_vec(&req).unwrap();
+                        if endpoint.send_channel_data("control", false, &data) {
+                            info!("layer request sent: {layer:?}");
+                            layer_sent = true;
+                        }
+                    }
                 }
                 ClientEvent::Closed => {
                     info!("connection closed");
