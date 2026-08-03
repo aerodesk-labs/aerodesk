@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            skip_crates: ""
+          - os: ubuntu-latest
+            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli
+          - os: windows-latest
+            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout str0m (netem dev-dep)
+        shell: bash
+        run: |
+          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
+            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
+          fi
+
+      - name: System deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev nasm
+      - name: System deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install nasm
+      - name: System deps (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: choco install nasm -y
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace ${{ matrix.skip_crates }} --all-targets
+
+      - name: test
+        run: cargo test --workspace ${{ matrix.skip_crates }}
+
+      - name: windows adapter
+        if: runner.os == 'Windows'
+        run: cargo check -p aerodesk-windows
+      - name: linux adapter
+        if: runner.os == 'Linux'
+        run: cargo check -p aerodesk-linux
+      - name: macos/ios adapters + cli
+        if: runner.os == 'macOS'
+        run: cargo check -p aerodesk-macos -p aerodesk-ios -p aerodesk-cli
