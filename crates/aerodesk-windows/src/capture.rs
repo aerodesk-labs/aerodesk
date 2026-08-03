@@ -87,8 +87,8 @@ impl DxgiCapturer {
                     Quality: 0,
                 },
                 Usage: D3D11_USAGE_STAGING,
-                BindFlags: D3D11_BIND_RENDER_TARGET.0,
-                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0,
+                BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
                 MiscFlags: 0,
             };
             let mut staging: Option<ID3D11Texture2D> = None;
