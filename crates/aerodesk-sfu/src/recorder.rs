@@ -28,6 +28,40 @@ struct Recording {
     started_at: u64,
     packets: u64,
     bytes: u64,
+    /// #15：创建/写入失败后标记为失败，本次会话跳过该房间录制（不 panic）。
+    failed: bool,
+}
+
+impl Recording {
+    /// 打开录制文件并写入 magic。失败返回 Err（调用方决定降级策略）。
+    fn open(root: &Path, room: &str, ts: u64) -> std::io::Result<Recording> {
+        let safe = safe_name(room);
+        let path = root.join(format!("{safe}.adrec"));
+        let mut writer = BufWriter::new(File::create(&path)?);
+        writer.write_all(MAGIC)?;
+        Ok(Recording {
+            room: room.to_string(),
+            path,
+            writer,
+            started_at: ts,
+            packets: 0,
+            bytes: 0,
+            failed: false,
+        })
+    }
+
+    /// 失败哨兵：该房间本次会话不再尝试录制。
+    fn failed(room: &str, ts: u64) -> Recording {
+        Recording {
+            room: room.to_string(),
+            path: PathBuf::new(),
+            writer: BufWriter::new(File::open("/dev/null").expect("/dev/null")),
+            started_at: ts,
+            packets: 0,
+            bytes: 0,
+            failed: true,
+        }
+    }
 }
 
 /// 录制器（进程级单例，跨分片共享）。
@@ -84,31 +118,39 @@ impl Recorder {
     }
 
     /// 记录一条媒体载荷（发布端 → SFU 的入口）。
+    ///
+    /// #15：录制文件创建失败（磁盘满/权限错误）时 warn 并跳过该房间，
+    /// 绝不 panic——否则会杀死分片线程、断开该分片全部客户端。
     pub fn record(&self, room: &str, payload: &[u8]) {
         let ts = now_micros();
         let mut recs = self.recordings.lock().unwrap_or_else(|e| e.into_inner());
-        let entry = recs.entry(room.to_string()).or_insert_with(|| {
-            let safe = safe_name(room);
-            let path = self.root.join(format!("{safe}.adrec"));
-            let mut writer = BufWriter::new(File::create(&path).expect("create recording"));
-            let _ = writer.write_all(MAGIC);
-            let r = Recording {
-                room: room.to_string(),
-                path,
-                writer,
-                started_at: ts,
-                packets: 0,
-                bytes: 0,
-            };
-            self.audit(serde_json::json!({
-                "ts": ts,
-                "event": "room_start",
-                "room": room,
-                "path": r.path.display().to_string(),
-            }));
-            r
-        });
 
+        // 首次见到该房间：尝试创建录制文件。
+        if !recs.contains_key(room) {
+            match Recording::open(&self.root, room, ts) {
+                Ok(rec) => {
+                    self.audit(serde_json::json!({
+                        "ts": ts,
+                        "event": "room_start",
+                        "room": room,
+                        "path": rec.path.display().to_string(),
+                    }));
+                    recs.insert(room.to_string(), rec);
+                }
+                Err(e) => {
+                    warn!(
+                        "recorder: room={room} 录制文件创建失败（{e}），本次会话跳过该房间录制"
+                    );
+                    recs.insert(room.to_string(), Recording::failed(room, ts));
+                    return;
+                }
+            }
+        }
+
+        let entry = recs.get_mut(room).expect("recording just ensured");
+        if entry.failed {
+            return;
+        }
         let len = payload.len() as u32;
         let mut header = [0u8; 12];
         header[0..8].copy_from_slice(&ts.to_le_bytes());
@@ -128,6 +170,9 @@ impl Recorder {
         let mut recs = self.recordings.lock().unwrap_or_else(|e| e.into_inner());
         let now = now_micros();
         for (_, mut rec) in recs.drain() {
+            if rec.failed {
+                continue;
+            }
             let _ = rec.writer.flush();
             let meta = serde_json::json!({
                 "room": rec.room,
@@ -194,6 +239,31 @@ mod tests {
         let audit = fs::read_to_string(dir.join("audit.log")).unwrap();
         assert!(audit.contains("room_start"));
         assert!(audit.contains("room_end"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_failure_skips_room_without_panic() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tmpdir("t3");
+        let rec = Recorder::new(&dir).unwrap();
+        rec.record("ok-room", b"first");
+
+        // 目录改为只读：新房间创建录制文件必失败。
+        let orig = fs::metadata(&dir).unwrap().permissions().mode();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+        // #15：失败不得 panic，且失败房间不再重试。
+        rec.record("blocked-room", b"x");
+        rec.record("blocked-room", b"y");
+
+        fs::set_permissions(&dir, fs::Permissions::from_mode(orig)).unwrap();
+        rec.finalize_all();
+
+        assert!(!dir.join("blocked-room.adrec").exists(), "失败房间不应有录制文件");
+        assert!(dir.join("ok-room.adrec").exists(), "正常房间不受影响");
         let _ = fs::remove_dir_all(&dir);
     }
 
