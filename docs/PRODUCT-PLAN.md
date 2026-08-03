@@ -22,7 +22,7 @@
 
 ```
 ┌────────────────────────── 客户端（每平台一个薄壳） ──────────────────────────┐
-│  UI 层（Flutter 一套 / 原生壳）                                              │
+│  UI 层（Slint 一套 / 原生壳）                                              │
 │  ─────────────────────────────────────────────────                          │
 │  Rust 核心 aerodesk-core（跨平台，FFI/NAPI/JSI 暴露）：                             │
 │   · 端点：str0m（发布端/观看端，与 SFU 同栈）                                 │
@@ -49,7 +49,7 @@
 | 层 | 选型 | 理由 |
 |---|---|---|
 | 协议核心 | **str0m（含 bwe-fixes fork）** | SFU 与客户端同栈，一套代码两种角色；纯 Rust 全平台（含鸿蒙 rustup 目标 aarch64-unknown-linux-ohos） |
-| 客户端 UI | Flutter（备选 Qt/原生） | 一套 UI 覆盖 7 平台；flutter_ohos 社区适配；Web 可跑 |
+| 客户端 UI | **Slint**（Rust 原生 UI，备选 ArkTS 原生壳） | 与 Rust 核心同语言零 FFI 桥接；Win/macOS/Linux/Android/iOS/Web(WASM) 官方支持；HarmonyOS 用 Rust 核心编 ohos + Slint 或 ArkTS 壳兜底 |
 | 服务端 SFU | 自研 aerodesk-sfu（多核分片架构） | 见 borrow-from-pulsebeam.md；PulseBeam 已证明该路线 |
 | TURN | coturn | 标准、成熟、REST 凭证 |
 | 编码（发布端） | **AV1 优先 → HEVC → H.264 兜底**（各平台硬件编码器） | AV1 免专利费；HEVC 兼容 iOS；H.264 老设备兜底 |
@@ -80,7 +80,7 @@
 | Wayland 采集/注入 | Linux 兼容性 | PipeWire portal + XWayland 回退 |
 | 硬件编码器 AV1 覆盖不均 | 老设备无法 AV1 | HEVC/H.264 自动降级链 |
 | HEVC 专利授权费 | 商业化成本 | AV1 优先策略 + 法律评估 |
-| flutter_ohos 成熟度 | 鸿蒙 UI 交付风险 | 备选 ArkTS 原生壳 + Rust NAPI |
+| Slint 对 HarmonyOS 的支持 | 鸿蒙 UI 交付风险 | Slint 官方未列 ohos 目标：先 ArkTS 原生壳 + Rust NAPI，UI 组件库设计上保持 Slint 可迁移 |
 
 ## 六、代码复用策略（统筹核心）
 
@@ -123,7 +123,7 @@ aerodesk-sfu（服务端）                 ← 与客户端共享协议/媒体�
 
 ### P5 鸿蒙 + 产品化
 6. **HarmonyOS 适配器** — [#6](https://github.com/aerodesk-labs/aerodesk/issues/6)
-7. **Flutter UI 壳（7 平台）** — [#7](https://github.com/aerodesk-labs/aerodesk/issues/7)
+7. **Slint UI 壳（7 平台）** — [#7](https://github.com/aerodesk-labs/aerodesk/issues/7)
 8. **质量验收与 4K60 压测** — [#8](https://github.com/aerodesk-labs/aerodesk/issues/8)
 
 > 所有任务在 GitHub Issues 跟踪（按里程碑 P3.5/P4/P5 分桶），
