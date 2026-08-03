@@ -14,3 +14,4 @@ pub mod media;
 pub mod signaling;
 
 pub use endpoint::{ClientEvent, Endpoint};
+pub mod connect;

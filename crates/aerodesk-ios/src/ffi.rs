@@ -78,3 +78,41 @@ pub unsafe extern "C" fn ad_decoder_decode(
         Err(_) => -2,
     }
 }
+
+/// 观看端连接（阻塞调用，请在后台线程执行）。
+/// 返回 malloc 分配的 C 字符串（用 `ad_free_string` 释放）。
+///
+/// # Safety
+/// `server`/`room` 必须是以 NUL 结尾的有效 C 字符串。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ad_connect(server: *const c_char, room: *const c_char) -> *mut c_char {
+    let server = if server.is_null() {
+        String::new()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(server) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    let room = if room.is_null() {
+        String::new()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(room) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    let status = aerodesk_core::connect::connect_viewer(&server, &room)
+        .map(|r| r.summary())
+        .unwrap_or_else(|e| format!("连接失败: {e}"));
+    std::ffi::CString::new(status).unwrap().into_raw()
+}
+
+/// 释放 `ad_connect` 返回的字符串。
+///
+/// # Safety
+/// `s` 必须来自 `ad_connect` 且未被释放过。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ad_free_string(s: *mut c_char) {
+    if !s.is_null() {
+        drop(unsafe { std::ffi::CString::from_raw(s) });
+    }
+}
