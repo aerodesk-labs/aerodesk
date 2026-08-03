@@ -3,7 +3,10 @@
 全平台远程桌面的 Rust workspace：**WebRTC SFU 服务端 + 共享协议 + 跨平台客户端核心**。
 
 > 仓库：<https://github.com/aerodesk-labs/aerodesk>
-> 平台矩阵、技术选型与路线图见 [`docs/PRODUCT-PLAN.md`](docs/PRODUCT-PLAN.md)。
+> 任务跟踪：[Issues](https://github.com/aerodesk-labs/aerodesk/issues) ·
+> [Projects 看板](https://github.com/orgs/aerodesk-labs/projects/1) ·
+> [Discussions](https://github.com/aerodesk-labs/aerodesk/discussions)
+> 产品决策记录（平台角色/选型/风险/踩坑）：[Wiki](https://github.com/aerodesk-labs/aerodesk/wiki)
 > TURN 中继部署见 [`docs/TURN.md`](docs/TURN.md)。
 > PulseBeam 架构借鉴见 [`docs/borrow-from-pulsebeam.md`](docs/borrow-from-pulsebeam.md)。
 
