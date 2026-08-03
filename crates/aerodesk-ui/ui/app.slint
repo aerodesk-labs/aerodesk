@@ -1,74 +1,203 @@
-// AeroDesk 通用 UI（Slint）：连接/房间/状态。7 平台一套代码。
-import { Button, LineEdit, ScrollView } from "std-widgets.slint";
+// AeroDesk 桌面 UI（#22 主页：侧边栏 + 连接区 + 最近会话）。
+import { Button, CheckBox, LineEdit, ScrollView } from "std-widgets.slint";
 
 export component AppWindow inherits Window {
-    in-out property <string> server-input: "wss://signal.aerodesk.io";
+    in-out property <int> tab: 0;                 // 0=连接 1=设置
     in-out property <string> room-input: "demo";
+    in-out property <string> token-input: "";
+    in-out property <string> server-input: "wss://signal.aerodesk.io";
     in-out property <string> status: "未连接";
     in-out property <string> log: "";
     in-out property <bool> connecting: false;
+    in-out property <int> conn-state: 0;   // 0=idle 1=connecting 2=connected 3=failed
+    in-out property <[string]> recents: [];
+    in-out property <bool> in-session: false;
+    in-out property <image> video-frame: @image-url("");
+    in-out property <string> session-status: "";
+    in-out property <string> input-mode: "键鼠已释放";
+    in-out property <int> settings-tab: 0;          // 0=显示 1=网络 2=安全 3=快捷键
+    in-out property <int> quality: 1;               // 0=清晰 1=平衡 2=流畅
+    in-out property <string> server-default: "wss://signal.aerodesk.io";
+    in-out property <bool> remember-token: false;
+    in-out property <string> token-default: "";
+    in-out property <string> settings-status: "";
 
     callback connect();
     callback disconnect();
+    callback set-tab(int);
+    callback connect-recent(string);
+    callback toggle-fullscreen();
+    callback toggle-audio();
+    callback toggle-display();
+    callback toggle-quality();
+    callback toggle-input();
+    callback set-settings-tab(int);
+    callback set-quality(int);
+    callback save-settings();
 
     title: "AeroDesk";
-    width: 460px;
-    height: 600px;
+    width: 760px;
+    height: 560px;
 
-    VerticalLayout {
-        padding: 16px;
-        spacing: 12px;
-
-        Text {
-            text: "AeroDesk";
-            font-size: 28px;
-            font-weight: 700;
-            horizontal-alignment: center;
-        }
-        Text {
-            text: "Remote Desktop · 5 个原生平台一套 UI（Slint）";
-            font-size: 12px;
-            color: gray;
-            horizontal-alignment: center;
-        }
-
-        HorizontalLayout {
-            spacing: 8px;
-            LineEdit {
-                text <=> root.server-input;
-                placeholder-text: "信令服务器（wss://…）";
-            }
-            LineEdit {
-                text <=> root.room-input;
-                placeholder-text: "房间";
-                width: 110px;
-            }
-        }
-
-        HorizontalLayout {
-            spacing: 8px;
-            Button {
-                text: connecting ? "连接中…" : "连接";
-                enabled: !connecting;
-                clicked => { root.connect(); }
-            }
-            Button {
-                text: "断开";
-                enabled: connecting;
-                clicked => { root.disconnect(); }
+    HorizontalLayout {
+        // ---- 侧边栏 ----
+        Rectangle {
+            width: 190px;
+            background: #151515;
+            VerticalLayout {
+                padding: 14px;
+                spacing: 8px;
+                Text { text: "AeroDesk"; font-size: 22px; font-weight: 700; }
+                Text { text: "Remote Desktop"; font-size: 11px; color: gray; }
+                Rectangle { height: 1px; background: #2a2a2a; }
+                Button { text: "连接"; checked: root.tab == 0; clicked => { root.set-tab(0); } }
+                Button { text: "设置"; checked: root.tab == 1; clicked => { root.set-tab(1); } }
+                Rectangle { height: 1px; background: #2a2a2a; }
+                Text { text: "最近会话"; font-size: 11px; color: gray; }
+                ScrollView {
+                    VerticalLayout {
+                        for item in root.recents: Rectangle {
+                            height: 32px;
+                            border-radius: 4px;
+                            background: #222;
+                            Text {
+                                text: item;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            TouchArea {
+                                clicked => { root.connect-recent(item); }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        Text {
-            text: root.status;
-            color: #2ea043;
-        }
+        // ---- 主区域 ----
+        Rectangle {
+            background: #1a1a1a;
+            VerticalLayout {
+                padding: 20px;
+                spacing: 14px;
 
-        ScrollView {
-            Text {
-                text: root.log;
-                font-size: 11px;
-                font-family: "monospace";
+                if root.tab == 0: VerticalLayout {
+                    spacing: 12px;
+                    Text { text: "连接远程桌面"; font-size: 18px; font-weight: 600; }
+                    LineEdit {
+                        text <=> root.room-input;
+                        placeholder-text: "房间 ID（对端标识）";
+                        font-size: 16px;
+                    }
+                    LineEdit {
+                        text <=> root.token-input;
+                        placeholder-text: "密码 / JWT（可选）";
+                    }
+                    LineEdit {
+                        text <=> root.server-input;
+                        placeholder-text: "信令服务器（wss://…）";
+                        font-size: 11px;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button {
+                            text: connecting ? "连接中…" : (root.conn-state == 3 ? "重连" : "连接");
+                            enabled: !connecting && !root.in-session;
+                            primary: true;
+                            clicked => { root.connect(); }
+                        }
+                        Button {
+                            text: "断开";
+                            enabled: connecting || root.in-session;
+                            clicked => { root.disconnect(); }
+                        }
+                    }
+                    Text { text: root.status; color: #2ea043; }
+                    ScrollView {
+                        height: 180px;
+                        Text {
+                            text: root.log;
+                            font-size: 11px;
+                            font-family: "monospace";
+                        }
+                    }
+                }
+                if root.tab == 1: VerticalLayout {
+                    spacing: 10px;
+                    Text { text: "设置"; font-size: 18px; font-weight: 600; }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Button { text: "显示"; checked: root.settings-tab == 0; clicked => { root.set-settings-tab(0); } }
+                        Button { text: "网络"; checked: root.settings-tab == 1; clicked => { root.set-settings-tab(1); } }
+                        Button { text: "安全"; checked: root.settings-tab == 2; clicked => { root.set-settings-tab(2); } }
+                        Button { text: "快捷键"; checked: root.settings-tab == 3; clicked => { root.set-settings-tab(3); } }
+                    }
+                    Rectangle { height: 1px; background: #2a2a2a; }
+
+                    if root.settings-tab == 0: VerticalLayout {
+                        spacing: 8px;
+                        Text { text: "显示质量（对应码率档位）"; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Button { text: "清晰"; checked: root.quality == 0; clicked => { root.set-quality(0); } }
+                            Button { text: "平衡"; checked: root.quality == 1; clicked => { root.set-quality(1); } }
+                            Button { text: "流畅"; checked: root.quality == 2; clicked => { root.set-quality(2); } }
+                        }
+                        Text { text: "质量 → 目标码率：清晰 8Mbps / 平衡 4Mbps / 流畅 1.5Mbps（对接 SFU 选层）"; font-size: 11px; color: gray; }
+                    }
+                    if root.settings-tab == 1: VerticalLayout {
+                        spacing: 8px;
+                        Text { text: "默认信令服务器"; }
+                        LineEdit { text <=> root.server-default; placeholder-text: "wss://…"; }
+                        Text { text: "中继偏好：自动（直连失败走 TURN）"; font-size: 11px; color: gray; }
+                    }
+                    if root.settings-tab == 2: VerticalLayout {
+                        spacing: 8px;
+                        CheckBox { text: "记住密码 / JWT"; checked <=> root.remember-token; }
+                        LineEdit { text <=> root.token-default; placeholder-text: "默认密码 / JWT（可选）"; }
+                    }
+                    if root.settings-tab == 3: VerticalLayout {
+                        spacing: 8px;
+                        Text { text: "全屏：F11（待绑定）"; }
+                        Text { text: "输入捕获/释放：Esc（待绑定）"; }
+                        Text { text: "断开：Ctrl+Alt+D（待绑定）"; }
+                    }
+                    Button { text: "保存设置"; clicked => { root.save-settings(); } }
+                    Text { text: root.settings-status; color: #2ea043; font-size: 12px; }
+                }
+
+                // ---- 会话视图（#23）----
+                if root.in-session: VerticalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        background: #000;
+                        border-radius: 6px;
+                        Image {
+                            source: root.video-frame;
+                            width: 100%;
+                            height: 100%;
+                            image-fit: contain;
+                        }
+                        if root.video-frame.width == 0: Text {
+                            text: "等待媒体流…（演示帧源已就绪，真实解码后续接入）";
+                            color: #555;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Button { text: "全屏"; clicked => { root.toggle-fullscreen(); } }
+                        Button { text: "音频"; clicked => { root.toggle-audio(); } }
+                        Button { text: "显示器"; clicked => { root.toggle-display(); } }
+                        Button { text: "画质"; clicked => { root.toggle-quality(); } }
+                        Button { text: "输入"; clicked => { root.toggle-input(); } }
+                        Button { text: "断开"; clicked => { root.disconnect(); } }
+                    }
+                    Text { text: root.session-status; color: #2ea043; font-size: 12px; }
+                    Text { text: "输入模式：" + root.input-mode; color: #888; font-size: 12px; }
+                }
             }
         }
     }

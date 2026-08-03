@@ -23,7 +23,7 @@ pub struct PublisherSession {
 impl PublisherSession {
     /// 连接信令（publisher 角色）+ SDP 交换 + ICE 泵。
     pub fn connect(server: &str, room: &str) -> Result<PublisherSession, String> {
-        let live = aerodesk_core::connect::connect_live_role(server, room, Role::Publisher)?;
+        let live = aerodesk_core::connect::connect_live_role(server, room, Role::Publisher, None)?;
         let (input_tx, input_rx) = mpsc::channel();
         Ok(PublisherSession {
             live: Mutex::new(live),
