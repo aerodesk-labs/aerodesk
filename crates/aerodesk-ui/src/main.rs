@@ -1,6 +1,6 @@
 //! AeroDesk UI 壳（Slint）：连接/房间/状态。
 //!
-//! 7 平台一套 UI（桌面/移动/Web）；鸿蒙走 ArkTS 壳 + Rust NAPI，UI 组件保持可迁移。
+//! 5 个原生平台（Win/macOS/Linux/Android/iOS）一套 UI；Web 走浏览器原生 WebRTC；鸿蒙走 ArkTS 壳 + Rust NAPI。
 //! 连接逻辑复用 aerodesk-core（WsSignalClient + Endpoint），与 CLI/App 共用。
 
 slint::include_modules!();
