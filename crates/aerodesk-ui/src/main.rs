@@ -6,7 +6,7 @@ slint::include_modules!();
 use slint::Model;
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -83,11 +83,10 @@ fn main() -> Result<(), slint::PlatformError> {
                         std::thread::spawn(move || {
                             let mut t = 0u32;
                             while running2.load(Ordering::SeqCst) {
-                                if let Some(fui) = frame_weak.upgrade() {
-                                    let px = demo_frame(t);
-                                    let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&px, DEMO_W, DEMO_H);
-                                    fui.set_video_frame(slint::Image::from_rgba8(buffer));
-                                }
+                                let Some(fui) = frame_weak.upgrade() else { break };
+                                let px = demo_frame(t);
+                                let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&px, DEMO_W, DEMO_H);
+                                fui.set_video_frame(slint::Image::from_rgba8(buffer));
                                 t = t.wrapping_add(1);
                                 std::thread::sleep(Duration::from_millis(66));
                             }
@@ -217,6 +216,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 token_default: ui.get_token_default().to_string(),
             };
             save_settings(&settings);
+            // 即时生效：同步主页输入框（无需重启）。
+            ui.set_server_input(settings.server_default.clone().into());
+            if settings.remember_token {
+                ui.set_token_input(settings.token_default.clone().into());
+            }
             ui.set_settings_status("已保存".into());
         }
     });
@@ -272,7 +276,10 @@ fn load_recents() -> Vec<slint::SharedString> {
 fn save_recents(items: &[slint::SharedString]) {
     let v: Vec<String> = items.iter().map(|s| s.to_string()).collect();
     if let Ok(json) = serde_json::to_string(&v) {
-        let _ = std::fs::write(recent_path(), json);
+        let path = recent_path();
+        if std::fs::write(&path, json).is_ok() {
+            set_private_perms(&path);
+        }
     }
 }
 
@@ -351,6 +358,22 @@ fn load_settings() -> AppSettings {
 
 fn save_settings(s: &AppSettings) {
     if let Ok(json) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(settings_path(), json);
+        let path = settings_path();
+        if std::fs::write(&path, json).is_ok() {
+            set_private_perms(&path);
+        }
+    }
+}
+
+/// 凭据/敏感文件权限收紧为 0600（#28 审查）。
+fn set_private_perms(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
 }

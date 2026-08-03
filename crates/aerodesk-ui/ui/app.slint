@@ -103,13 +103,13 @@ export component AppWindow inherits Window {
                         spacing: 8px;
                         Button {
                             text: connecting ? "连接中…" : (root.conn-state == 3 ? "重连" : "连接");
-                            enabled: !connecting;
+                            enabled: !connecting && !root.in-session;
                             primary: true;
                             clicked => { root.connect(); }
                         }
                         Button {
                             text: "断开";
-                            enabled: connecting;
+                            enabled: connecting || root.in-session;
                             clicked => { root.disconnect(); }
                         }
                     }
