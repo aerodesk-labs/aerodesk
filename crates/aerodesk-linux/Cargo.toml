@@ -9,3 +9,6 @@ rust-version.workspace = true
 [dependencies]
 aerodesk-core = { path = "../aerodesk-core" }
 tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = "0.13"
