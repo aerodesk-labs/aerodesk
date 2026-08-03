@@ -186,6 +186,27 @@ impl Endpoint {
         self.rtc.channel(id)
     }
 
+    /// 向指定 label 的数据通道发送数据（输入事件等）。
+    pub fn send_channel_data(&mut self, label: &str, binary: bool, data: &[u8]) -> bool {
+        let Some(id) = self
+            .channel_labels
+            .iter()
+            .find(|(_, l)| l.as_str() == label)
+            .map(|(id, _)| *id)
+        else {
+            return false;
+        };
+        let Some(mut ch) = self.rtc.channel(id) else {
+            return false;
+        };
+        ch.write(binary, data).unwrap_or(false)
+    }
+
+    /// 查询数据通道 id 对应的 label。
+    pub fn channel_label(&self, cid: ChannelId) -> Option<String> {
+        self.channel_labels.get(&cid).cloned()
+    }
+
     /// 发送一帧视频（内部匹配 PT 并写入）。
     pub fn send_video_frame(
         &mut self,

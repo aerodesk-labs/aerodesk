@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media::{Vp8Frame, parse_vp8_pcap};
 use aerodesk_core::{Endpoint, signaling::WsSignalClient};
+use aerodesk_protocol::input::{INPUT_PROTOCOL_VERSION, InputEvent, InputFrame};
 use aerodesk_protocol::signal::Role;
 use str0m::media::{Frequency, MediaTime};
 use str0m::net::Protocol;
@@ -260,6 +261,17 @@ fn publisher(signal_url: &str, room: &str, auth: Option<&str>) {
         // 客户端事件
         while let Some(ev) = endpoint.poll_event() {
             match ev {
+                ClientEvent::ChannelOpen(label, _) if label == "input" => {
+                    info!("input channel open");
+                }
+                ClientEvent::ChannelData(cid, _, data) => {
+                    // 观看端输入事件（input 通道）→ 被控端处理。
+                    if endpoint.channel_label(cid).as_deref() == Some("input") {
+                        if let Ok(frame) = serde_json::from_slice::<InputFrame>(&data) {
+                            info!("input: seq={} {:?}", frame.seq, frame.event);
+                        }
+                    }
+                }
                 ClientEvent::IceConnected => {
                     info!("ICE connected, starting stream");
                     connected = true;
@@ -312,6 +324,9 @@ fn viewer(signal_url: &str, room: &str, auth: Option<&str>) {
     let mut bytes = 0u64;
     let mut keyframes = 0u64;
     let mut last_report = Instant::now();
+    let mut input_open = false;
+    let mut input_seq = 0u64;
+    let mut last_input = Instant::now();
 
     loop {
         let wait = Duration::from_millis(50);
@@ -364,6 +379,10 @@ fn viewer(signal_url: &str, room: &str, auth: Option<&str>) {
                     }
                 }
                 ClientEvent::IceConnected => info!("ICE connected"),
+                ClientEvent::ChannelOpen(label, _) if label == "input" => {
+                    info!("input channel open");
+                    input_open = true;
+                }
                 ClientEvent::Closed => {
                     info!("connection closed");
                     return;
@@ -372,8 +391,29 @@ fn viewer(signal_url: &str, room: &str, auth: Option<&str>) {
             }
         }
 
+        // 输入事件回传：input 通道打开后周期性发送鼠标移动（模拟观看端输入）。
+        if input_open && last_input.elapsed() >= Duration::from_millis(100) {
+            let frame = InputFrame {
+                version: INPUT_PROTOCOL_VERSION,
+                seq: input_seq,
+                timestamp_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+                event: InputEvent::MouseMove { x: 0.5, y: 0.5 },
+            };
+            if let Ok(json) = serde_json::to_string(&frame) {
+                if endpoint.send_channel_data("input", false, json.as_bytes()) {
+                    input_seq += 1;
+                    last_input = Instant::now();
+                }
+            }
+        }
+
         if last_report.elapsed() >= Duration::from_secs(2) {
-            info!("RECEIVED: {frames} frames, {bytes} bytes, {keyframes} keyframes");
+            info!(
+                "RECEIVED: {frames} frames, {bytes} bytes, {keyframes} keyframes, input sent: {input_seq}"
+            );
             last_report = Instant::now();
         }
         std::thread::sleep(Duration::from_millis(2));
