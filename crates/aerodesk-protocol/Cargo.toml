@@ -11,3 +11,4 @@ serde_json.workspace = true
 hmac = "0.12"
 sha1 = "0.10"
 base64ct = { version = "1", features = ["std"] }
+jsonwebtoken = "9"

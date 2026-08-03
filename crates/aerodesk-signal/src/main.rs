@@ -5,7 +5,8 @@
 //!
 //! 环境变量：
 //!   SIGNAL_PORT   WSS 端口（默认 3001）
-//!   AUTH_TOKENS   逗号分隔合法 token（空则不认证）
+//!   AUTH_TOKENS   逗号分隔合法 token（JWT_SECRET 未设置时使用；空则不认证）
+//!   JWT_SECRET     HS256 共享密钥；设置后 Join 必须携带合法 JWT（用户/设备/房间/角色授权）
 //!   TURN_SECRET   coturn REST secret（空则不下发 TURN）
 //!   TURN_URLS     逗号分隔 TURN URL（默认 127.0.0.1:3478）
 //!   SFU_URL       SFU 内部接口（默认 http://127.0.0.1:3002）
@@ -24,6 +25,7 @@ use rouille::{Request, Response};
 
 struct Config {
     auth_tokens: Vec<String>,
+    jwt_secret: Option<String>,
     turn: Option<TurnConfig>,
     sfu_url: String,
     sfu_token: Option<String>,
@@ -116,6 +118,7 @@ fn load_config() -> Config {
 
     Config {
         auth_tokens,
+        jwt_secret: std::env::var("JWT_SECRET").ok().filter(|s| !s.is_empty()),
         turn,
         sfu_url: std::env::var("SFU_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into()),
         sfu_token: std::env::var("SFU_TOKEN").ok(),
@@ -166,12 +169,31 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 role,
                 auth_token,
             } => {
-                if !config.auth_tokens.is_empty()
-                    && !config
+                let auth_ok = if let Some(secret) = &config.jwt_secret {
+                    // JWT 认证：校验签名/过期/房间/角色。
+                    let token = auth_token.as_deref().unwrap_or_default();
+                    aerodesk_protocol::jwt::validate_token(secret, token, &room, role)
+                        .map(|claims| {
+                            info!(
+                                "jwt auth ok: user={} dev={:?} room={} role={:?}",
+                                claims.sub, claims.dev, room, role
+                            );
+                        })
+                        .map_err(|e| {
+                            warn!("jwt auth failed: {e}");
+                        })
+                        .is_ok()
+                } else if !config.auth_tokens.is_empty() {
+                    // 静态 token 认证（兼容模式）。
+                    config
                         .auth_tokens
                         .iter()
                         .any(|t| Some(t.as_str()) == auth_token.as_deref())
-                {
+                } else {
+                    // 开发模式：不认证。
+                    true
+                };
+                if !auth_ok {
                     send(
                         ws.clone(),
                         SignalMessage::Error {

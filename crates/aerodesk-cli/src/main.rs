@@ -24,6 +24,10 @@ use str0m::{Input, Output, net::Receive};
 fn main() {
     init_log();
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--issue-token") {
+        issue_token(&args);
+        return;
+    }
     let role = arg(&args, "--role").unwrap_or_else(|| "viewer".into());
     let signal = arg(&args, "--signal").unwrap_or_else(|| "ws://127.0.0.1:3003/ws".into());
     let signal = if signal.contains("/ws") {
@@ -32,15 +36,64 @@ fn main() {
         format!("{signal}/ws")
     };
     let room = arg(&args, "--room").unwrap_or_else(|| "demo".into());
+    let token = arg(&args, "--token");
     let encoder = arg(&args, "--encoder").unwrap_or_else(|| "pcap".into());
 
     match role.as_str() {
-        "publisher" if encoder == "screen" => publisher_capture(&signal, &room),
-        "publisher" if encoder == "vt" => publisher_vt(&signal, &room),
-        "publisher" if encoder == "x264" => publisher_x264(&signal, &room),
-        "publisher" => publisher(&signal, &room),
-        "viewer" => viewer(&signal, &room),
+        "publisher" if encoder == "screen" => publisher_capture(&signal, &room, token.as_deref()),
+        "publisher" if encoder == "vt" => publisher_vt(&signal, &room, token.as_deref()),
+        "publisher" if encoder == "x264" => publisher_x264(&signal, &room, token.as_deref()),
+        "publisher" => publisher(&signal, &room, token.as_deref()),
+        "viewer" => viewer(&signal, &room, token.as_deref()),
         other => panic!("unknown role {other}"),
+    }
+}
+
+/// 签发信令 JWT（供运维/测试使用）。
+///
+/// 用法：
+///   JWT_SECRET=<secret> aerodesk-cli --issue-token --user u1 --device mac-1 --room demo --role publisher --ttl 3600
+///   JWT_SECRET=<secret> aerodesk-cli --issue-token --user u1 --room demo --role "*" --ttl 86400
+fn issue_token(args: &[String]) {
+    let secret = match std::env::var("JWT_SECRET") {
+        Ok(s) if !s.is_empty() => s,
+        _ => {
+            eprintln!("JWT_SECRET 环境变量未设置");
+            std::process::exit(1);
+        }
+    };
+    let user = arg(args, "--user").unwrap_or_else(|| {
+        eprintln!("缺少 --user");
+        std::process::exit(1);
+    });
+    let device = arg(args, "--device");
+    let room = arg(args, "--room");
+    let role = match arg(args, "--role").as_deref() {
+        Some("publisher") => Some(Role::Publisher),
+        Some("viewer") => Some(Role::Viewer),
+        Some("*") | None => None,
+        Some(other) => {
+            eprintln!("unknown role: {other} (publisher/viewer/*)");
+            std::process::exit(1);
+        }
+    };
+    let ttl: u64 = arg(args, "--ttl")
+        .and_then(|t| t.parse().ok())
+        .unwrap_or(3600);
+
+    match aerodesk_protocol::jwt::mint_token(
+        &secret,
+        &user,
+        device.as_deref(),
+        room.as_deref(),
+        role,
+        ttl,
+    ) {
+        Ok(token) => println!("{token}"),
+        Err(e) => {
+            eprintln!("签发失败: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -65,16 +118,18 @@ fn connect(
     signal_url: &str,
     room: &str,
     role: Role,
+    auth: Option<&str>,
 ) -> (WsSignalClient, Endpoint, UdpSocket, str0m::media::Mid) {
-    connect_inner(signal_url, room, role, false)
+    connect_inner(signal_url, room, role, false, auth)
 }
 
 fn connect_h264(
     signal_url: &str,
     room: &str,
     role: Role,
+    auth: Option<&str>,
 ) -> (WsSignalClient, Endpoint, UdpSocket, str0m::media::Mid) {
-    connect_inner(signal_url, room, role, true)
+    connect_inner(signal_url, room, role, true, auth)
 }
 
 fn connect_inner(
@@ -82,9 +137,10 @@ fn connect_inner(
     room: &str,
     role: Role,
     h264_only: bool,
+    auth: Option<&str>,
 ) -> (WsSignalClient, Endpoint, UdpSocket, str0m::media::Mid) {
     let mut signal = WsSignalClient::connect(signal_url).expect("signal connect");
-    let (peer_id, turn) = signal.join(room, role, None).expect("join");
+    let (peer_id, turn) = signal.join(room, role, auth).expect("join");
     info!("joined room {room} as {peer_id}");
 
     let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp");
@@ -119,12 +175,13 @@ fn connect_inner(
     (signal, endpoint, socket, video_mid)
 }
 
-fn publisher(signal_url: &str, room: &str) {
+fn publisher(signal_url: &str, room: &str, auth: Option<&str>) {
     let pcap = include_bytes!("../../../crates/aerodesk-core/tests/data/vp8.pcap");
     let frames = parse_vp8_pcap(pcap);
     info!("loaded {} VP8 frames from pcap", frames.len());
 
-    let (mut signal, mut endpoint, socket, video_mid) = connect(signal_url, room, Role::Publisher);
+    let (mut signal, mut endpoint, socket, video_mid) =
+        connect(signal_url, room, Role::Publisher, auth);
     let mut connected = false;
     let mut frame_idx = 0usize;
     let mut last_frame_time = Instant::now();
@@ -235,8 +292,8 @@ fn publisher(signal_url: &str, room: &str) {
     }
 }
 
-fn viewer(signal_url: &str, room: &str) {
-    let (mut signal, mut endpoint, socket, _) = connect(signal_url, room, Role::Viewer);
+fn viewer(signal_url: &str, room: &str, auth: Option<&str>) {
+    let (mut signal, mut endpoint, socket, _) = connect(signal_url, room, Role::Viewer, auth);
     let mut frames = 0u64;
     let mut bytes = 0u64;
     let mut keyframes = 0u64;
@@ -311,7 +368,7 @@ fn viewer(signal_url: &str, room: &str) {
 }
 
 /// x264 发布端：合成帧 → H.264 编码 → SFU。
-fn publisher_x264(signal_url: &str, room: &str) {
+fn publisher_x264(signal_url: &str, room: &str, auth: Option<&str>) {
     use aerodesk_macos::encoder::X264Encoder;
     use aerodesk_macos::synthetic::SyntheticSource;
 
@@ -320,7 +377,7 @@ fn publisher_x264(signal_url: &str, room: &str) {
     const FPS: u32 = 30;
 
     let (mut signal, mut endpoint, socket, video_mid) =
-        connect_h264(signal_url, room, Role::Publisher);
+        connect_h264(signal_url, room, Role::Publisher, auth);
     let mut encoder = X264Encoder::new(W, H, FPS, 800).expect("x264 encoder");
     let mut source = SyntheticSource::new(W, H);
     let mut connected = false;
@@ -401,7 +458,7 @@ fn publisher_x264(signal_url: &str, room: &str) {
 }
 
 /// VideoToolbox 硬编发布端：合成 BGRA → 硬编 → SFU。
-fn publisher_vt(signal_url: &str, room: &str) {
+fn publisher_vt(signal_url: &str, room: &str, auth: Option<&str>) {
     use aerodesk_macos::synthetic::SyntheticSource;
     use aerodesk_macos::vt_encoder::{VtEncoder, avcc_to_annexb};
 
@@ -410,7 +467,7 @@ fn publisher_vt(signal_url: &str, room: &str) {
     const FPS: u32 = 30;
 
     let (mut signal, mut endpoint, socket, video_mid) =
-        connect_h264(signal_url, room, Role::Publisher);
+        connect_h264(signal_url, room, Role::Publisher, auth);
     let mut encoder = VtEncoder::new(W, H, FPS, 800_000).expect("vt encoder");
     let mut source = SyntheticSource::new(W, H);
     let mut connected = false;
@@ -491,7 +548,7 @@ fn publisher_vt(signal_url: &str, room: &str) {
 
 /// 真实屏幕采集发布端：ScreenCaptureKit → VideoToolbox 硬编（零拷贝）→ SFU。
 /// 需要屏幕录制权限（TCC）。
-fn publisher_capture(signal_url: &str, room: &str) {
+fn publisher_capture(signal_url: &str, room: &str, auth: Option<&str>) {
     use aerodesk_macos::capture::ScreenCapture;
     use aerodesk_macos::vt_encoder::{VtEncoder, avcc_to_annexb};
 
@@ -500,7 +557,7 @@ fn publisher_capture(signal_url: &str, room: &str) {
     const FPS: u32 = 30;
 
     let (mut signal, mut endpoint, socket, video_mid) =
-        connect_h264(signal_url, room, Role::Publisher);
+        connect_h264(signal_url, room, Role::Publisher, auth);
     let mut capture = match ScreenCapture::start(0, FPS, W, H) {
         Ok(c) => c,
         Err(e) => {
