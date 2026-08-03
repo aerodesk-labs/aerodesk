@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="AeroDesk 被控端"
+        android:textSize="24sp"
+        android:textStyle="bold" />
+
+    <EditText
+        android:id="@+id/server"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="信令服务器（ws://…）"
+        android:text="ws://10.0.2.2:3003" />
+
+    <EditText
+        android:id="@+id/room"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="房间"
+        android:text="demo" />
+
+    <Button
+        android:id="@+id/start"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="开始被控（录屏授权）" />
+
+    <Button
+        android:id="@+id/stop"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="停止" />
+
+    <TextView
+        android:id="@+id/status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="12sp" />
+</LinearLayout>

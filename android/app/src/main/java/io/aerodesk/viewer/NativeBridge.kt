@@ -16,4 +16,9 @@ object NativeBridge {
     external fun viewerCreate(server: String, room: String): Long
     external fun viewerDestroy(ptr: Long)
     external fun viewerTakeAnnexB(ptr: Long): ByteArray
+
+    // 发布会话（被控端：Kotlin 采集编码 → Rust 发送）
+    external fun publisherCreate(server: String, room: String): Long
+    external fun publisherDestroy(ptr: Long)
+    external fun publisherFeedAnnexB(ptr: Long, frame: ByteArray, ptsUs: Long): Boolean
 }

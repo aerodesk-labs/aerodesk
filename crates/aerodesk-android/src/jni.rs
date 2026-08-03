@@ -102,3 +102,72 @@ pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerTakeAnnexB<'lo
         None => env.new_byte_array(0).expect("byte array").into_raw(),
     }
 }
+
+use crate::publisher::PublisherSession;
+use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean};
+
+/// 创建发布会话（被控端）。返回指针（jlong），失败为 0。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_publisherCreate<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    server: JString<'local>,
+    room: JString<'local>,
+) -> jlong {
+    let server: String = env
+        .get_string(&server)
+        .map(|s| s.into())
+        .unwrap_or_default();
+    let room: String = env.get_string(&room).map(|s| s.into()).unwrap_or_default();
+    match PublisherSession::connect(&server, &room) {
+        Ok(p) => Box::into_raw(Box::new(p)) as jlong,
+        Err(_) => 0,
+    }
+}
+
+/// 销毁发布会话。
+///
+/// # Safety
+/// `ptr` 必须来自 publisherCreate 且未被销毁过。
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_io_aerodesk_viewer_NativeBridge_publisherDestroy<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    ptr: jlong,
+) {
+    if ptr != 0 {
+        drop(unsafe { Box::from_raw(ptr as *mut PublisherSession) });
+    }
+}
+
+/// 发送一帧 AnnexB H.264（Kotlin MediaCodec 编码输出）。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_publisherFeedAnnexB<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    ptr: jlong,
+    frame: JByteArray<'local>,
+    pts_us: jlong,
+) -> jboolean {
+    if ptr == 0 {
+        return JNI_FALSE;
+    }
+    let len = env.get_array_length(&frame).unwrap_or(0);
+    let mut buf = vec![0u8; len.max(0) as usize];
+    let ok = if len > 0 {
+        let i8slice =
+            unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut i8, buf.len()) };
+        env.get_byte_array_region(&frame, 0, i8slice).is_ok()
+    } else {
+        true
+    };
+    if !ok {
+        return JNI_FALSE;
+    }
+    let p = unsafe { &*(ptr as *mut PublisherSession) };
+    if p.feed(&buf, pts_us) {
+        JNI_TRUE
+    } else {
+        JNI_FALSE
+    }
+}
