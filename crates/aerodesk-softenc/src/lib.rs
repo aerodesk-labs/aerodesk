@@ -6,6 +6,15 @@
 pub mod decode;
 #[cfg(not(windows))]
 pub mod encode;
+pub mod openh264enc;
+
+/// 编码输出（AnnexB，与 str0m packetizer 对齐；全平台共用）。
+#[derive(Debug, Clone)]
+pub struct EncodedFrame {
+    pub data: Vec<u8>,
+    pub keyframe: bool,
+    pub pts: i64,
+}
 
 /// BGRA（蓝绿红透明度序）→ RGB24（x264 输入；Windows DXGI 输出 BGRA）。
 pub fn bgra_to_rgb(bgra: &[u8]) -> Vec<u8> {
