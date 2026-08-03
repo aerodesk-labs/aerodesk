@@ -3,12 +3,15 @@
 //! 5 个原生平台（Win/macOS/Linux/Android/iOS）一套 UI；Web 走浏览器原生 WebRTC。
 
 slint::include_modules!();
+#[cfg(target_os = "macos")]
+mod macos_media;
 use slint::Model;
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(not(target_os = "macos"))]
 use std::time::Duration;
 
 const MAX_RECENTS: usize = 10;
@@ -61,6 +64,13 @@ fn main() -> Result<(), slint::PlatformError> {
             let my_epoch = frame_epoch.fetch_add(1, Ordering::SeqCst) + 1;
             let epoch2 = frame_epoch.clone();
             std::thread::spawn(move || {
+                #[cfg(target_os = "macos")]
+                {
+                    // #29：macOS 真实 H.264 解码渲染（替换演示帧源）。
+                    crate::macos_media::run_viewer(server, room, Some(token), weak2.clone(), epoch2.clone(), my_epoch);
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
                 let auth = if token.is_empty() { None } else { Some(token.as_str()) };
                 let out = aerodesk_core::connect::connect_viewer_auth(&server, &room, auth);
                 let ui = weak2.clone();
@@ -104,7 +114,10 @@ fn main() -> Result<(), slint::PlatformError> {
                         }
                     }
                 }
-                ui.set_connecting(false);
+                } // cfg(not(target_os = "macos"))
+                if let Some(ui) = weak2.upgrade() {
+                    ui.set_connecting(false);
+                }
             });
         }
     });

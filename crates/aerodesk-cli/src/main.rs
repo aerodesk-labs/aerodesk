@@ -534,7 +534,7 @@ fn publisher_vt(
     bitrate: u32,
 ) {
     use aerodesk_macos::synthetic::SyntheticSource;
-    use aerodesk_macos::vt_encoder::{VtEncoder, avcc_to_annexb};
+    use aerodesk_macos::vt_encoder::VtEncoder;
 
     let (mut signal, mut endpoint, socket, video_mid) =
         connect_h264(signal_url, room, Role::Publisher, auth);
@@ -598,7 +598,7 @@ fn publisher_vt(
             let bgra = source.next_frame_bgra();
             match encoder.encode_bgra(bgra) {
                 Ok(Some(frame)) => {
-                    let annexb = avcc_to_annexb(&frame.data);
+                    let annexb = encoder.to_annexb(&frame);
                     let rtp_time = str0m::media::MediaTime::new(
                         frame.presentation_time.0 as u64,
                         str0m::media::Frequency::NINETY_KHZ,
@@ -621,7 +621,7 @@ fn publisher_vt(
 /// 需要屏幕录制权限（TCC）。
 fn publisher_capture(signal_url: &str, room: &str, auth: Option<&str>) {
     use aerodesk_macos::capture::ScreenCapture;
-    use aerodesk_macos::vt_encoder::{VtEncoder, avcc_to_annexb};
+    use aerodesk_macos::vt_encoder::VtEncoder;
 
     const W: u32 = 1920;
     const H: u32 = 1080;
@@ -691,7 +691,7 @@ fn publisher_capture(signal_url: &str, room: &str, auth: Option<&str>) {
         if connected && let Some(surface) = capture.next_frame(Duration::from_millis(50)) {
             match encoder.encode_surface(&surface) {
                 Ok(Some(frame)) => {
-                    let annexb = avcc_to_annexb(&frame.data);
+                    let annexb = encoder.to_annexb(&frame);
                     let rtp_time = str0m::media::MediaTime::new(
                         frame.presentation_time.0 as u64,
                         str0m::media::Frequency::NINETY_KHZ,
