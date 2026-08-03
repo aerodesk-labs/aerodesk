@@ -12,7 +12,7 @@
 | Android | `.apk` / `.aab` | Gradle（`android/`） | Play App Signing（上传密钥） |
 | iOS | `.ipa` | Xcode Archive（`ios/`） | App Store / TestFlight（开发者证书） |
 | HarmonyOS | `.hap` | DevEco Studio | 鸿蒙开发者证书 + Profile |
-| Web | WASM 静态站 | `wasm-pack` + slint 后端 | HTTPS（Caddy/Let's Encrypt） |
+| Web | HTML/JS 静态站（浏览器原生 WebRTC） | `web/index.html` 路线，无需 Rust/WASM | HTTPS（Caddy/Let's Encrypt） |
 
 ## 一键流程（桌面）
 
@@ -34,7 +34,7 @@ cargo deb -p aerodesk-ui --target x86_64-unknown-linux-gnu
 
 ## 待接入
 
-- [ ] Web：str0m 需要 wasm 支持（浏览器 WebSocket + 兼容 DTLS）后接 `wasm-pack`
+- [ ] Web：完善 `web/index.html`（浏览器原生 WebRTC；观看/发布/输入与原生端互通）
 - [ ] Windows：MF/NVENC 编码 + WiX/MSIX 打包脚本
 - [ ] Linux：cargo-deb/rpm 脚本 + VAAPI 编码
 - [ ] HarmonyOS：DevEco 打包（SDK 到位后）
