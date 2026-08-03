@@ -91,7 +91,7 @@ pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerTakeAnnexB<'lo
         return env.new_byte_array(0).expect("array").into_raw();
     }
     let v = unsafe { &*(ptr as *mut ViewerSession) };
-    match v.take_annexb() {
+    match v.take_frame() {
         Some(frame) => {
             let arr = env.new_byte_array(frame.len() as i32).expect("byte array");
             let i8slice =

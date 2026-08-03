@@ -1,14 +1,15 @@
-//! Android 观看会话：连接 + 后台收流循环 → 最新 AnnexB H.264 帧槽。
+//! Android 观看会话：连接 + 后台收流循环 → 最新完整访问单元（视频帧）槽。
 //!
-//! 解码由 Kotlin 侧 MediaCodec 完成（Surface 渲染），Rust 只负责
-//! WebRTC 收流并把最新 H.264 帧交给壳层（与 iOS 的差异：iOS 用 VideoToolbox
-//! 在 Rust 侧硬解，Android 走 MediaCodec）。
+//! 解码由 Kotlin 侧 MediaCodec 完成（Surface 渲染），Rust 负责 WebRTC 收流，
+//! 并把 str0m 输出的 NAL 事件经 [`AccessUnitAssembler`] 聚合成完整帧交给壳层
+//! （与 iOS 的差异：iOS 用 VideoToolbox 在 Rust 侧硬解，Android 走 MediaCodec）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use aerodesk_core::access_unit::AccessUnitAssembler;
 use aerodesk_core::connect::LiveSession;
 use aerodesk_core::endpoint::ClientEvent;
 use str0m::net::Protocol;
@@ -39,8 +40,8 @@ impl ViewerSession {
         })
     }
 
-    /// 取走最新帧（None 表示暂无新帧）。
-    pub fn take_annexb(&self) -> Option<Vec<u8>> {
+    /// 取走最新完整视频帧（AnnexB 访问单元；None 表示暂无新帧）。
+    pub fn take_frame(&self) -> Option<Vec<u8>> {
         self.latest.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 }
@@ -54,8 +55,10 @@ impl Drop for ViewerSession {
     }
 }
 
-/// 后台收流循环：UDP → endpoint → Media 事件 → 最新帧槽。
+/// 后台收流循环：UDP → endpoint → Media 事件 → 访问单元组装 → 最新帧槽。
 fn pump_media(mut live: LiveSession, latest: Arc<Mutex<Option<Vec<u8>>>>, stop: Arc<AtomicBool>) {
+    // 把 str0m 输出的 NAL 事件按 RTP 时间戳聚合成完整访问单元。
+    let mut assembler = AccessUnitAssembler::new();
     while !stop.load(Ordering::SeqCst) {
         live.socket
             .set_read_timeout(Some(Duration::from_millis(10)))
@@ -86,8 +89,13 @@ fn pump_media(mut live: LiveSession, latest: Arc<Mutex<Option<Vec<u8>>>>, stop: 
                     if let Some(mid) = live.video_mid
                         && data.mid == mid
                     {
-                        *latest.lock().unwrap_or_else(|e| e.into_inner()) =
-                            Some(data.data.to_vec());
+                        if let Some(frame) = assembler.push(
+                            data.data.as_ref(),
+                            data.time.as_micros(),
+                            data.is_keyframe(),
+                        ) {
+                            *latest.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame.data);
+                        }
                     }
                 }
                 ClientEvent::Closed => {
