@@ -15,6 +15,9 @@ str0m = { workspace = true, features = ["rust-crypto"] }
 aerodesk-core = { path = "../aerodesk-core" }
 aerodesk-protocol = { path = "../aerodesk-protocol" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+aerodesk-macos = { path = "../aerodesk-macos" }
+
 [build-dependencies]
 slint-build = "1"
 

@@ -8,6 +8,7 @@
 //! screen-capture-kit crate 已就绪，接入时注意 macOS 屏幕录制权限（TCC）。
 
 pub mod capture;
+pub mod decode;
 pub mod encoder;
 pub mod inject;
 pub mod synthetic;

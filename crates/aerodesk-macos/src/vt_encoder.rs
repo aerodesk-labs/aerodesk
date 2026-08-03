@@ -4,6 +4,7 @@
 //! H.264（str0m packetizer 兼容）。
 
 use apple_cf::iosurface::{IOSurface, IOSurfaceLockOptions};
+use apple_cf::raw::CMVideoFormatDescriptionGetH264ParameterSetAtIndex;
 use videotoolbox::Codec;
 use videotoolbox::compression::{CompressionSession, CompressionSessionBuilder, EncodedFrame};
 
@@ -17,6 +18,10 @@ pub struct VtEncoder {
     pts: i64,
     /// 每帧 RTP 时间戳步进（90kHz / fps；#8 压测发现固定 3000 会把 60fps 压成 30fps）。
     pts_inc: i64,
+    /// 从 format description 提取的 SPS/PPS（VT 关键帧码流默认不含参数集；
+    /// 接收端硬解必须要有，见 #29 回环测试）。
+    sps: Option<Vec<u8>>,
+    pps: Option<Vec<u8>>,
 }
 
 impl VtEncoder {
@@ -34,7 +39,78 @@ impl VtEncoder {
             height,
             pts: 0,
             pts_inc: (90_000 / fps.max(1)) as i64,
+            sps: None,
+            pps: None,
         })
+    }
+
+    /// 从编码输出的 format description 提取 SPS/PPS（只在首帧做一次）。
+    fn ensure_parameter_sets(&mut self, frame: &EncodedFrame) {
+        if self.sps.is_some() && self.pps.is_some() {
+            return;
+        }
+        let Some(sample) = frame.cm_sample_buffer() else {
+            return;
+        };
+        let Some(fmt) = sample.format_description() else {
+            return;
+        };
+        let mut get = |index: usize| -> Option<Vec<u8>> {
+            let mut ptr: *const u8 = std::ptr::null();
+            let mut size = 0usize;
+            let mut count = 0usize;
+            let mut nal_len = 0i32;
+            let status = unsafe {
+                CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                    fmt.as_ptr().cast(),
+                    index,
+                    &mut ptr,
+                    &mut size,
+                    &mut count,
+                    &mut nal_len,
+                )
+            };
+            if status != 0 || ptr.is_null() || size == 0 {
+                return None;
+            }
+            Some(unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec())
+        };
+        self.sps = get(0);
+        self.pps = get(1);
+    }
+
+    /// AVCC 数据里是否含 IDR（NAL type 5）→ 关键帧。
+    fn is_keyframe_avcc(data: &[u8]) -> bool {
+        let mut i = 0;
+        while i + 4 <= data.len() {
+            let len = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]) as usize;
+            i += 4;
+            if i + len > data.len() {
+                return false;
+            }
+            if len > 0 && (data[i] & 0x1F) == 5 {
+                return true;
+            }
+            i += len;
+        }
+        false
+    }
+
+    /// 输出 AnnexB：关键帧前置 SPS/PPS（接收端硬解依赖，见 #29）。
+    pub fn to_annexb(&self, frame: &EncodedFrame) -> Vec<u8> {
+        let mut out = Vec::with_capacity(frame.data.len() + 64);
+        if Self::is_keyframe_avcc(&frame.data) {
+            if let Some(sps) = &self.sps {
+                out.extend_from_slice(&[0, 0, 0, 1]);
+                out.extend_from_slice(sps);
+            }
+            if let Some(pps) = &self.pps {
+                out.extend_from_slice(&[0, 0, 0, 1]);
+                out.extend_from_slice(pps);
+            }
+        }
+        out.extend_from_slice(&avcc_to_annexb(&frame.data));
+        out
     }
 
     /// 零拷贝编码：直接硬编 ScreenCaptureKit 输出的 IOSurface。
@@ -44,6 +120,7 @@ impl VtEncoder {
             .encode(surface, (self.pts, 90_000))
             .map_err(|e| format!("vt encode: {e:?}"))?;
         self.pts += self.pts_inc;
+        self.ensure_parameter_sets(&frame);
         if frame.data.is_empty() {
             return Ok(None);
         }
@@ -71,6 +148,7 @@ impl VtEncoder {
             .encode(&surface, (self.pts, 90_000))
             .map_err(|e| format!("vt encode: {e:?}"))?;
         self.pts += self.pts_inc; // 90kHz / fps
+        self.ensure_parameter_sets(&frame);
         if frame.data.is_empty() {
             return Ok(None);
         }
