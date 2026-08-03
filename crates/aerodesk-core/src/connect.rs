@@ -33,13 +33,39 @@ impl ConnectResult {
     }
 }
 
-/// 观看端连接：WSS join → SDP 交换 → ICE 泵（5s 超时）。
-pub fn connect_viewer(server: &str, room: &str) -> Result<ConnectResult, String> {
-    connect(server, room, Role::Viewer)
+/// 活跃连接（保留 signal/endpoint/socket，供媒体循环使用）。
+pub struct LiveSession {
+    pub signal: WsSignalClient,
+    pub endpoint: crate::Endpoint,
+    pub socket: UdpSocket,
+    pub video_mid: Option<str0m::media::Mid>,
+    pub room: String,
+    pub peer_id: String,
+    pub ice_connected: bool,
 }
 
-/// 发布端连接（参数化角色）。
-pub fn connect(server: &str, room: &str, role: Role) -> Result<ConnectResult, String> {
+impl LiveSession {
+    pub fn summary(&self) -> String {
+        format!(
+            "peer={} room={} sdp=ok ice={}",
+            self.peer_id,
+            self.room,
+            if self.ice_connected {
+                "connected"
+            } else {
+                "pending(5s 超时)"
+            }
+        )
+    }
+}
+
+/// 连接并保留活跃会话（观看端）。
+pub fn connect_live(server: &str, room: &str) -> Result<LiveSession, String> {
+    connect_live_role(server, room, Role::Viewer)
+}
+
+/// 连接并保留活跃会话（任意角色）。
+pub fn connect_live_role(server: &str, room: &str, role: Role) -> Result<LiveSession, String> {
     let mut signal = WsSignalClient::connect(server).map_err(|e| format!("signal connect: {e}"))?;
     let (peer_id, _turn) = signal
         .join(room, role, None)
@@ -52,7 +78,7 @@ pub fn connect(server: &str, room: &str, role: Role) -> Result<ConnectResult, St
         .add_local_candidate(addr, Protocol::Udp)
         .map_err(|e| format!("candidate: {e:?}"))?;
     endpoint.add_video();
-    let (offer, pending, _video_mid) = endpoint
+    let (offer, pending, video_mid) = endpoint
         .create_offer()
         .map_err(|e| format!("offer: {e:?}"))?;
     let offer_json = serde_json::to_string(&offer).map_err(|e| e.to_string())?;
@@ -92,7 +118,7 @@ pub fn connect(server: &str, room: &str, role: Role) -> Result<ConnectResult, St
             }
         }
         while let Some(ev) = endpoint.poll_event() {
-            if let ClientEvent::IceConnected = ev {
+            if let crate::endpoint::ClientEvent::IceConnected = ev {
                 ice_connected = true;
                 break;
             }
@@ -102,9 +128,28 @@ pub fn connect(server: &str, room: &str, role: Role) -> Result<ConnectResult, St
         }
     }
 
-    Ok(ConnectResult {
+    Ok(LiveSession {
+        signal,
+        endpoint,
+        socket,
+        video_mid,
         room: room.to_string(),
         peer_id,
         ice_connected,
+    })
+}
+
+/// 观看端连接：WSS join → SDP 交换 → ICE 泵（5s 超时）。/// 观看端连接：WSS join → SDP 交换 → ICE 泵（5s 超时）。
+pub fn connect_viewer(server: &str, room: &str) -> Result<ConnectResult, String> {
+    connect(server, room, Role::Viewer)
+}
+
+/// 发布端连接（参数化角色）。
+pub fn connect(server: &str, room: &str, role: Role) -> Result<ConnectResult, String> {
+    let live = connect_live_role(server, room, role)?;
+    Ok(ConnectResult {
+        room: live.room.clone(),
+        peer_id: live.peer_id.clone(),
+        ice_connected: live.ice_connected,
     })
 }

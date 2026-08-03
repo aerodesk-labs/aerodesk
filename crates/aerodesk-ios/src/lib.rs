@@ -8,3 +8,4 @@ pub mod decode;
 
 pub use decode::H264Decoder;
 pub mod ffi;
+pub mod viewer;

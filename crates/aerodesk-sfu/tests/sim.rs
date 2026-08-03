@@ -153,7 +153,10 @@ fn combined_loss_jitter_latency_delivers_most() {
     let loss = 1.0 - delivered as f64 / total as f64;
     println!("combined: delivered {delivered}/{total}, loss {loss:.4}");
     // 5% 丢包下交付率应 ≥ 93%（容差 2%）。
-    assert!(delivered as f64 >= total as f64 * 0.93, "delivered too low: {delivered}");
+    assert!(
+        delivered as f64 >= total as f64 * 0.93,
+        "delivered too low: {delivered}"
+    );
 }
 
 /// #8 网络抗性：1% 丢包下媒体基本无损（高清通话质量线）。

@@ -32,6 +32,14 @@ const char *ad_connect(const char *server, const char *room);
 /// 释放 ad_connect 返回的字符串。
 void ad_free_string(char *s);
 
+/// 创建观看会话（连接 + 后台收流解码）。失败返回 NULL。
+void *ad_viewer_create(const char *server, const char *room);
+/// 销毁观看会话。
+void ad_viewer_destroy(void *viewer);
+/// 取最新解码帧：0=有新帧（*out 为 +1 CVPixelBufferRef，调用方 CVBufferRelease），1=暂无。
+int ad_viewer_take_frame(void *viewer, void **out);
+
+
 #ifdef __cplusplus
 }
 #endif

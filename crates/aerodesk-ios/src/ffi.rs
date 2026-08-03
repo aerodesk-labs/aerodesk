@@ -116,3 +116,62 @@ pub unsafe extern "C" fn ad_free_string(s: *mut c_char) {
         drop(unsafe { std::ffi::CString::from_raw(s) });
     }
 }
+
+use crate::viewer::ViewerSession;
+
+/// 创建观看会话：连接信令 + 启动后台收流解码线程。失败返回 null。
+///
+/// # Safety
+/// `server`/`room` 必须是以 NUL 结尾的有效 C 字符串。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ad_viewer_create(
+    server: *const c_char,
+    room: *const c_char,
+) -> *mut ViewerSession {
+    let server = if server.is_null() {
+        String::new()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(server) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    let room = if room.is_null() {
+        String::new()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(room) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    match ViewerSession::connect(&server, &room) {
+        Ok(s) => Box::into_raw(Box::new(s)),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// 销毁观看会话（停止收流线程）。
+///
+/// # Safety
+/// `v` 必须来自 `ad_viewer_create` 且未被销毁过。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ad_viewer_destroy(v: *mut ViewerSession) {
+    if !v.is_null() {
+        drop(unsafe { Box::from_raw(v) });
+    }
+}
+
+/// 取最新解码帧。
+/// 返回 0=有新帧（`*out` 为 +1 CVPixelBufferRef，调用方负责 CVBufferRelease），
+///      1=暂无新帧，<0=参数错误。
+///
+/// # Safety
+/// `v` 必须来自 `ad_viewer_create`；`out` 必须有效。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ad_viewer_take_frame(
+    v: *mut ViewerSession,
+    out: *mut *mut c_void,
+) -> c_int {
+    if v.is_null() || out.is_null() {
+        return -1;
+    }
+    crate::viewer::take_frame(unsafe { &*v }, out)
+}
