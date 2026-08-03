@@ -138,9 +138,7 @@ impl Recorder {
                     recs.insert(room.to_string(), rec);
                 }
                 Err(e) => {
-                    warn!(
-                        "recorder: room={room} 录制文件创建失败（{e}），本次会话跳过该房间录制"
-                    );
+                    warn!("recorder: room={room} 录制文件创建失败（{e}），本次会话跳过该房间录制");
                     recs.insert(room.to_string(), Recording::failed(room, ts));
                     return;
                 }
@@ -262,7 +260,10 @@ mod tests {
         fs::set_permissions(&dir, fs::Permissions::from_mode(orig)).unwrap();
         rec.finalize_all();
 
-        assert!(!dir.join("blocked-room.adrec").exists(), "失败房间不应有录制文件");
+        assert!(
+            !dir.join("blocked-room.adrec").exists(),
+            "失败房间不应有录制文件"
+        );
         assert!(dir.join("ok-room.adrec").exists(), "正常房间不受影响");
         let _ = fs::remove_dir_all(&dir);
     }

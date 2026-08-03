@@ -1114,19 +1114,34 @@ pub enum Propagated {
 ///
 /// `m=application`（数据通道）不算媒体。viewer 的 offer 不允许出现媒体发送方向。
 pub(crate) fn offer_sends_media(sdp: &str) -> bool {
-    let mut in_media = false;
+    // RFC 3264：m-line 无方向属性时缺省为 sendrecv。
+    // 因此媒体 m-line 必须显式 a=recvonly / a=inactive 才视为“不发送”。
+    let mut in_media = false; // 当前是否位于媒体 m-line 内
+    let mut seen_direction = false; // 当前 m-line 是否已有方向属性
     for line in sdp.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("m=") {
+            // 进入新 m-line：上一个媒体 m-line 若缺省方向 → sendrecv（发送）。
+            if in_media && !seen_direction {
+                return true;
+            }
             let mtype = rest.split_whitespace().next().unwrap_or("");
             in_media = mtype != "application";
+            seen_direction = false;
             continue;
         }
-        if in_media && (line.starts_with("a=sendonly") || line.starts_with("a=sendrecv")) {
+        if !in_media {
+            continue;
+        }
+        if line.starts_with("a=sendonly") || line.starts_with("a=sendrecv") {
             return true;
         }
+        if line.starts_with("a=recvonly") || line.starts_with("a=inactive") {
+            seen_direction = true;
+        }
     }
-    false
+    // 文件末尾：最后一个媒体 m-line 缺省方向 → sendrecv（发送）。
+    in_media && !seen_direction
 }
 
 #[cfg(test)]
@@ -1165,6 +1180,31 @@ mod tests {
     fn data_channel_only_not_detected() {
         let s = sdp("m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n");
         assert!(!offer_sends_media(&s));
+    }
+
+    #[test]
+    fn directionless_media_defaults_to_sendrecv() {
+        // RFC 3264：无方向属性 → sendrecv，viewer 应被拒绝。
+        let s = sdp("m=video 9 UDP/TLS/RTP/SAVPF 96\r\n");
+        assert!(offer_sends_media(&s), "缺省方向媒体 m-line 应视为发送");
+    }
+
+    #[test]
+    fn directionless_media_then_recvonly_audio() {
+        // 视频缺省方向（发送）+ 音频 recvonly：整体应判为发送。
+        let s = sdp(
+            "m=video 9 UDP/TLS/RTP/SAVPF 96\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=recvonly\r\n",
+        );
+        assert!(offer_sends_media(&s));
+    }
+
+    #[test]
+    fn recvonly_then_directionless_media() {
+        // 音频 recvonly + 视频缺省方向：视频缺省 sendrecv → 发送。
+        let s = sdp(
+            "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=recvonly\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n",
+        );
+        assert!(offer_sends_media(&s));
     }
 
     #[test]

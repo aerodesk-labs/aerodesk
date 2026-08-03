@@ -34,10 +34,8 @@ impl TlsIdentity {
             }),
             // 显式配置：读取失败/内容为空 → fail fast。
             (Some(c), Some(k)) => {
-                let cert = std::fs::read(&c)
-                    .map_err(|e| format!("CERT_FILE={c} 读取失败: {e}"))?;
-                let key = std::fs::read(&k)
-                    .map_err(|e| format!("KEY_FILE={k} 读取失败: {e}"))?;
+                let cert = std::fs::read(&c).map_err(|e| format!("CERT_FILE={c} 读取失败: {e}"))?;
+                let key = std::fs::read(&k).map_err(|e| format!("KEY_FILE={k} 读取失败: {e}"))?;
                 if cert.is_empty() {
                     return Err(format!("CERT_FILE={c} 为空"));
                 }
@@ -109,10 +107,16 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         let cert = pem("cert.pem");
         let key = pem("key.pem");
-        std::fs::write(&cert, b"-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n")
-            .unwrap();
-        std::fs::write(&key, b"-----BEGIN PRIVATE KEY-----\nBBB\n-----END PRIVATE KEY-----\n")
-            .unwrap();
+        std::fs::write(
+            &cert,
+            b"-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &key,
+            b"-----BEGIN PRIVATE KEY-----\nBBB\n-----END PRIVATE KEY-----\n",
+        )
+        .unwrap();
         set_env(cert.to_str().unwrap(), key.to_str().unwrap());
         let id = TlsIdentity::load().expect("valid files");
         assert_eq!(id.source, "file");
