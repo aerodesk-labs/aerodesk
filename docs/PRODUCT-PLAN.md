@@ -113,22 +113,21 @@ aerodesk-sfu（服务端）                 ← 与客户端共享协议/媒体�
 ## 八、下一步执行计划
 
 ### P3.5 移动端收口（优先）
-1. **iOS App 壳层**（Xcode 工程）：aerodesk-ios 解码器 → `AVSampleBufferDisplayLayer` 渲染；
-   网络用 NWConnection 跑 str0m（或先复用 WS 信令 + UDP socket）；输入事件走数据通道回传。
-   验收：iPhone 真机观看 macOS 被控端。
-2. **Android 真机适配**（需 NDK + 真机）：JNI 桥接；先做观看端（MediaCodec 硬解），
-   再做被控端（MediaProjection 采集 + MediaCodec 硬编 + Accessibility 注入）。
+1. **iOS App 壳层（观看端）** — [#1](https://github.com/aerodesk-labs/aerodesk/issues/1)
+2. **Android 真机适配（观看端 + 被控端）** — [#2](https://github.com/aerodesk-labs/aerodesk/issues/2)
 
 ### P4 桌面补齐（次优先）
-3. **Windows 适配器**：WGC/DXGI 采集 + MF/NVENC 编码 + SendInput（需 Windows 构建机）。
-4. **Linux 适配器**：PipeWire portal 采集 + VAAPI 编码 + XTest/uinput 注入（需 Linux 真机）。
-5. **服务端收口**：信令 JWT 认证、房间录制/审计、多 PoP 部署文档、证书自动化（Let's Encrypt）。
+3. **Windows 适配器** — [#3](https://github.com/aerodesk-labs/aerodesk/issues/3)
+4. **Linux 适配器** — [#4](https://github.com/aerodesk-labs/aerodesk/issues/4)
+5. **服务端收口** — [#5](https://github.com/aerodesk-labs/aerodesk/issues/5)
 
 ### P5 鸿蒙 + 产品化
-6. **HarmonyOS**：NAPI 桥 + AVScreenCapture + OH_VideoDecoder；输入注入权限
-   （INTERCEPT_INPUT_EVENT）走企业签名评估。
-7. **UI 壳**：Flutter 一套覆盖 7 平台（备选 ArkTS 原生 + Rust NAPI）。
-8. **质量验收**：真机冒烟矩阵；p99 抖动 <2ms、端到端 40-80ms@4K60；4K60 压测（CPU/带宽/内存）。
+6. **HarmonyOS 适配器** — [#6](https://github.com/aerodesk-labs/aerodesk/issues/6)
+7. **Flutter UI 壳（7 平台）** — [#7](https://github.com/aerodesk-labs/aerodesk/issues/7)
+8. **质量验收与 4K60 压测** — [#8](https://github.com/aerodesk-labs/aerodesk/issues/8)
+
+> 所有任务在 GitHub Issues 跟踪（按里程碑 P3.5/P4/P5 分桶），
+> 本文件只保留计划背景与坑位记录，任务状态以 Issues/Projects 为准。
 
 ## 九、已踩坑记录（平台适配必读）
 
