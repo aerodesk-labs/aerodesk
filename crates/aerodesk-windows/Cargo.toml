@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 aerodesk-core = { path = "../aerodesk-core" }
+aerodesk-softenc = { path = "../aerodesk-softenc" }
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]

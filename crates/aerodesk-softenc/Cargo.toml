@@ -7,4 +7,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+openh264 = "0.9.7"
+
+# x264 软编需要系统库（pkg-config），Windows 无 → 仅非 Windows 启用；
+# 解码（OpenH264）全平台可用。
+[target.'cfg(not(windows))'.dependencies]
 x264 = { path = "../x264" }
