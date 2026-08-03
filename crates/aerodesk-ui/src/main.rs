@@ -8,7 +8,7 @@ use slint::Model;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 const MAX_RECENTS: usize = 10;
@@ -34,8 +34,8 @@ fn main() -> Result<(), slint::PlatformError> {
     if settings.remember_token && !settings.token_default.is_empty() {
         ui.set_token_input(settings.token_default.into());
     }
-    // 会话帧线程运行标志
-    let session_running = Arc::new(AtomicBool::new(false));
+    // 会话帧线程代际：断开/新会话时递增，使旧帧线程退出（防线程泄漏）。
+    let frame_epoch = Arc::new(AtomicU64::new(0));
 
     ui.on_set_tab({
         let ui = ui.as_weak();
@@ -47,7 +47,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     ui.on_connect({
         let weak = ui.as_weak();
-        let session_running = session_running.clone();
+        let frame_epoch = frame_epoch.clone();
         move || {
             let ui = weak.unwrap();
             let server = ui.get_server_input().to_string();
@@ -57,14 +57,18 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_conn_state(1);
             ui.set_status(format!("连接 {} @ {} …", room, server).into());
             let weak2 = weak.clone();
-            let running2 = session_running.clone();
+            // 本会话代际：断开/新连接会递增 epoch，旧连接/旧帧线程据此退出。
+            let my_epoch = frame_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+            let epoch2 = frame_epoch.clone();
             std::thread::spawn(move || {
                 let auth = if token.is_empty() { None } else { Some(token.as_str()) };
                 let out = aerodesk_core::connect::connect_viewer_auth(&server, &room, auth);
                 let ui = weak2.clone();
                 let Some(ui) = ui.upgrade() else { return };
+                // 连接期间已断开/发起新会话：放弃进入会话视图。
+                let stale = epoch2.load(Ordering::SeqCst) != my_epoch;
                 match out {
-                    Ok(r) => {
+                    Ok(r) if !stale => {
                         ui.set_status(format!("已连接：peer={} ice={}", r.peer_id, r.ice_connected).into());
                         ui.set_log(
                             format!(
@@ -78,11 +82,10 @@ fn main() -> Result<(), slint::PlatformError> {
                         // #23：进入会话视图 + 启动演示帧源（验证视频渲染管道）
                         ui.set_in_session(true);
                         ui.set_session_status("会话中 · 演示帧源（15fps）".into());
-                        running2.store(true, Ordering::SeqCst);
                         let frame_weak = weak2.clone();
                         std::thread::spawn(move || {
                             let mut t = 0u32;
-                            while running2.load(Ordering::SeqCst) {
+                            while epoch2.load(Ordering::SeqCst) == my_epoch {
                                 let Some(fui) = frame_weak.upgrade() else { break };
                                 let px = demo_frame(t);
                                 let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&px, DEMO_W, DEMO_H);
@@ -92,10 +95,13 @@ fn main() -> Result<(), slint::PlatformError> {
                             }
                         });
                     }
+                    Ok(_) => { /* 连接完成但已断开：静默放弃，不进入会话 */ }
                     Err(e) => {
-                        ui.set_conn_state(3);
-                        ui.set_status(format!("连接失败：{e}").into());
-                        ui.set_log(format!("失败原因：{e}").into());
+                        if !stale {
+                            ui.set_conn_state(3);
+                            ui.set_status(format!("连接失败：{e}").into());
+                            ui.set_log(format!("失败原因：{e}").into());
+                        }
                     }
                 }
                 ui.set_connecting(false);
@@ -105,9 +111,10 @@ fn main() -> Result<(), slint::PlatformError> {
 
     ui.on_disconnect({
         let ui = ui.as_weak();
-        let session_running = session_running.clone();
+        let frame_epoch = frame_epoch.clone();
         move || {
-            session_running.store(false, Ordering::SeqCst);
+            // 递增代际：停止当前会话帧线程（含连接中会话，使其放弃进入会话视图）。
+            frame_epoch.fetch_add(1, Ordering::SeqCst);
             let ui = ui.unwrap();
             ui.set_conn_state(0);
             ui.set_input_mode("键鼠已释放".into());
@@ -122,7 +129,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let weak = ui.as_weak();
         move |entry: slint::SharedString| {
             let ui = weak.unwrap();
-            let (room, server) = parse_recent(&entry.to_string());
+            let (room, server) = parse_recent(entry.as_ref());
             ui.set_room_input(room.into());
             ui.set_server_input(server.into());
             ui.invoke_connect();
@@ -237,9 +244,9 @@ fn demo_frame(t: u32) -> Vec<u8> {
     for y in 0..h {
         for x in 0..w {
             let i = (y * w + x) * 4;
-            let band = (x as usize).wrapping_add(bar) % 240;
+            let band = x.wrapping_add(bar) % 240;
             px[i] = (band) as u8; // R
-            px[i + 1] = ((y as usize) % 256) as u8; // G
+            px[i + 1] = (y % 256) as u8; // G
             px[i + 2] = 128; // B
             px[i + 3] = 255; // A
         }
