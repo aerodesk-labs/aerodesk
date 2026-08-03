@@ -21,6 +21,7 @@ use str0m::net::Protocol;
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcError, net::Receive};
 
 use crate::bitrate::{BitrateController, Layer};
+use crate::recorder::Recorder;
 
 /// 发往分片的命令。
 #[allow(clippy::large_enum_variant)]
@@ -102,6 +103,8 @@ pub struct Shared {
     pub tcp_streams: Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
     /// 每分片指标（索引 = shard id）。
     pub metrics: Arc<Vec<ShardMetrics>>,
+    /// 可选录制器（RECORD_DIR 开启时存在）。
+    pub recorder: Option<Arc<Recorder>>,
 }
 
 impl Shared {
@@ -111,6 +114,7 @@ impl Shared {
             room_registry: Arc::new(RwLock::new(HashMap::new())),
             tcp_streams: Arc::new(Mutex::new(HashMap::new())),
             metrics: Arc::new((0..shard_count).map(|_| ShardMetrics::new()).collect()),
+            recorder: None,
         }
     }
 
@@ -228,6 +232,7 @@ fn run_shard(
             match cmd {
                 ShardCommand::AddClient { rtc, room } => {
                     let mut client = Client::new(rtc);
+                    client.recorder = shared.recorder.clone();
                     client.room = room.clone();
                     let id = client.id;
                     *room_counts.entry(room.clone()).or_default() += 1;
@@ -664,6 +669,8 @@ pub struct Client {
     pub tracks_in: Vec<TrackInEntry>,
     pub tracks_out: Vec<TrackOut>,
     pub chosen_rid: Option<Rid>,
+    /// 可选录制器引用（录制开启时非空）。
+    recorder: Option<Arc<Recorder>>,
 }
 
 impl Client {
@@ -681,6 +688,7 @@ impl Client {
             tracks_in: vec![],
             tracks_out: vec![],
             chosen_rid: None,
+            recorder: None,
         }
     }
 
@@ -845,6 +853,9 @@ impl Client {
     }
 
     fn handle_media_data_in(&mut self, data: MediaData) -> Propagated {
+        if let Some(rec) = &self.recorder {
+            rec.record(&self.room, &data.data);
+        }
         if !data.contiguous {
             self.request_keyframe_throttled(data.mid, data.rid, KeyframeRequestKind::Fir);
         }

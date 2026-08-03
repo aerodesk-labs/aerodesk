@@ -5,6 +5,9 @@
 //! - 房间 → 分片哈希路由（同房间同分片优先）
 //! - 跨分片：媒体/关键帧/输入通道事件 + UDP 包转投
 //! - TCP/SSL-TCP：全局 accept/读线程，按路由表分发到分片
+//!
+//! 可选录制/审计：设置 `RECORD_DIR` 后将每个房间媒体载荷落盘（ADREC1 格式）
+//! 并输出 `audit.log` JSON 审计日志（房间起止/包数/字节数）。
 
 #[macro_use]
 extern crate tracing;
@@ -21,6 +24,7 @@ use str0m::net::TcpType;
 use str0m::{Candidate, Rtc, net::Protocol};
 
 mod bitrate;
+mod recorder;
 mod router;
 mod shard;
 mod tcp;
@@ -112,7 +116,16 @@ pub fn main() {
     info!("Bound TCP/SSL-TCP media port: {tcp_addr}");
 
     // 3. 分片通道（先建 channel，后启线程）
-    let shared = Shared::new(shard_count);
+    let mut shared = Shared::new(shard_count);
+    if let Ok(dir) = std::env::var("RECORD_DIR") {
+        match recorder::Recorder::new(&dir) {
+            Ok(rec) => {
+                shared.recorder = Some(Arc::new(rec));
+                info!("recording enabled: {dir}");
+            }
+            Err(e) => warn!("RECORD_DIR set but recorder init failed: {e}"),
+        }
+    }
     let mut shard_txs: Vec<mpsc::Sender<ShardCommand>> = Vec::new();
     let mut shard_rxs = Vec::new();
     for _ in 0..shard_count {
