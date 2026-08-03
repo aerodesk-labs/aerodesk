@@ -129,7 +129,10 @@ fn feed_frame(
 }
 
 /// 取最新帧：有则转移 +1 引用给调用方（返回 0），无则返回 1。
-pub fn take_frame(session: &ViewerSession, out: *mut *mut std::ffi::c_void) -> i32 {
+///
+/// # Safety
+/// `out` 必须有效且可写。
+pub unsafe fn take_frame(session: &ViewerSession, out: *mut *mut std::ffi::c_void) -> i32 {
     let mut slot = session.latest.lock().unwrap_or_else(|e| e.into_inner());
     match slot.take() {
         Some(buf) => {

@@ -173,5 +173,5 @@ pub unsafe extern "C" fn ad_viewer_take_frame(
     if v.is_null() || out.is_null() {
         return -1;
     }
-    crate::viewer::take_frame(unsafe { &*v }, out)
+    unsafe { crate::viewer::take_frame(unsafe { &*v }, out) }
 }

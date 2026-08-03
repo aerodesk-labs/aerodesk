@@ -5,7 +5,6 @@
 
 slint::include_modules!();
 
-use std::net::UdpSocket;
 use std::time::Duration;
 
 use aerodesk_core::endpoint::ClientEvent;
