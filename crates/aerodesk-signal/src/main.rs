@@ -16,6 +16,7 @@
 extern crate tracing;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -363,10 +364,35 @@ fn proxy_to_sfu(
     resp.into_string().map_err(|e| e.to_string())
 }
 
+/// 进程内单调计数器：与纳秒时间戳组合，保证 peer_id 唯一。
+///
+/// 仅用纳秒时间戳在粗时钟（如 macOS ~1ms 分辨率）下可能同 tick 碰撞：
+/// publisher 与 viewer 几乎同时 Join 得到相同 peer_id，Description 按 id
+/// 查角色时会命中错误条目（如 publisher 被当成 viewer）→ SFU #12 误拒。
+static PEER_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 fn fastrand_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("{nanos:x}")
+    let n = PEER_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{nanos:x}-{n}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归：peer_id 必须在快速连续 Join 下保持唯一（粗时钟下纳秒时间戳会碰撞，
+    /// 碰撞会让 Description 按 id 查角色时命中错误条目，导致 SFU #12 误拒）。
+    #[test]
+    fn peer_ids_unique_across_rapid_calls() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..10_000 {
+            let id = fastrand_id();
+            let dup = !seen.insert(id.clone());
+            assert!(!dup, "duplicate peer_id: {id}");
+        }
+    }
 }
