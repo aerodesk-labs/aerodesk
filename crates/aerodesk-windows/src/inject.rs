@@ -1,13 +1,5 @@
 //! 输入注入：SendInput（鼠标绝对坐标/按键/滚轮）。
 
-use std::mem::size_of;
-
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_WHEEL, MOUSEINPUT,
-    SendInput,
-};
-
 /// 输入事件（与 aerodesk-protocol::input 对齐）。
 #[derive(Debug, Clone)]
 pub enum InputEvent {
@@ -37,10 +29,15 @@ pub trait InputInjector {
 }
 
 /// SendInput 注入器（普通桌面会话可用）。
+#[cfg(windows)]
 pub struct SendInputInjector;
 
+#[cfg(windows)]
 impl InputInjector for SendInputInjector {
     fn inject(&mut self, event: &InputEvent) -> Result<(), String> {
+        use std::mem::size_of;
+        use windows::Win32::UI::Input::KeyboardAndMouse::SendInput;
+
         unsafe {
             let inputs = match event {
                 InputEvent::MouseMove { x, y } => vec![mouse_move(*x, *y)],
@@ -56,7 +53,10 @@ impl InputInjector for SendInputInjector {
                 InputEvent::Wheel { dy, .. } => vec![wheel(*dy)],
                 InputEvent::Key { code, down } => vec![key(*code, *down)],
             };
-            let sent = SendInput(&inputs, size_of::<INPUT>() as i32);
+            let sent = SendInput(
+                &inputs,
+                size_of::<windows::Win32::UI::Input::KeyboardAndMouse::INPUT>() as i32,
+            );
             if sent as usize != inputs.len() {
                 return Err("SendInput partial".into());
             }
@@ -65,7 +65,22 @@ impl InputInjector for SendInputInjector {
     }
 }
 
-fn mouse_move(x: f32, y: f32) -> INPUT {
+/// 非 Windows 主机上的编译期骨架（保证 workspace 全平台可编译）。
+#[cfg(not(windows))]
+pub struct SendInputInjector;
+
+#[cfg(not(windows))]
+impl InputInjector for SendInputInjector {
+    fn inject(&mut self, _event: &InputEvent) -> Result<(), String> {
+        Err("windows: SendInput injection only available on Windows".into())
+    }
+}
+
+#[cfg(windows)]
+fn mouse_move(x: f32, y: f32) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE, MOUSEINPUT,
+    };
     INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
@@ -81,7 +96,11 @@ fn mouse_move(x: f32, y: f32) -> INPUT {
     }
 }
 
-fn mouse_button(down: bool) -> INPUT {
+#[cfg(windows)]
+fn mouse_button(down: bool) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT,
+    };
     INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
@@ -101,7 +120,11 @@ fn mouse_button(down: bool) -> INPUT {
     }
 }
 
-fn wheel(dy: f32) -> INPUT {
+#[cfg(windows)]
+fn wheel(dy: f32) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+    };
     INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
@@ -117,7 +140,11 @@ fn wheel(dy: f32) -> INPUT {
     }
 }
 
-fn key(code: u32, down: bool) -> INPUT {
+#[cfg(windows)]
+fn key(code: u32, down: bool) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
+    };
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {

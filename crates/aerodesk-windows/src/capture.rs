@@ -3,35 +3,40 @@
 //! D3D11 设备 → 输出复制 → 纹理读回 BGRA。Graphics Capture（Win10 1903+）
 //! 为后续可选升级路径（同接口，输出帧格式一致）。
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use windows::Win32::Foundation::RECT;
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
-use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BIND_RENDER_TARGET, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-};
-use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter1,
-    IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
-};
-use windows::core::Interface;
-
 use crate::CapturedFrame;
 
-/// DXGI Desktop Duplication 采集器（被控端）。
+/// 采集器抽象（被控端）。
+pub trait ScreenCapturer {
+    fn next_frame(&mut self) -> Option<CapturedFrame>;
+}
+
+/// DXGI Desktop Duplication 采集器（被控端，Windows）。
+#[cfg(windows)]
 pub struct DxgiCapturer {
-    device: ID3D11Device,
-    context: ID3D11DeviceContext,
-    duplication: IDXGIOutputDuplication,
-    staging: ID3D11Texture2D,
+    device: windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    context: windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+    duplication: windows::Win32::Graphics::Dxgi::IDXGIOutputDuplication,
+    staging: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
     width: u32,
     height: u32,
 }
 
+#[cfg(windows)]
 impl DxgiCapturer {
     pub fn new() -> Result<Self, String> {
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_BIND_RENDER_TARGET, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+            D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
+            ID3D11Texture2D,
+        };
+        use windows::Win32::Graphics::Dxgi::{
+            CreateDXGIFactory1, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC, IDXGIAdapter1,
+            IDXGIOutput1,
+        };
+        use windows::core::Interface;
+
         unsafe {
             let mut device: Option<ID3D11Device> = None;
             let mut context: Option<ID3D11DeviceContext> = None;
@@ -77,7 +82,7 @@ impl DxgiCapturer {
                 MipLevels: 1,
                 ArraySize: 1,
                 Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: windows::Win32::Graphics::Dxgi::DXGI_SAMPLE_DESC {
+                SampleDesc: DXGI_SAMPLE_DESC {
                     Count: 1,
                     Quality: 0,
                 },
@@ -86,7 +91,7 @@ impl DxgiCapturer {
                 CPUAccessFlags: D3D11_CPU_ACCESS_READ,
                 MiscFlags: 0,
             };
-            let staging = device
+            let staging: ID3D11Texture2D = device
                 .CreateTexture2D(&staging_desc, None)
                 .map_err(|e| format!("CreateTexture2D: {e}"))?;
 
@@ -107,8 +112,13 @@ impl DxgiCapturer {
 
     /// 取下一帧（阻塞最多 16ms）。无新帧/错误返回 None。
     pub fn next_frame(&mut self) -> Option<CapturedFrame> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use windows::Win32::Graphics::Direct3D11::{D3D11_MAP_READ, ID3D11Texture2D};
+        use windows::Win32::Graphics::Dxgi::IDXGIResource;
+        use windows::core::Interface;
+
         unsafe {
-            let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
+            let mut info = windows::Win32::Graphics::Dxgi::DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource: Option<IDXGIResource> = None;
             if self
                 .duplication
@@ -130,7 +140,8 @@ impl DxgiCapturer {
             };
             self.context.CopyResource(&self.staging, &tex);
 
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            let mut mapped =
+                windows::Win32::Graphics::Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
             if self
                 .context
                 .Map(&self.staging, 0, D3D11_MAP_READ, 0, &mut mapped)
@@ -166,6 +177,7 @@ impl DxgiCapturer {
     }
 }
 
+#[cfg(windows)]
 impl Drop for DxgiCapturer {
     fn drop(&mut self) {
         unsafe {
@@ -174,13 +186,31 @@ impl Drop for DxgiCapturer {
     }
 }
 
-/// 采集器抽象（被控端）。
-pub trait ScreenCapturer {
-    fn next_frame(&mut self) -> Option<CapturedFrame>;
-}
-
+#[cfg(windows)]
 impl ScreenCapturer for DxgiCapturer {
     fn next_frame(&mut self) -> Option<CapturedFrame> {
         self.next_frame()
+    }
+}
+
+/// 非 Windows 主机上的编译期骨架（保证 workspace 全平台可编译）。
+#[cfg(not(windows))]
+pub struct DxgiCapturer;
+
+#[cfg(not(windows))]
+impl DxgiCapturer {
+    pub fn new() -> Result<Self, String> {
+        Err("windows: DXGI capture only available on Windows".into())
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (0, 0)
+    }
+}
+
+#[cfg(not(windows))]
+impl ScreenCapturer for DxgiCapturer {
+    fn next_frame(&mut self) -> Option<CapturedFrame> {
+        None
     }
 }
