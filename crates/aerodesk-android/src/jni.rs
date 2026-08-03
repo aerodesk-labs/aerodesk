@@ -41,3 +41,64 @@ pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_connect<'local>(
         .unwrap_or_else(|e| format!("连接失败: {e}"));
     env.new_string(status).expect("jstring alloc").into_raw()
 }
+
+use crate::viewer::ViewerSession;
+use jni::objects::JByteArray;
+use jni::sys::{jbyteArray, jlong};
+
+/// 创建观看会话（连接 + 后台收流）。返回指针（jlong），失败为 0。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerCreate<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    server: JString<'local>,
+    room: JString<'local>,
+) -> jlong {
+    let server: String = env
+        .get_string(&server)
+        .map(|s| s.into())
+        .unwrap_or_default();
+    let room: String = env.get_string(&room).map(|s| s.into()).unwrap_or_default();
+    match ViewerSession::connect(&server, &room) {
+        Ok(v) => Box::into_raw(Box::new(v)) as jlong,
+        Err(_) => 0,
+    }
+}
+
+/// 销毁观看会话。
+///
+/// # Safety
+/// `ptr` 必须来自 viewerCreate 且未被销毁过。
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerDestroy<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    ptr: jlong,
+) {
+    if ptr != 0 {
+        drop(unsafe { Box::from_raw(ptr as *mut ViewerSession) });
+    }
+}
+
+/// 取最新 AnnexB H.264 帧（空数组表示暂无）。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerTakeAnnexB<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    ptr: jlong,
+) -> jbyteArray {
+    if ptr == 0 {
+        return env.new_byte_array(0).expect("array").into_raw();
+    }
+    let v = unsafe { &*(ptr as *mut ViewerSession) };
+    match v.take_annexb() {
+        Some(frame) => {
+            let arr = env.new_byte_array(frame.len() as i32).expect("byte array");
+            let i8slice =
+                unsafe { std::slice::from_raw_parts(frame.as_ptr() as *const i8, frame.len()) };
+            let _ = env.set_byte_array_region(&arr, 0, i8slice);
+            arr.into_raw()
+        }
+        None => env.new_byte_array(0).expect("byte array").into_raw(),
+    }
+}

@@ -1,13 +1,19 @@
 package io.aerodesk.viewer
 
+import android.media.MediaCodec
+import android.media.MediaFormat
 import android.os.Bundle
+import android.view.SurfaceView
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 
 class MainActivity : AppCompatActivity() {
-    private val bridge = NativeBridge()
+    private var viewer = 0L
+    private var codec: MediaCodec? = null
+    private var running = false
+    private var pollThread: Thread? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -17,17 +23,91 @@ class MainActivity : AppCompatActivity() {
         val room = findViewById<EditText>(R.id.room)
         val status = findViewById<TextView>(R.id.status)
         val connect = findViewById<Button>(R.id.connect)
+        val disconnect = findViewById<Button>(R.id.disconnect)
 
-        status.text = "SDK ${bridge.version()}（Rust JNI）"
+        status.text = "SDK ${NativeBridge.version()}（Rust JNI）"
 
         connect.setOnClickListener {
-            status.text = "连接中…"
             val s = server.text.toString()
             val r = room.text.toString()
+            status.text = "连接中…"
             Thread {
-                val result = bridge.connect(s, r)
-                runOnUiThread { status.text = result }
+                val v = NativeBridge.viewerCreate(s, r)
+                runOnUiThread {
+                    if (v == 0L) {
+                        status.text = "连接失败"
+                    } else {
+                        viewer = v
+                        status.text = "已连接，收流解码中…"
+                        startDecode()
+                    }
+                }
             }.start()
         }
+
+        disconnect.setOnClickListener {
+            stopViewer()
+            status.text = "已断开"
+        }
+    }
+
+    private fun startDecode() {
+        val surface = findViewById<SurfaceView>(R.id.surface).holder.surface
+        val fmt = MediaFormat.createVideoFormat("video/avc", 1280, 720)
+        codec = MediaCodec.createDecoderByType("video/avc").apply {
+            configure(fmt, surface, null, 0)
+            start()
+        }
+        running = true
+        pollThread = Thread {
+            var pts = 0L
+            while (running) {
+                val frame = NativeBridge.viewerTakeAnnexB(viewer)
+                if (frame.isEmpty()) {
+                    Thread.sleep(16)
+                    continue
+                }
+                val c = codec ?: break
+                val idx = c.dequeueInputBuffer(10_000)
+                if (idx >= 0) {
+                    val buf = c.getInputBuffer(idx) ?: continue
+                    buf.clear()
+                    buf.put(frame)
+                    val flags = if (hasSps(frame)) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+                    c.queueInputBuffer(idx, 0, frame.size, pts, flags)
+                    pts += 33_333
+                }
+            }
+        }.apply { start() }
+    }
+
+    private fun hasSps(frame: ByteArray): Boolean {
+        // AnnexB SPS 起始码：00 00 00 01 67 / 00 00 01 67
+        for (i in 0..frame.size - 5) {
+            if (frame[i] == 0.toByte() && frame[i + 1] == 0.toByte()
+                && frame[i + 2] == 1.toByte() && frame[i + 3] == 0x67.toByte()
+            ) return true
+            if (frame[i] == 0.toByte() && frame[i + 1] == 0.toByte()
+                && frame[i + 2] == 0.toByte() && frame[i + 3] == 1.toByte()
+                && frame[i + 4] == 0x67.toByte()
+            ) return true
+        }
+        return false
+    }
+
+    private fun stopViewer() {
+        running = false
+        pollThread?.join(1000)
+        pollThread = null
+        codec?.stop()
+        codec?.release()
+        codec = null
+        if (viewer != 0L) NativeBridge.viewerDestroy(viewer)
+        viewer = 0L
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopViewer()
     }
 }

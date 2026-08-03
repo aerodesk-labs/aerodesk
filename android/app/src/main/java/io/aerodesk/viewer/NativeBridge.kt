@@ -11,4 +11,9 @@ object NativeBridge {
 
     external fun version(): String
     external fun connect(server: String, room: String): String
+
+    // 观看会话（Rust 收流 → AnnexB 帧）
+    external fun viewerCreate(server: String, room: String): Long
+    external fun viewerDestroy(ptr: Long)
+    external fun viewerTakeAnnexB(ptr: Long): ByteArray
 }

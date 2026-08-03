@@ -32,3 +32,4 @@ pub struct CapturedFrame {
     pub pts_us: i64,
 }
 pub mod jni;
+pub mod viewer;
