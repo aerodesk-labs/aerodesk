@@ -26,6 +26,7 @@ pub fn run_viewer(
     ui_weak: slint::Weak<AppWindow>,
     epoch: Arc<AtomicU64>,
     my_epoch: u64,
+    control_rx: std::sync::mpsc::Receiver<String>,
 ) {
     let stale = || epoch.load(Ordering::SeqCst) != my_epoch;
     let auth = token.as_deref().filter(|t| !t.is_empty());
@@ -86,6 +87,12 @@ pub fn run_viewer(
             if let str0m::Output::Transmit(t) = output {
                 let _ = live.socket.send_to(&t.contents, t.destination);
             }
+        }
+        // #29：UI 选层请求（画质/显示器按钮）→ control 通道 → SFU。
+        while let Ok(req) = control_rx.try_recv() {
+            let _ = live
+                .endpoint
+                .send_channel_data("control", false, req.as_bytes());
         }
         while let Some(ev) = live.endpoint.poll_event() {
             match ev {

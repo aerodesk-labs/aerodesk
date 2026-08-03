@@ -67,7 +67,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 #[cfg(target_os = "macos")]
                 {
                     // #29：macOS 真实 H.264 解码渲染（替换演示帧源）。
-                    crate::macos_media::run_viewer(server, room, Some(token), weak2.clone(), epoch2.clone(), my_epoch);
+                    let (control_tx, control_rx) = std::sync::mpsc::channel();
+                    *CONTROL_TX.lock().unwrap() = Some(control_tx);
+                    crate::macos_media::run_viewer(server, room, Some(token), weak2.clone(), epoch2.clone(), my_epoch, control_rx);
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -149,6 +151,10 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // #29：UI → 会话 control 通道（选层请求）。
+    static CONTROL_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>> =
+        std::sync::Mutex::new(None);
+
     // ---- #23 会话工具栏 ----
     let fs_state = Arc::new(AtomicBool::new(false));
     ui.on_toggle_fullscreen({
@@ -171,15 +177,41 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_toggle_display({
         let ui = ui.as_weak();
         move || {
-            ui.unwrap()
-                .set_session_status("显示器切换：待接入（SFU simulcast 选层）".into());
+            let ui = ui.unwrap();
+            // 显示器切换：当前单显示器场景映射为选层切换（f↔h）。
+            let cur = ui.get_input_mode().contains("捕获");
+            let layer = if cur { "h" } else { "f" };
+            if let Some(tx) = CONTROL_TX.lock().unwrap().as_ref() {
+                let _ = tx.send(format!("{{\"layer\":\"{layer}\"}}"));
+            }
+            ui.set_session_status(format!("显示器切换：选层 {layer}（多显示器待接入）").into());
         }
     });
     ui.on_toggle_quality({
         let ui = ui.as_weak();
         move || {
-            ui.unwrap()
-                .set_session_status("画质：待接入（码率/帧率档位）".into());
+            let ui = ui.unwrap();
+            let q = ui.get_quality();
+            // 0=清晰(f) 1=平衡(h) 2=流畅(q)
+            let layer = match q {
+                0 => "f",
+                1 => "h",
+                _ => "q",
+            };
+            if let Some(tx) = CONTROL_TX.lock().unwrap().as_ref() {
+                let _ = tx.send(format!("{{\"layer\":\"{layer}\"}}"));
+            }
+            ui.set_session_status(
+                format!(
+                    "画质：{}（SFU 选层 {layer}）",
+                    match q {
+                        0 => "清晰",
+                        1 => "平衡",
+                        _ => "流畅",
+                    }
+                )
+                .into(),
+            );
         }
     });
     ui.on_toggle_input({
