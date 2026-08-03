@@ -14,9 +14,9 @@ jobs:
           - os: macos-latest
             skip_crates: ""
           - os: ubuntu-latest
-            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli
+            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli --exclude x264
           - os: windows-latest
-            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli
+            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli --exclude x264
     runs-on: ${{ matrix.os }}
     env:
       CARGO_TERM_COLOR: always
@@ -32,14 +32,10 @@ jobs:
 
       - name: System deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev nasm
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libx264-dev
       - name: System deps (macOS)
         if: runner.os == 'macOS'
-        run: brew install nasm
-      - name: System deps (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: choco install nasm -y
+        run: brew install x264
 
       - uses: dtolnay/rust-toolchain@stable
         with:
