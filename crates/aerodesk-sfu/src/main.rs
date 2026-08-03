@@ -74,7 +74,10 @@ pub fn main() {
         .unwrap_or(1);
     info!("Shards: {shard_count}");
 
-    let tls = aerodesk_protocol::tls::TlsIdentity::load();
+    let tls = aerodesk_protocol::tls::TlsIdentity::load().unwrap_or_else(|e| {
+        eprintln!("fatal: TLS identity load failed: {e}");
+        std::process::exit(1);
+    });
     info!("TLS identity source: {}", tls.source);
 
     let host_addr = util::select_host_address();

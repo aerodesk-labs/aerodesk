@@ -47,7 +47,10 @@ fn main() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3001);
-    let tls = aerodesk_protocol::tls::TlsIdentity::load();
+    let tls = aerodesk_protocol::tls::TlsIdentity::load().unwrap_or_else(|e| {
+        eprintln!("fatal: TLS identity load failed: {e}");
+        std::process::exit(1);
+    });
     info!("TLS identity source: {}", tls.source);
 
     // 明文 WS（开发用；生产只开 WSS 端口）
