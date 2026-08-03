@@ -1,0 +1,8 @@
+name: Ping2
+on:
+  push:
+jobs:
+  ping2:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "ping2 ok"
