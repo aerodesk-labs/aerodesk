@@ -190,6 +190,23 @@ fn connect_inner(
     (signal, endpoint, socket, video_mid)
 }
 
+/// 发布端公共事件处理：输入通道（观看端 → 被控端）。
+fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
+    match ev {
+        ClientEvent::ChannelOpen(label, _) if label == "input" => {
+            info!("input channel open");
+        }
+        ClientEvent::ChannelData(cid, _, data) => {
+            if endpoint.channel_label(cid).as_deref() == Some("input") {
+                if let Ok(frame) = serde_json::from_slice::<InputFrame>(&data) {
+                    info!("input: seq={} {:?}", frame.seq, frame.event);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn publisher(signal_url: &str, room: &str, auth: Option<&str>) {
     let pcap = include_bytes!("../../../crates/aerodesk-core/tests/data/vp8.pcap");
     let frames = parse_vp8_pcap(pcap);
@@ -261,17 +278,6 @@ fn publisher(signal_url: &str, room: &str, auth: Option<&str>) {
         // 客户端事件
         while let Some(ev) = endpoint.poll_event() {
             match ev {
-                ClientEvent::ChannelOpen(label, _) if label == "input" => {
-                    info!("input channel open");
-                }
-                ClientEvent::ChannelData(cid, _, data) => {
-                    // 观看端输入事件（input 通道）→ 被控端处理。
-                    if endpoint.channel_label(cid).as_deref() == Some("input") {
-                        if let Ok(frame) = serde_json::from_slice::<InputFrame>(&data) {
-                            info!("input: seq={} {:?}", frame.seq, frame.event);
-                        }
-                    }
-                }
                 ClientEvent::IceConnected => {
                     info!("ICE connected, starting stream");
                     connected = true;
@@ -281,7 +287,7 @@ fn publisher(signal_url: &str, room: &str, auth: Option<&str>) {
                     info!("connection closed");
                     return;
                 }
-                _ => {}
+                ev => handle_publisher_input(&mut endpoint, ev),
             }
         }
 
@@ -483,7 +489,7 @@ fn publisher_x264(signal_url: &str, room: &str, auth: Option<&str>) {
                     info!("connection closed");
                     return;
                 }
-                _ => {}
+                ev => handle_publisher_input(&mut endpoint, ev),
             }
         }
 
@@ -578,7 +584,7 @@ fn publisher_vt(
                     info!("connection closed");
                     return;
                 }
-                _ => {}
+                ev => handle_publisher_input(&mut endpoint, ev),
             }
         }
 
@@ -673,7 +679,7 @@ fn publisher_capture(signal_url: &str, room: &str, auth: Option<&str>) {
                     info!("connection closed");
                     return;
                 }
-                _ => {}
+                ev => handle_publisher_input(&mut endpoint, ev),
             }
         }
 
