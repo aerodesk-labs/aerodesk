@@ -12,6 +12,7 @@ members = [
     "crates/aerodesk-linux",
     "crates/aerodesk-windows",
     "crates/aerodesk-ohos",
+    "crates/aerodesk-ui",
 ]
 
 [workspace.package]

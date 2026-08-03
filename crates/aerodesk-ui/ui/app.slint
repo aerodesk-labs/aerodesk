@@ -1,0 +1,75 @@
+// AeroDesk 通用 UI（Slint）：连接/房间/状态。7 平台一套代码。
+import { Button, LineEdit, ScrollView } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    in-out property <string> server-input: "wss://signal.aerodesk.io";
+    in-out property <string> room-input: "demo";
+    in-out property <string> status: "未连接";
+    in-out property <string> log: "";
+    in-out property <bool> connecting: false;
+
+    callback connect();
+    callback disconnect();
+
+    title: "AeroDesk";
+    width: 460px;
+    height: 600px;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+
+        Text {
+            text: "AeroDesk";
+            font-size: 28px;
+            font-weight: 700;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: "Remote Desktop · 7 平台一套 UI（Slint）";
+            font-size: 12px;
+            color: gray;
+            horizontal-alignment: center;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            LineEdit {
+                text <=> root.server-input;
+                placeholder-text: "信令服务器（wss://…）";
+            }
+            LineEdit {
+                text <=> root.room-input;
+                placeholder-text: "房间";
+                width: 110px;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Button {
+                text: connecting ? "连接中…" : "连接";
+                enabled: !connecting;
+                clicked => { root.connect(); }
+            }
+            Button {
+                text: "断开";
+                enabled: connecting;
+                clicked => { root.disconnect(); }
+            }
+        }
+
+        Text {
+            text: root.status;
+            color: #2ea043;
+        }
+
+        ScrollView {
+            Text {
+                text: root.log;
+                font-size: 11px;
+                font-family: "monospace";
+            }
+        }
+    }
+}
