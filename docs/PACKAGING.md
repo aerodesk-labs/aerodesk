@@ -39,3 +39,17 @@ cargo deb -p aerodesk-ui --target x86_64-unknown-linux-gnu
 - [ ] Linux：cargo-deb/rpm 脚本 + VAAPI 编码
 - [ ] HarmonyOS：DevEco 打包（SDK 到位后）
 - [ ] CI：发布流水线（tag 触发 + 各平台签名上传）
+
+## 本地构建验证（2026-08-04）
+### iOS（模拟器）
+```sh
+bash scripts/build-ios-lib.sh all
+cd ios && xcodegen generate
+xcodebuild -project AeroDesk.xcodeproj -scheme AeroDesk -destination 'generic/platform=iOS Simulator' -configuration Debug ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build CODE_SIGNING_ALLOWED=NO
+```
+### Android（APK）
+```sh
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home  # JDK 26 会触发 Kotlin 插件解析失败
+export ANDROID_HOME=~/Library/Android/sdk
+cd android && bash gradlew assembleDebug
+```

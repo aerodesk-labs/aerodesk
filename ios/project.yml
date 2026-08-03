@@ -16,7 +16,7 @@ targets:
     sources:
       - path: AeroDesk
     dependencies:
-      - framework: AeroDeskBridge/AeroDesk.xcframework
+      - framework: AeroDeskBridge/lib/AeroDesk.xcframework
         embed: false
         codeSign: false
     settings:
