@@ -15,6 +15,8 @@ pub struct VtEncoder {
     width: u32,
     height: u32,
     pts: i64,
+    /// 每帧 RTP 时间戳步进（90kHz / fps；#8 压测发现固定 3000 会把 60fps 压成 30fps）。
+    pts_inc: i64,
 }
 
 impl VtEncoder {
@@ -31,6 +33,7 @@ impl VtEncoder {
             width,
             height,
             pts: 0,
+            pts_inc: (90_000 / fps.max(1)) as i64,
         })
     }
 
@@ -40,7 +43,7 @@ impl VtEncoder {
             .session
             .encode(surface, (self.pts, 90_000))
             .map_err(|e| format!("vt encode: {e:?}"))?;
-        self.pts += 3000;
+        self.pts += self.pts_inc;
         if frame.data.is_empty() {
             return Ok(None);
         }
@@ -67,7 +70,7 @@ impl VtEncoder {
             .session
             .encode(&surface, (self.pts, 90_000))
             .map_err(|e| format!("vt encode: {e:?}"))?;
-        self.pts += 3000; // 90kHz / 30fps
+        self.pts += self.pts_inc; // 90kHz / fps
         if frame.data.is_empty() {
             return Ok(None);
         }
