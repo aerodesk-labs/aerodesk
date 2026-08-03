@@ -10,11 +10,18 @@ export component AppWindow inherits Window {
     in-out property <string> log: "";
     in-out property <bool> connecting: false;
     in-out property <[string]> recents: [];
+    in-out property <bool> in-session: false;
+    in-out property <image> video-frame: @image-url("");
+    in-out property <string> session-status: "";
 
     callback connect();
     callback disconnect();
     callback set-tab(int);
     callback connect-recent(string);
+    callback toggle-fullscreen();
+    callback toggle-audio();
+    callback toggle-display();
+    callback toggle-quality();
 
     title: "AeroDesk";
     width: 760px;
@@ -108,6 +115,36 @@ export component AppWindow inherits Window {
                     spacing: 12px;
                     Text { text: "设置"; font-size: 18px; font-weight: 600; }
                     Text { text: "显示（质量/帧率/码率）· 网络 · 安全（密码/权限）· 快捷键 —— 见 #24"; color: gray; }
+                }
+
+                // ---- 会话视图（#23）----
+                if root.in-session: VerticalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        background: #000;
+                        border-radius: 6px;
+                        Image {
+                            source: root.video-frame;
+                            width: 100%;
+                            height: 100%;
+                            image-fit: contain;
+                        }
+                        if root.video-frame.width == 0: Text {
+                            text: "等待媒体流…（演示帧源已就绪，真实解码后续接入）";
+                            color: #555;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Button { text: "全屏"; clicked => { root.toggle-fullscreen(); } }
+                        Button { text: "音频"; clicked => { root.toggle-audio(); } }
+                        Button { text: "显示器"; clicked => { root.toggle-display(); } }
+                        Button { text: "画质"; clicked => { root.toggle-quality(); } }
+                        Button { text: "断开"; clicked => { root.disconnect(); } }
+                    }
+                    Text { text: root.session-status; color: #2ea043; font-size: 12px; }
                 }
             }
         }

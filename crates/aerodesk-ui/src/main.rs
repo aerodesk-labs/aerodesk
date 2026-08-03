@@ -1,4 +1,4 @@
-//! AeroDesk UI 壳（Slint）：主页（连接区 + 最近会话）+ 设置占位。
+//! AeroDesk UI 壳（Slint）：主页（连接区 + 最近会话）+ 会话视图（#23 初版）。
 //!
 //! 5 个原生平台（Win/macOS/Linux/Android/iOS）一套 UI；Web 走浏览器原生 WebRTC。
 
@@ -6,8 +6,13 @@ slint::include_modules!();
 use slint::Model;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 const MAX_RECENTS: usize = 10;
+const DEMO_W: u32 = 320;
+const DEMO_H: u32 = 180;
 
 fn main() -> Result<(), slint::PlatformError> {
     init_log();
@@ -15,6 +20,8 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // 最近会话（本地持久化）
     ui.set_recents(slint::ModelRc::new(slint::VecModel::from(load_recents())));
+    // 会话帧线程运行标志
+    let session_running = Arc::new(AtomicBool::new(false));
 
     ui.on_set_tab({
         let ui = ui.as_weak();
@@ -26,6 +33,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     ui.on_connect({
         let weak = ui.as_weak();
+        let session_running = session_running.clone();
         move || {
             let ui = weak.unwrap();
             let server = ui.get_server_input().to_string();
@@ -34,21 +42,40 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_connecting(true);
             ui.set_status(format!("连接 {} @ {} …", room, server).into());
             let weak2 = weak.clone();
+            let running2 = session_running.clone();
             std::thread::spawn(move || {
                 let auth = if token.is_empty() { None } else { Some(token.as_str()) };
                 let out = aerodesk_core::connect::connect_viewer_auth(&server, &room, auth);
-                let ui = weak2.unwrap();
+                let ui = weak2.clone();
+                let Some(ui) = ui.upgrade() else { return };
                 match out {
                     Ok(r) => {
                         ui.set_status(format!("已连接：peer={} ice={}", r.peer_id, r.ice_connected).into());
                         ui.set_log(
                             format!(
-                                "房间: {room}\n服务器: {server}\nSDP 交换: OK\nICE: {}\n\n已建立 WebRTC 会话（媒体/输入由后续里程碑接入）。",
+                                "房间: {room}\n服务器: {server}\nSDP 交换: OK\nICE: {}\n\n已建立 WebRTC 会话（真实媒体/输入后续接入）。",
                                 if r.ice_connected { "connected" } else { "pending(5s 超时)" }
                             )
                             .into(),
                         );
                         add_recent(&ui, &room, &server);
+                        // #23：进入会话视图 + 启动演示帧源（验证视频渲染管道）
+                        ui.set_in_session(true);
+                        ui.set_session_status("会话中 · 演示帧源（15fps）".into());
+                        running2.store(true, Ordering::SeqCst);
+                        let frame_weak = weak2.clone();
+                        std::thread::spawn(move || {
+                            let mut t = 0u32;
+                            while running2.load(Ordering::SeqCst) {
+                                if let Some(fui) = frame_weak.upgrade() {
+                                    let px = demo_frame(t);
+                                    let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&px, DEMO_W, DEMO_H);
+                                    fui.set_video_frame(slint::Image::from_rgba8(buffer));
+                                }
+                                t = t.wrapping_add(1);
+                                std::thread::sleep(Duration::from_millis(66));
+                            }
+                        });
                     }
                     Err(e) => {
                         ui.set_status(format!("连接失败：{e}").into());
@@ -61,9 +88,13 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     ui.on_disconnect({
-        let weak = ui.as_weak();
+        let ui = ui.as_weak();
+        let session_running = session_running.clone();
         move || {
-            let ui = weak.unwrap();
+            session_running.store(false, Ordering::SeqCst);
+            let ui = ui.unwrap();
+            ui.set_in_session(false);
+            ui.set_video_frame(slint::Image::default());
             ui.set_status("已断开".into());
             ui.set_connecting(false);
         }
@@ -76,12 +107,55 @@ fn main() -> Result<(), slint::PlatformError> {
             let (room, server) = parse_recent(&entry.to_string());
             ui.set_room_input(room.into());
             ui.set_server_input(server.into());
-            // 复用连接回调
             ui.invoke_connect();
         }
     });
 
+    // ---- #23 会话工具栏 ----
+    let fs_state = Arc::new(AtomicBool::new(false));
+    ui.on_toggle_fullscreen({
+        let ui = ui.as_weak();
+        let fs_state = fs_state.clone();
+        move || {
+            let fs = !fs_state.fetch_xor(true, Ordering::SeqCst);
+            let ui = ui.unwrap();
+            ui.window().set_fullscreen(fs);
+            ui.set_session_status(format!("全屏：{}", if fs { "开" } else { "关" }).into());
+        }
+    });
+    ui.on_toggle_audio({
+        let ui = ui.as_weak();
+        move || { ui.unwrap().set_session_status("音频：待接入（数据通道/媒体轨道）".into()); }
+    });
+    ui.on_toggle_display({
+        let ui = ui.as_weak();
+        move || { ui.unwrap().set_session_status("显示器切换：待接入（SFU simulcast 选层）".into()); }
+    });
+    ui.on_toggle_quality({
+        let ui = ui.as_weak();
+        move || { ui.unwrap().set_session_status("画质：待接入（码率/帧率档位）".into()); }
+    });
+
     ui.run()
+}
+
+/// 演示帧源：移动渐变（验证 Slint 视频渲染管道；真实解码后续接入）。
+fn demo_frame(t: u32) -> Vec<u8> {
+    let w = DEMO_W as usize;
+    let h = DEMO_H as usize;
+    let mut px = vec![0u8; w * h * 4];
+    let bar = (t % 240) as usize;
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            let band = (x as usize).wrapping_add(bar) % 240;
+            px[i] = (band) as u8; // R
+            px[i + 1] = ((y as usize) % 256) as u8; // G
+            px[i + 2] = 128; // B
+            px[i + 3] = 255; // A
+        }
+    }
+    px
 }
 
 /// 最近会话格式：`房间 · 服务器`（解析用分隔符）。
@@ -140,4 +214,29 @@ fn init_log() {
         .with(fmt::layer())
         .with(filter)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn demo_frame_rgba() {
+        let px = demo_frame(0);
+        assert_eq!(px.len(), (DEMO_W * DEMO_H * 4) as usize);
+        // alpha 全 255
+        assert!(px[3] == 255 && px[px.len() - 1] == 255);
+        // 不同帧内容不同（移动条）
+        assert_ne!(demo_frame(0), demo_frame(120));
+    }
+
+    #[test]
+    fn parse_recent_formats() {
+        let (r, s) = parse_recent("demo · wss://x:3001/ws");
+        assert_eq!(r, "demo");
+        assert_eq!(s, "wss://x:3001/ws");
+        let (r, s) = parse_recent("plain");
+        assert_eq!(r, "plain");
+        assert_eq!(s, "wss://signal.aerodesk.io");
+    }
 }
