@@ -1,6 +1,6 @@
 //! 媒体管线抽象：平台适配器实现，核心只依赖这些 trait。
 //!
-//! 平台矩阵（见 docs/PRODUCT-PLAN.md）：
+//! 平台矩阵（见仓库 Wiki「Platform-Roles」）：
 //! - Windows: DXGI + NVENC/QSV + WASAPI + SendInput
 //! - macOS:   ScreenCaptureKit + VideoToolbox + CGEvent
 //! - Linux:   PipeWire + VAAPI + XTest/uinput
