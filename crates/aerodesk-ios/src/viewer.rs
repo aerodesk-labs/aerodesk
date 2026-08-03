@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use aerodesk_core::access_unit::AccessUnitAssembler;
 use aerodesk_core::connect::LiveSession;
 use aerodesk_core::endpoint::ClientEvent;
 use apple_cf::cv::CVPixelBuffer;
@@ -75,6 +76,9 @@ fn pump_media(
     input_rx: mpsc::Receiver<Vec<u8>>,
 ) {
     let mut decoder = H264Decoder::new();
+    // str0m 输出单条 AnnexB NAL；按 RTP 时间戳聚合为完整访问单元后再解码
+    // （SPS/PPS 与 VCL 同帧，VideoToolbox 才能建 format description）。
+    let mut assembler = AccessUnitAssembler::new();
     while !stop.load(Ordering::SeqCst) {
         // 输入事件：观看端捕获 → input 数据通道 → SFU → 被控端。
         while let Ok(json) = input_rx.try_recv() {
@@ -111,7 +115,13 @@ fn pump_media(
                     if let Some(mid) = session.video_mid
                         && data.mid == mid
                     {
-                        feed_frame(&mut decoder, &data.data, &latest);
+                        if let Some(au) = assembler.push(
+                            data.data.as_ref(),
+                            data.time.as_micros(),
+                            data.is_keyframe(),
+                        ) {
+                            feed_frame(&mut decoder, &au.data, au.pts_us, &latest);
+                        }
                     }
                 }
                 ClientEvent::Closed => {
@@ -129,9 +139,10 @@ fn pump_media(
 fn feed_frame(
     decoder: &mut H264Decoder,
     annexb: &[u8],
+    pts_us: u64,
     latest: &Arc<Mutex<Option<CVPixelBuffer>>>,
 ) {
-    let Ok(Some(buf)) = decoder.decode_annexb(annexb, 0) else {
+    let Ok(Some(buf)) = decoder.decode_annexb(annexb, pts_us as i64) else {
         return;
     };
     let raw = buf.as_ptr();
