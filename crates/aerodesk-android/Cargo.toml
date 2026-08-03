@@ -10,3 +10,9 @@ rust-version.workspace = true
 aerodesk-core = { path = "../aerodesk-core" }
 str0m = { workspace = true, features = ["rust-crypto"] }
 tracing.workspace = true
+serde_json.workspace = true
+aerodesk-protocol = { path = "../aerodesk-protocol" }
+jni = "0.21"
+
+[lib]
+crate-type = ["rlib", "cdylib"]

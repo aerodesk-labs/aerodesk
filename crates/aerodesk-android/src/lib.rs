@@ -31,3 +31,4 @@ pub struct CapturedFrame {
     pub height: u32,
     pub pts_us: i64,
 }
+pub mod jni;
