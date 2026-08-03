@@ -30,6 +30,16 @@ pub trait InputInjector {
     fn inject(&mut self, event: &InputEvent) -> Result<(), String>;
 }
 
+/// XTest fake input 类型码（X11 核心事件码）。
+#[cfg(target_os = "linux")]
+mod fake_input {
+    pub const KEY_PRESS: u8 = 2;
+    pub const KEY_RELEASE: u8 = 3;
+    pub const BUTTON_PRESS: u8 = 4;
+    pub const BUTTON_RELEASE: u8 = 5;
+    pub const MOTION_NOTIFY: u8 = 6;
+}
+
 /// XTest 注入器（X11 桌面）。
 #[cfg(target_os = "linux")]
 pub struct XTestInjector {
@@ -77,22 +87,19 @@ impl XTestInjector {
                 y,
                 0, // deviceid
             )
-            .map_err(|e| format!("xtest_fake_input: {e:?}"))
+            .map_err(|e| format!("xtest_fake_input: {e:?}"))?;
+        Ok(())
     }
 }
 
 #[cfg(target_os = "linux")]
 impl InputInjector for XTestInjector {
     fn inject(&mut self, event: &InputEvent) -> Result<(), String> {
-        use x11rb::protocol::xtest::{
-            FAKE_INPUT_BUTTON_PRESS, FAKE_INPUT_BUTTON_RELEASE, FAKE_INPUT_KEY_PRESS,
-            FAKE_INPUT_KEY_RELEASE, FAKE_INPUT_MOTION,
-        };
         let to_px = |v: f32| (v.clamp(0.0, 1.0) * self.width as f32) as i16;
         let to_py = |v: f32| (v.clamp(0.0, 1.0) * self.height as f32) as i16;
         match event {
             InputEvent::MouseMove { x, y } => {
-                self.fake(FAKE_INPUT_MOTION, 0, to_px(*x), to_py(*y))?;
+                self.fake(fake_input::MOTION_NOTIFY, 0, to_px(*x), to_py(*y))?;
             }
             InputEvent::MouseButton {
                 x,
@@ -100,11 +107,11 @@ impl InputInjector for XTestInjector {
                 button: 0,
                 down,
             } => {
-                self.fake(FAKE_INPUT_MOTION, 0, to_px(*x), to_py(*y))?;
+                self.fake(fake_input::MOTION_NOTIFY, 0, to_px(*x), to_py(*y))?;
                 let kind = if *down {
-                    FAKE_INPUT_BUTTON_PRESS
+                    fake_input::BUTTON_PRESS
                 } else {
-                    FAKE_INPUT_BUTTON_RELEASE
+                    fake_input::BUTTON_RELEASE
                 };
                 self.fake(kind, 1, 0, 0)?; // 左键
             }
@@ -114,14 +121,14 @@ impl InputInjector for XTestInjector {
             InputEvent::Wheel { dy, .. } => {
                 // X11 滚轮：按钮 4=上 / 5=下。
                 let btn = if *dy > 0.0 { 4u8 } else { 5u8 };
-                self.fake(FAKE_INPUT_BUTTON_PRESS, btn, 0, 0)?;
-                self.fake(FAKE_INPUT_BUTTON_RELEASE, btn, 0, 0)?;
+                self.fake(fake_input::BUTTON_PRESS, btn, 0, 0)?;
+                self.fake(fake_input::BUTTON_RELEASE, btn, 0, 0)?;
             }
             InputEvent::Key { code, down } => {
                 let kind = if *down {
-                    FAKE_INPUT_KEY_PRESS
+                    fake_input::KEY_PRESS
                 } else {
-                    FAKE_INPUT_KEY_RELEASE
+                    fake_input::KEY_RELEASE
                 };
                 self.fake(kind, *code as u8, 0, 0)?;
             }
