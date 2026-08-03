@@ -172,7 +172,12 @@ fn connect_inner(
         .expect("candidate");
     let _ = turn;
 
-    endpoint.add_video();
+    // #12：viewer 的 offer 用 recvonly（SFU 拒绝 viewer 发布媒体）。
+    if role == Role::Viewer {
+        endpoint.add_video_recvonly();
+    } else {
+        endpoint.add_video();
+    }
     let (offer, pending, video_mid) = endpoint.create_offer().expect("offer");
     info!("video mid: {video_mid:?}");
     let offer_json = serde_json::to_string(&offer).unwrap();
