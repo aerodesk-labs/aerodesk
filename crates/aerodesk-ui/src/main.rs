@@ -245,6 +245,65 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // ---- #29 被控端授权流程 ----
+    ui.on_refresh_perms({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            #[cfg(target_os = "macos")]
+            {
+                let (sc, ax) = (
+                    aerodesk_macos::permissions::screen_capture_authorized(),
+                    aerodesk_macos::permissions::accessibility_authorized(),
+                );
+                ui.set_perm_screen(if sc {
+                    "已授权".into()
+                } else {
+                    "未授权".into()
+                });
+                ui.set_perm_a11y(if ax {
+                    "已授权".into()
+                } else {
+                    "未授权".into()
+                });
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                ui.set_perm_screen("平台未实现".into());
+                ui.set_perm_a11y("平台未实现".into());
+            }
+        }
+    });
+    ui.on_open_screen_perms({
+        let ui = ui.as_weak();
+        move || {
+            #[cfg(target_os = "macos")]
+            aerodesk_macos::permissions::open_system_settings(
+                aerodesk_macos::permissions::SettingsPane::ScreenCapture,
+            );
+            #[cfg(not(target_os = "macos"))]
+            if let Some(ui) = ui.upgrade() {
+                ui.set_settings_status("被控端权限引导仅 macOS 实现".into());
+            }
+        }
+    });
+    ui.on_open_a11y_perms({
+        let ui = ui.as_weak();
+        move || {
+            #[cfg(target_os = "macos")]
+            aerodesk_macos::permissions::open_system_settings(
+                aerodesk_macos::permissions::SettingsPane::Accessibility,
+            );
+            #[cfg(not(target_os = "macos"))]
+            if let Some(ui) = ui.upgrade() {
+                ui.set_settings_status("被控端权限引导仅 macOS 实现".into());
+            }
+        }
+    });
+
+    // 启动时刷一次权限状态
+    ui.invoke_refresh_perms();
+
     ui.run()
 }
 
