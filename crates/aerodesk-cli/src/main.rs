@@ -450,7 +450,7 @@ fn viewer(signal_url: &str, room: &str, auth: Option<&str>, layer: Option<&str>)
 /// x264 发布端：合成帧 → H.264 编码 → SFU。
 fn publisher_x264(signal_url: &str, room: &str, auth: Option<&str>) {
     use aerodesk_macos::synthetic::SyntheticSource;
-    use aerodesk_softenc::X264Encoder;
+    use aerodesk_softenc::encode::X264Encoder;
 
     const W: u32 = 640;
     const H: u32 = 360;
