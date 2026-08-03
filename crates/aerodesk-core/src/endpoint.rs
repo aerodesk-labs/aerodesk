@@ -125,6 +125,8 @@ impl Endpoint {
         };
         let _ = change.add_channel("offer/answer".into());
         let _ = change.add_channel("input".into());
+        // #29 画质/显示切换：观看端 → SFU 的控制通道（选层请求等）。
+        let _ = change.add_channel("control".into());
         let (offer, pending) = change
             .apply()
             .ok_or(RtcError::Io(std::io::Error::other("no changes")))?;
