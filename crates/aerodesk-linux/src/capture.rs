@@ -32,6 +32,7 @@ impl X11Capturer {
             .map_err(|e| format!("x11 connect: {e}"))?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
+        let depth = screen.root_depth;
         let geo = conn
             .get_geometry(root)
             .map_err(|e| format!("get_geometry: {e:?}"))?
@@ -43,7 +44,7 @@ impl X11Capturer {
             root,
             width,
             height,
-            depth: screen.root_depth,
+            depth,
         })
     }
 
