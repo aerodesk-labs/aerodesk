@@ -17,4 +17,4 @@ str0m = { workspace = true, features = ["rust-crypto"] }
 tracing.workspace = true
 
 [dev-dependencies]
-aerodesk-macos = { path = "../aerodesk-macos" }
+aerodesk-softenc = { path = "../aerodesk-softenc" }

@@ -226,7 +226,7 @@ impl H264Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aerodesk_macos::encoder::X264Encoder;
+    use aerodesk_softenc::X264Encoder;
 
     #[test]
     fn parses_last_nal_without_truncation() {

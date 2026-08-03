@@ -7,6 +7,7 @@ members = [
     "crates/aerodesk-signal",
     "crates/aerodesk-cli",
     "crates/aerodesk-macos",
+    "crates/aerodesk-softenc",
     "crates/aerodesk-ios",
     "crates/aerodesk-android",
     "crates/aerodesk-linux",
