@@ -5,12 +5,7 @@
 
 slint::include_modules!();
 
-use std::time::Duration;
 
-use aerodesk_core::endpoint::ClientEvent;
-use aerodesk_core::{Endpoint, signaling::WsSignalClient};
-use aerodesk_protocol::signal::Role;
-use str0m::net::Protocol;
 
 fn main() -> Result<(), slint::PlatformError> {
     init_log();

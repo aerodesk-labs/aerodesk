@@ -5,7 +5,6 @@
 use std::net::UdpSocket;
 use std::time::Duration;
 
-use crate::endpoint::ClientEvent;
 use crate::signaling::WsSignalClient;
 use aerodesk_protocol::signal::Role;
 use str0m::net::Protocol;
@@ -98,18 +97,18 @@ pub fn connect_live_role(server: &str, room: &str, role: Role) -> Result<LiveSes
             .set_read_timeout(Some(Duration::from_millis(10)))
             .ok();
         let mut buf = [0u8; 2048];
-        if let Ok((n, source)) = socket.recv_from(&mut buf) {
-            if let Ok(contents) = buf[..n].try_into() {
-                let _ = endpoint.handle_input(str0m::Input::Receive(
-                    std::time::Instant::now(),
-                    str0m::net::Receive {
-                        proto: Protocol::Udp,
-                        source,
-                        destination: socket.local_addr().unwrap(),
-                        contents,
-                    },
-                ));
-            }
+        if let Ok((n, source)) = socket.recv_from(&mut buf)
+            && let Ok(contents) = buf[..n].try_into()
+        {
+            let _ = endpoint.handle_input(str0m::Input::Receive(
+                std::time::Instant::now(),
+                str0m::net::Receive {
+                    proto: Protocol::Udp,
+                    source,
+                    destination: socket.local_addr().unwrap(),
+                    contents,
+                },
+            ));
         }
         let _ = endpoint.handle_timeout(std::time::Instant::now());
         while let Some(output) = endpoint.poll_output() {

@@ -10,3 +10,6 @@
 /android/app/build
 /android/local.properties
 /android/app/src/main/jniLibs/
+
+# 打包产物
+/dist
