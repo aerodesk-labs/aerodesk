@@ -16,7 +16,7 @@ jobs:
           - os: ubuntu-latest
             skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli
           - os: windows-latest
-            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli --exclude x264 --exclude aerodesk-softenc
+            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli --exclude aerodesk-linux --exclude x264 --exclude aerodesk-softenc
     runs-on: ${{ matrix.os }}
     env:
       CARGO_TERM_COLOR: always
