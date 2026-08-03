@@ -9,6 +9,7 @@
 //! └── media      媒体管线抽象 + VP8 测试媒体源
 //! ```
 
+pub mod access_unit;
 pub mod endpoint;
 pub mod media;
 pub mod signaling;
