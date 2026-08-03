@@ -97,12 +97,48 @@ aerodesk-sfu（服务端）                 ← 与客户端共享协议/媒体�
 
 **原则**：协议内核一份（str0m + bwe-fixes）；媒体管线抽象一份；平台差异全部收敛到适配器 trait；输入协议一份定义（各平台只实现注入/捕获）。
 
-## 七、待办队列（按 P1 展开）
+## 七、当前状态速览
 
-1. aerodesk-sfu 多核分片骨架（thread-per-core + SO_REUSEPORT + 房间哈希路由）
-2. ~~coturn 接入~~ ✅ 已实现
-3. 信令服务独立化（WSS + 认证 + 房间 + 会话管理）
-4. ~~BitrateController + set_current_bitrate~~ ✅ 已实现
-5. ~~simulcast/SVC 选层~~ ✅ 已实现（q/h/f 按目标码率）
-6. ~~模拟器测试框架~~ ✅ 已实现（netem：丢包/延迟/抖动/确定性）
-7. ~~指标与可观测性~~ ✅ 已实现（/metrics per-shard 计数）
+| 模块 | 状态 |
+|---|---|
+| aerodesk-sfu（分片/UnifiedSocket/选层/metrics） | ✅ 完成 |
+| coturn TURN（REST 凭证 + /config 下发） | ✅ 完成 |
+| aerodesk-signal（WSS/WS 信令） | ✅ 完成 |
+| aerodesk-core（Endpoint/信令客户端/VP8） | ✅ 完成 |
+| aerodesk-macos（SCK 采集/VT 硬编/x264/CGEvent） | ✅ 完成（E2E 验证） |
+| aerodesk-ios（VT H.264 硬解） | ✅ 解码库完成；App 壳层待做 |
+| aerodesk-android / linux / windows / ohos | 🔨 骨架（trait + 数据流） |
+| web/index.html | ✅ P0 原型 |
+
+## 八、下一步执行计划
+
+### P3.5 移动端收口（优先）
+1. **iOS App 壳层**（Xcode 工程）：aerodesk-ios 解码器 → `AVSampleBufferDisplayLayer` 渲染；
+   网络用 NWConnection 跑 str0m（或先复用 WS 信令 + UDP socket）；输入事件走数据通道回传。
+   验收：iPhone 真机观看 macOS 被控端。
+2. **Android 真机适配**（需 NDK + 真机）：JNI 桥接；先做观看端（MediaCodec 硬解），
+   再做被控端（MediaProjection 采集 + MediaCodec 硬编 + Accessibility 注入）。
+
+### P4 桌面补齐（次优先）
+3. **Windows 适配器**：WGC/DXGI 采集 + MF/NVENC 编码 + SendInput（需 Windows 构建机）。
+4. **Linux 适配器**：PipeWire portal 采集 + VAAPI 编码 + XTest/uinput 注入（需 Linux 真机）。
+5. **服务端收口**：信令 JWT 认证、房间录制/审计、多 PoP 部署文档、证书自动化（Let's Encrypt）。
+
+### P5 鸿蒙 + 产品化
+6. **HarmonyOS**：NAPI 桥 + AVScreenCapture + OH_VideoDecoder；输入注入权限
+   （INTERCEPT_INPUT_EVENT）走企业签名评估。
+7. **UI 壳**：Flutter 一套覆盖 7 平台（备选 ArkTS 原生 + Rust NAPI）。
+8. **质量验收**：真机冒烟矩阵；p99 抖动 <2ms、端到端 40-80ms@4K60；4K60 压测（CPU/带宽/内存）。
+
+## 九、已踩坑记录（平台适配必读）
+
+1. **VideoToolbox H.264 硬解对 AnnexB 末 NAL 截断极敏感**：解析器必须保留最后一个
+   NAL 的完整尾部（含 CABAC 收尾字节），截断 2-3 字节即稳定报
+   `kVTVideoDecoderMalfunctionErr(-12909)`（症状与 profile/SEI/多 slice 无关，
+   排查时全部排除了）。回归测试：`parses_last_nal_without_truncation`。
+2. **x264 输入必须是 4:2:0**：直接喂 RGB 会编码成 High 4:4:4（SPS profile_idc=0xF4），
+   VideoToolbox 不支持。`X264Encoder` 已内置 RGB24→I420 转换（BT.601）。
+3. **实时编码不要用帧级多线程**：x264 帧线程会缓冲前若干帧导致首帧延迟；
+   软编路径固定单线程单 slice（输出确定且立即出帧）。
+4. **SEI 不进解码样本**：x264/ffmpeg 的 buffering_period/pic_timing SEI（数百字节）
+   在部分硬解上会触发 -12909；解码样本只含 VCL NAL（1..=5），SPS/PPS 走 format description。
