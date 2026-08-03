@@ -27,6 +27,8 @@ pub struct AccessUnitAssembler {
     current_pts: Option<u64>,
     current: Vec<u8>,
     current_keyframe: bool,
+    /// 当前帧超限被标记丢弃：后续同时间戳数据一律跳过，切帧时整帧放弃（#36）。
+    dropping: bool,
     /// 单帧字节数上限（防御异常流导致内存失控；4K 帧量级 ~8MB）。
     max_au_bytes: usize,
     frames: usize,
@@ -45,6 +47,7 @@ impl AccessUnitAssembler {
             current_pts: None,
             current: Vec::new(),
             current_keyframe: false,
+            dropping: false,
             max_au_bytes: 64 << 20,
             frames: 0,
         }
@@ -60,9 +63,19 @@ impl AccessUnitAssembler {
         }
         match self.current_pts {
             Some(p) if p == pts_us => {
-                if self.current.len().saturating_add(data.len()) <= self.max_au_bytes {
-                    self.current.extend_from_slice(data);
+                if self.dropping {
+                    // 整帧已标记丢弃：同帧数据全部跳过（#36）。
+                    return None;
                 }
+                let would_exceed =
+                    self.current.len().saturating_add(data.len()) > self.max_au_bytes;
+                if would_exceed {
+                    // 超限：丢弃整帧而非保留残缺帧（#36）。
+                    self.dropping = true;
+                    self.current.clear();
+                    return None;
+                }
+                self.current.extend_from_slice(data);
                 self.current_keyframe |= keyframe;
                 None
             }
@@ -91,12 +104,22 @@ impl AccessUnitAssembler {
     fn begin(&mut self, pts_us: u64, data: &[u8], keyframe: bool) {
         self.current_pts = Some(pts_us);
         self.current.clear();
-        self.current.extend_from_slice(data);
         self.current_keyframe = keyframe;
+        // #35：首条 NAL 同样受单帧上限约束，超限直接丢弃整帧。
+        self.dropping = data.len() > self.max_au_bytes;
+        if !self.dropping {
+            self.current.extend_from_slice(data);
+        }
     }
 
     fn take_current(&mut self) -> Option<AccessUnit> {
         let pts = self.current_pts.take()?;
+        if self.dropping {
+            // 整帧被丢弃：不产出、不计帧数。
+            self.dropping = false;
+            self.current.clear();
+            return None;
+        }
         self.frames += 1;
         Some(AccessUnit {
             data: std::mem::take(&mut self.current),
@@ -175,12 +198,38 @@ mod tests {
     }
 
     #[test]
-    fn oversized_frame_is_capped() {
+    fn oversized_mid_frame_drops_whole_frame() {
         let mut au = AccessUnitAssembler::new();
         au.max_au_bytes = 16;
         au.push(&[0u8; 10], 1, false);
-        au.push(&[0u8; 10], 1, false); // 超上限：丢弃并入
-        let f = au.flush().unwrap();
-        assert_eq!(f.data.len(), 10, "超出上限的 NAL 应被丢弃");
+        au.push(&[0u8; 10], 1, false); // 超上限：整帧丢弃
+        assert!(au.flush().is_none(), "残缺帧不应产出");
+        assert_eq!(au.frames(), 0);
+        // 下一帧正常恢复。
+        au.push(&[0u8; 4], 2, false);
+        let f = au.flush().expect("next frame");
+        assert_eq!(f.data.len(), 4);
+    }
+
+    #[test]
+    fn oversized_first_nal_drops_frame() {
+        let mut au = AccessUnitAssembler::new();
+        au.max_au_bytes = 16;
+        // 首条 NAL 超上限（#35）：整帧丢弃，后续同 ts 也跳过。
+        au.push(&[0u8; 20], 1, true);
+        au.push(&[0u8; 4], 1, false);
+        assert!(au.flush().is_none());
+        assert_eq!(au.frames(), 0);
+    }
+
+    #[test]
+    fn dropped_frame_does_not_leak_into_next() {
+        let mut au = AccessUnitAssembler::new();
+        au.max_au_bytes = 16;
+        au.push(&[0u8; 20], 1, true); // 超限丢弃（push 返回 None）
+        assert!(au.push(&[0u8; 4], 2, false).is_none(), "新帧仍在组装中");
+        let f2 = au.flush().expect("next frame");
+        assert_eq!(f2.data.len(), 4);
+        assert!(!f2.keyframe, "丢弃帧的关键帧标志不得泄漏");
     }
 }
