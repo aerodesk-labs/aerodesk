@@ -38,7 +38,7 @@
         </select>
         <input id="room" placeholder="房间" value="demo">
         <input id="signal" placeholder="信令（默认 wss://host:3001/ws）" value="">
-        <input id="token" placeholder="JWT（可选）" type="password" value="">
+        <input id="token" placeholder="JWT（可选，仅本页读取）" value="">
         <button id="connect" class="primary">连接</button>
         <button id="disconnect" disabled>断开</button>
     </div>
@@ -52,21 +52,26 @@
 
 <script>
 'use strict';
-// ---------- 参数 ----------
+// ---------- 参数（仅用于预填；运行期从输入框取值） ----------
 const params = new URLSearchParams(location.search);
-const ROLE = params.get('role') || 'viewer';
-const ROOM = params.get('room') || 'demo';
-const TOKEN = params.get('token') || '';
+const rawRole = params.get('role') || 'viewer';
+// #21：前端校验角色
+const ROLE = (rawRole === 'publisher') ? 'publisher' : 'viewer';
+const ROOM_PREFILL = params.get('room') || 'demo';
 const SIGNAL_OVERRIDE = params.get('signal') || '';
+const TOKEN_PREFILL = params.get('token') || '';
+
 const byId = (id) => document.getElementById(id);
 const $ = byId;
 
-byId('role').value = ROLE;
-byId('room').value = ROOM;
-byId('token').value = TOKEN;
+$('role').value = ROLE;
+$('room').value = ROOM_PREFILL;
+$('token').value = TOKEN_PREFILL;
 
 let rtc = null, ws = null, peerId = null, inputChannel = null, signalChannel = null;
-let pending = [], inputSeq = 0, closed = false;
+let pending = [], inputSeq = 0, closed = false, screenStream = null;
+
+// ---------- 信令 ----------
 
 function log(msg) {
     const el = $('log');
@@ -84,7 +89,21 @@ function signalURL() {
     return `${proto}//${location.hostname}:${port}/ws`;
 }
 function sendSignal(msg) { ws.send(JSON.stringify(msg)); }
-function nextSignal() { return new Promise((resolve) => pending.push(resolve)); }
+
+// #19：pending 队列按消息类型匹配 + 超时 + 可重置
+function nextSignal(type, timeoutMs = 20000) {
+    return new Promise((resolve, reject) => {
+        const item = { type, resolve, reject };
+        pending.push(item);
+        setTimeout(() => {
+            const i = pending.indexOf(item);
+            if (i >= 0) { pending.splice(i, 1); reject(new Error('信令超时: ' + type)); }
+        }, timeoutMs);
+    });
+}
+function resetPending() {
+    for (const p of pending.splice(0)) p.reject(new Error('连接已重置'));
+}
 
 async function connectSignal() {
     await new Promise((resolve, reject) => {
@@ -94,11 +113,31 @@ async function connectSignal() {
     });
     ws.onmessage = (e) => {
         const msg = JSON.parse(e.data);
-        if (pending.length) pending.shift()(msg);
-        else log('signal: ' + e.data);
+        // 按类型匹配首个等待项
+        const idx = pending.findIndex((p) => p.type === msg.type);
+        if (idx >= 0) {
+            const [item] = pending.splice(idx, 1);
+            item.resolve(msg);
+        } else {
+            log('signal: ' + e.data);
+        }
     };
     ws.onclose = () => { if (!closed) { setStatus('信令断开'); log('signaling closed'); } };
     log('signaling connected: ' + signalURL());
+}
+
+// ---------- ICE：非 trickle 需等 gathering 完成（#17） ----------
+function waitIceGatheringComplete() {
+    if (rtc.iceGatheringState === 'complete') return Promise.resolve();
+    return new Promise((resolve) => {
+        rtc.addEventListener('icegatheringstatechange', () => {
+            if (rtc.iceGatheringState === 'complete') resolve();
+        });
+    });
+}
+async function localSdp() {
+    await waitIceGatheringComplete();
+    return JSON.stringify(rtc.localDescription);
 }
 
 // ---------- 输入事件（InputFrame 协议） ----------
@@ -111,34 +150,17 @@ function normPos(e, el) {
 }
 function sendInput(event) {
     if (!inputChannel || inputChannel.readyState !== 'open') return;
-    const frame = {
-        version: 1,
-        seq: inputSeq++,
-        timestamp_ms: Date.now(),
-        event,
-    };
+    const frame = { version: 1, seq: inputSeq++, timestamp_ms: Date.now(), event };
     inputChannel.send(JSON.stringify(frame));
 }
 const BTN = { 0: 'left', 1: 'middle', 2: 'right', 3: 'back', 4: 'forward' };
-function modifiers(e) {
-    return { ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey };
-}
+function modifiers(e) { return { ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey }; }
 function bindInput(el) {
     el.addEventListener('mousemove', (e) => sendInput({ type: 'mouse_move', ...normPos(e, el) }));
-    el.addEventListener('mousedown', (e) => {
-        sendInput({ type: 'mouse_button', button: BTN[e.button] || 'left', state: 'pressed', ...normPos(e, el) });
-    });
-    el.addEventListener('mouseup', (e) => {
-        sendInput({ type: 'mouse_button', button: BTN[e.button] || 'left', state: 'released', ...normPos(e, el) });
-    });
-    el.addEventListener('wheel', (e) => {
-        e.preventDefault();
-        sendInput({ type: 'wheel', ...normPos(e, el), delta_x: e.deltaX || 0, delta_y: e.deltaY || 0 });
-    }, { passive: false });
-    el.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        sendInput({ type: 'mouse_button', button: 'right', state: 'pressed', ...normPos(e, el) });
-    });
+    el.addEventListener('mousedown', (e) => sendInput({ type: 'mouse_button', button: BTN[e.button] || 'left', state: 'pressed', ...normPos(e, el) }));
+    el.addEventListener('mouseup', (e) => sendInput({ type: 'mouse_button', button: BTN[e.button] || 'left', state: 'released', ...normPos(e, el) }));
+    el.addEventListener('wheel', (e) => { e.preventDefault(); sendInput({ type: 'wheel', ...normPos(e, el), delta_x: e.deltaX || 0, delta_y: e.deltaY || 0 }); }, { passive: false });
+    el.addEventListener('contextmenu', (e) => { e.preventDefault(); sendInput({ type: 'mouse_button', button: 'right', state: 'pressed', ...normPos(e, el) }); });
     el.addEventListener('touchstart', (e) => touch(e, 'down'), { passive: true });
     el.addEventListener('touchmove', (e) => touch(e, 'move'), { passive: true });
     el.addEventListener('touchend', (e) => touch(e, 'up'), { passive: true });
@@ -149,11 +171,9 @@ function bindInput(el) {
 function touch(e, action) {
     for (const t of e.changedTouches) {
         const rect = $('video').getBoundingClientRect();
-        sendInput({
-            type: 'touch', touch_id: t.identifier, action,
+        sendInput({ type: 'touch', touch_id: t.identifier, action,
             x: Math.min(1, Math.max(0, (t.clientX - rect.left) / (rect.width || 1))),
-            y: Math.min(1, Math.max(0, (t.clientY - rect.top) / (rect.height || 1))),
-        });
+            y: Math.min(1, Math.max(0, (t.clientY - rect.top) / (rect.height || 1))), });
     }
 }
 
@@ -168,25 +188,32 @@ function setupRtc(iceServers) {
     };
     rtc.onicecandidate = () => { /* v1 非 trickle：candidate 内嵌 SDP */ };
 
-    // SDP 协商通道（轨道增删）
     signalChannel = rtc.createDataChannel('offer/answer');
     signalChannel.onmessage = (event) => {
         const json = JSON.parse(event.data);
         if (json.type === 'offer') handleOffer(event.data);
         else if (json.type === 'answer') {
-            if (pending.length) pending.shift()(event.data);
+            // negotiate() 的应答（data channel，与信令 WS 的 pending 队列分离）
+            if (dcAnswerResolve) { dcAnswerResolve(event.data); dcAnswerResolve = null; }
         }
     };
     signalChannel.onopen = () => {
-        // 输入通道（观看端 → 被控端）
         inputChannel = rtc.createDataChannel('input');
         inputChannel.onopen = () => log('input channel open');
         inputChannel.onmessage = (e) => log('input event: ' + e.data);
-        if (ROLE === 'publisher') startScreen();
-        else log('viewer ready — 在视频上移动/点击发送输入');
+        // #20：屏幕共享流已在点击时授权，这里直接加入连接
+        if (ROLE === 'publisher' && screenStream) {
+            const track = screenStream.getVideoTracks()[0];
+            if (track) {
+                rtc.addTransceiver(track, { direction: 'sendonly', streams: [screenStream] });
+                negotiate();
+                log('屏幕共享已加入连接');
+            }
+        } else if (ROLE === 'viewer') {
+            log('viewer ready — 在视频上移动/点击发送输入');
+        }
     };
 
-    // 媒体轨道（观看端）
     rtc.ontrack = (e) => {
         const video = $('video');
         video.srcObject = e.streams[0] || new MediaStream([e.track]);
@@ -196,35 +223,33 @@ function setupRtc(iceServers) {
     };
 }
 
+let dcAnswerResolve = null;
 async function negotiate() {
     const offer = await rtc.createOffer();
     await rtc.setLocalDescription(offer);
-    await signalChannel.send(JSON.stringify(offer));
-    const json = await new Promise((resolve) => pending.push(resolve));
-    await rtc.setRemoteDescription(JSON.parse(json));
+    await waitIceGatheringComplete();               // #17
+    await signalChannel.send(JSON.stringify(rtc.localDescription));
+    const answer = await new Promise((resolve) => { dcAnswerResolve = resolve; });
+    await rtc.setRemoteDescription(JSON.parse(answer));
 }
 async function handleOffer(json) {
     const offer = JSON.parse(json);
     await rtc.setRemoteDescription(offer);
     const answer = await rtc.createAnswer();
     await rtc.setLocalDescription(answer);
-    await signalChannel.send(JSON.stringify(answer));
+    await waitIceGatheringComplete();               // #17
+    await signalChannel.send(JSON.stringify(rtc.localDescription));
 }
 
-// ---------- 发布端：共享屏幕 ----------
-async function startScreen() {
+// ---------- 发布端：点击时先授权屏幕共享（#20） ----------
+async function acquireScreen() {
     try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({
-            video: { frameRate: 30 },
-            audio: false,
-        });
-        rtc.addTransceiver(stream.getVideoTracks()[0], { direction: 'sendonly', streams: [stream] });
-        stream.getVideoTracks()[0].addEventListener('ended', () => log('屏幕共享结束'));
-        await negotiate();
-        log('屏幕共享已开始');
+        screenStream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: false });
+        screenStream.getVideoTracks()[0].addEventListener('ended', () => log('屏幕共享结束'));
+        log('屏幕共享已授权');
     } catch (e) {
-        log('屏幕共享失败: ' + e);
-        setStatus('屏幕共享失败');
+        log('屏幕共享被拒绝: ' + e.message);
+        throw new Error('屏幕共享被拒绝');
     }
 }
 
@@ -233,14 +258,23 @@ async function connect() {
     closed = false;
     $('connect').disabled = true;
     $('disconnect').disabled = false;
-    setStatus('连接信令…');
+    setStatus('连接中…');
     try {
+        // #18：token 从输入框读取（URL 仅预填）
+        const token = byId('token').value || null;
+
+        // #20：发布端在用户点击手势内先请求屏幕共享
+        if (ROLE === 'publisher') {
+            setStatus('请求屏幕共享授权…');
+            await acquireScreen();
+        }
+
+        setStatus('连接信令…');
         await connectSignal();
-        sendSignal({ type: 'join', room: ROOM, role: ROLE, auth_token: TOKEN || null });
-        const joined = await nextSignal();
-        if (joined.type === 'error') { setStatus('join 失败: ' + joined.message); return; }
+        sendSignal({ type: 'join', room: $('room').value || 'demo', role: ROLE, auth_token: token });
+        const joined = await nextSignal('joined');
         peerId = joined.peer_id;
-        setStatus('已加入房间 ' + ROOM + '，peer=' + peerId);
+        setStatus('已加入房间，peer=' + peerId);
 
         let iceServers = [];
         if (joined.turn && joined.turn.urls) {
@@ -251,26 +285,37 @@ async function connect() {
 
         const offer = await rtc.createOffer();
         await rtc.setLocalDescription(offer);
-        sendSignal({ type: 'description', from: peerId, to: 'sfu', description: JSON.stringify(offer) });
-        const resp = await nextSignal();
-        if (resp.type !== 'description') { setStatus('信令错误: ' + JSON.stringify(resp)); return; }
+        const sdp = await localSdp();               // #17：等 gathering 完成
+        sendSignal({ type: 'description', from: peerId, to: 'sfu', description: sdp });
+        const resp = await nextSignal('description');
         await rtc.setRemoteDescription(JSON.parse(resp.description));
         setStatus('已连接');
         log('SDP 交换完成，等待媒体…');
     } catch (e) {
         setStatus('连接失败: ' + e.message);
         log('error: ' + e);
+        stopScreen();
     } finally {
         $('connect').disabled = false;
     }
 }
 
+function stopScreen() {
+    if (screenStream) {
+        for (const t of screenStream.getTracks()) t.stop();
+        screenStream = null;
+    }
+}
+
 function disconnect() {
     closed = true;
+    resetPending();
+    dcAnswerResolve = null;
     if (inputChannel) { try { inputChannel.close(); } catch (_) {} }
     if (signalChannel) { try { signalChannel.close(); } catch (_) {} }
     if (rtc) rtc.close();
     if (ws) ws.close();
+    stopScreen();
     rtc = null; ws = null; peerId = null; inputChannel = null; signalChannel = null;
     $('video').srcObject = null;
     $('placeholder').style.display = 'flex';
