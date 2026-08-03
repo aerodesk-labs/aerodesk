@@ -13,6 +13,10 @@ export component AppWindow inherits Window {
     in-out property <[string]> recents: [];
     in-out property <bool> in-session: false;
     in-out property <image> video-frame: @image-url("");
+    // #29 多会话标签：会话房间列表 / 当前标签 / 各会话帧。
+    in-out property <[string]> session-tabs: [];
+    in-out property <int> active-session: 0;
+    in-out property <[image]> session-frames: [];
     in-out property <string> session-status: "";
     in-out property <string> input-mode: "键鼠已释放";
     in-out property <int> settings-tab: 0;          // 0=显示 1=网络 2=安全 3=快捷键
@@ -34,6 +38,7 @@ export component AppWindow inherits Window {
     callback toggle-display();
     callback toggle-quality();
     callback toggle-input();
+    callback switch-session(int);
     callback set-settings-tab(int);
     callback set-quality(int);
     callback save-settings();
@@ -195,17 +200,26 @@ export component AppWindow inherits Window {
                 // ---- 会话视图（#23）----
                 if root.in-session: VerticalLayout {
                     spacing: 8px;
+                    // 多会话标签（#29）
+                    HorizontalLayout {
+                        spacing: 4px;
+                        // Slint 1.17 无 enumerate；固定槽位（最多 4 个并发会话）。
+                        if root.session-tabs.length > 0: Button { text: root.session-tabs[0]; checked: root.active-session == 0; clicked => { root.switch-session(0); } }
+                        if root.session-tabs.length > 1: Button { text: root.session-tabs[1]; checked: root.active-session == 1; clicked => { root.switch-session(1); } }
+                        if root.session-tabs.length > 2: Button { text: root.session-tabs[2]; checked: root.active-session == 2; clicked => { root.switch-session(2); } }
+                        if root.session-tabs.length > 3: Button { text: root.session-tabs[3]; checked: root.active-session == 3; clicked => { root.switch-session(3); } }
+                    }
                     Rectangle {
                         background: #000;
                         border-radius: 6px;
                         Image {
-                            source: root.video-frame;
+                            source: root.session-frames[root.active-session];
                             width: 100%;
                             height: 100%;
                             image-fit: contain;
                         }
-                        if root.video-frame.width == 0: Text {
-                            text: "等待媒体流…（演示帧源已就绪，真实解码后续接入）";
+                        if root.session-frames[root.active-session].width == 0: Text {
+                            text: "等待媒体流…（真实解码已接入 macOS；其余平台演示帧）";
                             color: #555;
                             vertical-alignment: center;
                             horizontal-alignment: center;

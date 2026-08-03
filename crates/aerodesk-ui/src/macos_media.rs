@@ -13,7 +13,7 @@ use aerodesk_core::connect::connect_live_role;
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_macos::decode::{H264Decoder, to_rgba};
 use aerodesk_protocol::signal::Role;
-use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
+use slint::{Image, Model, Rgba8Pixel, SharedPixelBuffer};
 use str0m::net::Protocol;
 
 use crate::AppWindow;
@@ -27,6 +27,7 @@ pub fn run_viewer(
     epoch: Arc<AtomicU64>,
     my_epoch: u64,
     control_rx: std::sync::mpsc::Receiver<String>,
+    session_idx: usize,
 ) {
     let stale = || epoch.load(Ordering::SeqCst) != my_epoch;
     let auth = token.as_deref().filter(|t| !t.is_empty());
@@ -58,6 +59,25 @@ pub fn run_viewer(
     ui.set_conn_state(2);
     ui.set_in_session(true);
     ui.set_session_status("会话中 · 真实 H.264 解码（VideoToolbox）".into());
+
+    // #29 多会话标签：登记会话房间与帧槽。
+    {
+        let mut tabs: Vec<slint::SharedString> = (0..ui.get_session_tabs().row_count())
+            .filter_map(|i| ui.get_session_tabs().row_data(i))
+            .collect();
+        if !tabs.iter().any(|t| t.as_str() == room) {
+            tabs.push(room.clone().into());
+        }
+        ui.set_session_tabs(slint::ModelRc::new(slint::VecModel::from(tabs)));
+        let mut frames: Vec<slint::Image> = (0..ui.get_session_frames().row_count())
+            .filter_map(|i| ui.get_session_frames().row_data(i))
+            .collect();
+        if frames.len() <= session_idx {
+            frames.resize(session_idx + 1, slint::Image::default());
+        }
+        ui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(frames)));
+        ui.set_active_session(session_idx as i32);
+    }
 
     let mut assembler = AccessUnitAssembler::new();
     let mut decoder = H264Decoder::new();
@@ -111,8 +131,23 @@ pub fn run_viewer(
                             let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
                                 &rgba, w as u32, h as u32,
                             );
+                            let img = Image::from_rgba8(buffer);
                             if let Some(fui) = ui_weak.upgrade() {
-                                fui.set_video_frame(Image::from_rgba8(buffer));
+                                // 更新本会话帧槽；当前标签同时更新显示帧。
+                                let mut arr: Vec<slint::Image> =
+                                    (0..fui.get_session_frames().row_count())
+                                        .filter_map(|i| fui.get_session_frames().row_data(i))
+                                        .collect();
+                                if arr.len() <= session_idx {
+                                    arr.resize(session_idx + 1, slint::Image::default());
+                                }
+                                arr[session_idx] = img.clone();
+                                fui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(
+                                    arr,
+                                )));
+                                if fui.get_active_session() == session_idx as i32 {
+                                    fui.set_video_frame(img);
+                                }
                             }
                             frames += 1;
                         }

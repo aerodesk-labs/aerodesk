@@ -67,9 +67,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 #[cfg(target_os = "macos")]
                 {
                     // #29：macOS 真实 H.264 解码渲染（替换演示帧源）。
+                    let session_idx = SESSION_NEXT.fetch_add(1, Ordering::SeqCst);
                     let (control_tx, control_rx) = std::sync::mpsc::channel();
                     *CONTROL_TX.lock().unwrap() = Some(control_tx);
-                    crate::macos_media::run_viewer(server, room, Some(token), weak2.clone(), epoch2.clone(), my_epoch, control_rx);
+                    crate::macos_media::run_viewer(server, room, Some(token), weak2.clone(), epoch2.clone(), my_epoch, control_rx, session_idx);
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -135,6 +136,17 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_input_mode("键鼠已释放".into());
             ui.set_in_session(false);
             ui.set_video_frame(slint::Image::default());
+            ui.set_session_tabs(slint::ModelRc::new(slint::VecModel::from(Vec::<
+                slint::SharedString,
+            >::new(
+            ))));
+            ui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(Vec::<
+                slint::Image,
+            >::new(
+            ))));
+            ui.set_active_session(0);
+            SESSION_NEXT.store(0, Ordering::SeqCst);
+            *CONTROL_TX.lock().unwrap() = None;
             ui.set_status("已断开".into());
             ui.set_connecting(false);
         }
@@ -154,6 +166,25 @@ fn main() -> Result<(), slint::PlatformError> {
     // #29：UI → 会话 control 通道（选层请求）。
     static CONTROL_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>> =
         std::sync::Mutex::new(None);
+    // #29 多会话：会话槽序号（断开时清零）。
+    static SESSION_NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    ui.on_switch_session({
+        let ui = ui.as_weak();
+        move |idx| {
+            let ui = ui.unwrap();
+            ui.set_active_session(idx);
+            if let Some(frame) = ui.get_session_frames().row_data(idx as usize) {
+                ui.set_video_frame(frame);
+            }
+            let name = ui
+                .get_session_tabs()
+                .row_data(idx as usize)
+                .map(|r| r.to_string())
+                .unwrap_or_default();
+            ui.set_status(format!("已切换到会话 {name}").into());
+        }
+    });
 
     // ---- #23 会话工具栏 ----
     let fs_state = Arc::new(AtomicBool::new(false));
