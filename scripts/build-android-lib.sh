@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # 构建 aerodesk-android 静态/动态库并复制到 jniLibs。
 # 依赖：NDK（ANDROID_NDK_HOME 或 ~/Library/Android/sdk/ndk）、cargo-ndk。
+# 注意：APK 构建（./gradlew assembleDebug）在 exFAT 卷上会因 macOS 生成的
+# `._*` AppleDouble 文件导致资源合并失败，建议在 APFS 卷（如 ~/tmp）构建。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -9,7 +11,7 @@ ABI="${ABI:-arm64-v8a}"
 TARGET="${TARGET:-aarch64-linux-android}"
 
 echo "== cargo ndk -t $ABI build -p aerodesk-android --release"
-ANDROID_NDK_HOME="$NDK_HOME" cargo ndk -t "$ABI" -p aerodesk-android build --release
+ANDROID_NDK_HOME="$NDK_HOME" cargo ndk -t "$ABI" build --release -p aerodesk-android
 
 DST="android/app/src/main/jniLibs/$ABI"
 mkdir -p "$DST"
