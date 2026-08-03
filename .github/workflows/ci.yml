@@ -50,7 +50,10 @@ jobs:
       - name: test
         run: cargo test --workspace ${{ matrix.skip_crates }}
 
-      - name: e2e smoke (sfu+signal+publisher+viewer)
+      # 端到端冒烟依赖 macOS 专属编码器（aerodesk-cli ← aerodesk-macos），
+      # 跨平台编译/单测已由三平台矩阵覆盖。
+      - name: e2e smoke (macOS only)
+        if: runner.os == 'macOS'
         run: ./scripts/smoke.sh
 
       - name: windows adapter
