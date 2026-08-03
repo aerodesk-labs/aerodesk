@@ -3,15 +3,6 @@
 
 use x264::{Colorspace, Encoder, Image, Plane};
 
-/// 一帧编码输出。
-#[derive(Debug)]
-pub struct EncodedFrame {
-    /// AnnexB H.264 NAL（SPS/PPS 由 headers() 提供，帧数据含关键帧）。
-    pub data: Vec<u8>,
-    pub keyframe: bool,
-    pub pts: i64,
-}
-
 /// RGB24 → I420 转换（BT.601 有限范围，整数运算）。
 pub fn rgb_to_i420(rgb: &[u8], width: u32, height: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     assert_eq!(
@@ -82,7 +73,7 @@ impl X264Encoder {
     }
 
     /// 编码一帧 RGB24 图像。
-    pub fn encode(&mut self, rgb: &[u8]) -> Result<Option<EncodedFrame>, String> {
+    pub fn encode(&mut self, rgb: &[u8]) -> Result<Option<crate::EncodedFrame>, String> {
         let (y, u, v) = rgb_to_i420(rgb, self.width, self.height);
         let y_plane = Plane {
             stride: self.width as i32,
@@ -112,7 +103,7 @@ impl X264Encoder {
         if bytes.is_empty() {
             return Ok(None);
         }
-        Ok(Some(EncodedFrame {
+        Ok(Some(crate::EncodedFrame {
             data: bytes.to_vec(),
             keyframe: picture.keyframe(),
             pts,

@@ -1,26 +1,7 @@
-//! 编码器（骨架）。
+//! 编码器：OpenH264 软编（全平台，aerodesk-softenc）。
 //!
-//! 真机路径：Media Foundation `H.264 Encoder MFT` / `HEVC Encoder MFT`；
-//! 回退 NVENC（ffmpeg 静态库）或软编 x264（aerodesk-softenc，需 Windows 系统 x264/
-//! vendored 支持后接入——当前 CI 的 x264-sys 走 pkg-config，Windows 无系统 x264）。
+//! 硬件路径（后续）：Media Foundation `H.264 Encoder MFT` / HEVC MFT，
+//! 或 NVENC/QSV/AMF。OpenH264（BSD）在 Windows 10+ 直接可用，先打通被控端编码链路。
 
-/// 编码输出（AnnexB）。
-#[derive(Debug, Clone)]
-pub struct EncodedFrame {
-    pub data: Vec<u8>,
-    pub keyframe: bool,
-    pub pts: i64,
-}
-
-/// TODO(P4): Media Foundation 实现。
-pub struct MfEncoder;
-
-impl MfEncoder {
-    pub fn new(_width: u32, _height: u32, _fps: u32, _bitrate_kbps: u32) -> Result<Self, String> {
-        Err("windows: Media Foundation encoder not implemented yet (P4)".into())
-    }
-
-    pub fn encode(&mut self, _bgra: &[u8]) -> Result<Option<EncodedFrame>, String> {
-        Ok(None)
-    }
-}
+pub use aerodesk_softenc::EncodedFrame;
+pub use aerodesk_softenc::openh264enc::OpenH264Encoder as SoftEncoder;
