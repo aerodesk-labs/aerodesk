@@ -38,3 +38,29 @@ export AR_aarch64_unknown_linux_ohos=llvm-ar
 - [ ] OH_VideoDecoder 硬解 + 渲染
 - [ ] AVScreenCapture 采集 + 硬编
 - [ ] 真机验收（鸿蒙观看 macOS 被控端）
+
+## NAPI 桥接口规约（2026-08-04，待 DevEco 工具链落地后实现）
+
+与 Android JNI / iOS FFI 同构，暴露 aerodesk-core 给 ArkTS 壳层：
+
+```ts
+// 观看端
+export function connectViewer(server: string, room: string, token?: string): number; // 返回 session id
+export function takeFrame(session: number): Uint8Array;   // 取最新完整访问单元（AnnexB）
+export function disconnect(session: number): void;
+
+// 被控端（后续）
+export function startPublish(server: string, room: string, token?: string): number;
+export function injectInput(json: string): boolean;       // InputFrame JSON → 注入
+```
+
+- 观看端：ArkTS 侧拿 `takeFrame` 的 AnnexB 喂 `OH_VideoDecoder`（AVCC 化 + SPS/PPS 首帧），
+  输出 Surface 给 XComponent 渲染
+- 被控端：AVScreenCapture 输出 → Rust 侧编码/打包 → str0m RTP；注入走
+  `OH_Input`/系统能力（企业签名通道）
+- Rust 侧复用 `aerodesk-core::connect`（含 AccessUnitAssembler，与 iOS/Android 同管线）
+
+### 编译阻塞（已确认）
+- `cargo check -p aerodesk-ohos --target aarch64-unknown-linux-ohos` 被 **ring 的 C 编译**
+  阻塞（需要 OpenHarmony NDK clang，设置 `CC_aarch64_unknown_linux_ohos`）
+- 需要 DevEco Studio + OHOS NDK 环境；本仓库 CI 暂无 ohos runner
