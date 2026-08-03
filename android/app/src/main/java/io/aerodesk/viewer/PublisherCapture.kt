@@ -29,6 +29,7 @@ class PublisherCapture(
         const val BITRATE = 4_000_000
     }
 
+    @Volatile var publisherPtr: Long = 0L
     private val handler = Handler(Looper.getMainLooper())
     private var encoder: MediaCodec? = null
     private var display: VirtualDisplay? = null
@@ -41,6 +42,7 @@ class PublisherCapture(
         running = true
         Thread {
             val ptr = bridge.publisherCreate(server, room)
+            publisherPtr = ptr
             if (ptr == 0L) {
                 running = false
                 return@Thread

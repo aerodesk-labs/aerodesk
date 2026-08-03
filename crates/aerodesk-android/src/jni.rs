@@ -171,3 +171,18 @@ pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_publisherFeedAnnexB<
         JNI_FALSE
     }
 }
+
+/// 取一条输入事件 JSON（观看端 → 本被控端）。空字符串表示暂无。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_publisherTakeInput<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    ptr: jlong,
+) -> jstring {
+    if ptr == 0 {
+        return env.new_string("").expect("jstring").into_raw();
+    }
+    let p = unsafe { &*(ptr as *mut PublisherSession) };
+    let out = p.take_input().unwrap_or_default();
+    env.new_string(out).expect("jstring").into_raw()
+}

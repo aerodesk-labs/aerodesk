@@ -21,4 +21,5 @@ object NativeBridge {
     external fun publisherCreate(server: String, room: String): Long
     external fun publisherDestroy(ptr: Long)
     external fun publisherFeedAnnexB(ptr: Long, frame: ByteArray, ptsUs: Long): Boolean
+    external fun publisherTakeInput(ptr: Long): String
 }

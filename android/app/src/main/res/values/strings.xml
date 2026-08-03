@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_desc">AeroDesk 输入注入：把观看端的鼠标/键盘事件应用到本设备。</string>
+</resources>
