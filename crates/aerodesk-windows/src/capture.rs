@@ -87,8 +87,8 @@ impl DxgiCapturer {
                     Quality: 0,
                 },
                 Usage: D3D11_USAGE_STAGING,
-                BindFlags: D3D11_BIND_RENDER_TARGET,
-                CPUAccessFlags: D3D11_CPU_ACCESS_READ,
+                BindFlags: D3D11_BIND_RENDER_TARGET.0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0,
                 MiscFlags: 0,
             };
             let mut staging: Option<ID3D11Texture2D> = None;
@@ -146,7 +146,7 @@ impl DxgiCapturer {
                 windows::Win32::Graphics::Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
             if self
                 .context
-                .Map(&self.staging, 0, D3D11_MAP_READ, 0, &mut mapped)
+                .Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
                 .is_err()
             {
                 let _ = self.duplication.ReleaseFrame();

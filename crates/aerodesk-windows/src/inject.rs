@@ -149,7 +149,7 @@ fn key(code: u32, down: bool) -> windows::Win32::UI::Input::KeyboardAndMouse::IN
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
-                wVk: code as u16,
+                wVk: VIRTUAL_KEY(code as u16),
                 wScan: 0,
                 dwFlags: if down {
                     KEYBD_EVENT_FLAGS(0)
