@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS：全量（含 macos/ios/cli 适配器）
+          - os: macos-latest
+            exclude: ""
+          # Linux/Windows：跳过 macOS 专属 crate
+          - os: ubuntu-latest
+            exclude: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli
+          - os: windows-latest
+            exclude: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      # aerodesk-sfu 的 netem dev-dep 指向外部 str0m 检出（../../../str0m）
+      - name: Checkout str0m (netem dev-dep)
+        run: |
+          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
+            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace ${{ matrix.exclude }} --all-targets
+
+      - name: test
+        run: cargo test --workspace ${{ matrix.exclude }}
+
+      # 平台适配器编译验证（骨架在各自宿主上必须可编译）
+      - name: windows adapter
+        if: runner.os == 'Windows'
+        run: cargo check -p aerodesk-windows
+      - name: linux adapter
+        if: runner.os == 'Linux'
+        run: cargo check -p aerodesk-linux
+      - name: macos/ios adapters + cli
+        if: runner.os == 'macOS'
+        run: cargo check -p aerodesk-macos -p aerodesk-ios -p aerodesk-cli
