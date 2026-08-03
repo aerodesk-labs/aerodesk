@@ -71,10 +71,11 @@ impl XTestInjector {
             .xtest_fake_input(
                 kind,
                 detail,
-                x11rb::protocol::xproto::TIME_CURRENT_TIME,
+                x11rb::CURRENT_TIME.into(),
                 self.root,
                 x,
                 y,
+                0, // deviceid
             )
             .map_err(|e| format!("xtest_fake_input: {e:?}"))
     }

@@ -3,6 +3,7 @@ package io.aerodesk.viewer
 import android.app.Activity
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
+import android.provider.Settings
 import android.os.Bundle
 import android.widget.Button
 import android.widget.EditText
@@ -28,6 +29,10 @@ class PublisherActivity : AppCompatActivity() {
         val status = findViewById<TextView>(R.id.status)
         val start = findViewById<Button>(R.id.start)
         val stopBtn = findViewById<Button>(R.id.stop)
+        val a11y = findViewById<Button>(R.id.a11y)
+        a11y.setOnClickListener {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
 
         start.setOnClickListener {
             val mp = getSystemService(MediaProjectionManager::class.java)
