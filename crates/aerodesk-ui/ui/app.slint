@@ -9,10 +9,12 @@ export component AppWindow inherits Window {
     in-out property <string> status: "未连接";
     in-out property <string> log: "";
     in-out property <bool> connecting: false;
+    in-out property <int> conn-state: 0;   // 0=idle 1=connecting 2=connected 3=failed
     in-out property <[string]> recents: [];
     in-out property <bool> in-session: false;
     in-out property <image> video-frame: @image-url("");
     in-out property <string> session-status: "";
+    in-out property <string> input-mode: "键鼠已释放";
 
     callback connect();
     callback disconnect();
@@ -22,6 +24,7 @@ export component AppWindow inherits Window {
     callback toggle-audio();
     callback toggle-display();
     callback toggle-quality();
+    callback toggle-input();
 
     title: "AeroDesk";
     width: 760px;
@@ -90,7 +93,7 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         spacing: 8px;
                         Button {
-                            text: connecting ? "连接中…" : "连接";
+                            text: connecting ? "连接中…" : (root.conn-state == 3 ? "重连" : "连接");
                             enabled: !connecting;
                             primary: true;
                             clicked => { root.connect(); }
@@ -142,9 +145,11 @@ export component AppWindow inherits Window {
                         Button { text: "音频"; clicked => { root.toggle-audio(); } }
                         Button { text: "显示器"; clicked => { root.toggle-display(); } }
                         Button { text: "画质"; clicked => { root.toggle-quality(); } }
+                        Button { text: "输入"; clicked => { root.toggle-input(); } }
                         Button { text: "断开"; clicked => { root.disconnect(); } }
                     }
                     Text { text: root.session-status; color: #2ea043; font-size: 12px; }
+                    Text { text: "输入模式：" + root.input-mode; color: #888; font-size: 12px; }
                 }
             }
         }

@@ -40,6 +40,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let room = ui.get_room_input().to_string();
             let token = ui.get_token_input().to_string();
             ui.set_connecting(true);
+            ui.set_conn_state(1);
             ui.set_status(format!("连接 {} @ {} …", room, server).into());
             let weak2 = weak.clone();
             let running2 = session_running.clone();
@@ -59,6 +60,7 @@ fn main() -> Result<(), slint::PlatformError> {
                             .into(),
                         );
                         add_recent(&ui, &room, &server);
+                        ui.set_conn_state(2);
                         // #23：进入会话视图 + 启动演示帧源（验证视频渲染管道）
                         ui.set_in_session(true);
                         ui.set_session_status("会话中 · 演示帧源（15fps）".into());
@@ -78,8 +80,9 @@ fn main() -> Result<(), slint::PlatformError> {
                         });
                     }
                     Err(e) => {
+                        ui.set_conn_state(3);
                         ui.set_status(format!("连接失败：{e}").into());
-                        ui.set_log(String::new().into());
+                        ui.set_log(format!("失败原因：{e}").into());
                     }
                 }
                 ui.set_connecting(false);
@@ -93,6 +96,8 @@ fn main() -> Result<(), slint::PlatformError> {
         move || {
             session_running.store(false, Ordering::SeqCst);
             let ui = ui.unwrap();
+            ui.set_conn_state(0);
+            ui.set_input_mode("键鼠已释放".into());
             ui.set_in_session(false);
             ui.set_video_frame(slint::Image::default());
             ui.set_status("已断开".into());
@@ -134,6 +139,15 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_toggle_quality({
         let ui = ui.as_weak();
         move || { ui.unwrap().set_session_status("画质：待接入（码率/帧率档位）".into()); }
+    });
+    ui.on_toggle_input({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            let captured = ui.get_input_mode().contains("捕获");
+            ui.set_input_mode(if captured { "键鼠已释放".into() } else { "键鼠捕获中".into() });
+            ui.set_session_status(if captured { "输入已释放".into() } else { "输入捕获中（Esc 可释放）".into() });
+        }
     });
 
     ui.run()
