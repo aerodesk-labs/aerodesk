@@ -38,6 +38,8 @@ pub struct Endpoint {
     channel_labels: HashMap<ChannelId, String>,
     /// 是否在下一个 offer 中添加视频（str0m 的 SdpApi 需在同一 change 中 apply）。
     want_video: bool,
+    /// 视频方向（viewer 用 RecvOnly，publisher 用 SendRecv/SendOnly）。
+    video_direction: str0m::media::Direction,
 }
 
 impl Default for Endpoint {
@@ -53,6 +55,7 @@ impl Endpoint {
             events: VecDeque::new(),
             channel_labels: HashMap::new(),
             want_video: false,
+            video_direction: str0m::media::Direction::SendRecv,
         }
     }
 
@@ -74,6 +77,7 @@ impl Endpoint {
             events: VecDeque::new(),
             channel_labels: HashMap::new(),
             want_video: false,
+            video_direction: str0m::media::Direction::SendRecv,
         }
     }
 
@@ -97,8 +101,17 @@ impl Endpoint {
 
     /// 请求在下一个 offer 中添加视频（VP8 起步）。
     /// 返回的 mid 在 [`create_offer`][Self::create_offer] 返回的 `Option<Mid>` 中。
+    /// 请求在下一个 offer 中添加视频（发布方向 SendRecv，兼容默认）。
     pub fn add_video(&mut self) {
         self.want_video = true;
+        self.video_direction = str0m::media::Direction::SendRecv;
+    }
+
+    /// 请求在下一个 offer 中添加视频，方向为 **RecvOnly**（观看端）。
+    /// #12：viewer 的 offer 必须是 recvonly，否则会被 SFU 拒绝（viewer 禁止发布媒体）。
+    pub fn add_video_recvonly(&mut self) {
+        self.want_video = true;
+        self.video_direction = str0m::media::Direction::RecvOnly;
     }
 
     /// 主动发起：创建 offer（含 video（可选）+ offer/answer + input 两个数据通道）。
@@ -106,13 +119,7 @@ impl Endpoint {
     pub fn create_offer(&mut self) -> Result<(SdpOffer, SdpPendingOffer, Option<Mid>), RtcError> {
         let mut change = self.rtc.sdp_api();
         let video_mid = if self.want_video {
-            Some(change.add_media(
-                MediaKind::Video,
-                str0m::media::Direction::SendRecv,
-                None,
-                None,
-                None,
-            ))
+            Some(change.add_media(MediaKind::Video, self.video_direction, None, None, None))
         } else {
             None
         };

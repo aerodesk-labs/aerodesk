@@ -76,7 +76,12 @@ pub fn connect_live_role(server: &str, room: &str, role: Role) -> Result<LiveSes
     endpoint
         .add_local_candidate(addr, Protocol::Udp)
         .map_err(|e| format!("candidate: {e:?}"))?;
-    endpoint.add_video();
+    // #12：viewer 的 offer 用 recvonly（SFU 拒绝 viewer 发布媒体）。
+    if role == Role::Viewer {
+        endpoint.add_video_recvonly();
+    } else {
+        endpoint.add_video();
+    }
     let (offer, pending, video_mid) = endpoint
         .create_offer()
         .map_err(|e| format!("offer: {e:?}"))?;

@@ -47,7 +47,10 @@ fn main() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3001);
-    let tls = aerodesk_protocol::tls::TlsIdentity::load();
+    let tls = aerodesk_protocol::tls::TlsIdentity::load().unwrap_or_else(|e| {
+        eprintln!("fatal: TLS identity load failed: {e}");
+        std::process::exit(1);
+    });
     info!("TLS identity source: {}", tls.source);
 
     // 明文 WS（开发用；生产只开 WSS 端口）
@@ -250,7 +253,15 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                     );
                     continue;
                 };
-                match proxy_to_sfu(&config, &room, &description) {
+                // #12：把 peer 角色传给 SFU，SFU 据此拒绝 viewer 发布媒体。
+                let role = rooms
+                    .lock()
+                    .unwrap()
+                    .get(&room)
+                    .and_then(|peers| peers.iter().find(|p| p.id == from))
+                    .map(|p| p.role)
+                    .unwrap_or(Role::Viewer);
+                match proxy_to_sfu(&config, &room, role, &description) {
                     Ok(answer) => send(
                         ws.clone(),
                         SignalMessage::Description {
@@ -329,9 +340,18 @@ fn find_room(rooms: &Rooms, peer_id: &str) -> Option<String> {
         .map(|(room, _)| room.clone())
 }
 
-/// 调用 SFU 内部接口：POST /start?room=xxx（body = SDP offer JSON）
-fn proxy_to_sfu(config: &Config, room: &str, description: &str) -> Result<String, String> {
-    let url = format!("{}/start?room={}", config.sfu_url, room);
+/// 调用 SFU 内部接口：POST /start?room=xxx&role=xxx（body = SDP offer JSON）
+fn proxy_to_sfu(
+    config: &Config,
+    room: &str,
+    role: Role,
+    description: &str,
+) -> Result<String, String> {
+    let role_name = match role {
+        Role::Publisher => "publisher",
+        Role::Viewer => "viewer",
+    };
+    let url = format!("{}/start?room={}&role={}", config.sfu_url, room, role_name);
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(10))
         .build();

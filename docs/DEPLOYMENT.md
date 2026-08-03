@@ -41,8 +41,10 @@ certbot certonly --standalone -d signal.aerodesk.io   --deploy-hook scripts/cert
 certbot renew --deploy-hook scripts/cert-renew-hook.sh
 ```
 
-`scripts/cert-renew-hook.sh` 会把新证书复制到 `CERT_DEST`（默认
-`/etc/aerodesk/tls`）并重启 signal/sfu 服务。systemd 服务示例：
+`scripts/cert-renew-hook.sh` 会把新证书**原子安装**到 `CERT_DEST`（默认
+`/etc/aerodesk/tls`）并重启 signal/sfu 服务：每个 lineage 装到独立子目录
+`$CERT_DEST/<lineage>/`，顶层 `cer.pem`/`key.pem` 是指向最新 lineage 的符号链接
+（证书与私钥永远成对；多 lineage 互不覆盖）。systemd 服务示例：
 
 ```ini
 # /etc/systemd/system/aerodesk-signal.service
