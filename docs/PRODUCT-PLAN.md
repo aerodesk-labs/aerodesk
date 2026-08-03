@@ -127,7 +127,9 @@ aerodesk-sfu（服务端）                 ← 与客户端共享协议/媒体�
 8. **质量验收与 4K60 压测** — [#8](https://github.com/aerodesk-labs/aerodesk/issues/8)
 
 > 所有任务在 GitHub Issues 跟踪（按里程碑 P3.5/P4/P5 分桶），
-> 本文件只保留计划背景与坑位记录，任务状态以 Issues/Projects 为准。
+> 看板：[AeroDesk 开发计划](https://github.com/orgs/aerodesk-labs/projects/1)
+> （Projects v2，视图可按"里程碑"或 Status 分组；任务状态以 Issues/Projects 为准）。
+> 本文件只保留计划背景与坑位记录。
 
 ## 九、已踩坑记录（平台适配必读）
 
