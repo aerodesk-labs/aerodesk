@@ -1,2 +1,6 @@
 /target
 .DS_Store
+
+# iOS 生成产物（xcodegen 生成工程；lib 由 scripts/build-ios-lib.sh 构建）
+/ios/AeroDesk.xcodeproj
+/ios/AeroDeskBridge/lib/

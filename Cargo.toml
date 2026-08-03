@@ -35,3 +35,8 @@ aerodesk-protocol = { path = "crates/aerodesk-protocol" }
 
 [profile.release]
 lto = "thin"
+
+# apple-cf 本地补丁：支持 iOS/iOS-Simulator 交叉编译（Swift 桥按 TARGET 选 triple/SDK）
+[patch.crates-io]
+apple-cf = { path = "vendor/apple-cf" }
+videotoolbox = { path = "vendor/videotoolbox" }

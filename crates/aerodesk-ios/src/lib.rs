@@ -7,3 +7,4 @@
 pub mod decode;
 
 pub use decode::H264Decoder;
+pub mod ffi;

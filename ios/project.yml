@@ -1,0 +1,37 @@
+name: AeroDesk
+options:
+  bundleIdPrefix: io.aerodesk
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    GENERATE_INFOPLIST_FILE: YES
+    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+targets:
+  AeroDesk:
+    type: application
+    platform: iOS
+    sources:
+      - path: AeroDesk
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.aerodesk.viewer
+        PRODUCT_NAME: AeroDesk
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/AeroDeskBridge
+        SWIFT_OBJC_BRIDGING_HEADER: $(SRCROOT)/AeroDesk/AeroDesk-Bridging-Header.h
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -L$(SRCROOT)/AeroDeskBridge/lib
+          - -laerodesk_ios
+          - -framework
+          - CoreMedia
+          - -framework
+          - CoreVideo
+          - -framework
+          - VideoToolbox
+        ENABLE_BITCODE: NO

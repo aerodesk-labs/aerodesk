@@ -1,0 +1,33 @@
+#ifndef AD_AERODESK_H
+#define AD_AERODESK_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/// SDK 版本字符串（静态存储，nul 结尾）。
+const char *ad_version(void);
+
+/// 创建 H.264 解码器（VideoToolbox 硬解）。
+void *ad_decoder_create(void);
+
+/// 释放解码器。
+void ad_decoder_free(void *decoder);
+
+/// 是否支持硬件解码。
+int ad_decoder_hardware(void);
+
+/// 解码一帧 AnnexB H.264。
+/// 返回 0=有输出帧（*out 为 +1 CVPixelBufferRef，调用方负责 CVBufferRelease），
+///      1=无输出（等关键帧），<0=错误。
+int ad_decoder_decode(void *decoder, const uint8_t *data, size_t len,
+                      int64_t pts, void **out);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* AD_AERODESK_H */
