@@ -38,7 +38,7 @@
         </select>
         <input id="room" placeholder="房间" value="demo">
         <input id="signal" placeholder="信令（默认 wss://host:3001/ws）" value="">
-        <input id="token" placeholder="JWT（可选，仅本页读取）" value="">
+        <input id="token" placeholder="JWT（可选，仅本页读取）" type="password" value="">
         <button id="connect" class="primary">连接</button>
         <button id="disconnect" disabled>断开</button>
     </div>
@@ -101,8 +101,8 @@ function nextSignal(type, timeoutMs = 20000) {
         }, timeoutMs);
     });
 }
-function resetPending() {
-    for (const p of pending.splice(0)) p.reject(new Error('连接已重置'));
+function resetPending(err) {
+    for (const p of pending.splice(0)) p.reject(err || new Error('连接已重置'));
 }
 
 async function connectSignal() {
@@ -113,6 +113,14 @@ async function connectSignal() {
     });
     ws.onmessage = (e) => {
         const msg = JSON.parse(e.data);
+        // #19 补充：服务端 error（如 auth failed）fail-fast，reject 所有等待项
+        if (msg.type === 'error') {
+            const err = new Error('信令错误: ' + (msg.message || 'unknown'));
+            resetPending(err);
+            setStatus(err.message);
+            log('signal error: ' + (msg.message || e.data));
+            return;
+        }
         // 按类型匹配首个等待项
         const idx = pending.findIndex((p) => p.type === msg.type);
         if (idx >= 0) {
@@ -130,9 +138,19 @@ async function connectSignal() {
 function waitIceGatheringComplete() {
     if (rtc.iceGatheringState === 'complete') return Promise.resolve();
     return new Promise((resolve) => {
-        rtc.addEventListener('icegatheringstatechange', () => {
-            if (rtc.iceGatheringState === 'complete') resolve();
-        });
+        const onState = () => {
+            if (rtc.iceGatheringState === 'complete') {
+                rtc.removeEventListener('icegatheringstatechange', onState);
+                clearTimeout(timer);
+                resolve();
+            }
+        };
+        // 兜底：15s 后带当前已收集候选继续（非 trickle 的最佳努力）
+        const timer = setTimeout(() => {
+            rtc.removeEventListener('icegatheringstatechange', onState);
+            resolve();
+        }, 15000);
+        rtc.addEventListener('icegatheringstatechange', onState);
     });
 }
 async function localSdp() {
@@ -229,7 +247,11 @@ async function negotiate() {
     await rtc.setLocalDescription(offer);
     await waitIceGatheringComplete();               // #17
     await signalChannel.send(JSON.stringify(rtc.localDescription));
-    const answer = await new Promise((resolve) => { dcAnswerResolve = resolve; });
+    const answer = await Promise.race([
+        new Promise((resolve) => { dcAnswerResolve = resolve; }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('重协商超时')), 20000)),
+    ]);
+    dcAnswerResolve = null;
     await rtc.setRemoteDescription(JSON.parse(answer));
 }
 async function handleOffer(json) {
