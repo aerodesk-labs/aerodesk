@@ -3,7 +3,8 @@
 # 依赖：cargo build、Playwright（npm i playwright-core）、Edge 或 Chrome。
 # 用法: scripts/web-e2e.sh [room]
 set -euo pipefail
-cd "$(dirname "$0")/.."
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
 
 ROOM="${1:-webe2e-$(date +%s)}"
 E2E_DIR="${WEB_E2E_DIR:-/tmp/web-e2e}"
@@ -36,17 +37,17 @@ const ROOM = process.argv[2];
 })().catch(e => { console.error('E2E FAIL:', e.message); process.exit(1); });
 JS
 
-cd "$(dirname "$0")/../.."
+cd "$ROOT"
 echo "== 构建"
 cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
 echo "== 启动服务"
 REC="$(mktemp -d)"
-RECORD_DIR="$REC" ./target/debug/aerodesk-sfu >/tmp/webe2e-sfu.log 2>&1 &
+RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu" >/tmp/webe2e-sfu.log 2>&1 &
 SFU=$!
-./target/debug/aerodesk-signal >/tmp/webe2e-sig.log 2>&1 &
+"$ROOT/target/debug/aerodesk-signal" >/tmp/webe2e-sig.log 2>&1 &
 SIG=$!
 sleep 1.5
-./target/debug/aerodesk-cli --role publisher --signal ws://127.0.0.1:3003 --room "$ROOM" --encoder x264 >/tmp/webe2e-pub.log 2>&1 &
+"$ROOT/target/debug/aerodesk-cli" --role publisher --signal ws://127.0.0.1:3003 --room "$ROOM" --encoder x264 >/tmp/webe2e-pub.log 2>&1 &
 PUB=$!
 sleep 2
 
