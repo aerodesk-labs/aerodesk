@@ -41,7 +41,21 @@ fn main() {
 
     match role.as_str() {
         "publisher" if encoder == "screen" => publisher_capture(&signal, &room, token.as_deref()),
-        "publisher" if encoder == "vt" => publisher_vt(&signal, &room, token.as_deref()),
+        "publisher" if encoder == "vt" => {
+            let w: u32 = arg(&args, "--width")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(640);
+            let h: u32 = arg(&args, "--height")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(360);
+            let fps: u32 = arg(&args, "--fps")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30);
+            let br: u32 = arg(&args, "--bitrate")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(800_000);
+            publisher_vt(&signal, &room, token.as_deref(), w, h, fps, br);
+        }
         "publisher" if encoder == "x264" => publisher_x264(&signal, &room, token.as_deref()),
         "publisher" => publisher(&signal, &room, token.as_deref()),
         "viewer" => viewer(&signal, &room, token.as_deref()),
@@ -458,18 +472,24 @@ fn publisher_x264(signal_url: &str, room: &str, auth: Option<&str>) {
 }
 
 /// VideoToolbox 硬编发布端：合成 BGRA → 硬编 → SFU。
-fn publisher_vt(signal_url: &str, room: &str, auth: Option<&str>) {
+/// 压测可传 --width/--height/--fps/--bitrate（如 3840x2160@60 8Mbps）。
+fn publisher_vt(
+    signal_url: &str,
+    room: &str,
+    auth: Option<&str>,
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate: u32,
+) {
     use aerodesk_macos::synthetic::SyntheticSource;
     use aerodesk_macos::vt_encoder::{VtEncoder, avcc_to_annexb};
 
-    const W: u32 = 640;
-    const H: u32 = 360;
-    const FPS: u32 = 30;
-
     let (mut signal, mut endpoint, socket, video_mid) =
         connect_h264(signal_url, room, Role::Publisher, auth);
-    let mut encoder = VtEncoder::new(W, H, FPS, 800_000).expect("vt encoder");
-    let mut source = SyntheticSource::new(W, H);
+    let mut encoder = VtEncoder::new(width, height, fps, bitrate).expect("vt encoder");
+    let mut source = SyntheticSource::new(width, height);
+    info!("VT publisher: {width}x{height}@{fps} {bitrate}bps");
     let mut connected = false;
     let mut next_frame = Instant::now();
 
@@ -523,7 +543,7 @@ fn publisher_vt(signal_url: &str, room: &str, auth: Option<&str>) {
         }
 
         if connected && Instant::now() >= next_frame {
-            next_frame += Duration::from_millis(1000 / FPS as u64);
+            next_frame += Duration::from_millis(1000 / fps as u64);
             let bgra = source.next_frame_bgra();
             match encoder.encode_bgra(bgra) {
                 Ok(Some(frame)) => {

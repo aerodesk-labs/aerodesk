@@ -120,7 +120,18 @@ pub fn main() {
     if let Ok(dir) = std::env::var("RECORD_DIR") {
         match recorder::Recorder::new(&dir) {
             Ok(rec) => {
-                shared.recorder = Some(Arc::new(rec));
+                let rec = Arc::new(rec);
+                // SIGINT（Ctrl+C）时先 finalize 录制再退出，保证 meta.json 落盘。
+                let rec_final = rec.clone();
+                if ctrlc::set_handler(move || {
+                    rec_final.finalize_all();
+                    std::process::exit(0);
+                })
+                .is_ok()
+                {
+                    info!("recording: SIGINT handler registered");
+                }
+                shared.recorder = Some(rec);
                 info!("recording enabled: {dir}");
             }
             Err(e) => warn!("RECORD_DIR set but recorder init failed: {e}"),
