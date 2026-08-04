@@ -40,11 +40,14 @@ fn main() -> Result<(), slint::PlatformError> {
     };
     ui.set_device_pw(pw_display.into());
     ui.set_quality(settings.quality);
-    ui.set_server_default(settings.server_default.clone().into());
+    // 服务器地址 UI 上只展示 host:port（协议/路径在连接时由
+    // aerodesk_core::signaling::normalize_signal_url 自动补全）。
+    let server_display = display_server(&settings.server_default);
+    ui.set_server_default(server_display.clone().into());
     ui.set_remember_token(settings.remember_token);
     ui.set_token_default(settings.token_default.clone().into());
     if !settings.server_default.is_empty() {
-        ui.set_server_input(settings.server_default.into());
+        ui.set_server_input(server_display.into());
     }
     if settings.remember_token && !settings.token_default.is_empty() {
         ui.set_token_input(settings.token_default.into());
@@ -187,7 +190,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let ui = weak.unwrap();
             let (room, server) = parse_recent(entry.as_ref());
             ui.set_room_input(room.into());
-            ui.set_server_input(server.into());
+            ui.set_server_input(display_server(&server).into());
             ui.invoke_connect();
         }
     });
@@ -322,7 +325,7 @@ fn main() -> Result<(), slint::PlatformError> {
         move || {
             let ui = ui.unwrap();
             let settings = AppSettings {
-                server_default: ui.get_server_default().to_string(),
+                server_default: display_server(&ui.get_server_default().to_string()),
                 quality: ui.get_quality(),
                 remember_token: ui.get_remember_token(),
                 token_default: ui.get_token_default().to_string(),
@@ -331,7 +334,7 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             save_settings(&settings);
             // 即时生效：同步主页输入框（无需重启）。
-            ui.set_server_input(settings.server_default.clone().into());
+            ui.set_server_input(display_server(&settings.server_default).into());
             if settings.remember_token {
                 ui.set_token_input(settings.token_default.clone().into());
             }
@@ -420,11 +423,21 @@ fn demo_frame(t: u32) -> Vec<u8> {
     px
 }
 
+/// UI 展示用服务器地址：去掉 ws:// / wss:// 协议前缀和 /ws 路径，只留 host:port。
+fn display_server(input: &str) -> String {
+    let s = input.trim();
+    let s = s
+        .strip_prefix("wss://")
+        .or_else(|| s.strip_prefix("ws://"))
+        .unwrap_or(s);
+    s.strip_suffix("/ws").unwrap_or(s).to_string()
+}
+
 /// 最近会话格式：`房间 · 服务器`（解析用分隔符）。
 fn parse_recent(entry: &str) -> (String, String) {
     match entry.split_once(" · ") {
         Some((r, s)) => (r.to_string(), s.to_string()),
-        None => (entry.to_string(), "wss://signal.aerodesk.io".to_string()),
+        None => (entry.to_string(), "signal.aerodesk.io".to_string()),
     }
 }
 
@@ -497,12 +510,19 @@ mod tests {
 
     #[test]
     fn parse_recent_formats() {
-        let (r, s) = parse_recent("demo · wss://x:3001/ws");
+        let (r, s) = parse_recent("demo · 127.0.0.1:3003");
         assert_eq!(r, "demo");
-        assert_eq!(s, "wss://x:3001/ws");
+        assert_eq!(s, "127.0.0.1:3003");
         let (r, s) = parse_recent("plain");
         assert_eq!(r, "plain");
-        assert_eq!(s, "wss://signal.aerodesk.io");
+        assert_eq!(s, "signal.aerodesk.io");
+        // 兼容旧数据：历史记录可能带协议/路径，展示层应剥掉。
+        assert_eq!(
+            display_server("wss://signal.aerodesk.io/ws"),
+            "signal.aerodesk.io"
+        );
+        assert_eq!(display_server("ws://127.0.0.1:3003"), "127.0.0.1:3003");
+        assert_eq!(display_server("signal.aerodesk.io"), "signal.aerodesk.io");
     }
 }
 

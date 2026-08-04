@@ -225,7 +225,7 @@ export component AppWindow inherits Window {
     in-out property <int> tab: 0;                 // 0=连接 1=设置 2=被控端
     in-out property <string> room-input: "demo";
     in-out property <string> token-input: "";
-    in-out property <string> server-input: "wss://signal.aerodesk.io";
+    in-out property <string> server-input: "signal.aerodesk.io";
     in-out property <string> status: "未连接";
     in-out property <string> log: "";
     in-out property <bool> connecting: false;
@@ -245,7 +245,7 @@ export component AppWindow inherits Window {
     // ---- 设置 ----
     in-out property <int> settings-tab: 0;          // 0=显示 1=网络 2=安全 3=快捷键
     in-out property <int> quality: 1;
-    in-out property <string> server-default: "wss://signal.aerodesk.io";
+    in-out property <string> server-default: "signal.aerodesk.io";
     in-out property <bool> remember-token: false;
     in-out property <string> token-default: "";
     in-out property <string> settings-status: "";
@@ -466,7 +466,7 @@ export component AppWindow inherits Window {
                         Text { text: "信令服务器"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                         RdInput {
                             text <=> root.server-input;
-                            placeholder: "wss://…";
+                            placeholder: "signal.aerodesk.io 或 127.0.0.1:3003";
                             font-size: 13px;
                         }
                         HorizontalLayout {
@@ -606,7 +606,7 @@ export component AppWindow inherits Window {
                 if root.settings-tab == 1: VerticalLayout {
                     spacing: 12px;
                     Text { text: "默认信令服务器"; font-size: 14px; color: #212121; height: 20px; vertical-stretch: 0; }
-                    RdInput { text <=> root.server-default; placeholder: "wss://…"; font-size: 14px; }
+                    RdInput { text <=> root.server-default; placeholder: "signal.aerodesk.io 或 127.0.0.1:3003"; font-size: 14px; }
                     Text { text: "中继偏好：自动（直连失败走 TURN）"; font-size: 12px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                 }
                 if root.settings-tab == 2: VerticalLayout {
