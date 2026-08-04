@@ -309,6 +309,70 @@ component SessionTab {
     }
 }
 
+// 被控端授权卡片（主页右侧 + 被控端页共用，保证视觉一致）。
+component PermissionCard {
+    in property <string> perm-screen;
+    in property <string> perm-a11y;
+    callback refresh;
+    callback open-screen;
+    callback open-a11y;
+    Rectangle {
+        vertical-stretch: 0;
+        width: 100%;
+        border-radius: 13px;
+        border-width: 1px;
+        border-color: #efeff2;
+        background: #ffffff;
+        VerticalLayout {
+            padding-left: 24px;
+            padding-right: 24px;
+            padding-top: 24px;
+            padding-bottom: 22px;
+            spacing: 14px;
+            Text { text: "被控端授权"; font-size: 19px; color: #212121; height: 26px; vertical-stretch: 0; }
+            Text {
+                text: "被控端需要以下 macOS 权限（其他平台后续接入）：";
+                font-size: 14px; color: #6d6d73; height: 20px; vertical-stretch: 0;
+            }
+            HorizontalLayout {
+                alignment: space-between;
+                cross-axis-alignment: center;
+                HorizontalLayout {
+                    cross-axis-alignment: center;
+                    spacing: 10px;
+                    Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.perm-screen == "已授权" ? #34a853 : #efeff2; }
+                    Text { text: "屏幕录制："; width: 90px; font-size: 14px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
+                    Text { text: root.perm-screen; font-size: 14px; color: root.perm-screen == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
+                }
+                HorizontalLayout {
+                    cross-axis-alignment: center;
+                    spacing: 4px;
+                    IconBtn { icon: "\u{e5d5}"; tooltip: "检查权限"; clicked => { root.refresh(); } }
+                    IconBtn { icon: "\u{e8b8}"; tooltip: "打开屏幕录制设置"; clicked => { root.open-screen(); } }
+                }
+            }
+            HorizontalLayout {
+                alignment: space-between;
+                cross-axis-alignment: center;
+                HorizontalLayout {
+                    cross-axis-alignment: center;
+                    spacing: 10px;
+                    Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.perm-a11y == "已授权" ? #34a853 : #efeff2; }
+                    Text { text: "辅助功能："; width: 90px; font-size: 14px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
+                    Text { text: root.perm-a11y; font-size: 14px; color: root.perm-a11y == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
+                }
+                HorizontalLayout {
+                    cross-axis-alignment: center;
+                    spacing: 4px;
+                    IconBtn { icon: "\u{e5d5}"; tooltip: "检查权限"; clicked => { root.refresh(); } }
+                    IconBtn { icon: "\u{e8b8}"; tooltip: "打开辅助功能设置"; clicked => { root.open-a11y(); } }
+                }
+            }
+            Text { text: "授权后重启应用生效（屏幕录制）"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+        }
+    }
+}
+
 // ---------- 主窗口 ----------
 export component AppWindow inherits Window {
     // ---- 主页 ----
@@ -618,63 +682,14 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // 被控端授权卡片（填充右侧空白，对齐 RustDesk helpCards 风格）
-                    Rectangle {
-                        vertical-stretch: 0;
+                    // 被控端授权卡片（与「被控端」页共用 PermissionCard 组件）
+                    PermissionCard {
                         width: max(0px, parent.width - 416px);
-                        border-radius: 13px;
-                        border-width: 1px;
-                        border-color: #efeff2;
-                        background: #ffffff;
-                        VerticalLayout {
-                            padding-left: 24px;
-                            padding-right: 24px;
-                            padding-top: 24px;
-                            padding-bottom: 22px;
-                            spacing: 14px;
-                            Text { text: "被控端授权"; font-size: 19px; color: #212121; height: 26px; vertical-stretch: 0; }
-                            Text {
-                                text: "被控端需要以下 macOS 权限（其他平台后续接入）：";
-                                font-size: 14px; color: #6d6d73; height: 20px; vertical-stretch: 0;
-                            }
-                            HorizontalLayout {
-                                alignment: space-between;
-                                width: max(0px, parent.width - 48px);
-                                cross-axis-alignment: center;
-                                HorizontalLayout {
-                                    cross-axis-alignment: center;
-                                    spacing: 10px;
-                                    Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.perm-screen == "已授权" ? #34a853 : #efeff2; }
-                                    Text { text: "屏幕录制："; width: 90px; font-size: 14px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
-                                    Text { text: root.perm-screen; font-size: 14px; color: root.perm-screen == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
-                                }
-                                HorizontalLayout {
-                                    cross-axis-alignment: center;
-                                    spacing: 4px;
-                                    IconBtn { icon: "\u{e5d5}"; tooltip: "检查权限"; clicked => { root.refresh-perms(); } }
-                                    IconBtn { icon: "\u{e8b8}"; tooltip: "打开屏幕录制设置"; clicked => { root.open-screen-perms(); } }
-                                }
-                            }
-                            HorizontalLayout {
-                                alignment: space-between;
-                                width: max(0px, parent.width - 48px);
-                                cross-axis-alignment: center;
-                                HorizontalLayout {
-                                    cross-axis-alignment: center;
-                                    spacing: 10px;
-                                    Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.perm-a11y == "已授权" ? #34a853 : #efeff2; }
-                                    Text { text: "辅助功能："; width: 90px; font-size: 14px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
-                                    Text { text: root.perm-a11y; font-size: 14px; color: root.perm-a11y == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
-                                }
-                                HorizontalLayout {
-                                    cross-axis-alignment: center;
-                                    spacing: 4px;
-                                    IconBtn { icon: "\u{e5d5}"; tooltip: "检查权限"; clicked => { root.refresh-perms(); } }
-                                    IconBtn { icon: "\u{e8b8}"; tooltip: "打开辅助功能设置"; clicked => { root.open-a11y-perms(); } }
-                                }
-                            }
-                            Text { text: "授权后重启应用生效（屏幕录制）"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
-                        }
+                        perm-screen: root.perm-screen;
+                        perm-a11y: root.perm-a11y;
+                        refresh => { root.refresh-perms(); }
+                        open-screen => { root.open-screen-perms(); }
+                        open-a11y => { root.open-a11y-perms(); }
                     }
                 }
 
@@ -925,45 +940,18 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // 权限卡片
+                // 权限卡片（与主页共用 PermissionCard 组件，视觉一致）
                 Rectangle {
                     width: 420px;
                     vertical-stretch: 0;
-                    border-radius: 13px;
-                    border-width: 1px;
-                    border-color: #efeff2;
-                    background: #ffffff;
-                    VerticalLayout {
-                        padding-left: 20px;
-                        padding-right: 20px;
-                        padding-top: 18px;
-                        padding-bottom: 18px;
-                        spacing: 12px;
-                        Text { text: "被控端授权"; font-size: 15px; font-weight: 600; color: #212121; height: 20px; vertical-stretch: 0; }
-                        Text { text: "被控端需要以下 macOS 权限（其他平台后续接入）："; font-size: 14px; color: #6d6d73; height: 18px; vertical-stretch: 0; }
-                        HorizontalLayout {
-                            cross-axis-alignment: center;
-                            spacing: 10px;
-                            Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.perm-screen == "已授权" ? #34a853 : #efeff2; }
-                            Text { text: "屏幕录制："; width: 90px; font-size: 14px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
-                            Text { text: root.perm-screen; font-size: 14px; color: root.perm-screen == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
-                            Rectangle { width: 0px; }
-                            RdButton { text: "检查"; clicked => { root.refresh-perms(); } }
-                            RdButton { text: "打开设置"; clicked => { root.open-screen-perms(); } }
-                        }
-                        HorizontalLayout {
-                            cross-axis-alignment: center;
-                            spacing: 10px;
-                            Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.perm-a11y == "已授权" ? #34a853 : #efeff2; }
-                            Text { text: "辅助功能："; width: 90px; font-size: 14px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
-                            Text { text: root.perm-a11y; font-size: 14px; color: root.perm-a11y == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
-                            Rectangle { width: 0px; }
-                            RdButton { text: "检查"; clicked => { root.refresh-perms(); } }
-                            RdButton { text: "打开设置"; clicked => { root.open-a11y-perms(); } }
-                        }
+                    PermissionCard {
+                        perm-screen: root.perm-screen;
+                        perm-a11y: root.perm-a11y;
+                        refresh => { root.refresh-perms(); }
+                        open-screen => { root.open-screen-perms(); }
+                        open-a11y => { root.open-a11y-perms(); }
                     }
                 }
-                Text { text: "授权后重启应用生效（屏幕录制）"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
             }
 
             // ---- 会话视图（对齐 RustDesk remote_page：大视频区 + 悬浮工具栏） ----
