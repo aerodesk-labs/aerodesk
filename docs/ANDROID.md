@@ -10,7 +10,7 @@
 - `android/`：Gradle 工程（AGP 8.7.3 / Kotlin 2.0.21 / compileSdk 34 / minSdk 26）
   - `MainActivity`：连接/房间 UI，后台线程调用 JNI
   - 预置 `jniLibs/arm64-v8a/libaerodesk_android.so`
-- 验证：`cargo ndk` 交叉编译 ✅；`./gradlew assembleDebug` 产出 APK（内含 .so）✅
+- 验证：`cargo ndk` 交叉编译 ✅；`./gradlew assembleDebug` 产出 APK（内含 .so）✅；CI 已含 Android APK build job（每次 push/PR）
 
 ## 构建
 
