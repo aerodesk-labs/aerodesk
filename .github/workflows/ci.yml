@@ -76,6 +76,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout str0m (netem dev-dep)
+        shell: bash
+        run: |
+          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
+            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
+          fi
+
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Add iOS Rust targets
