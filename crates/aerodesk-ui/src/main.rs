@@ -522,6 +522,21 @@ mod tests {
     }
 
     #[test]
+    fn one_time_password_is_8_chars_from_safe_alphabet() {
+        for _ in 0..100 {
+            let pw = generate_one_time_password();
+            assert_eq!(pw.len(), 8);
+            assert!(pw.chars().all(|c| c.is_ascii_alphanumeric()));
+            assert!(
+                !pw.chars().any(|c| matches!(c, '0' | 'O' | '1' | 'I' | 'l')),
+                "password contains confusing char: {pw}"
+            );
+        }
+        // 连续两次不应相同（CSPRNG）。
+        assert_ne!(generate_one_time_password(), generate_one_time_password());
+    }
+
+    #[test]
     fn parse_recent_formats() {
         let (r, s) = parse_recent("demo · 127.0.0.1:3003");
         assert_eq!(r, "demo");
@@ -576,26 +591,27 @@ fn save_settings(s: &AppSettings) {
 }
 
 /// 生成随机一次性密码（8 位，去除易混淆字符 0/O/1/I/l）。
+///
+/// 使用系统 CSPRNG（`getrandom`）：时间/进程状态可预测的伪随机（如 xorshift）
+/// 会让攻击者拿到一个历史密码后暴力搜种子预测后续密码，不能用于访问口令。
 fn generate_one_time_password() -> String {
     const CHARS: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz";
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let t = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let c = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut seed = (t ^ ((c as u128) << 32) ^ (std::process::id() as u128)) as u64;
-    let mut out = String::new();
-    for _ in 0..8 {
-        // xorshift 伪随机
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        out.push(CHARS[(seed as usize) % CHARS.len()] as char);
+    // 拒绝采样：只接受 0..216（= 54*4）的字节，避免取模偏差。
+    const ACCEPT: usize = CHARS.len() * 4;
+    let mut buf = [0u8; 8];
+    let mut out = String::with_capacity(8);
+    loop {
+        getrandom::getrandom(&mut buf).expect("OS random source available");
+        for &b in &buf {
+            let idx = b as usize;
+            if idx < ACCEPT {
+                out.push(CHARS[idx % CHARS.len()] as char);
+                if out.len() == 8 {
+                    return out;
+                }
+            }
+        }
     }
-    out
 }
 
 /// 生成本机 ID（AD- 前缀 + 6 位十六进制，基于时间+进程熵）。
