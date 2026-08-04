@@ -22,8 +22,9 @@ fn main() -> Result<(), slint::PlatformError> {
     init_log();
     let ui = AppWindow::new()?;
 
-    // 最近会话（本地持久化）
+    // 最近会话 / 收藏（本地持久化）
     ui.set_recents(slint::ModelRc::new(slint::VecModel::from(load_recents())));
+    ui.set_favorites(slint::ModelRc::new(slint::VecModel::from(load_favorites())));
 
     // 设置（本地持久化）
     let mut settings = load_settings();
@@ -39,6 +40,11 @@ fn main() -> Result<(), slint::PlatformError> {
         settings.device_pw.clone()
     };
     ui.set_device_pw(pw_display.into());
+    ui.set_pw_edit(settings.device_pw.clone().into());
+    ui.set_inc_enabled(settings.inc_enabled);
+    ui.set_inc_audio(settings.inc_audio);
+    ui.set_inc_mouse(settings.inc_mouse);
+    ui.set_inc_view_only(settings.inc_view_only);
     ui.set_quality(settings.quality);
     // 服务器地址 UI 上只展示 host:port（协议/路径在连接时由
     // aerodesk_core::signaling::normalize_signal_url 自动补全）。
@@ -214,6 +220,58 @@ fn main() -> Result<(), slint::PlatformError> {
     // #29 多会话：会话槽序号（断开时清零）。
     static SESSION_NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+    // Peer 标签切换（#57）
+    ui.on_set_peer_tab({
+        let ui = ui.as_weak();
+        move |t| {
+            let ui = ui.unwrap();
+            ui.set_peer_tab(t);
+        }
+    });
+
+    // 收藏/取消收藏（#57）：`房间 · 服务器` 条目，持久化。
+    ui.on_toggle_favorite({
+        let ui = ui.as_weak();
+        move |entry: slint::SharedString| {
+            let ui = ui.unwrap();
+            let model = ui.get_favorites();
+            let mut items: Vec<String> = (0..model.row_count())
+                .filter_map(|i| model.row_data(i))
+                .map(|s| s.to_string())
+                .collect();
+            if items.iter().any(|i| i == entry.as_str()) {
+                items.retain(|i| i != entry.as_str());
+                ui.set_status("已取消收藏".into());
+            } else {
+                items.insert(0, entry.to_string());
+                ui.set_status("已收藏".into());
+            }
+            let new: Vec<slint::SharedString> = items.iter().map(|s| s.into()).collect();
+            ui.set_favorites(slint::ModelRc::new(slint::VecModel::from(new.clone())));
+            save_favorites(&new);
+        }
+    });
+
+    // 刷新 Peer 数据（#57）：重新加载最近会话与收藏。
+    ui.on_refresh_peers({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            let recents: Vec<slint::SharedString> = load_recents();
+            let favorites: Vec<slint::SharedString> = load_favorites();
+            ui.set_recents(slint::ModelRc::new(slint::VecModel::from(recents.clone())));
+            ui.set_favorites(slint::ModelRc::new(slint::VecModel::from(favorites)));
+            ui.set_status(
+                format!(
+                    "已刷新：最近 {} 条 / 收藏 {} 条",
+                    recents.len(),
+                    ui.get_favorites().row_count()
+                )
+                .into(),
+            );
+        }
+    });
+
     ui.on_switch_session({
         let ui = ui.as_weak();
         move |idx| {
@@ -337,13 +395,24 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui = ui.as_weak();
         move || {
             let ui = ui.unwrap();
+            let mut device_pw = ui.get_device_pw().to_string();
+            // 设置页安全 tab：本机接入密码非空则更新
+            let pw_edit = ui.get_pw_edit().to_string();
+            if !pw_edit.trim().is_empty() {
+                device_pw = pw_edit.trim().to_string();
+                ui.set_device_pw(device_pw.clone().into());
+            }
             let settings = AppSettings {
                 server_default: display_server(&ui.get_server_default().to_string()),
                 quality: ui.get_quality(),
                 remember_token: ui.get_remember_token(),
                 token_default: ui.get_token_default().to_string(),
                 device_id: ui.get_device_id().to_string(),
-                device_pw: ui.get_device_pw().to_string(),
+                device_pw,
+                inc_enabled: ui.get_inc_enabled(),
+                inc_audio: ui.get_inc_audio(),
+                inc_mouse: ui.get_inc_mouse(),
+                inc_view_only: ui.get_inc_view_only(),
             };
             save_settings(&settings);
             // 即时生效：同步主页输入框（无需重启）。
@@ -451,6 +520,34 @@ fn parse_recent(entry: &str) -> (String, String) {
     match entry.split_once(" · ") {
         Some((r, s)) => (r.to_string(), s.to_string()),
         None => (entry.to_string(), "signal.aerodesk.io".to_string()),
+    }
+}
+
+fn favorites_path() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".aerodesk-favorites.json")
+}
+
+fn load_favorites() -> Vec<slint::SharedString> {
+    let Ok(text) = std::fs::read_to_string(favorites_path()) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<String>>(&text)
+        .unwrap_or_default()
+        .into_iter()
+        .map(Into::into)
+        .collect()
+}
+
+fn save_favorites(items: &[slint::SharedString]) {
+    let v: Vec<String> = items.iter().map(|s| s.to_string()).collect();
+    if let Ok(json) = serde_json::to_string(&v) {
+        let path = favorites_path();
+        if std::fs::write(&path, json).is_ok() {
+            set_private_perms(&path);
+        }
     }
 }
 
@@ -563,8 +660,24 @@ struct AppSettings {
     token_default: String,
     /// 本机 ID（被控端身份，首启生成并持久化）。
     device_id: String,
-    /// 本机接入密码（占位；发布端鉴权接入后使用）。
+    /// 本机接入密码（被控端一次性密码）。
     device_pw: String,
+    /// 被控端：是否开启被控。
+    #[serde(default)]
+    inc_enabled: bool,
+    /// 被控端：是否允许声音。
+    #[serde(default = "default_true")]
+    inc_audio: bool,
+    /// 被控端：是否允许鼠标控制。
+    #[serde(default = "default_true")]
+    inc_mouse: bool,
+    /// 被控端：仅观看（只读）。
+    #[serde(default)]
+    inc_view_only: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn settings_path() -> PathBuf {

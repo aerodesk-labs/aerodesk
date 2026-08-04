@@ -3,7 +3,7 @@
 //   grayBg #EFEFF2（左栏 / 输入框填充 / 卡片描边）
 //   accent #0071FF（左栏蓝色竖条 / 主按钮）
 //   主区白底，正文 black87 #212121，次要文字 50% 透明度
-import { CheckBox, ScrollView } from "std-widgets.slint";
+import { CheckBox, ScrollView, Switch } from "std-widgets.slint";
 import "fonts/MaterialIcons-Regular.ttf";
 
 // Material 图标（对齐 RustDesk 的 Material Icons 工具栏/标签栏/导航）。
@@ -168,31 +168,33 @@ component PeerTab {
     in property <string> icon;
     in property <string> tooltip: "";
     in property <bool> selected: false;
+    in property <bool> enabled: true;
     callback clicked;
     width: 44px;
     height: 32px;
     Rectangle {
         width: 100%;
         height: 100%;
-        background: root.selected ? transparent : (ta.has-hover ? #eef0f4 : transparent);
+        background: root.enabled && root.selected ? transparent : (ta.has-hover && root.enabled ? #eef0f4 : transparent);
         Rectangle {
             width: 100%;
             height: 2px;
             y: parent.height - 2px;
-            background: root.selected ? #0071ff : transparent;
+            background: root.enabled && root.selected ? #0071ff : transparent;
         }
         MIcon {
             icon: root.icon;
             size: 21px;
-            color: root.selected ? #0071ff : #8a8a90;
+            color: !root.enabled ? #c4c4ca : (root.selected ? #0071ff : #8a8a90);
         }
         ta := TouchArea {
             width: 100%;
             height: 100%;
+            enabled: root.enabled;
             mouse-cursor: pointer;
             clicked => { root.clicked(); }
         }
-        if root.tooltip != "": Tooltip {
+        if root.enabled && root.tooltip != "": Tooltip {
             Rectangle {
                 background: #3c4043;
                 border-radius: 4px;
@@ -319,6 +321,8 @@ export component AppWindow inherits Window {
     in-out property <bool> connecting: false;
     in-out property <int> conn-state: 0;   // 0=idle 1=connecting 2=connected 3=failed
     in-out property <[string]> recents: [];
+    in-out property <[string]> favorites: [];
+    in-out property <int> peer-tab: 0;   // 0=最近 1=收藏 2=发现 3=地址簿 4=设备组
     // 本机身份（被控端）
     in-out property <string> device-id: "—";
     in-out property <string> device-pw: "—";
@@ -340,6 +344,13 @@ export component AppWindow inherits Window {
     // ---- 被控端授权 ----
     in-out property <string> perm-screen: "未知";
     in-out property <string> perm-a11y: "未知";
+    // 被控端设置
+    in-out property <bool> inc-enabled: false;
+    in-out property <bool> inc-audio: true;
+    in-out property <bool> inc-mouse: true;
+    in-out property <bool> inc-view-only: false;
+    // 设置页密码编辑
+    in-out property <string> pw-edit: "";
 
     callback connect();
     callback disconnect();
@@ -356,6 +367,9 @@ export component AppWindow inherits Window {
     callback switch-session(int);
     callback set-settings-tab(int);
     callback set-quality(int);
+    callback set-peer-tab(int);
+    callback toggle-favorite(string);
+    callback refresh-peers();
     callback save-settings();
     callback refresh-perms();
     callback open-screen-perms();
@@ -440,20 +454,20 @@ export component AppWindow inherits Window {
                         value-size: 22px;
                         copy => { root.copy-device-id(); }
                     }
-                    // 右上「⋯」设置入口（对齐 RustDesk buildPopupMenu）
+                    // 右上复制 ID（对齐 RustDesk buildPopupMenu 位置的复制入口）
                     Rectangle {
                         width: 26px;
                         height: 26px;
                         border-radius: 13px;
                         background: mh.has-hover ? #ffffff : transparent;
-                        MIcon { icon: "\u{e5d4}"; size: 18px; color: #6d6d73; }   // more_vert
+                        MIcon { icon: "\u{e14d}"; size: 18px; color: #6d6d73; }   // content_copy
                         mh := TouchArea {
                             width: 100%;
                             height: 100%;
                             mouse-cursor: pointer;
-                            clicked => { root.set-tab(1); }
+                            clicked => { root.copy-device-id(); }
                         }
-                        Tooltip { text: @markdown("设置"); }
+                        Tooltip { text: @markdown("复制 ID"); }
                     }
                 }
                 // 密码板（对齐 buildPasswordBoard：左 20 右 16 上 13 下 13）
@@ -492,50 +506,9 @@ export component AppWindow inherits Window {
                             width: 100%;
                             height: 100%;
                             mouse-cursor: pointer;
-                            clicked => { root.set-tab(1); }
+                            clicked => { root.set-tab(1); root.set-settings-tab(2); }
                         }
                         Tooltip { text: @markdown("修改密码"); }
-                    }
-                }
-
-                // macOS 权限卡片（对齐 buildHelpCards：白底圆角卡片）
-                HorizontalLayout {
-                    padding-left: 16px;
-                    padding-right: 12px;
-                    Rectangle {
-                        vertical-stretch: 0;
-                        border-radius: 10px;
-                        background: #ffffff;
-                        border-width: 1px;
-                        border-color: #dedee2;
-                        VerticalLayout {
-                            padding-left: 14px;
-                            padding-right: 14px;
-                            padding-top: 12px;
-                            padding-bottom: 12px;
-                            spacing: 10px;
-                            Text { text: "被控端授权"; font-size: 14px; font-weight: 600; color: #212121; height: 18px; vertical-stretch: 0; }
-                            HorizontalLayout {
-                                cross-axis-alignment: center;
-                                spacing: 6px;
-                                Rectangle { width: 8px; height: 8px; border-radius: 4px; background: #efeff2; }
-                                Text { text: "屏幕录制："; font-size: 14px; color: #4d4d52; vertical-stretch: 0; }
-                                Text { text: root.perm-screen; font-size: 14px; color: #0071ff; vertical-stretch: 0; }
-                            }
-                            HorizontalLayout {
-                                cross-axis-alignment: center;
-                                spacing: 6px;
-                                Rectangle { width: 8px; height: 8px; border-radius: 4px; background: #efeff2; }
-                                Text { text: "辅助功能："; font-size: 14px; color: #4d4d52; vertical-stretch: 0; }
-                                Text { text: root.perm-a11y; font-size: 14px; color: #0071ff; vertical-stretch: 0; }
-                            }
-                            HorizontalLayout {
-                                spacing: 6px;
-                                Rectangle { width: 0px; }
-                                RdButton { text: "检查权限"; enabled: true; clicked => { root.refresh-perms(); } }
-                                RdButton { text: "打开设置"; enabled: true; clicked => { root.open-screen-perms(); } }
-                            }
-                        }
                     }
                 }
 
@@ -565,7 +538,7 @@ export component AppWindow inherits Window {
             // ---- 连接页 ----
             if !root.in-session && root.tab == 0: VerticalLayout {
                 padding-left: 24px;
-                padding-right: 24px;
+                padding-right: 28px;
                 padding-top: 26px;
                 spacing: 16px;
 
@@ -580,62 +553,127 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // 远端 ID 卡片（对齐 RustDesk：白底、圆角 13、灰描边、右侧蓝色「连接」）
-                Rectangle {
-                    width: 400px;
-                    vertical-stretch: 0;
-                    border-radius: 13px;
-                    border-width: 1px;
-                    border-color: #efeff2;
-                    background: #ffffff;
-                    VerticalLayout {
-                        padding-left: 24px;
-                        padding-right: 24px;
-                        padding-top: 24px;
-                        padding-bottom: 22px;
-                        spacing: 14px;
-                        Text { text: "远端 ID"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
-                        RdInput {
-                            text <=> root.room-input;
-                            placeholder: "输入对端 ID";
-                            font-size: 22px;
-                        }
-                        Text { text: "密码 / JWT（可选）"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
-                        RdInput {
-                            text <=> root.token-input;
-                            placeholder: "可选";
-                            font-size: 15px;
-                        }
-                        Text { text: "信令服务器"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
-                        RdInput {
-                            text <=> root.server-input;
-                            placeholder: "signal.aerodesk.io 或 127.0.0.1:3003";
-                            font-size: 14px;
-                        }
-                        HorizontalLayout {
-                            cross-axis-alignment: center;
-                            spacing: 8px;
-                            Rectangle { width: 0px; }
-                            RdButton {
-                                text: connecting ? "连接中…" : (root.conn-state == 3 ? "重连" : "连接");
-                                enabled: !connecting && !root.in-session;
-                                primary: true;
-                                width: 120px;
-                                clicked => { root.connect(); }
+                // 连接区：左 = 远端 ID 卡片，右 = 被控端授权（利用右侧空白）
+                HorizontalLayout {
+                    width: 100%;
+                    cross-axis-alignment: stretch;
+                    spacing: 16px;
+                    // 远端 ID 卡片（对齐 RustDesk：白底、圆角 13、灰描边、右侧蓝色「连接」）
+                    Rectangle {
+                        width: 400px;
+                        vertical-stretch: 0;
+                        border-radius: 13px;
+                        border-width: 1px;
+                        border-color: #efeff2;
+                        background: #ffffff;
+                        VerticalLayout {
+                            padding-left: 24px;
+                            padding-right: 24px;
+                            padding-top: 24px;
+                            padding-bottom: 22px;
+                            spacing: 14px;
+                            Text { text: "远端 ID"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                            RdInput {
+                                text <=> root.room-input;
+                                placeholder: "输入对端 ID";
+                                font-size: 22px;
                             }
-                            RdButton {
-                                text: "断开";
-                                width: 76px;
-                                enabled: connecting || root.in-session;
-                                clicked => { root.disconnect(); }
+                            Text { text: "密码 / JWT（可选）"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                            RdInput {
+                                text <=> root.token-input;
+                                placeholder: "可选";
+                                font-size: 15px;
                             }
-                            Text {
-                                text: root.status;
-                                color: root.conn-state == 2 ? #34a853 : (root.conn-state == 3 ? #d93025 : #9a9aa0);
+                            Text { text: "信令服务器"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                            RdInput {
+                                text <=> root.server-input;
+                                placeholder: "signal.aerodesk.io 或 127.0.0.1:3003";
                                 font-size: 14px;
-                                vertical-alignment: center;
-                                vertical-stretch: 0;
                             }
+                            HorizontalLayout {
+                                cross-axis-alignment: center;
+                                spacing: 8px;
+                                Rectangle { width: 0px; }
+                                RdButton {
+                                    text: connecting ? "连接中…" : (root.conn-state == 3 ? "重连" : "连接");
+                                    enabled: !connecting && !root.in-session;
+                                    primary: true;
+                                    width: 120px;
+                                    clicked => { root.connect(); }
+                                }
+                                RdButton {
+                                    text: "断开";
+                                    width: 76px;
+                                    enabled: connecting || root.in-session;
+                                    clicked => { root.disconnect(); }
+                                }
+                                Text {
+                                    text: root.status;
+                                    color: root.conn-state == 2 ? #34a853 : (root.conn-state == 3 ? #d93025 : #9a9aa0);
+                                    font-size: 14px;
+                                    vertical-alignment: center;
+                                    vertical-stretch: 0;
+                                }
+                            }
+                        }
+                    }
+
+                    // 被控端授权卡片（填充右侧空白，对齐 RustDesk helpCards 风格）
+                    Rectangle {
+                        vertical-stretch: 0;
+                        width: max(0px, parent.width - 416px);
+                        border-radius: 13px;
+                        border-width: 1px;
+                        border-color: #efeff2;
+                        background: #ffffff;
+                        VerticalLayout {
+                            padding-left: 24px;
+                            padding-right: 24px;
+                            padding-top: 24px;
+                            padding-bottom: 22px;
+                            spacing: 14px;
+                            Text { text: "被控端授权"; font-size: 19px; color: #212121; height: 26px; vertical-stretch: 0; }
+                            Text {
+                                text: "被控端需要以下 macOS 权限（其他平台后续接入）：";
+                                font-size: 14px; color: #6d6d73; height: 20px; vertical-stretch: 0;
+                            }
+                            HorizontalLayout {
+                                alignment: space-between;
+                                width: max(0px, parent.width - 48px);
+                                cross-axis-alignment: center;
+                                HorizontalLayout {
+                                    cross-axis-alignment: center;
+                                    spacing: 10px;
+                                    Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.perm-screen == "已授权" ? #34a853 : #efeff2; }
+                                    Text { text: "屏幕录制："; width: 90px; font-size: 14px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
+                                    Text { text: root.perm-screen; font-size: 14px; color: root.perm-screen == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
+                                }
+                                HorizontalLayout {
+                                    cross-axis-alignment: center;
+                                    spacing: 4px;
+                                    IconBtn { icon: "\u{e5d5}"; tooltip: "检查权限"; clicked => { root.refresh-perms(); } }
+                                    IconBtn { icon: "\u{e8b8}"; tooltip: "打开屏幕录制设置"; clicked => { root.open-screen-perms(); } }
+                                }
+                            }
+                            HorizontalLayout {
+                                alignment: space-between;
+                                width: max(0px, parent.width - 48px);
+                                cross-axis-alignment: center;
+                                HorizontalLayout {
+                                    cross-axis-alignment: center;
+                                    spacing: 10px;
+                                    Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.perm-a11y == "已授权" ? #34a853 : #efeff2; }
+                                    Text { text: "辅助功能："; width: 90px; font-size: 14px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
+                                    Text { text: root.perm-a11y; font-size: 14px; color: root.perm-a11y == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
+                                }
+                                HorizontalLayout {
+                                    cross-axis-alignment: center;
+                                    spacing: 4px;
+                                    IconBtn { icon: "\u{e5d5}"; tooltip: "检查权限"; clicked => { root.refresh-perms(); } }
+                                    IconBtn { icon: "\u{e8b8}"; tooltip: "打开辅助功能设置"; clicked => { root.open-a11y-perms(); } }
+                                }
+                            }
+                            Text { text: "授权后重启应用生效（屏幕录制）"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                         }
                     }
                 }
@@ -648,17 +686,20 @@ export component AppWindow inherits Window {
                     cross-axis-alignment: center;
                     spacing: 4px;
                     height: 36px;
-                    PeerTab { icon: "\u{e192}"; tooltip: "最近会话"; selected: true; clicked => {} }       // access_time
-                    PeerTab { icon: "\u{e838}"; tooltip: "收藏"; clicked => {} }                   // star
-                    PeerTab { icon: "\u{e87a}"; tooltip: "发现"; clicked => {} }                   // explore
-                    PeerTab { icon: "\u{e0ba}"; tooltip: "地址簿"; clicked => {} }                 // contacts
-                    PeerTab { icon: "\u{e7ef}"; tooltip: "设备组"; clicked => {} }                 // group
+                    PeerTab { icon: "\u{e192}"; tooltip: "最近会话"; selected: root.peer-tab == 0; clicked => { root.set-peer-tab(0); } }
+                    PeerTab { icon: "\u{e838}"; tooltip: "收藏"; selected: root.peer-tab == 1; clicked => { root.set-peer-tab(1); } }
+                    PeerTab { icon: "\u{e87a}"; tooltip: "发现"; enabled: false; selected: false; clicked => { root.set-peer-tab(2); } }
+                    PeerTab { icon: "\u{e0ba}"; tooltip: "地址簿"; enabled: false; selected: false; clicked => { root.set-peer-tab(3); } }
+                    PeerTab { icon: "\u{e7ef}"; tooltip: "设备组"; enabled: false; selected: false; clicked => { root.set-peer-tab(4); } }
                     Rectangle { width: 0px; horizontal-stretch: 1; }
-                    IconBtn { icon: "\u{e5d5}"; tooltip: "刷新"; clicked => {} }                   // refresh
+                    IconBtn { icon: "\u{e5d5}"; tooltip: "刷新"; clicked => { root.refresh-peers(); } }
                 }
-                // 最近会话（对齐 RustDesk PeerTabPage 列表）
-                Text { text: "最近会话"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
-                ScrollView {
+                // 列表标题（跟随标签）
+                Text {
+                    text: root.peer-tab == 0 ? "最近会话" : (root.peer-tab == 1 ? "我的收藏" : "开发中");
+                    font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0;
+                }
+                if root.peer-tab == 0: ScrollView {
                     vertical-stretch: 1;
                     VerticalLayout {
                         spacing: 2px;
@@ -666,7 +707,14 @@ export component AppWindow inherits Window {
                             height: 46px;
                             border-radius: 8px;
                             background: rec.has-hover ? #f2f2f5 : transparent;
+                            rec := TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                mouse-cursor: pointer;
+                                clicked => { root.connect-recent(item); }
+                            }
                             HorizontalLayout {
+                                cross-axis-alignment: center;
                                 padding-left: 10px;
                                 spacing: 12px;
                                 Rectangle {
@@ -692,14 +740,68 @@ export component AppWindow inherits Window {
                                     vertical-alignment: center;
                                     overflow: elide;
                                 }
+                                Rectangle { width: 0px; horizontal-stretch: 1; }
+                                IconBtn { icon: "\u{e83a}"; tooltip: "收藏"; clicked => { root.toggle-favorite(item); } }
                             }
-                            rec := TouchArea {
+                        }
+                    }
+                }
+                if root.peer-tab == 1: ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 2px;
+                        for item in root.favorites: Rectangle {
+                            height: 46px;
+                            border-radius: 8px;
+                            background: fav.has-hover ? #f2f2f5 : transparent;
+                            fav := TouchArea {
                                 width: 100%;
                                 height: 100%;
                                 mouse-cursor: pointer;
                                 clicked => { root.connect-recent(item); }
                             }
+                            HorizontalLayout {
+                                cross-axis-alignment: center;
+                                padding-left: 10px;
+                                spacing: 12px;
+                                Rectangle {
+                                    width: 32px;
+                                    height: 32px;
+                                    border-radius: 16px;
+                                    background: #f5a623;
+                                    Text {
+                                        text: "★";
+                                        color: #ffffff;
+                                        font-size: 14px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        width: 100%;
+                                        height: 100%;
+                                    }
+                                }
+                                Text {
+                                    text: item;
+                                    font-size: 14px;
+                                    color: #212121;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                Rectangle { width: 0px; horizontal-stretch: 1; }
+                                IconBtn { icon: "\u{e838}"; tooltip: "取消收藏"; clicked => { root.toggle-favorite(item); } }
+                            }
                         }
+                    }
+                }
+                if root.peer-tab >= 2: Rectangle {
+                    vertical-stretch: 1;
+                    Text {
+                        text: "该功能开发中（见 #57/#59）";
+                        color: #9a9aa0;
+                        font-size: 14px;
+                        vertical-alignment: center;
+                        horizontal-alignment: center;
+                        width: 100%;
+                        height: 100%;
                     }
                 }
 
@@ -773,6 +875,10 @@ export component AppWindow inherits Window {
                     CheckBox { text: "记住密码 / JWT"; checked <=> root.remember-token; }
                     Text { text: "默认密码 / JWT（可选）"; font-size: 15px; color: #212121; height: 20px; vertical-stretch: 0; }
                     RdInput { text <=> root.token-default; placeholder: "默认密码 / JWT（可选）"; font-size: 14px; }
+                    Rectangle { height: 1px; background: #efeff2; }
+                    Text { text: "本机接入密码（被控端一次性密码）"; font-size: 15px; color: #212121; height: 20px; vertical-stretch: 0; }
+                    RdInput { text <=> root.pw-edit; placeholder: "留空则不修改"; font-size: 14px; }
+                    Text { text: "保存后左栏「一次性密码」同步更新；点左栏刷新图标可随机生成"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                 }
                 if root.settings-tab == 3: VerticalLayout {
                     spacing: 12px;
@@ -787,14 +893,39 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // ---- 被控端授权页 ----
+            // ---- 被控端页 ----
             if !root.in-session && root.tab == 2: VerticalLayout {
                 padding-left: 24px;
                 padding-right: 24px;
                 padding-top: 24px;
                 spacing: 16px;
-                Text { text: "被控端授权"; font-size: 19px; color: #212121; height: 26px; vertical-stretch: 0; }
-                Text { text: "被控端需要以下 macOS 权限（其他平台后续接入）："; font-size: 14px; color: #6d6d73; height: 18px; vertical-stretch: 0; }
+                Text { text: "被控端"; font-size: 19px; color: #212121; height: 26px; vertical-stretch: 0; }
+                Text { text: "本机作为被控端时的接入设置与 macOS 权限："; font-size: 14px; color: #6d6d73; height: 18px; vertical-stretch: 0; }
+
+                // 被控端设置卡片
+                Rectangle {
+                    width: 420px;
+                    vertical-stretch: 0;
+                    border-radius: 13px;
+                    border-width: 1px;
+                    border-color: #efeff2;
+                    background: #ffffff;
+                    VerticalLayout {
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        padding-top: 18px;
+                        padding-bottom: 18px;
+                        spacing: 10px;
+                        Text { text: "接入设置"; font-size: 15px; font-weight: 600; color: #212121; height: 20px; vertical-stretch: 0; }
+                        Switch { text: "开启被控（允许被远程接入）"; checked <=> root.inc-enabled; }
+                        Switch { text: "允许声音（被控端采集系统音频）"; checked <=> root.inc-audio; }
+                        Switch { text: "允许鼠标控制"; checked <=> root.inc-mouse; }
+                        Switch { text: "仅观看（只读，禁止输入控制）"; checked <=> root.inc-view-only; }
+                        Text { text: "设置随「保存设置」持久化；开关即时反映状态"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                    }
+                }
+
+                // 权限卡片
                 Rectangle {
                     width: 420px;
                     vertical-stretch: 0;
@@ -808,6 +939,8 @@ export component AppWindow inherits Window {
                         padding-top: 18px;
                         padding-bottom: 18px;
                         spacing: 12px;
+                        Text { text: "被控端授权"; font-size: 15px; font-weight: 600; color: #212121; height: 20px; vertical-stretch: 0; }
+                        Text { text: "被控端需要以下 macOS 权限（其他平台后续接入）："; font-size: 14px; color: #6d6d73; height: 18px; vertical-stretch: 0; }
                         HorizontalLayout {
                             cross-axis-alignment: center;
                             spacing: 10px;
