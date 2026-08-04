@@ -933,9 +933,9 @@ export component AppWindow inherits Window {
                         spacing: 10px;
                         Text { text: "接入设置"; font-size: 15px; font-weight: 600; color: #212121; height: 20px; vertical-stretch: 0; }
                         Switch { text: "开启被控（允许被远程接入）"; checked <=> root.inc-enabled; }
-                        Switch { text: "允许声音（被控端采集系统音频）"; checked <=> root.inc-audio; }
-                        Switch { text: "允许鼠标控制"; checked <=> root.inc-mouse; }
-                        Switch { text: "仅观看（只读，禁止输入控制）"; checked <=> root.inc-view-only; }
+                        Switch { text: "允许声音（被控端采集系统音频）"; enabled: root.inc-enabled; checked <=> root.inc-audio; }
+                        Switch { text: "允许鼠标控制"; enabled: root.inc-enabled; checked <=> root.inc-mouse; }
+                        Switch { text: "仅观看（只读，禁止输入控制）"; enabled: root.inc-enabled; checked <=> root.inc-view-only; }
                         Text { text: "设置随「保存设置」持久化；开关即时反映状态"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                     }
                 }
