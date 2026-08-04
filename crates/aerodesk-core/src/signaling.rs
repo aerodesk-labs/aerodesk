@@ -38,10 +38,19 @@ pub fn normalize_signal_url(input: &str) -> String {
         };
         format!("{scheme}://{input}")
     };
-    if with_scheme.contains("/ws") {
-        with_scheme
-    } else {
-        format!("{with_scheme}/ws")
+    // 路径处理：仅当无路径（或只有根路径 `/`）时补 `/ws`；
+    // 已有任何显式路径则原样保留（与 docstring 一致），
+    // 避免 `contains("/ws")` 子串误判（如 /wsfoo）与尾部斜杠产生 `//ws`。
+    let Some(rest) = with_scheme.split_once("://").map(|(_, r)| r) else {
+        return with_scheme;
+    };
+    match rest.find('/') {
+        // 无路径：补 /ws
+        None => format!("{with_scheme}/ws"),
+        // 只有尾部根斜杠：去掉后补 /ws（避免 //ws）
+        Some(i) if i == rest.len() - 1 => format!("{}/ws", &with_scheme[..with_scheme.len() - 1]),
+        // 已有路径（含 /ws 或其它）：原样保留
+        Some(_) => with_scheme,
     }
 }
 
@@ -144,6 +153,24 @@ mod tests {
         assert_eq!(
             normalize_signal_url("ws://127.0.0.1:3003"),
             "ws://127.0.0.1:3003/ws"
+        );
+        // 尾部根斜杠 → 补 /ws 且不产生双斜杠
+        assert_eq!(
+            normalize_signal_url("127.0.0.1:3003/"),
+            "ws://127.0.0.1:3003/ws"
+        );
+        assert_eq!(
+            normalize_signal_url("ws://127.0.0.1:3003/"),
+            "ws://127.0.0.1:3003/ws"
+        );
+        // 已有非 /ws 显式路径 → 原样保留（不追加，不因子串误判）
+        assert_eq!(
+            normalize_signal_url("ws://h:3003/signaling"),
+            "ws://h:3003/signaling"
+        );
+        assert_eq!(
+            normalize_signal_url("ws://h:3003/wsfoo"),
+            "ws://h:3003/wsfoo"
         );
         // 空串
         assert_eq!(normalize_signal_url(""), "");
