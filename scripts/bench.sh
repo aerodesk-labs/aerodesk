@@ -21,13 +21,13 @@ REPORT_DIR="${REPORT_DIR:-/tmp/aerodesk-bench}"
 mkdir -p "$REPORT_DIR"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q --release -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
 
 REC="$(mktemp -d /tmp/bench-rec.XXXX)"
 echo "== 启动 sfu/signal"
-RECORD_DIR="$REC" ./target/debug/aerodesk-sfu >"$REPORT_DIR/sfu.log" 2>&1 &
+RECORD_DIR="$REC" ./target/release/aerodesk-sfu >"$REPORT_DIR/sfu.log" 2>&1 &
 SFU_PID=$!
-./target/debug/aerodesk-signal >"$REPORT_DIR/signal.log" 2>&1 &
+./target/release/aerodesk-signal >"$REPORT_DIR/signal.log" 2>&1 &
 SIG_PID=$!
 for _ in $(seq 1 50); do
   if nc -z 127.0.0.1 3003 2>/dev/null; then break; fi
@@ -74,7 +74,7 @@ sampler &
 SAMPLER_PID=$!
 
 echo "== 压测: ${ROOMS} 房间 × ${PAIRS} 对 @ ${W}x${H}/${FPS}fps ${BITRATE}bps，${DURATION}s"
-BIN="$ROOT/target/debug/aerodesk-cli" SIGNAL="ws://127.0.0.1:3003" \
+BIN="$ROOT/target/release/aerodesk-cli" SIGNAL="ws://127.0.0.1:3003" \
   bash "$ROOT/scripts/loadtest.sh" "$ROOMS" "$PAIRS" "$DURATION" "$W" "$H" "$FPS" \
   > "$REPORT_DIR/loadtest.log" 2>&1 || true
 
