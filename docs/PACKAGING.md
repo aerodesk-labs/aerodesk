@@ -55,5 +55,8 @@ xcodebuild -project AeroDesk.xcodeproj -scheme AeroDesk -destination 'generic/pl
 ```sh
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home  # JDK 26 会触发 Kotlin 插件解析失败
 export ANDROID_HOME=~/Library/Android/sdk
+bash scripts/build-android-lib.sh      # 先构建 Rust .so（需 ANDROID_NDK_HOME 或 ~/Library/Android/sdk/ndk）
 cd android && bash gradlew assembleDebug
 ```
+> 注意：Gradle 在 **exFAT 卷**上会因 macOS 生成的 `._*` AppleDouble 文件导致资源合并/清理失败，
+> 请在 APFS 卷（如 `~/tmp`）构建。Rust .so + APK 两条构建已纳入 CI（Android APK build job）。
