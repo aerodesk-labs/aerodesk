@@ -7,10 +7,12 @@ import { CheckBox, ScrollView } from "std-widgets.slint";
 import "fonts/MaterialIcons-Regular.ttf";
 
 // Material 图标（对齐 RustDesk 的 Material Icons 工具栏/标签栏/导航）。
+// Material Icons 字形在 em 框内视觉偏上，默认给 2px 下移让图标视觉居中。
 component MIcon {
     in property <string> icon;
     in property <length> size: 20px;
     in property <brush> color: #4d4d52;
+    in property <length> y-offset: 2px;
     width: 100%;
     height: 100%;
     Text {
@@ -22,6 +24,7 @@ component MIcon {
         vertical-alignment: center;
         width: 100%;
         height: 100%;
+        y: root.y-offset;
     }
 }
 
@@ -59,7 +62,7 @@ component RdButton {
             height: 100%;
             text: root.text;
             color: root.primary ? #ffffff : (root.checked ? #0071ff : #212121);
-            font-size: 13px;
+            font-size: 14px;
             horizontal-alignment: center;
             vertical-alignment: center;
         }
@@ -93,6 +96,17 @@ component IconBtn {
             size: 18px;
             color: root.danger ? #d93025 : (root.active ? #0071ff : #5f6368);
         }
+        if root.tooltip != "": Tooltip {
+            Rectangle {
+                background: #3c4043;
+                border-radius: 4px;
+                padding-left: 8px;
+                padding-right: 8px;
+                padding-top: 4px;
+                padding-bottom: 4px;
+                Text { text: root.tooltip; font-size: 12px; color: #ffffff; }
+            }
+        }
     }
 }
 
@@ -103,18 +117,19 @@ component NavItem {
     in property <bool> selected: false;
     callback clicked;
     width: 100%;
-    height: 32px;
+    height: 36px;
     Rectangle {
         width: 100%;
         height: 100%;
         border-radius: 6px;
         background: root.selected ? #e3ecfb : (ta.has-hover ? #e4e4e8 : transparent);
         HorizontalLayout {
-            padding-left: 10px;
-            spacing: 8px;
+            cross-axis-alignment: center;
+            padding-left: 12px;
+            spacing: 10px;
             Rectangle {
-                width: 20px;
-                height: 20px;
+                width: 22px;
+                height: 22px;
                 MIcon {
                     icon: root.icon;
                     size: 18px;
@@ -123,7 +138,7 @@ component NavItem {
             }
             Text {
                 text: root.text;
-                font-size: 13px;
+                font-size: 14px;
                 color: root.selected ? #0071ff : #3c3c40;
                 vertical-alignment: center;
             }
@@ -134,17 +149,28 @@ component NavItem {
             mouse-cursor: pointer;
             clicked => { root.clicked(); }
         }
+        Tooltip {
+            Rectangle {
+                background: #3c4043;
+                border-radius: 4px;
+                padding-left: 8px;
+                padding-right: 8px;
+                padding-top: 4px;
+                padding-bottom: 4px;
+                Text { text: root.text; font-size: 12px; color: #ffffff; }
+            }
+        }
     }
 }
 
 // Peer 标签（对齐 RustDesk PeerTabPage：图标 + 选中 2px 底边）。
 component PeerTab {
     in property <string> icon;
+    in property <string> tooltip: "";
     in property <bool> selected: false;
-    in property <bool> hover: false;
     callback clicked;
-    width: 40px;
-    height: 30px;
+    width: 44px;
+    height: 32px;
     Rectangle {
         width: 100%;
         height: 100%;
@@ -157,7 +183,7 @@ component PeerTab {
         }
         MIcon {
             icon: root.icon;
-            size: 20px;
+            size: 21px;
             color: root.selected ? #0071ff : #8a8a90;
         }
         ta := TouchArea {
@@ -165,6 +191,17 @@ component PeerTab {
             height: 100%;
             mouse-cursor: pointer;
             clicked => { root.clicked(); }
+        }
+        if root.tooltip != "": Tooltip {
+            Rectangle {
+                background: #3c4043;
+                border-radius: 4px;
+                padding-left: 8px;
+                padding-right: 8px;
+                padding-top: 4px;
+                padding-bottom: 4px;
+                Text { text: root.tooltip; font-size: 12px; color: #ffffff; }
+            }
         }
     }
 }
@@ -175,7 +212,7 @@ component IdentityRow {
     in property <string> value;
     in property <length> value-size: 22px;
     callback copy;
-    height: 58px;
+    height: 62px;
     HorizontalLayout {
         Rectangle {
             width: 2px;
@@ -187,7 +224,7 @@ component IdentityRow {
             spacing: 2px;
             Text {
                 text: root.label;
-                font-size: 13px;
+                font-size: 14px;
                 color: #7d7d84;
             }
             Text {
@@ -204,7 +241,7 @@ component RdInput {
     in property <string> placeholder: "";
     in property <length> font-size: 16px;
     in-out property <string> text: "";
-    height: 44px;
+    height: 48px;
     Rectangle {
         width: 100%;
         height: 100%;
@@ -256,7 +293,7 @@ component SessionTab {
             width: 100%;
             height: 100%;
             text: root.text;
-            font-size: 12px;
+            font-size: 14px;
             color: root.selected ? #0071ff : #4d4d52;
             horizontal-alignment: center;
             vertical-alignment: center;
@@ -333,10 +370,12 @@ export component AppWindow inherits Window {
             width: 200px;
             background: #efeff2;
             VerticalLayout {
+                spacing: 2px;
                 // Logo（对齐 loadLogo：顶部居中，高约 60）
                 Rectangle {
-                    height: 60px;
+                    height: 76px;
                     HorizontalLayout {
+                        cross-axis-alignment: center;
                         Rectangle { width: 0px; horizontal-stretch: 1; }
                         Rectangle {
                             width: 30px;
@@ -357,7 +396,7 @@ export component AppWindow inherits Window {
                         Rectangle { width: 8px; }
                         VerticalLayout {
                             Text { text: "AeroDesk"; font-size: 16px; font-weight: 700; color: #212121; }
-                            Text { text: "Remote Desktop"; font-size: 10px; color: #8a8a90; }
+                            Text { text: "Remote Desktop"; font-size: 14px; color: #8a8a90; }
                         }
                         Rectangle { width: 0px; horizontal-stretch: 1; }
                     }
@@ -380,7 +419,7 @@ export component AppWindow inherits Window {
                     padding-right: 16px;
                     Text {
                         text: "使用下面的 ID 和密码，可以远程访问这台设备。";
-                        font-size: 12px;
+                        font-size: 14px;
                         color: #6d6d73;
                         wrap: word-wrap;
                         height: 34px;
@@ -391,6 +430,7 @@ export component AppWindow inherits Window {
 
                 // ID 板（对齐 buildIDBoard：左 20 右 11，2px 蓝条 + ID 标签 + 22px 大号 ID）
                 HorizontalLayout {
+                    cross-axis-alignment: center;
                     padding-left: 20px;
                     padding-right: 8px;
                     IdentityRow {
@@ -412,10 +452,12 @@ export component AppWindow inherits Window {
                             mouse-cursor: pointer;
                             clicked => { root.set-tab(1); }
                         }
+                        Tooltip { text: @markdown("设置"); }
                     }
                 }
                 // 密码板（对齐 buildPasswordBoard：左 20 右 16 上 13 下 13）
                 HorizontalLayout {
+                    cross-axis-alignment: center;
                     padding-left: 20px;
                     padding-right: 8px;
                     IdentityRow {
@@ -437,6 +479,7 @@ export component AppWindow inherits Window {
                             mouse-cursor: pointer;
                             clicked => { root.copy-device-pw(); }
                         }
+                        Tooltip { text: @markdown("刷新密码"); }
                     }
                     Rectangle {
                         width: 24px;
@@ -450,6 +493,7 @@ export component AppWindow inherits Window {
                             mouse-cursor: pointer;
                             clicked => { root.set-tab(1); }
                         }
+                        Tooltip { text: @markdown("修改密码"); }
                     }
                 }
 
@@ -464,23 +508,25 @@ export component AppWindow inherits Window {
                         border-width: 1px;
                         border-color: #dedee2;
                         VerticalLayout {
-                            padding-left: 12px;
-                            padding-right: 12px;
-                            padding-top: 10px;
-                            padding-bottom: 10px;
-                            spacing: 8px;
-                            Text { text: "被控端授权"; font-size: 13px; font-weight: 600; color: #212121; height: 18px; vertical-stretch: 0; }
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            padding-top: 12px;
+                            padding-bottom: 12px;
+                            spacing: 10px;
+                            Text { text: "被控端授权"; font-size: 14px; font-weight: 600; color: #212121; height: 18px; vertical-stretch: 0; }
                             HorizontalLayout {
+                                cross-axis-alignment: center;
                                 spacing: 6px;
                                 Rectangle { width: 8px; height: 8px; border-radius: 4px; background: #efeff2; }
-                                Text { text: "屏幕录制："; font-size: 12px; color: #4d4d52; vertical-stretch: 0; }
-                                Text { text: root.perm-screen; font-size: 12px; color: #0071ff; vertical-stretch: 0; }
+                                Text { text: "屏幕录制："; font-size: 14px; color: #4d4d52; vertical-stretch: 0; }
+                                Text { text: root.perm-screen; font-size: 14px; color: #0071ff; vertical-stretch: 0; }
                             }
                             HorizontalLayout {
+                                cross-axis-alignment: center;
                                 spacing: 6px;
                                 Rectangle { width: 8px; height: 8px; border-radius: 4px; background: #efeff2; }
-                                Text { text: "辅助功能："; font-size: 12px; color: #4d4d52; vertical-stretch: 0; }
-                                Text { text: root.perm-a11y; font-size: 12px; color: #0071ff; vertical-stretch: 0; }
+                                Text { text: "辅助功能："; font-size: 14px; color: #4d4d52; vertical-stretch: 0; }
+                                Text { text: root.perm-a11y; font-size: 14px; color: #0071ff; vertical-stretch: 0; }
                             }
                             HorizontalLayout {
                                 spacing: 6px;
@@ -517,10 +563,10 @@ export component AppWindow inherits Window {
             background: #ffffff;
             // ---- 连接页 ----
             if !root.in-session && root.tab == 0: VerticalLayout {
-                padding-left: 20px;
-                padding-right: 20px;
-                padding-top: 22px;
-                spacing: 14px;
+                padding-left: 24px;
+                padding-right: 24px;
+                padding-top: 26px;
+                spacing: 16px;
 
                 // 「控制远程桌面」标题
                 HorizontalLayout {
@@ -542,30 +588,31 @@ export component AppWindow inherits Window {
                     border-color: #efeff2;
                     background: #ffffff;
                     VerticalLayout {
-                        padding-left: 20px;
-                        padding-right: 20px;
-                        padding-top: 20px;
-                        padding-bottom: 18px;
-                        spacing: 10px;
-                        Text { text: "远端 ID"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                        padding-left: 24px;
+                        padding-right: 24px;
+                        padding-top: 24px;
+                        padding-bottom: 22px;
+                        spacing: 14px;
+                        Text { text: "远端 ID"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                         RdInput {
                             text <=> root.room-input;
                             placeholder: "输入对端 ID";
                             font-size: 22px;
                         }
-                        Text { text: "密码 / JWT（可选）"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                        Text { text: "密码 / JWT（可选）"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                         RdInput {
                             text <=> root.token-input;
                             placeholder: "可选";
                             font-size: 15px;
                         }
-                        Text { text: "信令服务器"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                        Text { text: "信令服务器"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                         RdInput {
                             text <=> root.server-input;
                             placeholder: "signal.aerodesk.io 或 127.0.0.1:3003";
-                            font-size: 13px;
+                            font-size: 14px;
                         }
                         HorizontalLayout {
+                            cross-axis-alignment: center;
                             spacing: 8px;
                             Rectangle { width: 0px; }
                             RdButton {
@@ -584,7 +631,7 @@ export component AppWindow inherits Window {
                             Text {
                                 text: root.status;
                                 color: root.conn-state == 2 ? #34a853 : (root.conn-state == 3 ? #d93025 : #9a9aa0);
-                                font-size: 12px;
+                                font-size: 14px;
                                 vertical-alignment: center;
                                 vertical-stretch: 0;
                             }
@@ -597,38 +644,39 @@ export component AppWindow inherits Window {
 
                 // Peer 标签栏（对齐 RustDesk PeerTabPage：最近/收藏/发现/地址簿/设备组）
                 HorizontalLayout {
+                    cross-axis-alignment: center;
                     spacing: 4px;
-                    height: 32px;
-                    PeerTab { icon: "\u{e192}"; selected: true; clicked => {} }                    // access_time
-                    PeerTab { icon: "\u{e838}"; clicked => {} }                                    // star
-                    PeerTab { icon: "\u{e87a}"; clicked => {} }                                    // explore
-                    PeerTab { icon: "\u{e0ba}"; clicked => {} }                                    // contacts
-                    PeerTab { icon: "\u{e7ef}"; clicked => {} }                                    // group
+                    height: 36px;
+                    PeerTab { icon: "\u{e192}"; tooltip: "最近会话"; selected: true; clicked => {} }       // access_time
+                    PeerTab { icon: "\u{e838}"; tooltip: "收藏"; clicked => {} }                   // star
+                    PeerTab { icon: "\u{e87a}"; tooltip: "发现"; clicked => {} }                   // explore
+                    PeerTab { icon: "\u{e0ba}"; tooltip: "地址簿"; clicked => {} }                 // contacts
+                    PeerTab { icon: "\u{e7ef}"; tooltip: "设备组"; clicked => {} }                 // group
                     Rectangle { width: 0px; horizontal-stretch: 1; }
                     IconBtn { icon: "\u{e5d5}"; tooltip: "刷新"; clicked => {} }                   // refresh
                 }
                 // 最近会话（对齐 RustDesk PeerTabPage 列表）
-                Text { text: "最近会话"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                Text { text: "最近会话"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                 ScrollView {
                     vertical-stretch: 1;
                     VerticalLayout {
                         spacing: 2px;
                         for item in root.recents: Rectangle {
-                            height: 40px;
+                            height: 46px;
                             border-radius: 8px;
                             background: rec.has-hover ? #f2f2f5 : transparent;
                             HorizontalLayout {
-                                padding-left: 8px;
-                                spacing: 10px;
+                                padding-left: 10px;
+                                spacing: 12px;
                                 Rectangle {
-                                    width: 28px;
-                                    height: 28px;
-                                    border-radius: 14px;
+                                    width: 32px;
+                                    height: 32px;
+                                    border-radius: 16px;
                                     background: #0071ff;
                                     Text {
                                         text: "A";
                                         color: #ffffff;
-                                        font-size: 13px;
+                                        font-size: 14px;
                                         font-weight: 600;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
@@ -638,7 +686,7 @@ export component AppWindow inherits Window {
                                 }
                                 Text {
                                     text: item;
-                                    font-size: 13px;
+                                    font-size: 14px;
                                     color: #212121;
                                     vertical-alignment: center;
                                     overflow: elide;
@@ -667,7 +715,7 @@ export component AppWindow inherits Window {
                     }
                     Text {
                         text: root.status == "" ? "就绪" : root.status;
-                        font-size: 13px;
+                        font-size: 14px;
                         color: #616161;
                         vertical-alignment: center;
                         vertical-stretch: 0;
@@ -675,7 +723,7 @@ export component AppWindow inherits Window {
                     Rectangle { width: 0px; }
                     if root.log != "": Text {
                         text: root.log;
-                        font-size: 11px;
+                        font-size: 12px;
                         color: #9a9aa0;
                         vertical-alignment: center;
                         overflow: elide;
@@ -692,6 +740,7 @@ export component AppWindow inherits Window {
                 spacing: 16px;
                 Text { text: "设置"; font-size: 19px; color: #212121; height: 26px; vertical-stretch: 0; }
                 HorizontalLayout {
+                    cross-axis-alignment: center;
                     spacing: 8px;
                     RdButton { text: "显示"; width: 72px; checked: root.settings-tab == 0; clicked => { root.set-settings-tab(0); } }
                     RdButton { text: "网络"; width: 72px; checked: root.settings-tab == 1; clicked => { root.set-settings-tab(1); } }
@@ -702,37 +751,38 @@ export component AppWindow inherits Window {
 
                 if root.settings-tab == 0: VerticalLayout {
                     spacing: 12px;
-                    Text { text: "显示质量"; font-size: 14px; color: #212121; height: 20px; vertical-stretch: 0; }
+                    Text { text: "显示质量"; font-size: 15px; color: #212121; height: 20px; vertical-stretch: 0; }
                     HorizontalLayout {
+                        cross-axis-alignment: center;
                         spacing: 8px;
                         RdButton { text: "清晰（8Mbps）"; width: 120px; checked: root.quality == 0; clicked => { root.set-quality(0); } }
                         RdButton { text: "平衡（4Mbps）"; width: 120px; checked: root.quality == 1; clicked => { root.set-quality(1); } }
                         RdButton { text: "流畅（1.5Mbps）"; width: 120px; checked: root.quality == 2; clicked => { root.set-quality(2); } }
                     }
-                    Text { text: "质量 → 目标码率：清晰 8Mbps / 平衡 4Mbps / 流畅 1.5Mbps（对接 SFU 选层）"; font-size: 12px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                    Text { text: "质量 → 目标码率：清晰 8Mbps / 平衡 4Mbps / 流畅 1.5Mbps（对接 SFU 选层）"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                 }
                 if root.settings-tab == 1: VerticalLayout {
                     spacing: 12px;
-                    Text { text: "默认信令服务器"; font-size: 14px; color: #212121; height: 20px; vertical-stretch: 0; }
+                    Text { text: "默认信令服务器"; font-size: 15px; color: #212121; height: 20px; vertical-stretch: 0; }
                     RdInput { text <=> root.server-default; placeholder: "signal.aerodesk.io 或 127.0.0.1:3003"; font-size: 14px; }
-                    Text { text: "中继偏好：自动（直连失败走 TURN）"; font-size: 12px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                    Text { text: "中继偏好：自动（直连失败走 TURN）"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                 }
                 if root.settings-tab == 2: VerticalLayout {
                     spacing: 12px;
                     CheckBox { text: "记住密码 / JWT"; checked <=> root.remember-token; }
-                    Text { text: "默认密码 / JWT（可选）"; font-size: 14px; color: #212121; height: 20px; vertical-stretch: 0; }
+                    Text { text: "默认密码 / JWT（可选）"; font-size: 15px; color: #212121; height: 20px; vertical-stretch: 0; }
                     RdInput { text <=> root.token-default; placeholder: "默认密码 / JWT（可选）"; font-size: 14px; }
                 }
                 if root.settings-tab == 3: VerticalLayout {
                     spacing: 12px;
-                    Text { text: "全屏：F11（待绑定）"; font-size: 13px; color: #4d4d52; height: 18px; vertical-stretch: 0; }
-                    Text { text: "输入捕获/释放：Esc（待绑定）"; font-size: 13px; color: #4d4d52; height: 18px; vertical-stretch: 0; }
-                    Text { text: "断开：Ctrl+Alt+D（待绑定）"; font-size: 13px; color: #4d4d52; height: 18px; vertical-stretch: 0; }
+                    Text { text: "全屏：F11（待绑定）"; font-size: 14px; color: #4d4d52; height: 18px; vertical-stretch: 0; }
+                    Text { text: "输入捕获/释放：Esc（待绑定）"; font-size: 14px; color: #4d4d52; height: 18px; vertical-stretch: 0; }
+                    Text { text: "断开：Ctrl+Alt+D（待绑定）"; font-size: 14px; color: #4d4d52; height: 18px; vertical-stretch: 0; }
                 }
                 HorizontalLayout {
                     spacing: 8px;
                     RdButton { text: "保存设置"; primary: true; clicked => { root.save-settings(); } }
-                    Text { text: root.settings-status; font-size: 12px; color: #34a853; vertical-alignment: center; vertical-stretch: 0; }
+                    Text { text: root.settings-status; font-size: 14px; color: #34a853; vertical-alignment: center; vertical-stretch: 0; }
                 }
             }
 
@@ -743,7 +793,7 @@ export component AppWindow inherits Window {
                 padding-top: 24px;
                 spacing: 16px;
                 Text { text: "被控端授权"; font-size: 19px; color: #212121; height: 26px; vertical-stretch: 0; }
-                Text { text: "被控端需要以下 macOS 权限（其他平台后续接入）："; font-size: 13px; color: #6d6d73; height: 18px; vertical-stretch: 0; }
+                Text { text: "被控端需要以下 macOS 权限（其他平台后续接入）："; font-size: 14px; color: #6d6d73; height: 18px; vertical-stretch: 0; }
                 Rectangle {
                     width: 420px;
                     vertical-stretch: 0;
@@ -758,26 +808,28 @@ export component AppWindow inherits Window {
                         padding-bottom: 18px;
                         spacing: 12px;
                         HorizontalLayout {
+                            cross-axis-alignment: center;
                             spacing: 10px;
                             Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.perm-screen == "已授权" ? #34a853 : #efeff2; }
-                            Text { text: "屏幕录制："; width: 90px; font-size: 13px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
-                            Text { text: root.perm-screen; font-size: 13px; color: root.perm-screen == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
+                            Text { text: "屏幕录制："; width: 90px; font-size: 14px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
+                            Text { text: root.perm-screen; font-size: 14px; color: root.perm-screen == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
                             Rectangle { width: 0px; }
                             RdButton { text: "检查"; clicked => { root.refresh-perms(); } }
                             RdButton { text: "打开设置"; clicked => { root.open-screen-perms(); } }
                         }
                         HorizontalLayout {
+                            cross-axis-alignment: center;
                             spacing: 10px;
                             Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.perm-a11y == "已授权" ? #34a853 : #efeff2; }
-                            Text { text: "辅助功能："; width: 90px; font-size: 13px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
-                            Text { text: root.perm-a11y; font-size: 13px; color: root.perm-a11y == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
+                            Text { text: "辅助功能："; width: 90px; font-size: 14px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
+                            Text { text: root.perm-a11y; font-size: 14px; color: root.perm-a11y == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
                             Rectangle { width: 0px; }
                             RdButton { text: "检查"; clicked => { root.refresh-perms(); } }
                             RdButton { text: "打开设置"; clicked => { root.open-a11y-perms(); } }
                         }
                     }
                 }
-                Text { text: "授权后重启应用生效（屏幕录制）"; font-size: 12px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                Text { text: "授权后重启应用生效（屏幕录制）"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
             }
 
             // ---- 会话视图（对齐 RustDesk remote_page：大视频区 + 悬浮工具栏） ----
@@ -816,12 +868,13 @@ export component AppWindow inherits Window {
                         x: 12px;
                         y: 12px;
                         width: 280px;
-                        height: 40px;
+                        height: 44px;
                         border-radius: 6px;
                         background: #ffffff;
                         border-width: 1px;
                         border-color: #d9d9de;
                         HorizontalLayout {
+                            cross-axis-alignment: center;
                             padding-left: 4px;
                             padding-right: 4px;
                             spacing: 2px;
@@ -836,7 +889,7 @@ export component AppWindow inherits Window {
                             Text {
                                 text: root.session-status;
                                 color: #34a853;
-                                font-size: 12px;
+                                font-size: 14px;
                                 vertical-alignment: center;
                             }
                         }
@@ -844,15 +897,15 @@ export component AppWindow inherits Window {
                 }
                 // 底部状态行
                 Rectangle {
-                    height: 24px;
+                    height: 28px;
                     background: #ffffff;
                     HorizontalLayout {
-                        padding-left: 12px;
+                        padding-left: 14px;
                         spacing: 8px;
                         Text {
                             text: "输入模式：" + root.input-mode;
                             color: #7d7d84;
-                            font-size: 12px;
+                            font-size: 14px;
                             vertical-alignment: center;
                         }
                     }
