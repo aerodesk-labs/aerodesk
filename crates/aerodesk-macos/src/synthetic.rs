@@ -6,34 +6,21 @@ pub struct SyntheticSource {
     frame: u64,
     buf: Vec<u8>,
     bgra: Vec<u8>,
+    /// 彩条基础行（每行相同，逐行复制避免全帧逐像素计算）。
+    base_row: Vec<u8>,
 }
 
 impl SyntheticSource {
     pub fn new(width: u32, height: u32) -> Self {
-        Self {
+        let mut src = Self {
             width,
             height,
             frame: 0,
             buf: vec![0; (width * height * 3) as usize],
             bgra: vec![0; (width * height * 4) as usize],
-        }
-    }
-
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-
-    /// 生成下一帧 RGB24。
-    pub fn next_frame(&mut self) -> &[u8] {
-        let w = self.width as usize;
-        let h = self.height as usize;
-        let t = self.frame;
-
-        // 彩条：8 条色带
+            base_row: vec![0; (width * 3) as usize],
+        };
+        // 预计算彩条基础行（8 条色带）。
         let bars = [
             (180u8, 180u8, 180u8),
             (180, 180, 0),
@@ -44,14 +31,35 @@ impl SyntheticSource {
             (0, 0, 180),
             (0, 0, 0),
         ];
+        for x in 0..width as usize {
+            let idx = x * 3;
+            let bar = bars[((x * 8) / width as usize).min(7)];
+            src.base_row[idx] = bar.0;
+            src.base_row[idx + 1] = bar.1;
+            src.base_row[idx + 2] = bar.2;
+        }
+        src
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// 生成下一帧 RGB24（行级复制 + 方块覆盖，4K 下比逐像素快一个量级）。
+    pub fn next_frame(&mut self) -> &[u8] {
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let t = self.frame;
+
+        // 彩条：每行复制预计算的 base_row。
+        let row_bytes = w * 3;
         for y in 0..h {
-            for x in 0..w {
-                let idx = (y * w + x) * 3;
-                let bar = bars[((x * 8) / w).min(7)];
-                self.buf[idx] = bar.0;
-                self.buf[idx + 1] = bar.1;
-                self.buf[idx + 2] = bar.2;
-            }
+            let start = y * row_bytes;
+            self.buf[start..start + row_bytes].copy_from_slice(&self.base_row);
         }
 
         // 移动方块（模拟鼠标指针/内容变化）
@@ -81,13 +89,21 @@ impl SyntheticSource {
     }
 
     /// 生成下一帧 BGRA32（VideoToolbox 硬编输入）。
+    /// 直接在 bgra 缓冲转换，避免中间 to_vec 拷贝（4K 下省 ~25MB/帧）。
     pub fn next_frame_bgra(&mut self) -> &[u8] {
-        let rgb = self.next_frame().to_vec();
-        for (dst, src) in self.bgra.chunks_exact_mut(4).zip(rgb.chunks_exact(3)) {
-            dst[0] = src[2]; // B
-            dst[1] = src[1]; // G
-            dst[2] = src[0]; // R
-            dst[3] = 255; // A
+        self.next_frame();
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let buf = &self.buf;
+        let bgra = &mut self.bgra;
+        let n = w * h;
+        for i in 0..n {
+            let s = i * 3;
+            let d = i * 4;
+            bgra[d] = buf[s + 2]; // B
+            bgra[d + 1] = buf[s + 1]; // G
+            bgra[d + 2] = buf[s]; // R
+            bgra[d + 3] = 255; // A
         }
         &self.bgra
     }
@@ -104,5 +120,20 @@ mod tests {
         let b = src.next_frame().to_vec();
         assert_eq!(a.len(), 64 * 64 * 3);
         assert_ne!(a, b, "moving block should change content");
+    }
+
+    #[test]
+    fn four_k_frame_generation_speed() {
+        // 4K 合成源应达到较高帧率（优化后行级复制）；回归护栏：单帧生成 < 20ms。
+        let mut src = SyntheticSource::new(3840, 2160);
+        let start = std::time::Instant::now();
+        let n = 30;
+        for _ in 0..n {
+            let _ = src.next_frame();
+        }
+        let per_frame = start.elapsed() / n;
+        // 实测优化后应远小于 20ms；此处只做软断言（CI 负载差异大），打日志供参考。
+        eprintln!("4K synthetic per-frame: {:?}", per_frame);
+        assert!(per_frame.as_millis() < 50, "4K 合成帧过慢: {per_frame:?}");
     }
 }
