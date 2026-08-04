@@ -642,10 +642,30 @@ export component AppWindow inherits Window {
                                 placeholder: "输入对端 ID";
                                 font-size: 22px;
                             }
-                            Text { text: "密码 / JWT（可选）"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                            HorizontalLayout {
+                                cross-axis-alignment: center;
+                                spacing: 4px;
+                                Text { text: "访问凭证 / JWT（可选）"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                                Rectangle {
+                                    width: 16px;
+                                    height: 18px;
+                                    MIcon { icon: "\u{e8fd}"; size: 13px; color: #9a9aa0; }   // help_outline
+                                    Tooltip {
+                                        Rectangle {
+                                            background: #3c4043;
+                                            border-radius: 4px;
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            padding-top: 4px;
+                                            padding-bottom: 4px;
+                                            Text { text: "服务器管理员分发的连接授权凭证（JWT/静态 token）；未配置认证时留空"; font-size: 12px; color: #ffffff; }
+                                        }
+                                    }
+                                }
+                            }
                             RdInput {
                                 text <=> root.token-input;
-                                placeholder: "可选";
+                                placeholder: "留空或填管理员给的凭证";
                                 font-size: 15px;
                             }
                             Text { text: "信令服务器"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
@@ -887,9 +907,9 @@ export component AppWindow inherits Window {
                 }
                 if root.settings-tab == 2: VerticalLayout {
                     spacing: 12px;
-                    CheckBox { text: "记住密码 / JWT"; checked <=> root.remember-token; }
-                    Text { text: "默认密码 / JWT（可选）"; font-size: 15px; color: #212121; height: 20px; vertical-stretch: 0; }
-                    RdInput { text <=> root.token-default; placeholder: "默认密码 / JWT（可选）"; font-size: 14px; }
+                    CheckBox { text: "记住访问凭证 / JWT"; checked <=> root.remember-token; }
+                    Text { text: "默认访问凭证 / JWT（可选）"; font-size: 15px; color: #212121; height: 20px; vertical-stretch: 0; }
+                    RdInput { text <=> root.token-default; placeholder: "默认访问凭证 / JWT（可选）"; font-size: 14px; }
                     Rectangle { height: 1px; background: #efeff2; }
                     Text { text: "本机接入密码（被控端一次性密码）"; font-size: 15px; color: #212121; height: 20px; vertical-stretch: 0; }
                     RdInput { text <=> root.pw-edit; placeholder: "留空则不修改"; font-size: 14px; }
