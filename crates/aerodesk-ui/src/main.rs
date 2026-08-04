@@ -26,7 +26,19 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_recents(slint::ModelRc::new(slint::VecModel::from(load_recents())));
 
     // 设置（本地持久化）
-    let settings = load_settings();
+    let mut settings = load_settings();
+    // 本机 ID：首启生成并持久化（RustDesk 左栏「本机 ID」对齐）。
+    if settings.device_id.is_empty() {
+        settings.device_id = default_device_id();
+        save_settings(&settings);
+    }
+    ui.set_device_id(settings.device_id.clone().into());
+    let pw_display = if settings.device_pw.is_empty() {
+        "未设置".to_string()
+    } else {
+        settings.device_pw.clone()
+    };
+    ui.set_device_pw(pw_display.into());
     ui.set_quality(settings.quality);
     ui.set_server_default(settings.server_default.clone().into());
     ui.set_remember_token(settings.remember_token);
@@ -37,6 +49,23 @@ fn main() -> Result<(), slint::PlatformError> {
     if settings.remember_token && !settings.token_default.is_empty() {
         ui.set_token_input(settings.token_default.into());
     }
+    // 复制本机 ID / 密码到剪贴板。
+    ui.on_copy_device_id({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            copy_to_clipboard(&ui.get_device_id().to_string());
+            ui.set_status("本机 ID 已复制".into());
+        }
+    });
+    ui.on_copy_device_pw({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            copy_to_clipboard(&ui.get_device_pw().to_string());
+            ui.set_status("密码已复制".into());
+        }
+    });
     // 会话帧线程代际：断开/新会话时递增，使旧帧线程退出（防线程泄漏）。
     let frame_epoch = Arc::new(AtomicU64::new(0));
 
@@ -297,6 +326,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 quality: ui.get_quality(),
                 remember_token: ui.get_remember_token(),
                 token_default: ui.get_token_default().to_string(),
+                device_id: ui.get_device_id().to_string(),
+                device_pw: ui.get_device_pw().to_string(),
             };
             save_settings(&settings);
             // 即时生效：同步主页输入框（无需重启）。
@@ -482,6 +513,10 @@ struct AppSettings {
     quality: i32,
     remember_token: bool,
     token_default: String,
+    /// 本机 ID（被控端身份，首启生成并持久化）。
+    device_id: String,
+    /// 本机接入密码（占位；发布端鉴权接入后使用）。
+    device_pw: String,
 }
 
 fn settings_path() -> PathBuf {
@@ -504,6 +539,55 @@ fn save_settings(s: &AppSettings) {
         if std::fs::write(&path, json).is_ok() {
             set_private_perms(&path);
         }
+    }
+}
+
+/// 生成本机 ID（AD- 前缀 + 6 位十六进制，基于时间+进程熵）。
+fn default_device_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id() as u128;
+    let n = (t ^ (pid << 32)) as u64;
+    format!("AD-{:06X}", (n % 0xF4_23F) as u32)
+}
+
+/// 复制文本到系统剪贴板（macOS pbcopy；其他平台占位）。
+fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(mut child) = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            let _ = child.stdin.as_mut().map(|s| s.write_all(text.as_bytes()));
+            let _ = child.wait();
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xclip")
+            .arg("-selection")
+            .arg("clipboard")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut c| {
+                c.stdin.as_mut().map(|s| s.write_all(text.as_bytes()));
+                c.wait()
+            });
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("clip")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut c| {
+                c.stdin.as_mut().map(|s| s.write_all(text.as_bytes()));
+                c.wait()
+            });
     }
 }
 

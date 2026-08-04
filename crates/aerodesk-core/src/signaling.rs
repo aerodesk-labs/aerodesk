@@ -14,8 +14,16 @@ pub struct WsSignalClient {
 
 impl WsSignalClient {
     /// 连接信令服务器（ws:// 或 wss://）。
+    ///
+    /// 服务器 WebSocket 端点统一挂在 `/ws` 路径下；若调用方只给到主机/端口
+    /// （如 `ws://127.0.0.1:3003`），这里自动补全路径，避免连到根路径被回 200 而卡住。
     pub fn connect(url: &str) -> Result<Self, tungstenite::Error> {
-        let (ws, _) = connect(url)?;
+        let url = if url.contains("/ws") {
+            url.to_string()
+        } else {
+            format!("{url}/ws")
+        };
+        let (ws, _) = connect(&url)?;
         Ok(Self { ws, peer_id: None })
     }
 
