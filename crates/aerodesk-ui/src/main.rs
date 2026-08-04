@@ -493,51 +493,21 @@ fn main() -> Result<(), slint::PlatformError> {
     // 启动时刷一次权限状态
     ui.invoke_refresh_perms();
 
-    // ---- 无边框窗口：自定义标题栏控制（关闭/最小化/拖动） ----
-    ui.on_close_window({
-        move || {
-            // 无边框窗口无系统关闭按钮：直接退出（后续有托盘再改隐藏）。
-            std::process::exit(0);
-        }
-    });
-    ui.on_minimize_window({
-        let ui = ui.as_weak();
-        move || {
-            if let Some(ui) = ui.upgrade() {
-                ui.window().set_minimized(true);
-            }
-        }
-    });
-    // 拖动：按下记录窗口起点（逻辑坐标），移动时按增量更新。
-    let drag_state: Arc<std::sync::Mutex<Option<slint::LogicalPosition>>> =
-        Arc::new(std::sync::Mutex::new(None));
-    ui.on_drag_start({
-        let ui = ui.as_weak();
-        let drag_state = drag_state.clone();
-        move || {
-            if let Some(ui) = ui.upgrade() {
-                let scale = ui.window().scale_factor();
-                let pos = ui.window().position().to_logical(scale);
-                *drag_state.lock().unwrap() = Some(pos);
-            }
-        }
-    });
-    ui.on_drag_move({
-        let ui = ui.as_weak();
-        let drag_state = drag_state.clone();
-        move |dx: f32, dy: f32| {
-            if let (Some(ui), Some(start)) = (ui.upgrade(), *drag_state.lock().unwrap()) {
-                ui.window()
-                    .set_position(slint::LogicalPosition::new(start.x + dx, start.y + dy));
-            }
-        }
-    });
-    ui.on_drag_end({
-        let drag_state = drag_state.clone();
-        move || {
-            *drag_state.lock().unwrap() = None;
-        }
-    });
+    // macOS：隐藏标题栏文字 + 内容铺满窗口，保留原生红绿灯控制按钮。
+    #[cfg(target_os = "macos")]
+    {
+        // 窗口显示后延迟配置（确保 NSWindow 已注册到 NSApp.windows）。
+        let timer = slint::Timer::default();
+        timer.start(
+            slint::TimerMode::SingleShot,
+            std::time::Duration::from_millis(300),
+            || {
+                aerodesk_macos::window::configure_fullsize_titlebar("AeroDesk");
+            },
+        );
+        // 保活：Timer 被 drop 则不触发。
+        std::mem::forget(timer);
+    }
 
     ui.run()
 }
