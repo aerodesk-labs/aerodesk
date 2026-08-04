@@ -398,19 +398,22 @@ fn main() -> Result<(), slint::PlatformError> {
             );
         }
     });
-    ui.on_save_settings({
+    // 自动保存：任一设置控件变化即持久化 + 即时生效（无「保存设置」按钮）。
+    ui.on_auto_save({
         let ui = ui.as_weak();
         move || {
             let ui = ui.unwrap();
             let mut device_pw = ui.get_device_pw().to_string();
-            // 设置页安全 tab：本机接入密码非空则更新
+            // 设置页安全 tab：本机接入密码非空则更新（清空表示不修改）。
             let pw_edit = ui.get_pw_edit().to_string();
             if !pw_edit.trim().is_empty() {
                 device_pw = pw_edit.trim().to_string();
                 ui.set_device_pw(device_pw.clone().into());
             }
+            // server-default 与主页 server-input 已在 UI 层双向同步。
+            let server_default = display_server(&ui.get_server_default().to_string());
             let settings = AppSettings {
-                server_default: display_server(&ui.get_server_default().to_string()),
+                server_default: server_default.clone(),
                 quality: ui.get_quality(),
                 remember_token: ui.get_remember_token(),
                 token_default: ui.get_token_default().to_string(),
@@ -423,11 +426,11 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             save_settings(&settings);
             // 即时生效：同步主页输入框（无需重启）。
-            ui.set_server_input(display_server(&settings.server_default).into());
+            ui.set_server_input(server_default.into());
             if settings.remember_token {
                 ui.set_token_input(settings.token_default.clone().into());
             }
-            ui.set_settings_status("已保存".into());
+            ui.set_settings_status("已自动保存".into());
         }
     });
 

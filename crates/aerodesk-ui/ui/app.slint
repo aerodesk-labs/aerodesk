@@ -243,6 +243,7 @@ component RdInput {
     in property <string> placeholder: "";
     in property <length> font-size: 16px;
     in-out property <string> text: "";
+    callback edited;
     height: 48px;
     Rectangle {
         width: 100%;
@@ -261,6 +262,7 @@ component RdInput {
             font-size: root.font-size;
             vertical-alignment: center;
             single-line: true;
+            edited => { root.edited(); }
         }
         // 手动 placeholder（TextInput 内建不支持 placeholder-text）
         Text {
@@ -434,7 +436,7 @@ export component AppWindow inherits Window {
     callback set-peer-tab(int);
     callback toggle-favorite(string);
     callback refresh-peers();
-    callback save-settings();
+    callback auto-save();
     callback refresh-perms();
     callback open-screen-perms();
     callback open-a11y-perms();
@@ -673,6 +675,7 @@ export component AppWindow inherits Window {
                                 text <=> root.server-input;
                                 placeholder: "signal.aerodesk.io 或 127.0.0.1:3003";
                                 font-size: 14px;
+                                edited => { root.server-default = root.server-input; root.auto-save(); }
                             }
                             HorizontalLayout {
                                 cross-axis-alignment: center;
@@ -893,27 +896,27 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         cross-axis-alignment: center;
                         spacing: 8px;
-                        RdButton { text: "清晰（8Mbps）"; width: 120px; checked: root.quality == 0; clicked => { root.set-quality(0); } }
-                        RdButton { text: "平衡（4Mbps）"; width: 120px; checked: root.quality == 1; clicked => { root.set-quality(1); } }
-                        RdButton { text: "流畅（1.5Mbps）"; width: 120px; checked: root.quality == 2; clicked => { root.set-quality(2); } }
+                        RdButton { text: "清晰（8Mbps）"; width: 120px; checked: root.quality == 0; clicked => { root.set-quality(0); root.auto-save(); } }
+                        RdButton { text: "平衡（4Mbps）"; width: 120px; checked: root.quality == 1; clicked => { root.set-quality(1); root.auto-save(); } }
+                        RdButton { text: "流畅（1.5Mbps）"; width: 120px; checked: root.quality == 2; clicked => { root.set-quality(2); root.auto-save(); } }
                     }
                     Text { text: "质量 → 目标码率：清晰 8Mbps / 平衡 4Mbps / 流畅 1.5Mbps（对接 SFU 选层）"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                 }
                 if root.settings-tab == 1: VerticalLayout {
                     spacing: 12px;
                     Text { text: "默认信令服务器"; font-size: 15px; color: #212121; height: 20px; vertical-stretch: 0; }
-                    RdInput { text <=> root.server-default; placeholder: "signal.aerodesk.io 或 127.0.0.1:3003"; font-size: 14px; }
+                    RdInput { text <=> root.server-default; placeholder: "signal.aerodesk.io 或 127.0.0.1:3003"; font-size: 14px; edited => { root.server-input = root.server-default; root.auto-save(); } }
                     Text { text: "中继偏好：自动（直连失败走 TURN）"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                 }
                 if root.settings-tab == 2: VerticalLayout {
                     spacing: 12px;
-                    CheckBox { text: "记住访问凭证 / JWT"; checked <=> root.remember-token; }
+                    CheckBox { text: "记住访问凭证 / JWT"; checked <=> root.remember-token; toggled => { root.auto-save(); } }
                     Text { text: "默认访问凭证 / JWT（可选）"; font-size: 15px; color: #212121; height: 20px; vertical-stretch: 0; }
-                    RdInput { text <=> root.token-default; placeholder: "默认访问凭证 / JWT（可选）"; font-size: 14px; }
+                    RdInput { text <=> root.token-default; placeholder: "默认访问凭证 / JWT（可选）"; font-size: 14px; edited => { root.auto-save(); } }
                     Rectangle { height: 1px; background: #efeff2; }
                     Text { text: "本机接入密码（被控端一次性密码）"; font-size: 15px; color: #212121; height: 20px; vertical-stretch: 0; }
-                    RdInput { text <=> root.pw-edit; placeholder: "留空则不修改"; font-size: 14px; }
-                    Text { text: "保存后左栏「一次性密码」同步更新；点左栏刷新图标可随机生成"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                    RdInput { text <=> root.pw-edit; placeholder: "留空则不修改"; font-size: 14px; edited => { root.auto-save(); } }
+                    Text { text: "修改后立即生效并同步左栏；点左栏刷新图标可随机生成"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                 }
                 if root.settings-tab == 3: VerticalLayout {
                     spacing: 12px;
@@ -921,11 +924,7 @@ export component AppWindow inherits Window {
                     Text { text: "输入捕获/释放：Esc（待绑定）"; font-size: 14px; color: #4d4d52; height: 18px; vertical-stretch: 0; }
                     Text { text: "断开：Ctrl+Alt+D（待绑定）"; font-size: 14px; color: #4d4d52; height: 18px; vertical-stretch: 0; }
                 }
-                HorizontalLayout {
-                    spacing: 8px;
-                    RdButton { text: "保存设置"; primary: true; clicked => { root.save-settings(); } }
-                    Text { text: root.settings-status; font-size: 14px; color: #34a853; vertical-alignment: center; vertical-stretch: 0; }
-                }
+                Text { text: "所有设置修改后自动保存"; font-size: 13px; color: #9a9aa0; height: 18px; vertical-stretch: 0; }
             }
 
             // ---- 被控端页 ----
@@ -952,9 +951,9 @@ export component AppWindow inherits Window {
                         padding-bottom: 18px;
                         spacing: 10px;
                         Text { text: "接入设置"; font-size: 15px; font-weight: 600; color: #212121; height: 20px; vertical-stretch: 0; }
-                        Switch { text: "开启被控（允许被远程接入）"; checked <=> root.inc-enabled; }
-                        Switch { text: "允许声音（被控端采集系统音频）"; enabled: root.inc-enabled; checked <=> root.inc-audio; }
-                        Switch { text: "仅观看（只读，禁止鼠标/键盘控制）"; enabled: root.inc-enabled; checked <=> root.inc-view-only; }
+                        Switch { text: "开启被控（允许被远程接入）"; checked <=> root.inc-enabled; toggled => { root.auto-save(); } }
+                        Switch { text: "允许声音（被控端采集系统音频）"; enabled: root.inc-enabled; checked <=> root.inc-audio; toggled => { root.auto-save(); } }
+                        Switch { text: "仅观看（只读，禁止鼠标/键盘控制）"; enabled: root.inc-enabled; checked <=> root.inc-view-only; toggled => { root.auto-save(); } }
                         Text { text: "设置随「保存设置」持久化；开关即时反映状态"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                     }
                 }
