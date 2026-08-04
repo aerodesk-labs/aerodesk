@@ -510,7 +510,20 @@ fn main() -> Result<(), slint::PlatformError> {
     // 启动时刷一次权限状态
     ui.invoke_refresh_perms();
 
-    ui.run()
+    // 系统托盘（Slint 1.17 SystemTrayIcon）
+    let tray = Tray::new()?;
+    let win = ui.as_weak();
+    tray.on_show_window(move || {
+        if let Some(ui) = win.upgrade() {
+            let _ = ui.show();
+        }
+    });
+    tray.on_quit_app(move || {
+        std::process::exit(0);
+    });
+    ui.show()?;
+    tray.show()?;
+    slint::run_event_loop()
 }
 
 /// 演示帧源：移动渐变（验证 Slint 视频渲染管道；真实解码后续接入）。
