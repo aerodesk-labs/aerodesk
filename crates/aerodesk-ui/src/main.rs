@@ -20,6 +20,23 @@ const DEMO_H: u32 = 180;
 
 fn main() -> Result<(), slint::PlatformError> {
     init_log();
+    #[cfg(target_os = "macos")]
+    {
+        // winit WindowAttributes hook：标题栏透明 + 隐藏标题文字 + 内容铺满，
+        // 保留原生红绿灯控制按钮（官方推荐方式）。
+        use i_slint_backend_winit::Backend;
+        use winit::platform::macos::WindowAttributesExtMacOS;
+        let backend = Backend::builder()
+            .with_window_attributes_hook(|attrs| {
+                attrs
+                    .with_titlebar_transparent(true)
+                    .with_title_hidden(true)
+                    .with_fullsize_content_view(true)
+            })
+            .build()
+            .expect("slint winit backend");
+        slint::platform::set_platform(Box::new(backend)).expect("set slint platform");
+    }
     let ui = AppWindow::new()?;
 
     // 最近会话 / 收藏（本地持久化）
@@ -82,6 +99,8 @@ fn main() -> Result<(), slint::PlatformError> {
             let ui = ui.unwrap();
             let pw = generate_one_time_password();
             ui.set_device_pw(pw.clone().into());
+            // 同步设置页「安全」tab 的密码输入框，保证两处一致。
+            ui.set_pw_edit(pw.clone().into());
             ui.set_status("一次性密码已刷新".into());
             let mut settings = load_settings();
             settings.device_pw = pw;
@@ -370,7 +389,12 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_set_settings_tab({
         let ui = ui.as_weak();
         move |t| {
-            ui.unwrap().set_settings_tab(t);
+            let ui = ui.unwrap();
+            ui.set_settings_tab(t);
+            // 进入「安全」tab 时，密码输入框同步为当前一次性密码。
+            if t == 2 {
+                ui.set_pw_edit(ui.get_device_pw().to_string().into());
+            }
         }
     });
     ui.on_set_quality({
@@ -391,19 +415,22 @@ fn main() -> Result<(), slint::PlatformError> {
             );
         }
     });
-    ui.on_save_settings({
+    // 自动保存：任一设置控件变化即持久化 + 即时生效（无「保存设置」按钮）。
+    ui.on_auto_save({
         let ui = ui.as_weak();
         move || {
             let ui = ui.unwrap();
             let mut device_pw = ui.get_device_pw().to_string();
-            // 设置页安全 tab：本机接入密码非空则更新
+            // 设置页安全 tab：本机接入密码非空则更新（清空表示不修改）。
             let pw_edit = ui.get_pw_edit().to_string();
             if !pw_edit.trim().is_empty() {
                 device_pw = pw_edit.trim().to_string();
                 ui.set_device_pw(device_pw.clone().into());
             }
+            // server-default 与主页 server-input 已在 UI 层双向同步。
+            let server_default = display_server(&ui.get_server_default().to_string());
             let settings = AppSettings {
-                server_default: display_server(&ui.get_server_default().to_string()),
+                server_default: server_default.clone(),
                 quality: ui.get_quality(),
                 remember_token: ui.get_remember_token(),
                 token_default: ui.get_token_default().to_string(),
@@ -416,11 +443,11 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             save_settings(&settings);
             // 即时生效：同步主页输入框（无需重启）。
-            ui.set_server_input(display_server(&settings.server_default).into());
+            ui.set_server_input(server_default.into());
             if settings.remember_token {
                 ui.set_token_input(settings.token_default.clone().into());
             }
-            ui.set_settings_status("已保存".into());
+            ui.set_settings_status("已自动保存".into());
         }
     });
 
@@ -483,7 +510,20 @@ fn main() -> Result<(), slint::PlatformError> {
     // 启动时刷一次权限状态
     ui.invoke_refresh_perms();
 
-    ui.run()
+    // 系统托盘（Slint 1.17 SystemTrayIcon）
+    let tray = Tray::new()?;
+    let win = ui.as_weak();
+    tray.on_show_window(move || {
+        if let Some(ui) = win.upgrade() {
+            let _ = ui.show();
+        }
+    });
+    tray.on_quit_app(move || {
+        std::process::exit(0);
+    });
+    ui.show()?;
+    tray.show()?;
+    slint::run_event_loop()
 }
 
 /// 演示帧源：移动渐变（验证 Slint 视频渲染管道；真实解码后续接入）。
