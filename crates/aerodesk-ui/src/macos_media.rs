@@ -173,3 +173,101 @@ pub fn run_viewer(
         std::thread::sleep(Duration::from_millis(1));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aerodesk_macos::decode::to_rgba;
+    use aerodesk_macos::synthetic::SyntheticSource;
+    use aerodesk_macos::vt_encoder::VtEncoder;
+
+    /// 按 AnnexB 起始码拆分 NAL（保留起始码，模拟 str0m 的 `Output::Media` AnnexB 输出）。
+    fn split_annexb_nalus(annexb: &[u8]) -> Vec<&[u8]> {
+        // 记录所有起始码（位置 + 长度；4 字节优先，避免被误判为 3 字节）。
+        let mut codes: Vec<(usize, usize)> = Vec::new();
+        let mut i = 0usize;
+        while i + 3 <= annexb.len() {
+            if i + 4 <= annexb.len()
+                && annexb[i] == 0
+                && annexb[i + 1] == 0
+                && annexb[i + 2] == 0
+                && annexb[i + 3] == 1
+            {
+                codes.push((i, 4));
+                i += 4;
+            } else if annexb[i] == 0 && annexb[i + 1] == 0 && annexb[i + 2] == 1 {
+                codes.push((i, 3));
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+        codes
+            .iter()
+            .enumerate()
+            .map(|(k, &(code, _))| {
+                // 返回含起始码的完整 NAL（str0m AnnexB 输出格式），供 assembler 拼接。
+                let payload_end = codes.get(k + 1).map(|&(c, _)| c).unwrap_or(annexb.len());
+                &annexb[code..payload_end]
+            })
+            .collect()
+    }
+
+    /// 桌面 UI 观看链路（无网络）：VT 编码 → to_annexb（完整 AU）→ 拆成
+    /// NAL 事件 → AccessUnitAssembler 重组 → H264Decoder 解码 → RGBA。
+    /// 与 `run_viewer` 的媒体路径完全一致（#29 真实解码）。
+    #[test]
+    fn desktop_ui_decode_chain_roundtrip() {
+        let (w, h) = (320u32, 180u32);
+        let mut enc = VtEncoder::new(w, h, 30, 1_000_000).expect("vt encoder");
+        let mut src = SyntheticSource::new(w, h);
+        let mut assembler = AccessUnitAssembler::new();
+        let mut decoder = H264Decoder::new();
+
+        let mut decoded = None;
+        for i in 0..12u32 {
+            let frame = enc
+                .encode_bgra(&src.next_frame_bgra())
+                .expect("encode")
+                .expect("frame");
+            let au = enc.to_annexb(&frame);
+            let pts_us = i as u64 * 33_333; // ~30fps
+            // 模拟 str0m 逐条 NAL 事件：同 pts 聚合为完整访问单元后整帧解码。
+            for nal in split_annexb_nalus(&au) {
+                if let Some(complete) = assembler.push(nal, pts_us, false)
+                    && let Ok(Some(buf)) =
+                        decoder.decode_annexb(&complete.data, complete.pts_us as i64)
+                    && let Some((rgba, dw, dh)) = to_rgba(&buf)
+                {
+                    decoded = Some((rgba, dw, dh));
+                }
+            }
+            if decoded.is_some() {
+                break;
+            }
+        }
+        let (rgba, dw, dh) = decoded.expect("应在若干帧内解码出 RGBA");
+        assert_eq!((dw, dh), (w as usize, h as usize));
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+        assert!(
+            rgba.chunks_exact(4).any(|p| p[3] == 255),
+            "alpha 应全不透明"
+        );
+    }
+
+    #[test]
+    fn split_annexb_nalus_works() {
+        // 3 字节与 4 字节起始码都要识别。
+        let data: Vec<u8> = [
+            &[0u8, 0, 0, 1, 0x67, 0x01][..],
+            &[0, 0, 0, 1, 0x65, 0x02][..],
+            &[0, 0, 1, 0x41, 0x03][..],
+        ]
+        .concat();
+        let nals = split_annexb_nalus(&data);
+        assert_eq!(nals.len(), 3);
+        assert_eq!(nals[0], &[0, 0, 0, 1, 0x67, 0x01]);
+        assert_eq!(nals[1], &[0, 0, 0, 1, 0x65, 0x02]);
+        assert_eq!(nals[2], &[0, 0, 1, 0x41, 0x03]);
+    }
+}
