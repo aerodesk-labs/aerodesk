@@ -41,12 +41,16 @@ cargo deb -p aerodesk-ui --target x86_64-unknown-linux-gnu
 - [ ] CI：发布流水线（tag 触发 + 各平台签名上传）
 
 ## 本地构建验证（2026-08-04）
-### iOS（模拟器）
+### iOS（模拟器 + 真机 slice）
 ```sh
-bash scripts/build-ios-lib.sh all
-cd ios && xcodegen generate
+bash scripts/build-ios-lib.sh all   # 构建 sim/device 两个 Rust 静态库并合成 XCFramework
+cd ios && xcodegen generate          # 生成 AeroDesk.xcodeproj（gitignore 生成物，pull 后必须重新生成）
 xcodebuild -project AeroDesk.xcodeproj -scheme AeroDesk -destination 'generic/platform=iOS Simulator' -configuration Debug ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build CODE_SIGNING_ALLOWED=NO
+xcodebuild -project AeroDesk.xcodeproj -scheme AeroDesk -destination 'generic/platform=iOS' -configuration Debug ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build CODE_SIGNING_ALLOWED=NO
 ```
+> 注意：`ios/AeroDesk.xcodeproj` 与 `ios/AeroDeskBridge/lib/` 均为构建产物（gitignore）。
+> 拉取新代码后务必先重新执行 `build-ios-lib.sh all` + `xcodegen generate`，否则会链接到过期的扁平 `.a`
+> （报错 `built for 'iOS-simulator'` 之类，属 #14 同源回归）。两条 slice 构建已纳入 CI（iOS app build job）。
 ### Android（APK）
 ```sh
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home  # JDK 26 会触发 Kotlin 插件解析失败
