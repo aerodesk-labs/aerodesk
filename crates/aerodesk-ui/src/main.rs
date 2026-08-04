@@ -20,6 +20,23 @@ const DEMO_H: u32 = 180;
 
 fn main() -> Result<(), slint::PlatformError> {
     init_log();
+    #[cfg(target_os = "macos")]
+    {
+        // winit WindowAttributes hook：标题栏透明 + 隐藏标题文字 + 内容铺满，
+        // 保留原生红绿灯控制按钮（官方推荐方式）。
+        use i_slint_backend_winit::Backend;
+        use winit::platform::macos::WindowAttributesExtMacOS;
+        let backend = Backend::builder()
+            .with_window_attributes_hook(|attrs| {
+                attrs
+                    .with_titlebar_transparent(true)
+                    .with_title_hidden(true)
+                    .with_fullsize_content_view(true)
+            })
+            .build()
+            .expect("slint winit backend");
+        slint::platform::set_platform(Box::new(backend)).expect("set slint platform");
+    }
     let ui = AppWindow::new()?;
 
     // 最近会话 / 收藏（本地持久化）
@@ -492,22 +509,6 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // 启动时刷一次权限状态
     ui.invoke_refresh_perms();
-
-    // macOS：隐藏标题栏文字 + 内容铺满窗口，保留原生红绿灯控制按钮。
-    #[cfg(target_os = "macos")]
-    {
-        // 窗口显示后延迟配置（确保 NSWindow 已注册到 NSApp.windows）。
-        let timer = slint::Timer::default();
-        timer.start(
-            slint::TimerMode::SingleShot,
-            std::time::Duration::from_millis(300),
-            || {
-                aerodesk_macos::window::configure_fullsize_titlebar("AeroDesk");
-            },
-        );
-        // 保活：Timer 被 drop 则不触发。
-        std::mem::forget(timer);
-    }
 
     ui.run()
 }

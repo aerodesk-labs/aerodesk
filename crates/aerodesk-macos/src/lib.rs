@@ -14,4 +14,3 @@ pub mod inject;
 pub mod permissions;
 pub mod synthetic;
 pub mod vt_encoder;
-pub mod window;

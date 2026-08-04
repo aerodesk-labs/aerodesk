@@ -15,5 +15,4 @@ videotoolbox = "0.18"
 apple-cf = "0.9"
 screencapturekit = { version = "8", features = ["macos_14_0"] }
 aerodesk-protocol.workspace = true
-objc = "0.2"
 tracing.workspace = true

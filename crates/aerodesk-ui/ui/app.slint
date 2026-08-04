@@ -452,6 +452,8 @@ export component AppWindow inherits Window {
             background: #efeff2;
             VerticalLayout {
                 spacing: 2px;
+                // 顶部留出红绿灯区域（fullSizeContentView 后红绿灯悬浮在内容左上角）
+                padding-top: 30px;
                 // Logo（对齐 loadLogo：顶部居中，高约 60）
                 Rectangle {
                     height: 76px;
