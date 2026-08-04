@@ -452,14 +452,13 @@ export component AppWindow inherits Window {
             background: #efeff2;
             VerticalLayout {
                 spacing: 2px;
-                // 顶部留出红绿灯区域（fullSizeContentView 后红绿灯悬浮在内容左上角）
-                padding-top: 30px;
-                // Logo（对齐 loadLogo：顶部居中，高约 60）
+                // Logo：右移避开左上角红绿灯（x 0-75），靠近顶部（间距小）
                 Rectangle {
-                    height: 76px;
+                    height: 60px;
                     HorizontalLayout {
                         cross-axis-alignment: center;
-                        Rectangle { width: 0px; horizontal-stretch: 1; }
+                        padding-left: 82px;
+                        spacing: 8px;
                         Rectangle {
                             width: 30px;
                             height: 30px;
@@ -476,12 +475,10 @@ export component AppWindow inherits Window {
                                 height: 100%;
                             }
                         }
-                        Rectangle { width: 8px; }
                         VerticalLayout {
                             Text { text: "AeroDesk"; font-size: 16px; font-weight: 700; color: #212121; }
                             Text { text: "Remote Desktop"; font-size: 14px; color: #8a8a90; }
                         }
-                        Rectangle { width: 0px; horizontal-stretch: 1; }
                     }
                 }
 
