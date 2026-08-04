@@ -65,3 +65,43 @@ jobs:
       - name: macos/ios adapters + cli
         if: runner.os == 'macOS'
         run: cargo check -p aerodesk-macos -p aerodesk-ios -p aerodesk-cli
+
+  # iOS App 双 slice 构建回归：#14 类链接回归（XCFramework/扁平静态库路径错位）
+  # 曾导致 Xcode 无法链接；此处每次 push/PR 都验证模拟器 + 真机 slice 可编译可链接。
+  ios-app-build:
+    name: iOS app build (sim + device)
+    runs-on: macos-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Add iOS Rust targets
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      # 产物（XCFramework + xcodeproj）均为 gitignore 生成物，必须现构建/现生成，
+      # 与本地“clean clone → build”路径一致（见 docs/PACKAGING.md）。
+      - name: Build Rust static libs (sim + device) → XCFramework
+        run: bash scripts/build-ios-lib.sh all
+
+      - name: Generate Xcode project
+        run: cd ios && xcodegen generate
+
+      - name: Build app (simulator slice)
+        run: |
+          cd ios
+          xcodebuild -project AeroDesk.xcodeproj -scheme AeroDesk \
+            -destination 'generic/platform=iOS Simulator' -configuration Debug \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build CODE_SIGNING_ALLOWED=NO
+
+      - name: Build app (device slice, unsigned)
+        run: |
+          cd ios
+          xcodebuild -project AeroDesk.xcodeproj -scheme AeroDesk \
+            -destination 'generic/platform=iOS' -configuration Debug \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build CODE_SIGNING_ALLOWED=NO
