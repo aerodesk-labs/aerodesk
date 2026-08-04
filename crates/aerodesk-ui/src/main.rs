@@ -40,6 +40,11 @@ fn main() -> Result<(), slint::PlatformError> {
         settings.device_pw.clone()
     };
     ui.set_device_pw(pw_display.into());
+    ui.set_pw_edit(settings.device_pw.clone().into());
+    ui.set_inc_enabled(settings.inc_enabled);
+    ui.set_inc_audio(settings.inc_audio);
+    ui.set_inc_mouse(settings.inc_mouse);
+    ui.set_inc_view_only(settings.inc_view_only);
     ui.set_quality(settings.quality);
     // 服务器地址 UI 上只展示 host:port（协议/路径在连接时由
     // aerodesk_core::signaling::normalize_signal_url 自动补全）。
@@ -377,13 +382,24 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui = ui.as_weak();
         move || {
             let ui = ui.unwrap();
+            let mut device_pw = ui.get_device_pw().to_string();
+            // 设置页安全 tab：本机接入密码非空则更新
+            let pw_edit = ui.get_pw_edit().to_string();
+            if !pw_edit.trim().is_empty() {
+                device_pw = pw_edit.trim().to_string();
+                ui.set_device_pw(device_pw.clone().into());
+            }
             let settings = AppSettings {
                 server_default: display_server(&ui.get_server_default().to_string()),
                 quality: ui.get_quality(),
                 remember_token: ui.get_remember_token(),
                 token_default: ui.get_token_default().to_string(),
                 device_id: ui.get_device_id().to_string(),
-                device_pw: ui.get_device_pw().to_string(),
+                device_pw,
+                inc_enabled: ui.get_inc_enabled(),
+                inc_audio: ui.get_inc_audio(),
+                inc_mouse: ui.get_inc_mouse(),
+                inc_view_only: ui.get_inc_view_only(),
             };
             save_settings(&settings);
             // 即时生效：同步主页输入框（无需重启）。
@@ -616,8 +632,24 @@ struct AppSettings {
     token_default: String,
     /// 本机 ID（被控端身份，首启生成并持久化）。
     device_id: String,
-    /// 本机接入密码（占位；发布端鉴权接入后使用）。
+    /// 本机接入密码（被控端一次性密码）。
     device_pw: String,
+    /// 被控端：是否开启被控。
+    #[serde(default)]
+    inc_enabled: bool,
+    /// 被控端：是否允许声音。
+    #[serde(default = "default_true")]
+    inc_audio: bool,
+    /// 被控端：是否允许鼠标控制。
+    #[serde(default = "default_true")]
+    inc_mouse: bool,
+    /// 被控端：仅观看（只读）。
+    #[serde(default)]
+    inc_view_only: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn settings_path() -> PathBuf {

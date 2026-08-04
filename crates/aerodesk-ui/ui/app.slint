@@ -3,7 +3,7 @@
 //   grayBg #EFEFF2（左栏 / 输入框填充 / 卡片描边）
 //   accent #0071FF（左栏蓝色竖条 / 主按钮）
 //   主区白底，正文 black87 #212121，次要文字 50% 透明度
-import { CheckBox, ScrollView } from "std-widgets.slint";
+import { CheckBox, ScrollView, Switch } from "std-widgets.slint";
 import "fonts/MaterialIcons-Regular.ttf";
 
 // Material 图标（对齐 RustDesk 的 Material Icons 工具栏/标签栏/导航）。
@@ -344,6 +344,13 @@ export component AppWindow inherits Window {
     // ---- 被控端授权 ----
     in-out property <string> perm-screen: "未知";
     in-out property <string> perm-a11y: "未知";
+    // 被控端设置
+    in-out property <bool> inc-enabled: false;
+    in-out property <bool> inc-audio: true;
+    in-out property <bool> inc-mouse: true;
+    in-out property <bool> inc-view-only: false;
+    // 设置页密码编辑
+    in-out property <string> pw-edit: "";
 
     callback connect();
     callback disconnect();
@@ -446,20 +453,20 @@ export component AppWindow inherits Window {
                         value-size: 22px;
                         copy => { root.copy-device-id(); }
                     }
-                    // 右上「⋯」设置入口（对齐 RustDesk buildPopupMenu）
+                    // 右上复制 ID（对齐 RustDesk buildPopupMenu 位置的复制入口）
                     Rectangle {
                         width: 26px;
                         height: 26px;
                         border-radius: 13px;
                         background: mh.has-hover ? #ffffff : transparent;
-                        MIcon { icon: "\u{e5d4}"; size: 18px; color: #6d6d73; }   // more_vert
+                        MIcon { icon: "\u{e14d}"; size: 18px; color: #6d6d73; }   // content_copy
                         mh := TouchArea {
                             width: 100%;
                             height: 100%;
                             mouse-cursor: pointer;
-                            clicked => { root.set-tab(1); }
+                            clicked => { root.copy-device-id(); }
                         }
-                        Tooltip { text: @markdown("设置"); }
+                        Tooltip { text: @markdown("复制 ID"); }
                     }
                 }
                 // 密码板（对齐 buildPasswordBoard：左 20 右 16 上 13 下 13）
@@ -498,7 +505,7 @@ export component AppWindow inherits Window {
                             width: 100%;
                             height: 100%;
                             mouse-cursor: pointer;
-                            clicked => { root.set-tab(1); }
+                            clicked => { root.set-tab(1); root.set-settings-tab(2); }
                         }
                         Tooltip { text: @markdown("修改密码"); }
                     }
@@ -867,6 +874,10 @@ export component AppWindow inherits Window {
                     CheckBox { text: "记住密码 / JWT"; checked <=> root.remember-token; }
                     Text { text: "默认密码 / JWT（可选）"; font-size: 15px; color: #212121; height: 20px; vertical-stretch: 0; }
                     RdInput { text <=> root.token-default; placeholder: "默认密码 / JWT（可选）"; font-size: 14px; }
+                    Rectangle { height: 1px; background: #efeff2; }
+                    Text { text: "本机接入密码（被控端一次性密码）"; font-size: 15px; color: #212121; height: 20px; vertical-stretch: 0; }
+                    RdInput { text <=> root.pw-edit; placeholder: "留空则不修改"; font-size: 14px; }
+                    Text { text: "保存后左栏「一次性密码」同步更新；点左栏刷新图标可随机生成"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                 }
                 if root.settings-tab == 3: VerticalLayout {
                     spacing: 12px;
@@ -881,14 +892,39 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // ---- 被控端授权页 ----
+            // ---- 被控端页 ----
             if !root.in-session && root.tab == 2: VerticalLayout {
                 padding-left: 24px;
                 padding-right: 24px;
                 padding-top: 24px;
                 spacing: 16px;
-                Text { text: "被控端授权"; font-size: 19px; color: #212121; height: 26px; vertical-stretch: 0; }
-                Text { text: "被控端需要以下 macOS 权限（其他平台后续接入）："; font-size: 14px; color: #6d6d73; height: 18px; vertical-stretch: 0; }
+                Text { text: "被控端"; font-size: 19px; color: #212121; height: 26px; vertical-stretch: 0; }
+                Text { text: "本机作为被控端时的接入设置与 macOS 权限："; font-size: 14px; color: #6d6d73; height: 18px; vertical-stretch: 0; }
+
+                // 被控端设置卡片
+                Rectangle {
+                    width: 420px;
+                    vertical-stretch: 0;
+                    border-radius: 13px;
+                    border-width: 1px;
+                    border-color: #efeff2;
+                    background: #ffffff;
+                    VerticalLayout {
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        padding-top: 18px;
+                        padding-bottom: 18px;
+                        spacing: 10px;
+                        Text { text: "接入设置"; font-size: 15px; font-weight: 600; color: #212121; height: 20px; vertical-stretch: 0; }
+                        Switch { text: "开启被控（允许被远程接入）"; checked <=> root.inc-enabled; }
+                        Switch { text: "允许声音（被控端采集系统音频）"; checked <=> root.inc-audio; }
+                        Switch { text: "允许鼠标控制"; checked <=> root.inc-mouse; }
+                        Switch { text: "仅观看（只读，禁止输入控制）"; checked <=> root.inc-view-only; }
+                        Text { text: "设置随「保存设置」持久化；开关即时反映状态"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                    }
+                }
+
+                // 权限卡片
                 Rectangle {
                     width: 420px;
                     vertical-stretch: 0;
@@ -902,6 +938,8 @@ export component AppWindow inherits Window {
                         padding-top: 18px;
                         padding-bottom: 18px;
                         spacing: 12px;
+                        Text { text: "被控端授权"; font-size: 15px; font-weight: 600; color: #212121; height: 20px; vertical-stretch: 0; }
+                        Text { text: "被控端需要以下 macOS 权限（其他平台后续接入）："; font-size: 14px; color: #6d6d73; height: 18px; vertical-stretch: 0; }
                         HorizontalLayout {
                             cross-axis-alignment: center;
                             spacing: 10px;
