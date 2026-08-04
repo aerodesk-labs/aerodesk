@@ -465,13 +465,13 @@ export component AppWindow inherits Window {
             background: #efeff2;
             VerticalLayout {
                 spacing: 2px;
-                padding-top: 18px;
-                // Logo：右移避开左上角红绿灯（x 0-75），顶部留 18px 间距
+                padding-top: 34px;
+                // Logo：靠左对齐（左边距 12），下移避开左上角红绿灯（x 9-75, y 9-23）
                 Rectangle {
                     height: 56px;
                     HorizontalLayout {
                         cross-axis-alignment: center;
-                        padding-left: 86px;
+                        padding-left: 12px;
                         spacing: 6px;
                         Rectangle {
                             width: 26px;

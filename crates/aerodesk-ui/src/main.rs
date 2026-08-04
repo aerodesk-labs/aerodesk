@@ -510,6 +510,10 @@ fn main() -> Result<(), slint::PlatformError> {
     // 启动时刷一次权限状态
     ui.invoke_refresh_perms();
 
+    // macOS：点击 Dock 图标恢复隐藏窗口（配合托盘隐藏）。
+    #[cfg(target_os = "macos")]
+    aerodesk_macos::dock::install_reopen_handler();
+
     // 系统托盘（Slint 1.17 SystemTrayIcon）
     let tray = Tray::new()?;
     let win = ui.as_weak();

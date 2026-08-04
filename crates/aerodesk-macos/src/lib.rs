@@ -9,6 +9,7 @@
 
 pub mod capture;
 pub mod decode;
+pub mod dock;
 pub mod encoder;
 pub mod inject;
 pub mod permissions;
