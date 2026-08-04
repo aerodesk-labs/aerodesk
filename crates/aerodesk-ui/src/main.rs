@@ -82,6 +82,8 @@ fn main() -> Result<(), slint::PlatformError> {
             let ui = ui.unwrap();
             let pw = generate_one_time_password();
             ui.set_device_pw(pw.clone().into());
+            // 同步设置页「安全」tab 的密码输入框，保证两处一致。
+            ui.set_pw_edit(pw.clone().into());
             ui.set_status("一次性密码已刷新".into());
             let mut settings = load_settings();
             settings.device_pw = pw;
@@ -370,7 +372,12 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_set_settings_tab({
         let ui = ui.as_weak();
         move |t| {
-            ui.unwrap().set_settings_tab(t);
+            let ui = ui.unwrap();
+            ui.set_settings_tab(t);
+            // 进入「安全」tab 时，密码输入框同步为当前一次性密码。
+            if t == 2 {
+                ui.set_pw_edit(ui.get_device_pw().to_string().into());
+            }
         }
     });
     ui.on_set_quality({
