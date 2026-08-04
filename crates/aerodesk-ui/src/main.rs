@@ -878,7 +878,8 @@ mod tests {
     #[test]
     fn parse_addressbook_entry() {
         // 完整格式：别名 · 房间 · 服务器 · 组
-        let (name, room, server, group) = parse_addressbook("我的NAS · demo · 192.168.1.10:3003 · 家庭");
+        let (name, room, server, group) =
+            parse_addressbook("我的NAS · demo · 192.168.1.10:3003 · 家庭");
         assert_eq!(name, "我的NAS");
         assert_eq!(room, "demo");
         assert_eq!(server, "192.168.1.10:3003");
@@ -904,7 +905,8 @@ mod tests {
         let v: Vec<String> = items.iter().map(|s| s.to_string()).collect();
         let json = serde_json::to_string(&v).unwrap();
         std::fs::write(&path, &json).unwrap();
-        let loaded: Vec<String> = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let loaded: Vec<String> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(loaded, vec!["NAS · demo · 192.168.1.10:3003 · 家庭"]);
         std::fs::remove_file(&path).ok();
     }
