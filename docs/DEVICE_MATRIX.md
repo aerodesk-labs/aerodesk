@@ -25,6 +25,7 @@
 
 ## 自动验证现状
 - CI 三平台（macOS/Ubuntu/Windows）：cargo fmt/clippy/test + macOS e2e smoke ✅
+- CI 移动端构建回归：iOS App 双 slice（模拟器 + 真机，未签名）+ Android APK（Rust .so + Gradle assembleDebug）✅
 - 本机（共享开发机，负载 8/10）：smoke/loadtest/web-e2e/选层 e2e 均跑通
 
 ## 硬件就绪后的验收步骤
