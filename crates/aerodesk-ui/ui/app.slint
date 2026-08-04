@@ -630,24 +630,40 @@ export component AppWindow inherits Window {
                                 font-size: 14px; color: #6d6d73; height: 20px; vertical-stretch: 0;
                             }
                             HorizontalLayout {
+                                alignment: space-between;
+                                width: max(0px, parent.width - 48px);
                                 cross-axis-alignment: center;
-                                spacing: 10px;
-                                Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.perm-screen == "已授权" ? #34a853 : #efeff2; }
-                                Text { text: "屏幕录制："; width: 90px; font-size: 14px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
-                                Text { text: root.perm-screen; font-size: 14px; color: root.perm-screen == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
-                                Rectangle { width: 0px; horizontal-stretch: 1; }
-                                RdButton { text: "检查"; clicked => { root.refresh-perms(); } }
-                                RdButton { text: "打开设置"; clicked => { root.open-screen-perms(); } }
+                                HorizontalLayout {
+                                    cross-axis-alignment: center;
+                                    spacing: 10px;
+                                    Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.perm-screen == "已授权" ? #34a853 : #efeff2; }
+                                    Text { text: "屏幕录制："; width: 90px; font-size: 14px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
+                                    Text { text: root.perm-screen; font-size: 14px; color: root.perm-screen == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
+                                }
+                                HorizontalLayout {
+                                    cross-axis-alignment: center;
+                                    spacing: 4px;
+                                    IconBtn { icon: "\u{e5d5}"; tooltip: "检查权限"; clicked => { root.refresh-perms(); } }
+                                    IconBtn { icon: "\u{e8b8}"; tooltip: "打开屏幕录制设置"; clicked => { root.open-screen-perms(); } }
+                                }
                             }
                             HorizontalLayout {
+                                alignment: space-between;
+                                width: max(0px, parent.width - 48px);
                                 cross-axis-alignment: center;
-                                spacing: 10px;
-                                Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.perm-a11y == "已授权" ? #34a853 : #efeff2; }
-                                Text { text: "辅助功能："; width: 90px; font-size: 14px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
-                                Text { text: root.perm-a11y; font-size: 14px; color: root.perm-a11y == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
-                                Rectangle { width: 0px; horizontal-stretch: 1; }
-                                RdButton { text: "检查"; clicked => { root.refresh-perms(); } }
-                                RdButton { text: "打开设置"; clicked => { root.open-a11y-perms(); } }
+                                HorizontalLayout {
+                                    cross-axis-alignment: center;
+                                    spacing: 10px;
+                                    Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.perm-a11y == "已授权" ? #34a853 : #efeff2; }
+                                    Text { text: "辅助功能："; width: 90px; font-size: 14px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
+                                    Text { text: root.perm-a11y; font-size: 14px; color: root.perm-a11y == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
+                                }
+                                HorizontalLayout {
+                                    cross-axis-alignment: center;
+                                    spacing: 4px;
+                                    IconBtn { icon: "\u{e5d5}"; tooltip: "检查权限"; clicked => { root.refresh-perms(); } }
+                                    IconBtn { icon: "\u{e8b8}"; tooltip: "打开辅助功能设置"; clicked => { root.open-a11y-perms(); } }
+                                }
                             }
                             Text { text: "授权后重启应用生效（屏幕录制）"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                         }
