@@ -530,7 +530,7 @@ export component AppWindow inherits Window {
             // ---- 连接页 ----
             if !root.in-session && root.tab == 0: VerticalLayout {
                 padding-left: 24px;
-                padding-right: 24px;
+                padding-right: 28px;
                 padding-top: 26px;
                 spacing: 16px;
 
@@ -547,6 +547,7 @@ export component AppWindow inherits Window {
 
                 // 连接区：左 = 远端 ID 卡片，右 = 被控端授权（利用右侧空白）
                 HorizontalLayout {
+                    width: 100%;
                     cross-axis-alignment: stretch;
                     spacing: 16px;
                     // 远端 ID 卡片（对齐 RustDesk：白底、圆角 13、灰描边、右侧蓝色「连接」）
@@ -612,7 +613,7 @@ export component AppWindow inherits Window {
                     // 被控端授权卡片（填充右侧空白，对齐 RustDesk helpCards 风格）
                     Rectangle {
                         vertical-stretch: 0;
-                        horizontal-stretch: 1;
+                        width: max(0px, parent.width - 416px);
                         border-radius: 13px;
                         border-width: 1px;
                         border-color: #efeff2;
