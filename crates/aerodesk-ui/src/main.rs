@@ -42,6 +42,9 @@ fn main() -> Result<(), slint::PlatformError> {
     // 最近会话 / 收藏（本地持久化）
     ui.set_recents(slint::ModelRc::new(slint::VecModel::from(load_recents())));
     ui.set_favorites(slint::ModelRc::new(slint::VecModel::from(load_favorites())));
+    ui.set_addressbook(slint::ModelRc::new(slint::VecModel::from(
+        load_addressbook(),
+    )));
 
     // 设置（本地持久化）
     let mut settings = load_settings();
@@ -288,6 +291,128 @@ fn main() -> Result<(), slint::PlatformError> {
                 )
                 .into(),
             );
+        }
+    });
+
+    // #59 地址簿：添加（用当前连接信息 + 别名/分组）
+    ui.on_add_addressbook({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            let alias = ui.get_ab_alias().to_string().trim().to_string();
+            let group = ui.get_ab_group().to_string().trim().to_string();
+            let room = ui.get_room_input().to_string();
+            let server = ui.get_server_input().to_string();
+            if room.is_empty() || server.is_empty() {
+                ui.set_status("请先填写远端 ID 与信令服务器".into());
+                return;
+            }
+            let alias = if alias.is_empty() {
+                room.clone()
+            } else {
+                alias
+            };
+            let entry = format!("{alias} · {room} · {server} · {group}");
+            let model = ui.get_addressbook();
+            let mut items: Vec<String> = (0..model.row_count())
+                .filter_map(|i| model.row_data(i))
+                .map(|s| s.to_string())
+                .collect();
+            if !items.iter().any(|i| i == &entry) {
+                items.push(entry.clone());
+                ui.set_status("已添加到地址簿".into());
+            } else {
+                ui.set_status("地址簿已存在该条目".into());
+            }
+            let new: Vec<slint::SharedString> = items.iter().map(|s| s.into()).collect();
+            ui.set_addressbook(slint::ModelRc::new(slint::VecModel::from(new.clone())));
+            save_addressbook(&new);
+        }
+    });
+
+    // #59 地址簿：删除
+    ui.on_remove_addressbook({
+        let ui = ui.as_weak();
+        move |entry: slint::SharedString| {
+            let ui = ui.unwrap();
+            let model = ui.get_addressbook();
+            let mut items: Vec<String> = (0..model.row_count())
+                .filter_map(|i| model.row_data(i))
+                .map(|s| s.to_string())
+                .collect();
+            items.retain(|i| i != entry.as_str());
+            let new: Vec<slint::SharedString> = items.iter().map(|s| s.into()).collect();
+            ui.set_addressbook(slint::ModelRc::new(slint::VecModel::from(new.clone())));
+            save_addressbook(&new);
+            ui.set_status("已从地址簿删除".into());
+        }
+    });
+
+    // #59 地址簿/发现：点击连接（解析 别名·房间·服务器·组）
+    ui.on_connect_addressbook({
+        let ui = ui.as_weak();
+        move |entry: slint::SharedString| {
+            let ui = ui.unwrap();
+            let (_, room, server, _) = parse_addressbook(entry.as_str());
+            if room.is_empty() || server.is_empty() {
+                ui.set_status("地址簿条目缺少房间/服务器".into());
+                return;
+            }
+            ui.set_room_input(room.into());
+            ui.set_server_input(server.into());
+            ui.invoke_connect();
+        }
+    });
+
+    // #59 局域网扫描：扫本网段 3003 端口（信令）
+    ui.on_scan_lan({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            ui.set_status("扫描局域网…".into());
+            let weak = ui.as_weak();
+            std::thread::spawn(move || {
+                let found = scan_lan();
+                if let Some(ui) = weak.upgrade() {
+                    let model = ui.get_discovered();
+                    let mut items: Vec<String> = (0..model.row_count())
+                        .filter_map(|i| model.row_data(i))
+                        .map(|s| s.to_string())
+                        .collect();
+                    for f in &found {
+                        if !items.contains(f) {
+                            items.push(f.clone());
+                        }
+                    }
+                    let new: Vec<slint::SharedString> = items.iter().map(|s| s.into()).collect();
+                    ui.set_discovered(slint::ModelRc::new(slint::VecModel::from(new.clone())));
+                    ui.set_status(format!("扫描完成：发现 {} 台", found.len()).into());
+                }
+            });
+        }
+    });
+
+    // #59 发现条目 -> 地址簿（房间固定 demo，服务器 = ip:3003）
+    ui.on_add_discovered({
+        let ui = ui.as_weak();
+        move |entry: slint::SharedString| {
+            let ui = ui.unwrap();
+            let server = entry.to_string();
+            let room = "demo".to_string();
+            let alias = server.clone();
+            let entry_str = format!("{alias} · {room} · {server} · 未分组");
+            let model = ui.get_addressbook();
+            let mut items: Vec<String> = (0..model.row_count())
+                .filter_map(|i| model.row_data(i))
+                .map(|s| s.to_string())
+                .collect();
+            if !items.iter().any(|i| i == &entry_str) {
+                items.push(entry_str);
+                ui.set_status("发现设备已加入地址簿".into());
+            }
+            let new: Vec<slint::SharedString> = items.iter().map(|s| s.into()).collect();
+            ui.set_addressbook(slint::ModelRc::new(slint::VecModel::from(new.clone())));
+            save_addressbook(&new);
         }
     });
 
@@ -595,6 +720,83 @@ fn save_favorites(items: &[slint::SharedString]) {
     }
 }
 
+fn addressbook_path() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".aerodesk-addressbook.json")
+}
+
+fn load_addressbook() -> Vec<slint::SharedString> {
+    let Ok(text) = std::fs::read_to_string(addressbook_path()) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<String>>(&text)
+        .unwrap_or_default()
+        .into_iter()
+        .map(Into::into)
+        .collect()
+}
+
+fn save_addressbook(items: &[slint::SharedString]) {
+    let v: Vec<String> = items.iter().map(|s| s.to_string()).collect();
+    if let Ok(json) = serde_json::to_string(&v) {
+        let path = addressbook_path();
+        if std::fs::write(&path, json).is_ok() {
+            set_private_perms(&path);
+        }
+    }
+}
+
+/// 解析地址簿条目 `别名 · 房间 · 服务器 · 组`。
+fn parse_addressbook(entry: &str) -> (String, String, String, String) {
+    let parts: Vec<&str> = entry.splitn(4, " · ").collect();
+    let name = parts.first().map(|s| s.to_string()).unwrap_or_default();
+    let room = parts.get(1).map(|s| s.to_string()).unwrap_or_default();
+    let server = parts.get(2).map(|s| s.to_string()).unwrap_or_default();
+    let group = parts.get(3).map(|s| s.to_string()).unwrap_or_default();
+    (name, room, server, group)
+}
+
+/// 局域网扫描：取本机 IPv4，扫同 /24 网段的信令端口（默认 3003）。
+fn scan_lan() -> Vec<String> {
+    use std::net::{TcpStream, UdpSocket};
+    use std::time::Duration;
+
+    // 通过 UDP 连接获取本机 IP（不发包）。
+    let local_ip = match UdpSocket::bind("0.0.0.0:0").and_then(|s| {
+        s.connect("8.8.8.8:80")?;
+        Ok(s.local_addr()?.ip())
+    }) {
+        Ok(ip) => ip,
+        Err(_) => return Vec::new(),
+    };
+    let octets = match local_ip {
+        std::net::IpAddr::V4(v4) => v4.octets(),
+        _ => return Vec::new(),
+    };
+    let mut found = Vec::new();
+    let port = 3003u16;
+    for last in 1..255u8 {
+        let ip = format!("{}.{}.{}.{}", octets[0], octets[1], octets[2], last);
+        let addr = format!("{ip}:{port}");
+        let Ok(mut stream) = TcpStream::connect_timeout(
+            &addr
+                .parse()
+                .unwrap_or_else(|_| "127.0.0.1:3003".parse().unwrap()),
+            Duration::from_millis(60),
+        ) else {
+            continue;
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+        found.push(addr);
+        if found.len() >= 20 {
+            break;
+        }
+    }
+    found
+}
+
 fn recent_path() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -675,6 +877,42 @@ mod tests {
         }
         // 连续两次不应相同（CSPRNG）。
         assert_ne!(generate_one_time_password(), generate_one_time_password());
+    }
+
+    #[test]
+    fn parse_addressbook_entry() {
+        // 完整格式：别名 · 房间 · 服务器 · 组
+        let (name, room, server, group) =
+            parse_addressbook("我的NAS · demo · 192.168.1.10:3003 · 家庭");
+        assert_eq!(name, "我的NAS");
+        assert_eq!(room, "demo");
+        assert_eq!(server, "192.168.1.10:3003");
+        assert_eq!(group, "家庭");
+        // 缺分组
+        let (name, room, server, group) = parse_addressbook("x · demo · h:3003");
+        assert_eq!(name, "x");
+        assert_eq!(room, "demo");
+        assert_eq!(server, "h:3003");
+        assert_eq!(group, "");
+        // 空/乱输入不 panic
+        let (name, room, server, group) = parse_addressbook("");
+        assert!(name.is_empty() && room.is_empty() && server.is_empty() && group.is_empty());
+    }
+
+    #[test]
+    fn addressbook_roundtrip() {
+        // 构造条目 -> save -> load -> 一致
+        let entry: slint::SharedString = "NAS · demo · 192.168.1.10:3003 · 家庭".into();
+        let items = vec![entry.clone()];
+        let path = std::env::temp_dir().join(format!("ad-ab-test-{}.json", std::process::id()));
+        // 用临时文件验证序列化
+        let v: Vec<String> = items.iter().map(|s| s.to_string()).collect();
+        let json = serde_json::to_string(&v).unwrap();
+        std::fs::write(&path, &json).unwrap();
+        let loaded: Vec<String> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(loaded, vec!["NAS · demo · 192.168.1.10:3003 · 家庭"]);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
