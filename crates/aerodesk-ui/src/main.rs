@@ -69,6 +69,19 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_status("密码已复制".into());
         }
     });
+    // 重新生成一次性密码：更新左栏显示 + 持久化。
+    ui.on_refresh_device_pw({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            let pw = generate_one_time_password();
+            ui.set_device_pw(pw.clone().into());
+            ui.set_status("一次性密码已刷新".into());
+            let mut settings = load_settings();
+            settings.device_pw = pw;
+            save_settings(&settings);
+        }
+    });
     // 会话帧线程代际：断开/新会话时递增，使旧帧线程退出（防线程泄漏）。
     let frame_epoch = Arc::new(AtomicU64::new(0));
 
@@ -509,6 +522,21 @@ mod tests {
     }
 
     #[test]
+    fn one_time_password_is_8_chars_from_safe_alphabet() {
+        for _ in 0..100 {
+            let pw = generate_one_time_password();
+            assert_eq!(pw.len(), 8);
+            assert!(pw.chars().all(|c| c.is_ascii_alphanumeric()));
+            assert!(
+                !pw.chars().any(|c| matches!(c, '0' | 'O' | '1' | 'I' | 'l')),
+                "password contains confusing char: {pw}"
+            );
+        }
+        // 连续两次不应相同（CSPRNG）。
+        assert_ne!(generate_one_time_password(), generate_one_time_password());
+    }
+
+    #[test]
     fn parse_recent_formats() {
         let (r, s) = parse_recent("demo · 127.0.0.1:3003");
         assert_eq!(r, "demo");
@@ -558,6 +586,30 @@ fn save_settings(s: &AppSettings) {
         let path = settings_path();
         if std::fs::write(&path, json).is_ok() {
             set_private_perms(&path);
+        }
+    }
+}
+
+/// 生成随机一次性密码（8 位，去除易混淆字符 0/O/1/I/l）。
+///
+/// 使用系统 CSPRNG（`getrandom`）：时间/进程状态可预测的伪随机（如 xorshift）
+/// 会让攻击者拿到一个历史密码后暴力搜种子预测后续密码，不能用于访问口令。
+fn generate_one_time_password() -> String {
+    const CHARS: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz";
+    // 拒绝采样：只接受 0..216（= 54*4）的字节，避免取模偏差。
+    const ACCEPT: usize = CHARS.len() * 4;
+    let mut buf = [0u8; 8];
+    let mut out = String::with_capacity(8);
+    loop {
+        getrandom::getrandom(&mut buf).expect("OS random source available");
+        for &b in &buf {
+            let idx = b as usize;
+            if idx < ACCEPT {
+                out.push(CHARS[idx % CHARS.len()] as char);
+                if out.len() == 8 {
+                    return out;
+                }
+            }
         }
     }
 }
