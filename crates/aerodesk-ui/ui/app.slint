@@ -347,6 +347,7 @@ export component AppWindow inherits Window {
     callback connect-recent(string);
     callback copy-device-id();
     callback copy-device-pw();
+    callback refresh-device-pw();
     callback toggle-fullscreen();
     callback toggle-audio();
     callback toggle-display();
@@ -477,9 +478,9 @@ export component AppWindow inherits Window {
                             width: 100%;
                             height: 100%;
                             mouse-cursor: pointer;
-                            clicked => { root.copy-device-pw(); }
+                            clicked => { root.refresh-device-pw(); }
                         }
-                        Tooltip { text: @markdown("刷新密码"); }
+                        Tooltip { text: @markdown("刷新一次性密码"); }
                     }
                     Rectangle {
                         width: 24px;

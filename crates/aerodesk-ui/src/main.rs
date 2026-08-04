@@ -69,6 +69,19 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_status("密码已复制".into());
         }
     });
+    // 重新生成一次性密码：更新左栏显示 + 持久化。
+    ui.on_refresh_device_pw({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            let pw = generate_one_time_password();
+            ui.set_device_pw(pw.clone().into());
+            ui.set_status("一次性密码已刷新".into());
+            let mut settings = load_settings();
+            settings.device_pw = pw;
+            save_settings(&settings);
+        }
+    });
     // 会话帧线程代际：断开/新会话时递增，使旧帧线程退出（防线程泄漏）。
     let frame_epoch = Arc::new(AtomicU64::new(0));
 
@@ -560,6 +573,29 @@ fn save_settings(s: &AppSettings) {
             set_private_perms(&path);
         }
     }
+}
+
+/// 生成随机一次性密码（8 位，去除易混淆字符 0/O/1/I/l）。
+fn generate_one_time_password() -> String {
+    const CHARS: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz";
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let c = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut seed = (t ^ ((c as u128) << 32) ^ (std::process::id() as u128)) as u64;
+    let mut out = String::new();
+    for _ in 0..8 {
+        // xorshift 伪随机
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        out.push(CHARS[(seed as usize) % CHARS.len()] as char);
+    }
+    out
 }
 
 /// 生成本机 ID（AD- 前缀 + 6 位十六进制，基于时间+进程熵）。
