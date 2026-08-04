@@ -675,8 +675,9 @@ export component AppWindow inherits Window {
             // ---- 会话视图（对齐 RustDesk remote_page：大视频区 + 悬浮工具栏） ----
             if root.in-session: VerticalLayout {
                 spacing: 0px;
-                // 会话标签行
-                HorizontalLayout {
+                vertical-stretch: 1;
+                // 会话标签行（仅有多会话时显示）
+                if root.session-tabs.length > 0: HorizontalLayout {
                     spacing: 0px;
                     if root.session-tabs.length > 0: SessionTab { text: root.session-tabs[0]; selected: root.active-session == 0; clicked => { root.switch-session(0); } }
                     if root.session-tabs.length > 1: SessionTab { text: root.session-tabs[1]; selected: root.active-session == 1; clicked => { root.switch-session(1); } }
@@ -706,6 +707,7 @@ export component AppWindow inherits Window {
                     Rectangle {
                         x: 12px;
                         y: 12px;
+                        width: 280px;
                         height: 40px;
                         border-radius: 6px;
                         background: #ffffff;
