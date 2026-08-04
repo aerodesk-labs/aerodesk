@@ -4,6 +4,26 @@
 //   accent #0071FF（左栏蓝色竖条 / 主按钮）
 //   主区白底，正文 black87 #212121，次要文字 50% 透明度
 import { CheckBox, ScrollView } from "std-widgets.slint";
+import "fonts/MaterialIcons-Regular.ttf";
+
+// Material 图标（对齐 RustDesk 的 Material Icons 工具栏/标签栏/导航）。
+component MIcon {
+    in property <string> icon;
+    in property <length> size: 20px;
+    in property <brush> color: #4d4d52;
+    width: 100%;
+    height: 100%;
+    Text {
+        text: root.icon;
+        font-family: "Material Icons";
+        font-size: root.size;
+        color: root.color;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: 100%;
+        height: 100%;
+    }
+}
 
 // ---------- 通用控件 ----------
 
@@ -48,7 +68,7 @@ component RdButton {
 
 // 圆角小图标按钮（会话工具栏 / 左栏导航）。
 component IconBtn {
-    in property <string> glyph;
+    in property <string> icon;
     in property <string> tooltip: "";
     in property <bool> active: false;
     in property <bool> danger: false;
@@ -68,21 +88,17 @@ component IconBtn {
             mouse-cursor: pointer;
             clicked => { root.clicked(); }
         }
-        Text {
-            width: 100%;
-            height: 100%;
-            text: root.glyph;
-            color: root.danger ? #d93025 : (root.active ? #0071ff : #4d4d52);
-            font-size: 15px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
+        MIcon {
+            icon: root.icon;
+            size: 18px;
+            color: root.danger ? #d93025 : (root.active ? #0071ff : #5f6368);
         }
     }
 }
 
 // 左栏导航项：图标 + 文字，选中时蓝字 + 浅蓝底。
 component NavItem {
-    in property <string> glyph;
+    in property <string> icon;
     in property <string> text;
     in property <bool> selected: false;
     callback clicked;
@@ -96,11 +112,14 @@ component NavItem {
         HorizontalLayout {
             padding-left: 10px;
             spacing: 8px;
-            Text {
-                text: root.glyph;
-                font-size: 13px;
-                color: root.selected ? #0071ff : #6d6d73;
-                vertical-alignment: center;
+            Rectangle {
+                width: 20px;
+                height: 20px;
+                MIcon {
+                    icon: root.icon;
+                    size: 18px;
+                    color: root.selected ? #0071ff : #6d6d73;
+                }
             }
             Text {
                 text: root.text;
@@ -108,6 +127,38 @@ component NavItem {
                 color: root.selected ? #0071ff : #3c3c40;
                 vertical-alignment: center;
             }
+        }
+        ta := TouchArea {
+            width: 100%;
+            height: 100%;
+            mouse-cursor: pointer;
+            clicked => { root.clicked(); }
+        }
+    }
+}
+
+// Peer 标签（对齐 RustDesk PeerTabPage：图标 + 选中 2px 底边）。
+component PeerTab {
+    in property <string> icon;
+    in property <bool> selected: false;
+    in property <bool> hover: false;
+    callback clicked;
+    width: 40px;
+    height: 30px;
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: root.selected ? transparent : (ta.has-hover ? #eef0f4 : transparent);
+        Rectangle {
+            width: 100%;
+            height: 2px;
+            y: parent.height - 2px;
+            background: root.selected ? #0071ff : transparent;
+        }
+        MIcon {
+            icon: root.icon;
+            size: 20px;
+            color: root.selected ? #0071ff : #8a8a90;
         }
         ta := TouchArea {
             width: 100%;
@@ -341,23 +392,64 @@ export component AppWindow inherits Window {
                 // ID 板（对齐 buildIDBoard：左 20 右 11，2px 蓝条 + ID 标签 + 22px 大号 ID）
                 HorizontalLayout {
                     padding-left: 20px;
-                    padding-right: 11px;
+                    padding-right: 8px;
                     IdentityRow {
                         label: "ID";
                         value: root.device-id;
                         value-size: 22px;
                         copy => { root.copy-device-id(); }
                     }
+                    // 右上「⋯」设置入口（对齐 RustDesk buildPopupMenu）
+                    Rectangle {
+                        width: 26px;
+                        height: 26px;
+                        border-radius: 13px;
+                        background: mh.has-hover ? #ffffff : transparent;
+                        MIcon { icon: "\u{e5d4}"; size: 18px; color: #6d6d73; }   // more_vert
+                        mh := TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => { root.set-tab(1); }
+                        }
+                    }
                 }
                 // 密码板（对齐 buildPasswordBoard：左 20 右 16 上 13 下 13）
                 HorizontalLayout {
                     padding-left: 20px;
-                    padding-right: 16px;
+                    padding-right: 8px;
                     IdentityRow {
                         label: "一次性密码";
                         value: root.device-pw;
                         value-size: 15px;
                         copy => { root.copy-device-pw(); }
+                    }
+                    // 刷新/编辑（对齐 RustDesk buildPasswordBoard2 的 refresh/edit 图标）
+                    Rectangle {
+                        width: 24px;
+                        height: 24px;
+                        border-radius: 12px;
+                        background: rh.has-hover ? #ffffff : transparent;
+                        MIcon { icon: "\u{e5d5}"; size: 18px; color: #6d6d73; }   // refresh
+                        rh := TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => { root.copy-device-pw(); }
+                        }
+                    }
+                    Rectangle {
+                        width: 24px;
+                        height: 24px;
+                        border-radius: 12px;
+                        background: eh.has-hover ? #ffffff : transparent;
+                        MIcon { icon: "\u{e3c9}"; size: 18px; color: #6d6d73; }   // edit
+                        eh := TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: pointer;
+                            clicked => { root.set-tab(1); }
+                        }
                     }
                 }
 
@@ -406,9 +498,9 @@ export component AppWindow inherits Window {
                     padding-left: 4px;
                     padding-right: 4px;
                     spacing: 2px;
-                    NavItem { glyph: "▦"; text: "连接"; selected: root.tab == 0; clicked => { root.set-tab(0); } }
-                    NavItem { glyph: "◉"; text: "被控端"; selected: root.tab == 2; clicked => { root.set-tab(2); } }
-                    NavItem { glyph: "☰"; text: "设置"; selected: root.tab == 1; clicked => { root.set-tab(1); } }
+                    NavItem { icon: "\u{e157}"; text: "连接"; selected: root.tab == 0; clicked => { root.set-tab(0); } }
+                    NavItem { icon: "\u{e897}"; text: "被控端"; selected: root.tab == 2; clicked => { root.set-tab(2); } }
+                    NavItem { icon: "\u{e8b8}"; text: "设置"; selected: root.tab == 1; clicked => { root.set-tab(1); } }
                 }
                 Rectangle { height: 10px; }
             }
@@ -434,7 +526,11 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     Text { text: "控制远程桌面"; font-size: 19px; color: #212121; height: 26px; vertical-stretch: 0; }
                     Rectangle { width: 6px; }
-                    Text { text: "ⓘ"; font-size: 15px; color: #9a9aa0; height: 26px; vertical-stretch: 0; }
+                    Rectangle {
+                        width: 18px;
+                        height: 26px;
+                        MIcon { icon: "\u{e8fd}"; size: 16px; color: #9a9aa0; }   // help_outline
+                    }
                 }
 
                 // 远端 ID 卡片（对齐 RustDesk：白底、圆角 13、灰描边、右侧蓝色「连接」）
@@ -499,6 +595,18 @@ export component AppWindow inherits Window {
                 // 分隔线
                 Rectangle { height: 1px; background: #efeff2; }
 
+                // Peer 标签栏（对齐 RustDesk PeerTabPage：最近/收藏/发现/地址簿/设备组）
+                HorizontalLayout {
+                    spacing: 4px;
+                    height: 32px;
+                    PeerTab { icon: "\u{e192}"; selected: true; clicked => {} }                    // access_time
+                    PeerTab { icon: "\u{e838}"; clicked => {} }                                    // star
+                    PeerTab { icon: "\u{e87a}"; clicked => {} }                                    // explore
+                    PeerTab { icon: "\u{e0ba}"; clicked => {} }                                    // contacts
+                    PeerTab { icon: "\u{e7ef}"; clicked => {} }                                    // group
+                    Rectangle { width: 0px; horizontal-stretch: 1; }
+                    IconBtn { icon: "\u{e5d5}"; tooltip: "刷新"; clicked => {} }                   // refresh
+                }
                 // 最近会话（对齐 RustDesk PeerTabPage 列表）
                 Text { text: "最近会话"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                 ScrollView {
@@ -717,13 +825,13 @@ export component AppWindow inherits Window {
                             padding-left: 4px;
                             padding-right: 4px;
                             spacing: 2px;
-                            IconBtn { glyph: "⤢"; tooltip: "全屏"; clicked => { root.toggle-fullscreen(); } }
-                            IconBtn { glyph: "♪"; tooltip: "音频"; clicked => { root.toggle-audio(); } }
-                            IconBtn { glyph: "▦"; tooltip: "显示器"; clicked => { root.toggle-display(); } }
-                            IconBtn { glyph: "◐"; tooltip: "画质"; clicked => { root.toggle-quality(); } }
-                            IconBtn { glyph: "⌨"; tooltip: "输入"; clicked => { root.toggle-input(); } }
+                            IconBtn { icon: "\u{e5d0}"; tooltip: "全屏"; clicked => { root.toggle-fullscreen(); } }
+                            IconBtn { icon: "\u{e050}"; tooltip: "音频"; clicked => { root.toggle-audio(); } }
+                            IconBtn { icon: "\u{e30c}"; tooltip: "显示器"; clicked => { root.toggle-display(); } }
+                            IconBtn { icon: "\u{e429}"; tooltip: "画质"; clicked => { root.toggle-quality(); } }
+                            IconBtn { icon: "\u{e312}"; tooltip: "输入"; clicked => { root.toggle-input(); } }
                             Rectangle { width: 1px; height: 22px; background: #dedee2; }
-                            IconBtn { glyph: "✕"; danger: true; tooltip: "断开"; clicked => { root.disconnect(); } }
+                            IconBtn { icon: "\u{e5cd}"; danger: true; tooltip: "断开"; clicked => { root.disconnect(); } }
                             Rectangle { width: 6px; }
                             Text {
                                 text: root.session-status;
