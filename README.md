@@ -51,8 +51,10 @@ cargo run -p aerodesk-cli -- --role publisher --encoder screen
 # 发布端 simulcast（q/h/f 三层，SFU 选层真实生效；--noisy 用高熵合成源验证码率档位）
 cargo run -p aerodesk-cli -- --role publisher --encoder x264 --simulcast --noisy
 
-# 观看端（--layer q|h|f 显式选层）
-cargo run -p aerodesk-cli -- --role viewer --layer f
+# 观看端（--layer q|h|f 显式选层；--audio 接收音频，--mute-audio 静音）
+cargo run -p aerodesk-cli -- --role viewer --layer f --audio
+
+# 音频：publisher --audio 发送合成 PCMU（G.711 8kHz）；真实系统音频采集待真机接入
 
 # 浏览器：https://<host>:3000/?role=publisher|viewer
 ```

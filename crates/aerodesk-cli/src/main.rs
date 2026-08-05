@@ -43,10 +43,13 @@ fn main() {
     let simulcast = args.iter().any(|a| a == "--simulcast");
     // 高熵合成源（伪随机噪声）：码率贴近目标档位，用于选层/压测验证。
     let noisy = args.iter().any(|a| a == "--noisy");
+    // #58 音频：publisher 发送合成 PCMU 音频 / viewer 接收；--mute-audio 观看端静音。
+    let audio = args.iter().any(|a| a == "--audio");
+    let mute_audio = args.iter().any(|a| a == "--mute-audio");
 
     match role.as_str() {
         "publisher" if encoder == "screen" => {
-            publisher_capture(&signal, &room, token.as_deref(), simulcast)
+            publisher_capture(&signal, &room, token.as_deref(), simulcast, audio)
         }
         "publisher" if encoder == "vt" => {
             let w: u32 = arg(&args, "--width")
@@ -73,17 +76,20 @@ fn main() {
                 },
                 simulcast,
                 noisy,
+                audio,
             );
         }
         "publisher" if encoder == "x264" => {
-            publisher_x264(&signal, &room, token.as_deref(), simulcast, noisy)
+            publisher_x264(&signal, &room, token.as_deref(), simulcast, noisy, audio)
         }
-        "publisher" => publisher(&signal, &room, token.as_deref()),
+        "publisher" => publisher(&signal, &room, token.as_deref(), audio),
         "viewer" => viewer(
             &signal,
             &room,
             token.as_deref(),
             arg(&args, "--layer").as_deref(),
+            audio,
+            mute_audio,
         ),
         other => panic!("unknown role {other}"),
     }
@@ -153,14 +159,21 @@ fn init_log() {
         .init();
 }
 
-/// 连接信令 + 建立 Endpoint（公共步骤）。返回 (signal, endpoint, socket, video_mid)。
+/// 连接信令 + 建立 Endpoint（公共步骤）。返回 (signal, endpoint, socket, video_mid, audio_mid)。
 fn connect(
     signal_url: &str,
     room: &str,
     role: Role,
     auth: Option<&str>,
-) -> (WsSignalClient, Endpoint, UdpSocket, str0m::media::Mid) {
-    connect_inner(signal_url, room, role, false, false, auth)
+    audio: bool,
+) -> (
+    WsSignalClient,
+    Endpoint,
+    UdpSocket,
+    str0m::media::Mid,
+    Option<str0m::media::Mid>,
+) {
+    connect_inner(signal_url, room, role, false, false, audio, auth)
 }
 
 fn connect_h264(
@@ -169,8 +182,15 @@ fn connect_h264(
     role: Role,
     auth: Option<&str>,
     simulcast: bool,
-) -> (WsSignalClient, Endpoint, UdpSocket, str0m::media::Mid) {
-    connect_inner(signal_url, room, role, true, simulcast, auth)
+    audio: bool,
+) -> (
+    WsSignalClient,
+    Endpoint,
+    UdpSocket,
+    str0m::media::Mid,
+    Option<str0m::media::Mid>,
+) {
+    connect_inner(signal_url, room, role, true, simulcast, audio, auth)
 }
 
 fn connect_inner(
@@ -179,8 +199,15 @@ fn connect_inner(
     role: Role,
     h264_only: bool,
     simulcast: bool,
+    audio: bool,
     auth: Option<&str>,
-) -> (WsSignalClient, Endpoint, UdpSocket, str0m::media::Mid) {
+) -> (
+    WsSignalClient,
+    Endpoint,
+    UdpSocket,
+    str0m::media::Mid,
+    Option<str0m::media::Mid>,
+) {
     let mut signal = WsSignalClient::connect(signal_url).expect("signal connect");
     let (peer_id, turn) = signal.join(room, role, auth).expect("join");
     info!("joined room {room} as {peer_id}");
@@ -208,8 +235,16 @@ fn connect_inner(
     } else {
         endpoint.add_video();
     }
-    let (offer, pending, video_mid) = endpoint.create_offer().expect("offer");
-    info!("video mid: {video_mid:?}");
+    // #58 音频：publisher 发 PCMU，viewer 收 PCMU（recvonly）。
+    if audio {
+        if role == Role::Viewer {
+            endpoint.add_audio_recvonly();
+        } else {
+            endpoint.add_audio();
+        }
+    }
+    let (offer, pending, video_mid, audio_mid) = endpoint.create_offer().expect("offer");
+    info!("video mid: {video_mid:?} audio mid: {audio_mid:?}");
     let offer_json = serde_json::to_string(&offer).unwrap();
     let answer_json = signal.exchange_description(&offer_json).expect("answer");
     let answer: str0m::change::SdpAnswer =
@@ -222,7 +257,7 @@ fn connect_inner(
 
     info!("SDP negotiated, awaiting ICE...");
     let video_mid = video_mid.expect("video mid");
-    (signal, endpoint, socket, video_mid)
+    (signal, endpoint, socket, video_mid, audio_mid)
 }
 
 /// VideoToolbox 合成源编码参数（--width/--height/--fps/--bitrate）。
@@ -277,6 +312,46 @@ fn drain_payload_queue(endpoint: &mut Endpoint, n: usize) {
     }
 }
 
+/// #58 音频节拍器：8kHz 单声道合成正弦（440Hz）→ PCMU，20ms/帧。
+struct AudioTicker {
+    next: Instant,
+    pts: u64,
+    phase: u32,
+}
+
+impl AudioTicker {
+    fn new() -> Self {
+        Self {
+            next: Instant::now(),
+            pts: 0,
+            phase: 0,
+        }
+    }
+
+    /// 到点则补发若干 20ms PCMU 帧（8kHz：每帧 160 样本）。
+    fn tick(&mut self, endpoint: &mut Endpoint, mid: str0m::media::Mid, now: Instant) {
+        if self.next > now {
+            return;
+        }
+        while self.next <= now {
+            let mut samples = [0i16; 160];
+            for s in &mut samples {
+                let t = self.phase as f64 / 8000.0;
+                *s = ((t * 440.0 * std::f64::consts::TAU).sin() * 8000.0) as i16;
+                self.phase = self.phase.wrapping_add(1);
+            }
+            let data = aerodesk_core::pcmu::pcmu_encode(&samples);
+            let rtp_time =
+                str0m::media::MediaTime::new(self.pts * 160, str0m::media::Frequency::EIGHT_KHZ);
+            if let Err(e) = endpoint.send_audio_frame(mid, data, rtp_time) {
+                warn!("send audio failed: {e:?}");
+            }
+            self.pts += 1;
+            self.next += Duration::from_millis(20);
+        }
+    }
+}
+
 /// 发布端公共事件处理：输入通道（观看端 → 被控端）。
 fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
     match ev {
@@ -294,14 +369,15 @@ fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
     }
 }
 
-fn publisher(signal_url: &str, room: &str, auth: Option<&str>) {
+fn publisher(signal_url: &str, room: &str, auth: Option<&str>, audio: bool) {
     let pcap = include_bytes!("../../../crates/aerodesk-core/tests/data/vp8.pcap");
     let frames = parse_vp8_pcap(pcap);
     info!("loaded {} VP8 frames from pcap", frames.len());
 
-    let (mut signal, mut endpoint, socket, video_mid) =
-        connect(signal_url, room, Role::Publisher, auth);
+    let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
+        connect(signal_url, room, Role::Publisher, auth, audio);
     let mut connected = false;
+    let mut audio_ticker = AudioTicker::new();
     let mut frame_idx = 0usize;
     let mut last_frame_time = Instant::now();
     let mut next_deadline = Instant::now() + Duration::from_millis(100);
@@ -378,6 +454,11 @@ fn publisher(signal_url: &str, room: &str, auth: Option<&str>) {
             }
         }
 
+        // #58 音频：按 20ms 节拍发送 PCMU 帧。
+        if let Some(amid) = audio_mid {
+            audio_ticker.tick(&mut endpoint, amid, Instant::now());
+        }
+
         // 发送帧（按 90kHz 时间戳节奏）
         if connected && frame_idx < frames.len() {
             let f: &Vp8Frame = &frames[frame_idx];
@@ -411,16 +492,30 @@ fn publisher(signal_url: &str, room: &str, auth: Option<&str>) {
     }
 }
 
-fn viewer(signal_url: &str, room: &str, auth: Option<&str>, layer: Option<&str>) {
-    let (mut signal, mut endpoint, socket, _) = connect(signal_url, room, Role::Viewer, auth);
+fn viewer(
+    signal_url: &str,
+    room: &str,
+    auth: Option<&str>,
+    layer: Option<&str>,
+    audio: bool,
+    mute_audio: bool,
+) {
+    let (mut signal, mut endpoint, socket, _, _audio_mid) =
+        connect(signal_url, room, Role::Viewer, auth, audio);
     let mut frames = 0u64;
     let mut bytes = 0u64;
     let mut keyframes = 0u64;
+    let mut audio_frames = 0u64;
+    let mut audio_bytes = 0u64;
     let mut last_report = Instant::now();
     let mut input_open = false;
     let mut input_seq = 0u64;
     let mut last_input = Instant::now();
     let mut layer_sent = layer.is_none();
+    // #58 观看端静音：--mute-audio 经 control 通道下发；静音后丢弃音频帧。
+    let audio_muted = mute_audio;
+    let mut mute_sent = false;
+    let mut dropped_audio_frames = 0u64;
 
     loop {
         let wait = Duration::from_millis(50);
@@ -466,10 +561,23 @@ fn viewer(signal_url: &str, room: &str, auth: Option<&str>, layer: Option<&str>)
         while let Some(ev) = endpoint.poll_event() {
             match ev {
                 ClientEvent::Media(data) => {
-                    frames += 1;
-                    bytes += data.data.len() as u64;
-                    if data.is_keyframe() {
-                        keyframes += 1;
+                    // #58 音频识别：SFU 转发时 RTP mid 扩展用 SFU 本地 mid（与
+                    // viewer 协商的 mid 不同，视频/音频都一样），不能按 mid 过滤；
+                    // 用协商 codec（PCMU）识别音频帧。
+                    if data.params.spec().codec == str0m::format::Codec::PCMU {
+                        // 静音时丢弃（若接播放设备则无声）。
+                        if audio_muted {
+                            dropped_audio_frames += 1;
+                        } else {
+                            audio_frames += 1;
+                            audio_bytes += data.data.len() as u64;
+                        }
+                    } else {
+                        frames += 1;
+                        bytes += data.data.len() as u64;
+                        if data.is_keyframe() {
+                            keyframes += 1;
+                        }
                     }
                 }
                 ClientEvent::IceConnected => info!("ICE connected"),
@@ -487,6 +595,15 @@ fn viewer(signal_url: &str, room: &str, auth: Option<&str>, layer: Option<&str>)
                         if endpoint.send_channel_data("control", false, &data) {
                             info!("layer request sent: {layer:?}");
                             layer_sent = true;
+                        }
+                    }
+                    // #58 观看端静音：经 control 通道下发一次。
+                    if mute_audio && !mute_sent {
+                        let req = serde_json::json!({ "audio_mute": true });
+                        let data = serde_json::to_vec(&req).unwrap();
+                        if endpoint.send_channel_data("control", false, &data) {
+                            info!("audio mute command sent");
+                            mute_sent = true;
                         }
                     }
                 }
@@ -519,7 +636,7 @@ fn viewer(signal_url: &str, room: &str, auth: Option<&str>, layer: Option<&str>)
 
         if last_report.elapsed() >= Duration::from_secs(2) {
             info!(
-                "RECEIVED: {frames} frames, {bytes} bytes, {keyframes} keyframes, input sent: {input_seq}"
+                "RECEIVED: {frames} frames, {bytes} bytes, {keyframes} keyframes, input sent: {input_seq}, AUDIO: {audio_frames} frames {audio_bytes} bytes muted={audio_muted} dropped={dropped_audio_frames}"
             );
             last_report = Instant::now();
         }
@@ -531,7 +648,14 @@ fn viewer(signal_url: &str, room: &str, auth: Option<&str>, layer: Option<&str>)
 /// x264 发布端：合成帧 → H.264 编码 → SFU。
 /// `--simulcast` 时编码 q/h/f 三层（640x360 / 1280x720 / 1920x1080），
 /// SFU 选层请求（画质档位）才能真正切换分辨率/码率。
-fn publisher_x264(signal_url: &str, room: &str, auth: Option<&str>, simulcast: bool, noisy: bool) {
+fn publisher_x264(
+    signal_url: &str,
+    room: &str,
+    auth: Option<&str>,
+    simulcast: bool,
+    noisy: bool,
+    audio: bool,
+) {
     use aerodesk_macos::synthetic::SyntheticSource;
     use aerodesk_softenc::encode::X264Encoder;
     use str0m::media::Rid;
@@ -540,8 +664,8 @@ fn publisher_x264(signal_url: &str, room: &str, auth: Option<&str>, simulcast: b
     const W: u32 = 640;
     const H: u32 = 360;
 
-    let (mut signal, mut endpoint, socket, video_mid) =
-        connect_h264(signal_url, room, Role::Publisher, auth, simulcast);
+    let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
+        connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio);
 
     let make_source = |w: u32, h: u32| {
         if noisy {
@@ -572,6 +696,7 @@ fn publisher_x264(signal_url: &str, room: &str, auth: Option<&str>, simulcast: b
     };
 
     let mut connected = false;
+    let mut audio_ticker = AudioTicker::new();
     let mut next_frame = Instant::now();
     let mut pts = 0i64;
 
@@ -639,6 +764,11 @@ fn publisher_x264(signal_url: &str, room: &str, auth: Option<&str>, simulcast: b
             }
         }
 
+        // #58 音频：按 20ms 节拍发送 PCMU 帧。
+        if let Some(amid) = audio_mid {
+            audio_ticker.tick(&mut endpoint, amid, Instant::now());
+        }
+
         // 30fps 节奏编码发送（simulcast 各层同一 rtp_time，SFU 按 rid 选层）
         if connected && Instant::now() >= next_frame {
             next_frame += Duration::from_millis(1000 / FPS as u64);
@@ -676,6 +806,7 @@ fn publisher_vt(
     params: VideoParams,
     simulcast: bool,
     noisy: bool,
+    audio: bool,
 ) {
     let VideoParams {
         width,
@@ -687,8 +818,8 @@ fn publisher_vt(
     use aerodesk_macos::vt_encoder::VtEncoder;
     use str0m::media::Rid;
 
-    let (mut signal, mut endpoint, socket, video_mid) =
-        connect_h264(signal_url, room, Role::Publisher, auth, simulcast);
+    let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
+        connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio);
 
     let make_source = |w: u32, h: u32| {
         if noisy {
@@ -722,6 +853,7 @@ fn publisher_vt(
         layers.len()
     );
     let mut connected = false;
+    let mut audio_ticker = AudioTicker::new();
     let mut next_frame = Instant::now();
     let mut pts = 0i64;
     let pts_inc = 90_000 / fps.max(1) as i64;
@@ -775,6 +907,11 @@ fn publisher_vt(
             }
         }
 
+        // #58 音频：按 20ms 节拍发送 PCMU 帧。
+        if let Some(amid) = audio_mid {
+            audio_ticker.tick(&mut endpoint, amid, Instant::now());
+        }
+
         if connected && Instant::now() >= next_frame {
             next_frame += Duration::from_millis(1000 / fps as u64);
             let rtp_time = str0m::media::MediaTime::new(
@@ -806,7 +943,13 @@ fn publisher_vt(
 /// 真实屏幕采集发布端：ScreenCaptureKit → VideoToolbox 硬编（零拷贝）→ SFU。
 /// 需要屏幕录制权限（TCC）。`--simulcast`：q/h/f 三层各一路 SCK 采集 + 硬编，
 /// 分辨率越低开销越小，选层切换立即生效。
-fn publisher_capture(signal_url: &str, room: &str, auth: Option<&str>, simulcast: bool) {
+fn publisher_capture(
+    signal_url: &str,
+    room: &str,
+    auth: Option<&str>,
+    simulcast: bool,
+    audio: bool,
+) {
     use aerodesk_macos::capture::ScreenCapture;
     use aerodesk_macos::vt_encoder::VtEncoder;
     use str0m::media::Rid;
@@ -815,8 +958,8 @@ fn publisher_capture(signal_url: &str, room: &str, auth: Option<&str>, simulcast
     const W: u32 = 1920;
     const H: u32 = 1080;
 
-    let (mut signal, mut endpoint, socket, video_mid) =
-        connect_h264(signal_url, room, Role::Publisher, auth, simulcast);
+    let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
+        connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio);
 
     // (rid, encoder, capture)
     let mut layers: Vec<(Option<Rid>, VtEncoder, ScreenCapture)> = Vec::new();
@@ -855,6 +998,7 @@ fn publisher_capture(signal_url: &str, room: &str, auth: Option<&str>, simulcast
     }
 
     let mut connected = false;
+    let mut audio_ticker = AudioTicker::new();
     let mut pts = 0i64;
     let pts_inc = 90_000 / FPS as i64;
 
@@ -904,6 +1048,11 @@ fn publisher_capture(signal_url: &str, room: &str, auth: Option<&str>, simulcast
                 }
                 ev => handle_publisher_input(&mut endpoint, ev),
             }
+        }
+
+        // #58 音频：按 20ms 节拍发送 PCMU 帧。
+        if let Some(amid) = audio_mid {
+            audio_ticker.tick(&mut endpoint, amid, Instant::now());
         }
 
         if connected {

@@ -87,7 +87,7 @@ pub fn connect_live_role(
     } else {
         endpoint.add_video();
     }
-    let (offer, pending, video_mid) = endpoint
+    let (offer, pending, video_mid, _audio_mid) = endpoint
         .create_offer()
         .map_err(|e| format!("offer: {e:?}"))?;
     let offer_json = serde_json::to_string(&offer).map_err(|e| e.to_string())?;
