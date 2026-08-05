@@ -5,19 +5,25 @@
 - `crates/aerodesk-ohos`：骨架（capture/decode/inject 模块），Rust 目标
   `aarch64-unknown-linux-ohos` 已通过 rustup 安装
 - `cargo check -p aerodesk-ohos --target aarch64-unknown-linux-ohos`
-  目前被 **ring 的 C 编译**阻塞：需要 OpenHarmony NDK 的 clang
-  （设置 `CC_aarch64_unknown_linux_ohos` 指向 DevEco 自带工具链）
+  目前被 **C 依赖编译**阻塞：根因是 str0m 的 `dimpl` 依赖无条件带
+  `aws-lc-rs → aws-lc-sys`（BoringSSL C 构建；`ring` 同理）。
+  aws-lc-sys 本身支持 OHOS（构建脚本已识别 `OHOS_ARCH=arm64-v8a`），
+  缺的是 **OHOS NDK 的 clang/链接器**。
+- 先跑 `scripts/check-ohos-toolchain.sh` 一键检测工具链是否就绪
 
 ## 前置（真机开发必需）
 
 - DevEco Studio + HarmonyOS SDK（含 OHOS NDK / clang）
 - 鸿蒙真机（API 12+）
-- 环境变量示例：
+- 环境变量示例（完整，含 AR/RANLIB；`scripts/check-ohos-toolchain.sh` 会检测）：
 
 ```sh
-export PATH="/path/to/DevEco/toolchain:$PATH"
-export CC_aarch64_unknown_linux_ohos=/path/to/DevEco/ohos-ndk/clang
-export AR_aarch64_unknown_linux_ohos=llvm-ar
+export PATH="/path/to/DevEco/ohos-ndk/llvm/bin:$PATH"
+export CC_aarch64_unknown_linux_ohos="/path/to/DevEco/ohos-ndk/llvm/bin/clang"
+export AR_aarch64_unknown_linux_ohos="/path/to/DevEco/ohos-ndk/llvm/bin/llvm-ar"
+export RANLIB_aarch64_unknown_linux_ohos="/path/to/DevEco/ohos-ndk/llvm/bin/llvm-ranlib"
+# 必要时（缺 sysroot 报错时）：
+export CFLAGS_aarch64_unknown_linux_ohos="--sysroot=/path/to/DevEco/ohos-ndk/sysroot"
 ```
 
 ## 方案
@@ -60,7 +66,9 @@ export function injectInput(json: string): boolean;       // InputFrame JSON →
   `OH_Input`/系统能力（企业签名通道）
 - Rust 侧复用 `aerodesk-core::connect`（含 AccessUnitAssembler，与 iOS/Android 同管线）
 
-### 编译阻塞（已确认）
-- `cargo check -p aerodesk-ohos --target aarch64-unknown-linux-ohos` 被 **ring 的 C 编译**
-  阻塞（需要 OpenHarmony NDK clang，设置 `CC_aarch64_unknown_linux_ohos`）
+### 编译阻塞（已确认，2026-08-05 复核）
+- `cargo check -p aerodesk-ohos --target aarch64-unknown-linux-ohos` 被 **C 依赖编译**阻塞：
+  str0m 的 `dimpl` 依赖无条件带 `aws-lc-rs → aws-lc-sys`（也含 `ring` 路径），
+  均需 OHOS NDK 的 clang/链接器（aws-lc-sys 构建脚本已支持 OHOS，只是本机无工具链）
 - 需要 DevEco Studio + OHOS NDK 环境；本仓库 CI 暂无 ohos runner
+- 检测脚本：`scripts/check-ohos-toolchain.sh`（target/CC/AR/RANLIB/最小 C 冒烟）
