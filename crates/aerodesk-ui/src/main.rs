@@ -468,15 +468,17 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     ui.on_toggle_display({
         let ui = ui.as_weak();
+        // #58 显示器切换：经 control 通道下发 {"display":N}（SFU 转发给被控端）。
+        // 依次循环 0/1/2；被控端无对应显示器时保持当前并报错（日志可见）。
+        let display_idx = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let display_idx2 = display_idx.clone();
         move || {
             let ui = ui.unwrap();
-            // 显示器切换：当前单显示器场景映射为选层切换（f↔h）。
-            let cur = ui.get_input_mode().contains("捕获");
-            let layer = if cur { "h" } else { "f" };
+            let n = display_idx2.fetch_add(1, Ordering::SeqCst) % 3;
             if let Some(tx) = CONTROL_TX.lock().unwrap().as_ref() {
-                let _ = tx.send(format!("{{\"layer\":\"{layer}\"}}"));
+                let _ = tx.send(format!("{{\"display\":{n}}}"));
             }
-            ui.set_session_status(format!("显示器切换：选层 {layer}（多显示器待接入）").into());
+            ui.set_session_status(format!("显示器：{n}（切换指令已下发）").into());
         }
     });
     ui.on_toggle_quality({

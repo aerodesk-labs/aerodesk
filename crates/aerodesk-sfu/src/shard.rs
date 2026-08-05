@@ -975,14 +975,26 @@ impl Client {
             warn!("Unrecognized data on signal channel");
             return Propagated::Noop;
         }
-        // #29 画质/显示切换：control 通道的选层请求（观看端 → SFU），不转发。
+        // #29 画质/显示切换：control 通道的选层请求（观看端 → SFU），不转发；
+        // #58 显示器切换请求需要转发到 publisher（同房间其它客户端）。
         if label == "control" {
-            if let Ok(req) = serde_json::from_slice::<LayerRequest>(&d.data) {
-                info!("Client ({}) layer request: {:?}", *self.id, req.layer());
-                self.bwe.set_requested_layer(req.layer());
-            } else {
-                warn!("Client ({}) 未知 control 消息", *self.id);
+            // 按顶层字段分发：LayerRequest 的 layer 是 Option，若直接反序列化
+            // 会把 {"display":N} 也解析成 layer=None（#58 排查）。
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&d.data) {
+                if let Some(layer) = v.get("layer").and_then(|l| l.as_str()) {
+                    let req = LayerRequest {
+                        layer: Some(layer.to_string()),
+                    };
+                    info!("Client ({}) layer request: {:?}", *self.id, req.layer());
+                    self.bwe.set_requested_layer(req.layer());
+                    return Propagated::Noop;
+                }
+                if let Some(disp) = v.get("display").and_then(|d| d.as_u64()) {
+                    info!("Client ({}) display request: {disp}", *self.id);
+                    return Propagated::ChannelData(self.id, "control".into(), d);
+                }
             }
+            warn!("Client ({}) 未知 control 消息", *self.id);
             return Propagated::Noop;
         }
         Propagated::ChannelData(self.id, label, d)

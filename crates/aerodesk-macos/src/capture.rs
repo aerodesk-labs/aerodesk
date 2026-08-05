@@ -68,4 +68,14 @@ impl ScreenCapture {
     pub fn seq(&self) -> i64 {
         self.seq
     }
+
+    /// 采集分辨率宽。
+    pub fn width(&self) -> u32 {
+        self.config.width()
+    }
+
+    /// 采集分辨率高。
+    pub fn height(&self) -> u32 {
+        self.config.height()
+    }
 }
