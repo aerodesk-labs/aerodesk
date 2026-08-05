@@ -11,7 +11,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ROOM="${1:-sim-$(date +%s)}"
-OBS="${2:-10}"
+OBS="${2:-12}"
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建（release）"
@@ -32,21 +32,38 @@ for _ in $(seq 1 50); do
 done
 sleep 0.3
 
-echo "== 启动 publisher（x264 --simulcast: q/h/f）"
-./target/release/aerodesk-cli --role publisher --encoder x264 --simulcast --noisy \
-    --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/sim-pub.log 2>&1 &
-PUB_PID=$!
-sleep 2
-
-# 并发两个 viewer：f（清晰）与 q（流畅）同时请求不同层。
-# 不用“kill 一个再连下一个”：信令服务器在旧连接被 kill 后有死锁（存量 bug）。
-echo "== 并发观察 f/q 层 ${OBS}s"
+# 先起两个 viewer 并等它们登记选层（High/Low），再启动 publisher：
+# 让 viewer 赶上 publisher 的首个关键帧（#0），避免“迟到 viewer 等下一
+# 个关键帧”造成 f 层偶发 0 帧（#66 排查结论）。
+echo "== 启动 viewer f/q（先加入并登记选层）"
 ./target/release/aerodesk-cli --role viewer --layer f \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/sim-view-f.log 2>&1 &
 F_PID=$!
 ./target/release/aerodesk-cli --role viewer --layer q \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/sim-view-q.log 2>&1 &
 Q_PID=$!
+ready=0
+for _ in $(seq 1 50); do
+    if grep -q "layer request sent" /tmp/sim-view-f.log 2>/dev/null \
+        && grep -q "layer request sent" /tmp/sim-view-q.log 2>/dev/null; then
+        ready=1; break
+    fi
+    sleep 0.2
+done
+if [ "$ready" != "1" ]; then
+    echo "FAIL viewer 未能在 10s 内登记选层"
+    echo "--- f log:"; cat /tmp/sim-view-f.log 2>/dev/null | tail -5
+    echo "--- q log:"; cat /tmp/sim-view-q.log 2>/dev/null | tail -5
+    echo "--- sig log:"; tail -5 /tmp/sim-sig.log 2>/dev/null
+    kill "$F_PID" "$Q_PID" "$SFU_PID" "$SIG_PID" 2>/dev/null || true
+    exit 1
+fi
+
+echo "== 启动 publisher（x264 --simulcast --noisy: q/h/f）"
+./target/release/aerodesk-cli --role publisher --encoder x264 --simulcast --noisy \
+    --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/sim-pub.log 2>&1 &
+PUB_PID=$!
+echo "== 观察 f/q 层 ${OBS}s"
 sleep "$OBS"
 
 kill "$F_PID" "$Q_PID" "$PUB_PID" "$SFU_PID" "$SIG_PID" 2>/dev/null || true
@@ -70,14 +87,18 @@ for layer in High Low; do
         echo "FAIL SFU layer request $layer missing"; fail=1
     fi
 done
-# 3) f 层码率显著高于 q 层（release 下编码率接近目标码率）
+# 3) f 层单帧平均大小显著高于 q 层（分辨率/码率切换真实生效）。
+# 用“平均帧大小”而不是总字节：共享机上 f 层软编帧率低，总字节会被帧率
+# 稀释（#66 排查结论），单帧大小反映真实的分辨率/码率梯度。
 bytes_f=$(grep -oE "RECEIVED: [0-9]+ frames, [0-9]+ bytes" /tmp/sim-view-f.log | tail -1 | grep -oE "[0-9]+ bytes" | grep -oE "[0-9]+" || echo 0)
 bytes_q=$(grep -oE "RECEIVED: [0-9]+ frames, [0-9]+ bytes" /tmp/sim-view-q.log | tail -1 | grep -oE "[0-9]+ bytes" | grep -oE "[0-9]+" || echo 0)
 frames_f=$(grep -oE "RECEIVED: [0-9]+ frames" /tmp/sim-view-f.log | tail -1 | grep -oE "[0-9]+" || echo 0)
 frames_q=$(grep -oE "RECEIVED: [0-9]+ frames" /tmp/sim-view-q.log | tail -1 | grep -oE "[0-9]+" || echo 0)
-echo "  f: $frames_f frames / $bytes_f bytes; q: $frames_q frames / $bytes_q bytes"
-if [ "${frames_f:-0}" -gt 0 ] && [ "${frames_q:-0}" -gt 0 ] && [ "${bytes_f:-0}" -gt $((bytes_q * 2)) ] 2>/dev/null; then
-    echo "PASS layer switching changes bitrate (f > 2x q)"
+avg_f=$(( bytes_f / (frames_f > 0 ? frames_f : 1) ))
+avg_q=$(( bytes_q / (frames_q > 0 ? frames_q : 1) ))
+echo "  f: $frames_f frames / $bytes_f bytes (avg ${avg_f}B); q: $frames_q frames / $bytes_q bytes (avg ${avg_q}B)"
+if [ "${frames_f:-0}" -gt 0 ] && [ "${frames_q:-0}" -gt 0 ] && [ "$avg_f" -gt $((avg_q * 2)) ] 2>/dev/null; then
+    echo "PASS layer switching changes bitrate/resolution (f avg > 2x q avg)"
 else
     echo "FAIL f layer not significantly higher than q"; fail=1
 fi

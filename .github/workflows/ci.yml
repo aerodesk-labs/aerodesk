@@ -62,6 +62,11 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/simulcast-e2e.sh
 
+      # #66 回归：kill 一个连接后，新连接必须能正常 Join（信号服务器无死锁）。
+      - name: e2e signal reconnect after disconnect (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/signal-reconnect-e2e.sh
+
       - name: windows adapter
         if: runner.os == 'Windows'
         run: cargo check -p aerodesk-windows

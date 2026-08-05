@@ -54,6 +54,10 @@ impl X264Encoder {
             .sliced_threads(false)
             .threads(1)
             .max_keyframe_interval((fps * 2) as i32)
+            // #66：关闭场景切换关键帧。屏幕流（尤其高熵合成源）内容每帧都在变，
+            // x264 会几乎每帧判为 scene cut → 疯狂 IDR（f 层每帧 300KB），
+            // pacer/BWE 跟不上把大层关键帧丢弃，SFU 永远收不到该层（选层失效）。
+            .scenecut_threshold(0)
             .build(Colorspace::I420, width as i32, height as i32)
             .map_err(|e| format!("x264 init: {e:?}"))?;
         Ok(Self {
@@ -62,6 +66,11 @@ impl X264Encoder {
             height,
             pts: 0,
         })
+    }
+
+    /// 强制下一帧为 IDR 关键帧（响应 SFU 关键帧请求）。
+    pub fn force_idr(&mut self) {
+        self.encoder.force_idr();
     }
 
     /// SPS/PPS 参数集（连接建立后发送一次）。

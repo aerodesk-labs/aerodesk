@@ -311,24 +311,38 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
         return;
     };
     info!("peer {peer_id} left room {room}");
-    let peers = rooms.lock().unwrap();
-    if let Some(peers) = peers.get(&room) {
-        for p in peers {
-            send(
-                p.ws.clone(),
-                SignalMessage::PeerLeft {
-                    peer_id: peer_id.clone(),
-                },
-            );
-        }
+    // #66：先快照同房间其它连接、释放 rooms 锁，再尽力广播 PeerLeft。
+    // 不能在持有 rooms 锁时去锁其它连接的 ws（锁序反转 → 死锁）。
+    let peers: Vec<Arc<Mutex<Websocket>>> = {
+        let rooms = rooms.lock().unwrap();
+        rooms
+            .get(&room)
+            .map(|peers| peers.iter().map(|p| p.ws.clone()).collect())
+            .unwrap_or_default()
+    };
+    for p in peers {
+        send(
+            p,
+            SignalMessage::PeerLeft {
+                peer_id: peer_id.clone(),
+            },
+        );
     }
     info!("session closed");
 }
 
 fn send(ws: Arc<Mutex<Websocket>>, msg: SignalMessage) {
-    if let Ok(text) = serde_json::to_string(&msg)
-        && let Ok(mut ws) = ws.lock()
-    {
+    if let Ok(text) = serde_json::to_string(&msg) {
+        // #66：非阻塞发送。每个连接自己的 session_loop 在阻塞读 `next()` 时
+        // 持有本连接的 ws Mutex；若这里用 `lock()` 等待，会与「清理广播持有
+        // rooms 锁再去锁其它连接 ws」形成锁序反转死锁——kill 一个连接后，
+        // 新连接的 Join 就永远拿不到 rooms 锁（Join 卡死）。
+        // 对本连接（Join/Description 应答）try_lock 必然成功；对其它连接的
+        // PeerLeft 广播为尽力而为（协议保留该消息，当前无消费方，见 #66）。
+        let Ok(mut ws) = ws.try_lock() else {
+            tracing::debug!("send skipped: peer websocket busy (non-blocking, #66)");
+            return;
+        };
         let _ = ws.send_text(&text);
     }
 }
