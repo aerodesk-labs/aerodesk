@@ -89,6 +89,22 @@ RECORD_DIR=/tmp/aerodesk-acceptance ./target/debug/aerodesk-sfu   # 分片服务
 ### 7. Web 观看（已 ✅ web-e2e）
 浏览器打开 `web/index.html`（或部署静态站），填 `ws://<host>:3003` + 房间；观看/发布/输入与原生端互通。
 
+### 7.5 #58 工具栏媒体控制验收（画质/音频/显示器）
+
+软件侧已全部合入（PR #65/#68/#69，三个 e2e 已接入 macOS CI 守护）：
+```sh
+# 画质选层（SFU 按 rid 转发，f 平均帧 ≈9x q）
+./scripts/simulcast-e2e.sh
+# 音频（publisher 合成 PCMU → SFU → viewer；--mute-audio 静音丢弃）
+./scripts/audio-e2e.sh
+# 显示器控制链路（viewer --display N → SFU control 转发 → publisher）
+./scripts/display-e2e.sh
+```
+真机验收（对应 issue 评论贴证据）：
+1. **音频真实采集/播放**：macOS 端 AudioUnit/AVAudioEngine 采集系统音频接入 publisher（当前为合成 PCMU；代码路径待接入），观看端出声且「音频」按钮静音后无声
+2. **多显示器切换**：macOS 被控端 ≥2 显示器，`--encoder screen --display N` 或 viewer `--display N` 切换后画面/码率变化
+3. 证据 → 关 #58
+
 ### 8. #8 4K60 压测（干净专用机）
 1. 干净机标准：load < 2、无共享服务、专用网卡；被控/观看可同机或跨机
 2. `scripts/bench.sh 4 2 60 3840 2160 60`（`BITRATE=12000000` 可选），产物在 `$REPORT_DIR`（JSON+Markdown）
