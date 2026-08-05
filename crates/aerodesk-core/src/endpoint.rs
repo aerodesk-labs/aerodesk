@@ -184,6 +184,8 @@ impl Endpoint {
         let _ = change.add_channel("input".into());
         // #29 画质/显示切换：观看端 → SFU 的控制通道（选层请求等）。
         let _ = change.add_channel("control".into());
+        // #72 文件传输：双向 data channel（FileMeta/Chunk/Done，见 aerodesk-protocol::file）。
+        let _ = change.add_channel("file".into());
         let (offer, pending) = change
             .apply()
             .ok_or(RtcError::Io(std::io::Error::other("no changes")))?;

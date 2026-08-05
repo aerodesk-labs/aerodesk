@@ -1,0 +1,132 @@
+//! 文件传输协议（#72）：经 WebRTC data channel（label "file"）双向传输。
+//!
+//! 帧格式：
+//! - 控制消息（Meta/Done/Cancel）：JSON 文本，UTF-8
+//! - 数据分片（Chunk）：二进制，首字节 0x01 + id 长度(u32 LE) + id(UTF-8)
+//!   + 分片序号(u64 LE) + 载荷
+//!
+//! 大文件分片（默认 64KB）避免单条 data channel 消息过大；接收端按 id
+//! 聚合分片，Done 后校验大小/hash 落盘。
+
+use serde::{Deserialize, Serialize};
+
+/// 默认分片大小。
+///
+/// 注意：SCTP data channel 远端默认 max message size 为 64KB（str0m
+/// `DEFAULT_REMOTE_MAX_MESSAGE_SIZE`），且 str0m 跨流缓冲上限 128KB；
+/// 实测经 SFU 转发大分片会卡在缓冲排空，取 8KB 在吞吐与可靠性间平衡。
+pub const CHUNK_SIZE: usize = 1024;
+
+/// 分片二进制帧类型标记。
+pub const CHUNK_MAGIC: u8 = 0x01;
+
+/// 文件元信息（发送端先发）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileMeta {
+    /// 传输会话 id（发送端生成，如 "tx1"）。
+    pub id: String,
+    /// 文件名（不含路径）。
+    pub name: String,
+    /// 文件总字节数。
+    pub size: u64,
+    /// 分片总数。
+    pub chunks: u64,
+    /// 可选 SHA-256（十六进制小写），接收端校验。
+    pub hash: Option<String>,
+}
+
+/// 传输完成/失败。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileDone {
+    pub id: String,
+    pub ok: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// 取消传输。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileCancel {
+    pub id: String,
+}
+
+/// 控制消息（JSON 文本）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FileControl {
+    Meta(FileMeta),
+    Done(FileDone),
+    Cancel(FileCancel),
+}
+
+/// 编码一个分片为二进制帧。
+pub fn encode_chunk(id: &str, index: u64, data: &[u8]) -> Vec<u8> {
+    let id_bytes = id.as_bytes();
+    let mut out = Vec::with_capacity(1 + 4 + id_bytes.len() + 8 + data.len());
+    out.push(CHUNK_MAGIC);
+    out.extend_from_slice(&(id_bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(id_bytes);
+    out.extend_from_slice(&index.to_le_bytes());
+    out.extend_from_slice(data);
+    out
+}
+
+/// 解析分片二进制帧；不是分片帧时返回 None。
+pub fn decode_chunk(buf: &[u8]) -> Option<(String, u64, &[u8])> {
+    if buf.first() != Some(&CHUNK_MAGIC) {
+        return None;
+    }
+    if buf.len() < 1 + 4 + 8 {
+        return None;
+    }
+    let id_len = u32::from_le_bytes(buf[1..5].try_into().ok()?) as usize;
+    let body = buf.get(5..)?;
+    if body.len() < id_len + 8 {
+        return None;
+    }
+    let id = std::str::from_utf8(&body[..id_len]).ok()?.to_string();
+    let index = u64::from_le_bytes(body[id_len..id_len + 8].try_into().ok()?);
+    let payload = &body[id_len + 8..];
+    Some((id, index, payload))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_roundtrip() {
+        let data = vec![7u8; 12345];
+        let frame = encode_chunk("tx1", 42, &data);
+        let (id, index, payload) = decode_chunk(&frame).expect("decode");
+        assert_eq!(id, "tx1");
+        assert_eq!(index, 42);
+        assert_eq!(payload, data.as_slice());
+    }
+
+    #[test]
+    fn non_chunk_returns_none() {
+        assert!(decode_chunk(b"{\"type\":\"meta\"}").is_none());
+        assert!(decode_chunk(&[]).is_none());
+    }
+
+    #[test]
+    fn control_json_roundtrip() {
+        let meta = FileControl::Meta(FileMeta {
+            id: "tx1".into(),
+            name: "a.bin".into(),
+            size: 1024,
+            chunks: 1,
+            hash: Some("abc".into()),
+        });
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: FileControl = serde_json::from_str(&json).unwrap();
+        match back {
+            FileControl::Meta(m) => {
+                assert_eq!(m.name, "a.bin");
+                assert_eq!(m.size, 1024);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}

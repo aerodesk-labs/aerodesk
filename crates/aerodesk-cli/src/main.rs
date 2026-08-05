@@ -10,6 +10,8 @@
 #[macro_use]
 extern crate tracing;
 
+mod file_transfer;
+
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
@@ -50,6 +52,13 @@ fn main() {
     let display: usize = arg(&args, "--display")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    let viewer_display: Option<usize> = arg(&args, "--display").and_then(|v| v.parse().ok());
+    // #72 文件传输：--send-file <path> 发送；--recv-dir <dir> 接收落盘。
+    let send_file = arg(&args, "--send-file").map(std::path::PathBuf::from);
+    let recv_dir = arg(&args, "--recv-dir").map(std::path::PathBuf::from);
+
+    // #72 文件传输状态机（进程级单例；发送/接收同一状态机）。
+    file_transfer::init(send_file, recv_dir);
 
     match role.as_str() {
         "publisher" if encoder == "screen" => {
@@ -94,7 +103,7 @@ fn main() {
             arg(&args, "--layer").as_deref(),
             audio,
             mute_audio,
-            display,
+            viewer_display,
         ),
         other => panic!("unknown role {other}"),
     }
@@ -359,6 +368,8 @@ impl AudioTicker {
 
 /// 发布端公共事件处理：输入通道（观看端 → 被控端）。
 fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
+    // #72 文件传输：file 通道事件交给状态机（非 file 事件为 no-op）。
+    file_transfer::handle_event(&ev, endpoint);
     match ev {
         ClientEvent::ChannelOpen(label, _) if label == "input" => {
             info!("input channel open");
@@ -470,6 +481,8 @@ fn publisher(signal_url: &str, room: &str, auth: Option<&str>, audio: bool) {
         if let Some(amid) = audio_mid {
             audio_ticker.tick(&mut endpoint, amid, Instant::now());
         }
+        // #72 文件传输：推进发送。
+        file_transfer::tick(&mut endpoint);
 
         // 发送帧（按 90kHz 时间戳节奏）
         if connected && frame_idx < frames.len() {
@@ -511,7 +524,7 @@ fn viewer(
     layer: Option<&str>,
     audio: bool,
     mute_audio: bool,
-    display_idx: usize,
+    display: Option<usize>,
 ) {
     let (mut signal, mut endpoint, socket, _, _audio_mid) =
         connect(signal_url, room, Role::Viewer, auth, audio);
@@ -530,7 +543,8 @@ fn viewer(
     let mut mute_sent = false;
     let mut dropped_audio_frames = 0u64;
     // #58 显示器切换：--display N 经 control 通道下发（SFU 转发给被控端）。
-    let mut display_sent = false;
+    // 未显式指定时不下发（避免每次连接都切到显示器 0）。
+    let mut display_sent = display.is_none();
 
     loop {
         let wait = Duration::from_millis(50);
@@ -574,6 +588,8 @@ fn viewer(
         }
 
         while let Some(ev) = endpoint.poll_event() {
+            // #72 文件传输：file 通道事件交给状态机。
+            file_transfer::handle_event(&ev, &mut endpoint);
             match ev {
                 ClientEvent::Media(data) => {
                     // #58 音频识别：SFU 转发时 RTP mid 扩展用 SFU 本地 mid（与
@@ -622,11 +638,13 @@ fn viewer(
                         }
                     }
                     // #58 显示器切换：经 control 通道下发一次（SFU 转发给被控端）。
-                    if !display_sent {
-                        let req = serde_json::json!({ "display": display_idx });
+                    if let Some(d) = display
+                        && !display_sent
+                    {
+                        let req = serde_json::json!({ "display": d });
                         let data = serde_json::to_vec(&req).unwrap();
                         if endpoint.send_channel_data("control", false, &data) {
-                            info!("display switch command sent: {display_idx}");
+                            info!("display switch command sent: {d}");
                             display_sent = true;
                         }
                     }
@@ -639,6 +657,9 @@ fn viewer(
             }
         }
 
+        // #72 文件传输：推进发送。
+        file_transfer::tick(&mut endpoint);
+
         // 输入事件回传：input 通道打开后周期性发送鼠标移动（模拟观看端输入）。
         if input_open && last_input.elapsed() >= Duration::from_millis(100) {
             let frame = InputFrame {
@@ -650,11 +671,11 @@ fn viewer(
                     .unwrap_or(0),
                 event: InputEvent::MouseMove { x: 0.5, y: 0.5 },
             };
-            if let Ok(json) = serde_json::to_string(&frame) {
-                if endpoint.send_channel_data("input", false, json.as_bytes()) {
-                    input_seq += 1;
-                    last_input = Instant::now();
-                }
+            if let Ok(json) = serde_json::to_string(&frame)
+                && endpoint.send_channel_data("input", false, json.as_bytes())
+            {
+                input_seq += 1;
+                last_input = Instant::now();
             }
         }
 
@@ -792,6 +813,8 @@ fn publisher_x264(
         if let Some(amid) = audio_mid {
             audio_ticker.tick(&mut endpoint, amid, Instant::now());
         }
+        // #72 文件传输：推进发送。
+        file_transfer::tick(&mut endpoint);
 
         // 30fps 节奏编码发送（simulcast 各层同一 rtp_time，SFU 按 rid 选层）
         if connected && Instant::now() >= next_frame {
@@ -935,6 +958,8 @@ fn publisher_vt(
         if let Some(amid) = audio_mid {
             audio_ticker.tick(&mut endpoint, amid, Instant::now());
         }
+        // #72 文件传输：推进发送。
+        file_transfer::tick(&mut endpoint);
 
         if connected && Instant::now() >= next_frame {
             next_frame += Duration::from_millis(1000 / fps as u64);
@@ -1125,6 +1150,8 @@ fn publisher_capture(
         if let Some(amid) = audio_mid {
             audio_ticker.tick(&mut endpoint, amid, Instant::now());
         }
+        // #72 文件传输：推进发送。
+        file_transfer::tick(&mut endpoint);
 
         if connected {
             // 每层各自采集一帧（simulcast 下 SCK 按层分辨率采集；单层维持原路径）。
