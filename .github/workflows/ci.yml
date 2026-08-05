@@ -77,6 +77,11 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/display-e2e.sh
 
+      # #72 文件传输：publisher --send-file → SFU → viewer --recv-dir，SHA-256 一致。
+      - name: e2e file transfer (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/file-transfer-e2e.sh
+
       - name: windows adapter
         if: runner.os == 'Windows'
         run: cargo check -p aerodesk-windows
