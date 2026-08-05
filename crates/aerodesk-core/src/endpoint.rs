@@ -40,6 +40,8 @@ pub struct Endpoint {
     want_video: bool,
     /// 视频方向（viewer 用 RecvOnly，publisher 用 SendRecv/SendOnly）。
     video_direction: str0m::media::Direction,
+    /// 可选 simulcast 发送层（q/h/f）；Some 时 offer 携带 simulcast 属性。
+    video_simulcast: Option<str0m::media::Simulcast>,
 }
 
 impl Default for Endpoint {
@@ -56,6 +58,7 @@ impl Endpoint {
             channel_labels: HashMap::new(),
             want_video: false,
             video_direction: str0m::media::Direction::SendRecv,
+            video_simulcast: None,
         }
     }
 
@@ -78,6 +81,7 @@ impl Endpoint {
             channel_labels: HashMap::new(),
             want_video: false,
             video_direction: str0m::media::Direction::SendRecv,
+            video_simulcast: None,
         }
     }
 
@@ -107,6 +111,18 @@ impl Endpoint {
         self.video_direction = str0m::media::Direction::SendRecv;
     }
 
+    /// 请求在下一个 offer 中添加 simulcast 视频（发送层 q/h/f）。
+    /// 画质选层前提：publisher 多路编码按 rid 发送，SFU 按层转发。
+    pub fn add_video_simulcast(&mut self) {
+        self.want_video = true;
+        self.video_direction = str0m::media::Direction::SendRecv;
+        let mut sim = str0m::media::Simulcast::new();
+        sim.add_send_layer(str0m::media::SimulcastLayer::new("q"));
+        sim.add_send_layer(str0m::media::SimulcastLayer::new("h"));
+        sim.add_send_layer(str0m::media::SimulcastLayer::new("f"));
+        self.video_simulcast = Some(sim);
+    }
+
     /// 请求在下一个 offer 中添加视频，方向为 **RecvOnly**（观看端）。
     /// #12：viewer 的 offer 必须是 recvonly，否则会被 SFU 拒绝（viewer 禁止发布媒体）。
     pub fn add_video_recvonly(&mut self) {
@@ -119,7 +135,13 @@ impl Endpoint {
     pub fn create_offer(&mut self) -> Result<(SdpOffer, SdpPendingOffer, Option<Mid>), RtcError> {
         let mut change = self.rtc.sdp_api();
         let video_mid = if self.want_video {
-            Some(change.add_media(MediaKind::Video, self.video_direction, None, None, None))
+            Some(change.add_media(
+                MediaKind::Video,
+                self.video_direction,
+                None,
+                None,
+                self.video_simulcast.clone(),
+            ))
         } else {
             None
         };
@@ -235,6 +257,26 @@ impl Endpoint {
         writer.write(pt, Instant::now(), rtp_time, data)
     }
 
+    /// 按 simulcast rid 发送视频帧（画质选层：q/h/f 层）。
+    pub fn send_video_frame_rid(
+        &mut self,
+        mid: Mid,
+        rid: str0m::media::Rid,
+        data: impl Into<std::sync::Arc<[u8]>>,
+        rtp_time: str0m::media::MediaTime,
+    ) -> Result<(), RtcError> {
+        let Some(writer) = self.rtc.writer(mid) else {
+            return Err(RtcError::Io(std::io::Error::other("no writer for mid")));
+        };
+        let Some(params) = writer.payload_params().next().cloned() else {
+            return Err(RtcError::Io(std::io::Error::other("no payload params")));
+        };
+        let Some(pt) = writer.match_params(params) else {
+            return Err(RtcError::Io(std::io::Error::other("no matching pt")));
+        };
+        writer.rid(rid).write(pt, Instant::now(), rtp_time, data)
+    }
+
     /// 是否存活。
     pub fn is_alive(&self) -> bool {
         self.rtc.is_alive()
@@ -298,5 +340,41 @@ impl Endpoint {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simulcast_offer_declares_qhf_rids() {
+        let mut ep = Endpoint::new();
+        ep.add_video_simulcast();
+        let (offer, _pending, video_mid) = ep.create_offer().expect("offer");
+        assert!(video_mid.is_some(), "simulcast offer should include video");
+        let sdp = offer.to_sdp_string();
+        assert!(
+            sdp.contains("simulcast"),
+            "offer missing a=simulcast: {sdp}"
+        );
+        for rid in ["q", "h", "f"] {
+            assert!(
+                sdp.contains(&format!("rid:{rid}")),
+                "offer missing rid {rid}: {sdp}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_video_offer_has_no_simulcast() {
+        let mut ep = Endpoint::new();
+        ep.add_video();
+        let (offer, _pending, video_mid) = ep.create_offer().expect("offer");
+        assert!(video_mid.is_some());
+        assert!(
+            !offer.to_sdp_string().contains("simulcast"),
+            "plain offer must not advertise simulcast"
+        );
     }
 }

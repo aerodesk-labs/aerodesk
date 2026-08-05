@@ -39,9 +39,15 @@ fn main() {
     let room = arg(&args, "--room").unwrap_or_else(|| "demo".into());
     let token = arg(&args, "--token");
     let encoder = arg(&args, "--encoder").unwrap_or_else(|| "pcap".into());
+    // #58：publisher 多路编码（q/h/f 三层），SFU 选层请求才能真正切换画质。
+    let simulcast = args.iter().any(|a| a == "--simulcast");
+    // 高熵合成源（伪随机噪声）：码率贴近目标档位，用于选层/压测验证。
+    let noisy = args.iter().any(|a| a == "--noisy");
 
     match role.as_str() {
-        "publisher" if encoder == "screen" => publisher_capture(&signal, &room, token.as_deref()),
+        "publisher" if encoder == "screen" => {
+            publisher_capture(&signal, &room, token.as_deref(), simulcast)
+        }
         "publisher" if encoder == "vt" => {
             let w: u32 = arg(&args, "--width")
                 .and_then(|v| v.parse().ok())
@@ -55,9 +61,23 @@ fn main() {
             let br: u32 = arg(&args, "--bitrate")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(800_000);
-            publisher_vt(&signal, &room, token.as_deref(), w, h, fps, br);
+            publisher_vt(
+                &signal,
+                &room,
+                token.as_deref(),
+                VideoParams {
+                    width: w,
+                    height: h,
+                    fps,
+                    bitrate: br,
+                },
+                simulcast,
+                noisy,
+            );
         }
-        "publisher" if encoder == "x264" => publisher_x264(&signal, &room, token.as_deref()),
+        "publisher" if encoder == "x264" => {
+            publisher_x264(&signal, &room, token.as_deref(), simulcast, noisy)
+        }
         "publisher" => publisher(&signal, &room, token.as_deref()),
         "viewer" => viewer(
             &signal,
@@ -140,7 +160,7 @@ fn connect(
     role: Role,
     auth: Option<&str>,
 ) -> (WsSignalClient, Endpoint, UdpSocket, str0m::media::Mid) {
-    connect_inner(signal_url, room, role, false, auth)
+    connect_inner(signal_url, room, role, false, false, auth)
 }
 
 fn connect_h264(
@@ -148,8 +168,9 @@ fn connect_h264(
     room: &str,
     role: Role,
     auth: Option<&str>,
+    simulcast: bool,
 ) -> (WsSignalClient, Endpoint, UdpSocket, str0m::media::Mid) {
-    connect_inner(signal_url, room, role, true, auth)
+    connect_inner(signal_url, room, role, true, simulcast, auth)
 }
 
 fn connect_inner(
@@ -157,6 +178,7 @@ fn connect_inner(
     room: &str,
     role: Role,
     h264_only: bool,
+    simulcast: bool,
     auth: Option<&str>,
 ) -> (WsSignalClient, Endpoint, UdpSocket, str0m::media::Mid) {
     let mut signal = WsSignalClient::connect(signal_url).expect("signal connect");
@@ -180,6 +202,9 @@ fn connect_inner(
     // #12：viewer 的 offer 用 recvonly（SFU 拒绝 viewer 发布媒体）。
     if role == Role::Viewer {
         endpoint.add_video_recvonly();
+    } else if simulcast {
+        // #58：publisher 多路编码 → offer 携带 a=simulcast/rid（q/h/f）。
+        endpoint.add_video_simulcast();
     } else {
         endpoint.add_video();
     }
@@ -198,6 +223,54 @@ fn connect_inner(
     info!("SDP negotiated, awaiting ICE...");
     let video_mid = video_mid.expect("video mid");
     (signal, endpoint, socket, video_mid)
+}
+
+/// VideoToolbox 合成源编码参数（--width/--height/--fps/--bitrate）。
+struct VideoParams {
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate: u32,
+}
+
+/// simulcast 层参数（画质档位：0=清晰 f / 1=平衡 h / 2=流畅 q，见 UI quality 映射）。
+/// x264 编码器按 kbps 配置。
+const SIMULCAST_LAYERS_X264: [(&str, u32, u32, u32); 3] = [
+    ("q", 640, 360, 500),
+    ("h", 960, 540, 1200),
+    ("f", 1280, 720, 2500),
+];
+/// VideoToolbox 按 bps 配置。
+const SIMULCAST_LAYERS_VT: [(&str, u32, u32, u32); 3] = [
+    ("q", 640, 360, 800_000),
+    ("h", 1280, 720, 2_500_000),
+    ("f", 1920, 1080, 8_000_000),
+];
+
+/// 把同一时刻的若干层编码帧写入对应 rid（单层 rid=None 走普通发送）。
+fn send_frame_layers(
+    endpoint: &mut Endpoint,
+    mid: str0m::media::Mid,
+    rtp_time: str0m::media::MediaTime,
+    frames: &[(Option<str0m::media::Rid>, Vec<u8>)],
+) {
+    for (rid, data) in frames {
+        let res = match rid {
+            Some(r) => endpoint.send_video_frame_rid(mid, *r, data.clone(), rtp_time),
+            None => endpoint.send_video_frame(mid, data.clone(), rtp_time),
+        };
+        if let Err(e) = res {
+            warn!("send layer {rid:?} failed: {e:?}");
+        }
+    }
+}
+
+/// 排空 str0m 的待打包帧队列：每个 `handle_timeout` 只处理一帧，
+/// simulcast 每轮写入 `n` 帧（同一 mid），需连续 `n` 次才能避免队列积压。
+fn drain_payload_queue(endpoint: &mut Endpoint, n: usize) {
+    for _ in 0..n {
+        let _ = endpoint.handle_timeout(Instant::now());
+    }
 }
 
 /// 发布端公共事件处理：输入通道（观看端 → 被控端）。
@@ -448,18 +521,48 @@ fn viewer(signal_url: &str, room: &str, auth: Option<&str>, layer: Option<&str>)
 }
 
 /// x264 发布端：合成帧 → H.264 编码 → SFU。
-fn publisher_x264(signal_url: &str, room: &str, auth: Option<&str>) {
+/// `--simulcast` 时编码 q/h/f 三层（640x360 / 1280x720 / 1920x1080），
+/// SFU 选层请求（画质档位）才能真正切换分辨率/码率。
+fn publisher_x264(signal_url: &str, room: &str, auth: Option<&str>, simulcast: bool, noisy: bool) {
     use aerodesk_macos::synthetic::SyntheticSource;
     use aerodesk_softenc::encode::X264Encoder;
+    use str0m::media::Rid;
 
+    const FPS: u32 = 30;
     const W: u32 = 640;
     const H: u32 = 360;
-    const FPS: u32 = 30;
 
     let (mut signal, mut endpoint, socket, video_mid) =
-        connect_h264(signal_url, room, Role::Publisher, auth);
-    let mut encoder = X264Encoder::new(W, H, FPS, 800).expect("x264 encoder");
-    let mut source = SyntheticSource::new(W, H);
+        connect_h264(signal_url, room, Role::Publisher, auth, simulcast);
+
+    let make_source = |w: u32, h: u32| {
+        if noisy {
+            SyntheticSource::new_noisy(w, h)
+        } else {
+            SyntheticSource::new(w, h)
+        }
+    };
+
+    // (rid, encoder, source)：单层 rid=None；simulcast 为 q/h/f 三层。
+    let mut layers: Vec<(Option<Rid>, X264Encoder, SyntheticSource)> = if simulcast {
+        SIMULCAST_LAYERS_X264
+            .iter()
+            .map(|(rid, w, h, kbps)| {
+                (
+                    Some(Rid::from(*rid)),
+                    X264Encoder::new(*w, *h, FPS, *kbps).expect("x264 encoder"),
+                    make_source(*w, *h),
+                )
+            })
+            .collect()
+    } else {
+        vec![(
+            None,
+            X264Encoder::new(W, H, FPS, 800).expect("x264 encoder"),
+            make_source(W, H),
+        )]
+    };
+
     let mut connected = false;
     let mut next_frame = Instant::now();
     let mut pts = 0i64;
@@ -501,7 +604,7 @@ fn publisher_x264(signal_url: &str, room: &str, auth: Option<&str>) {
         while let Some(ev) = endpoint.poll_event() {
             match ev {
                 ClientEvent::IceConnected => {
-                    info!("ICE connected, starting x264 stream");
+                    info!("ICE connected, starting x264 stream (simulcast={simulcast})");
                     connected = true;
                     next_frame = Instant::now();
                 }
@@ -513,22 +616,26 @@ fn publisher_x264(signal_url: &str, room: &str, auth: Option<&str>) {
             }
         }
 
-        // 30fps 节奏编码发送
+        // 30fps 节奏编码发送（simulcast 各层同一 rtp_time，SFU 按 rid 选层）
         if connected && Instant::now() >= next_frame {
             next_frame += Duration::from_millis(1000 / FPS as u64);
-            let rgb = source.next_frame();
-            if let Some(frame) = encoder.encode(rgb).expect("encode") {
-                let rtp_time = str0m::media::MediaTime::new(
-                    pts as u64 * 3000,
-                    str0m::media::Frequency::NINETY_KHZ,
-                );
-                if let Err(e) = endpoint.send_video_frame(video_mid, frame.data, rtp_time) {
-                    warn!("send frame failed: {e:?}");
-                }
-                if frame.keyframe {
-                    info!("sent keyframe (pts {pts})");
+            let rtp_time = str0m::media::MediaTime::new(
+                pts as u64 * 3000,
+                str0m::media::Frequency::NINETY_KHZ,
+            );
+            let mut frames = Vec::with_capacity(layers.len());
+            for (rid, encoder, source) in &mut layers {
+                let rgb = source.next_frame();
+                if let Some(frame) = encoder.encode(rgb).expect("encode") {
+                    if frame.keyframe {
+                        info!("sent keyframe rid={rid:?} #{pts}");
+                    }
+                    frames.push((*rid, frame.data));
                 }
             }
+            send_frame_layers(&mut endpoint, video_mid, rtp_time, &frames);
+            // simulcast：每层一帧都需一次 do_payload，多排空避免 WriteWithoutPoll 背压。
+            drain_payload_queue(&mut endpoint, layers.len());
             pts += 1;
         }
 
@@ -536,28 +643,65 @@ fn publisher_x264(signal_url: &str, room: &str, auth: Option<&str>) {
         let _ = &mut signal;
     }
 }
-
 /// VideoToolbox 硬编发布端：合成 BGRA → 硬编 → SFU。
 /// 压测可传 --width/--height/--fps/--bitrate（如 3840x2160@60 8Mbps）。
+/// `--simulcast` 时编码 q/h/f 三层（SFU 选层生效）。
 fn publisher_vt(
     signal_url: &str,
     room: &str,
     auth: Option<&str>,
-    width: u32,
-    height: u32,
-    fps: u32,
-    bitrate: u32,
+    params: VideoParams,
+    simulcast: bool,
+    noisy: bool,
 ) {
+    let VideoParams {
+        width,
+        height,
+        fps,
+        bitrate,
+    } = params;
     use aerodesk_macos::synthetic::SyntheticSource;
     use aerodesk_macos::vt_encoder::VtEncoder;
+    use str0m::media::Rid;
 
     let (mut signal, mut endpoint, socket, video_mid) =
-        connect_h264(signal_url, room, Role::Publisher, auth);
-    let mut encoder = VtEncoder::new(width, height, fps, bitrate).expect("vt encoder");
-    let mut source = SyntheticSource::new(width, height);
-    info!("VT publisher: {width}x{height}@{fps} {bitrate}bps");
+        connect_h264(signal_url, room, Role::Publisher, auth, simulcast);
+
+    let make_source = |w: u32, h: u32| {
+        if noisy {
+            SyntheticSource::new_noisy(w, h)
+        } else {
+            SyntheticSource::new(w, h)
+        }
+    };
+
+    // (rid, encoder, source)
+    let mut layers: Vec<(Option<Rid>, VtEncoder, SyntheticSource)> = if simulcast {
+        SIMULCAST_LAYERS_VT
+            .iter()
+            .map(|(rid, w, h, bps)| {
+                (
+                    Some(Rid::from(*rid)),
+                    VtEncoder::new(*w, *h, fps, *bps).expect("vt encoder"),
+                    make_source(*w, *h),
+                )
+            })
+            .collect()
+    } else {
+        vec![(
+            None,
+            VtEncoder::new(width, height, fps, bitrate).expect("vt encoder"),
+            make_source(width, height),
+        )]
+    };
+    info!(
+        "VT publisher: {} layer(s), top {width}x{height}@{fps} {bitrate}bps",
+        layers.len()
+    );
     let mut connected = false;
     let mut next_frame = Instant::now();
+    let mut pts = 0i64;
+    let pts_inc = 90_000 / fps.max(1) as i64;
 
     loop {
         let wait = Duration::from_millis(5);
@@ -596,7 +740,7 @@ fn publisher_vt(
         while let Some(ev) = endpoint.poll_event() {
             match ev {
                 ClientEvent::IceConnected => {
-                    info!("ICE connected, starting VideoToolbox stream");
+                    info!("ICE connected, starting VideoToolbox stream (simulcast={simulcast})");
                     connected = true;
                     next_frame = Instant::now();
                 }
@@ -610,50 +754,86 @@ fn publisher_vt(
 
         if connected && Instant::now() >= next_frame {
             next_frame += Duration::from_millis(1000 / fps as u64);
-            let bgra = source.next_frame_bgra();
-            match encoder.encode_bgra(bgra) {
-                Ok(Some(frame)) => {
-                    let annexb = encoder.to_annexb(&frame);
-                    let rtp_time = str0m::media::MediaTime::new(
-                        frame.presentation_time.0 as u64,
-                        str0m::media::Frequency::NINETY_KHZ,
-                    );
-                    if let Err(e) = endpoint.send_video_frame(video_mid, annexb, rtp_time) {
-                        warn!("send frame failed: {e:?}");
+            let rtp_time = str0m::media::MediaTime::new(
+                pts as u64 * pts_inc as u64,
+                str0m::media::Frequency::NINETY_KHZ,
+            );
+            let mut frames = Vec::with_capacity(layers.len());
+            for (rid, encoder, source) in &mut layers {
+                let bgra = source.next_frame_bgra();
+                match encoder.encode_bgra(bgra) {
+                    Ok(Some(frame)) => {
+                        let annexb = encoder.to_annexb(&frame);
+                        frames.push((*rid, annexb));
                     }
+                    Ok(None) => {}
+                    Err(e) => warn!("vt encode: {e}"),
                 }
-                Ok(None) => {}
-                Err(e) => warn!("vt encode: {e}"),
             }
+            send_frame_layers(&mut endpoint, video_mid, rtp_time, &frames);
+            // simulcast：每层一帧都需一次 do_payload，多排空避免 WriteWithoutPoll 背压。
+            drain_payload_queue(&mut endpoint, layers.len());
+            pts += 1;
         }
 
         std::thread::sleep(Duration::from_millis(2));
         let _ = &mut signal;
     }
 }
-
 /// 真实屏幕采集发布端：ScreenCaptureKit → VideoToolbox 硬编（零拷贝）→ SFU。
-/// 需要屏幕录制权限（TCC）。
-fn publisher_capture(signal_url: &str, room: &str, auth: Option<&str>) {
+/// 需要屏幕录制权限（TCC）。`--simulcast`：q/h/f 三层各一路 SCK 采集 + 硬编，
+/// 分辨率越低开销越小，选层切换立即生效。
+fn publisher_capture(signal_url: &str, room: &str, auth: Option<&str>, simulcast: bool) {
     use aerodesk_macos::capture::ScreenCapture;
     use aerodesk_macos::vt_encoder::VtEncoder;
+    use str0m::media::Rid;
 
+    const FPS: u32 = 30;
     const W: u32 = 1920;
     const H: u32 = 1080;
-    const FPS: u32 = 30;
 
     let (mut signal, mut endpoint, socket, video_mid) =
-        connect_h264(signal_url, room, Role::Publisher, auth);
-    let mut capture = match ScreenCapture::start(0, FPS, W, H) {
-        Ok(c) => c,
-        Err(e) => {
-            error!("screen capture init failed: {e}");
-            info!("grant Screen Recording permission in System Settings > Privacy & Security");
-            return;
+        connect_h264(signal_url, room, Role::Publisher, auth, simulcast);
+
+    // (rid, encoder, capture)
+    let mut layers: Vec<(Option<Rid>, VtEncoder, ScreenCapture)> = Vec::new();
+    if simulcast {
+        for (rid, w, h, bps) in SIMULCAST_LAYERS_VT.iter() {
+            let capture = match ScreenCapture::start(0, FPS, *w, *h) {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("screen capture init failed: {e}");
+                    info!(
+                        "grant Screen Recording permission in System Settings > Privacy & Security"
+                    );
+                    return;
+                }
+            };
+            layers.push((
+                Some(Rid::from(*rid)),
+                VtEncoder::new(*w, *h, FPS, *bps).expect("vt encoder"),
+                capture,
+            ));
         }
-    };
-    let mut encoder = VtEncoder::new(W, H, FPS, 8_000_000).expect("vt encoder");
+    } else {
+        let capture = match ScreenCapture::start(0, FPS, W, H) {
+            Ok(c) => c,
+            Err(e) => {
+                error!("screen capture init failed: {e}");
+                info!("grant Screen Recording permission in System Settings > Privacy & Security");
+                return;
+            }
+        };
+        layers.push((
+            None,
+            VtEncoder::new(W, H, FPS, 8_000_000).expect("vt encoder"),
+            capture,
+        ));
+    }
+
     let mut connected = false;
+    let mut pts = 0i64;
+    let pts_inc = 90_000 / FPS as i64;
 
     loop {
         let wait = Duration::from_millis(5);
@@ -692,7 +872,7 @@ fn publisher_capture(signal_url: &str, room: &str, auth: Option<&str>) {
         while let Some(ev) = endpoint.poll_event() {
             match ev {
                 ClientEvent::IceConnected => {
-                    info!("ICE connected, starting screen capture stream");
+                    info!("ICE connected, starting screen capture stream (simulcast={simulcast})");
                     connected = true;
                 }
                 ClientEvent::Closed => {
@@ -703,20 +883,32 @@ fn publisher_capture(signal_url: &str, room: &str, auth: Option<&str>) {
             }
         }
 
-        if connected && let Some(surface) = capture.next_frame(Duration::from_millis(50)) {
-            match encoder.encode_surface(&surface) {
-                Ok(Some(frame)) => {
-                    let annexb = encoder.to_annexb(&frame);
-                    let rtp_time = str0m::media::MediaTime::new(
-                        frame.presentation_time.0 as u64,
-                        str0m::media::Frequency::NINETY_KHZ,
-                    );
-                    if let Err(e) = endpoint.send_video_frame(video_mid, annexb, rtp_time) {
-                        warn!("send frame failed: {e:?}");
+        if connected {
+            // 每层各自采集一帧（simulcast 下 SCK 按层分辨率采集；单层维持原路径）。
+            let mut frames = Vec::with_capacity(layers.len());
+            let mut captured_any = false;
+            for (rid, encoder, capture) in &mut layers {
+                if let Some(surface) = capture.next_frame(Duration::from_millis(50)) {
+                    captured_any = true;
+                    match encoder.encode_surface(&surface) {
+                        Ok(Some(frame)) => {
+                            let annexb = encoder.to_annexb(&frame);
+                            frames.push((*rid, annexb));
+                        }
+                        Ok(None) => {}
+                        Err(e) => warn!("vt encode: {e}"),
                     }
                 }
-                Ok(None) => {}
-                Err(e) => warn!("vt encode: {e}"),
+            }
+            if captured_any {
+                let rtp_time = str0m::media::MediaTime::new(
+                    pts as u64 * pts_inc as u64,
+                    str0m::media::Frequency::NINETY_KHZ,
+                );
+                send_frame_layers(&mut endpoint, video_mid, rtp_time, &frames);
+                // simulcast：每层一帧都需一次 do_payload，多排空避免 WriteWithoutPoll 背压。
+                drain_payload_queue(&mut endpoint, layers.len());
+                pts += 1;
             }
         }
 

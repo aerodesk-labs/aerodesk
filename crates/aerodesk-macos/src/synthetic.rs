@@ -8,6 +8,9 @@ pub struct SyntheticSource {
     bgra: Vec<u8>,
     /// 彩条基础行（每行相同，逐行复制避免全帧逐像素计算）。
     base_row: Vec<u8>,
+    /// 高熵内容（确定性伪随机噪声）：编码码率贴近目标档位，
+    /// 用于 simulcast 选层验证与 4K 压测（#8/#58）。
+    noise: bool,
 }
 
 impl SyntheticSource {
@@ -19,6 +22,7 @@ impl SyntheticSource {
             buf: vec![0; (width * height * 3) as usize],
             bgra: vec![0; (width * height * 4) as usize],
             base_row: vec![0; (width * 3) as usize],
+            noise: false,
         };
         // 预计算彩条基础行（8 条色带）。
         let bars = [
@@ -41,6 +45,13 @@ impl SyntheticSource {
         src
     }
 
+    /// 高熵合成源（伪随机噪声，每帧变化）。
+    pub fn new_noisy(width: u32, height: u32) -> Self {
+        let mut src = Self::new(width, height);
+        src.noise = true;
+        src
+    }
+
     pub fn width(&self) -> u32 {
         self.width
     }
@@ -54,6 +65,33 @@ impl SyntheticSource {
         let w = self.width as usize;
         let h = self.height as usize;
         let t = self.frame;
+
+        if self.noise {
+            // 彩条基础 + 底部 1/4 高噪声带（确定性 xorshift，按帧变化）。
+            // 噪声像素量随分辨率缩放：f 层（1280x720）约是 q 层（640x360）的 4 倍，
+            // 码率差可观测但编码量可控（避免全帧噪声把软编压垮）。
+            let row_bytes = w * 3;
+            for y in 0..h {
+                let start = y * row_bytes;
+                self.buf[start..start + row_bytes].copy_from_slice(&self.base_row);
+            }
+            let mut seed = t.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x1234_5678_9ABC_DEF0;
+            let band_top = (h * 3 / 4).max(1);
+            let band_bottom = (h - 8).max(band_top + 1);
+            for y in band_top..band_bottom {
+                for x in 0..w {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    let idx = (y * w + x) * 3;
+                    self.buf[idx] = seed as u8;
+                    self.buf[idx + 1] = (seed >> 8) as u8;
+                    self.buf[idx + 2] = (seed >> 16) as u8;
+                }
+            }
+            self.frame += 1;
+            return &self.buf;
+        }
 
         // 彩条：每行复制预计算的 base_row。
         let row_bytes = w * 3;

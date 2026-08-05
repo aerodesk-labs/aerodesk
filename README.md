@@ -48,8 +48,11 @@ cargo run -p aerodesk-signal
 # 发布端（macOS 真实屏幕采集，需屏幕录制 + 辅助功能权限）
 cargo run -p aerodesk-cli -- --role publisher --encoder screen
 
-# 观看端
-cargo run -p aerodesk-cli -- --role viewer
+# 发布端 simulcast（q/h/f 三层，SFU 选层真实生效；--noisy 用高熵合成源验证码率档位）
+cargo run -p aerodesk-cli -- --role publisher --encoder x264 --simulcast --noisy
+
+# 观看端（--layer q|h|f 显式选层）
+cargo run -p aerodesk-cli -- --role viewer --layer f
 
 # 浏览器：https://<host>:3000/?role=publisher|viewer
 ```

@@ -56,6 +56,12 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/smoke.sh
 
+      # #58 画质选层端到端：publisher simulcast q/h/f → SFU 按 rid 选层，
+      # 断言 f 层码率显著高于 q 层（release 构建，避免 debug 失真）。
+      - name: e2e simulcast layer switching (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/simulcast-e2e.sh
+
       - name: windows adapter
         if: runner.os == 'Windows'
         run: cargo check -p aerodesk-windows
