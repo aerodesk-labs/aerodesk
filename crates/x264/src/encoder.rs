@@ -6,6 +6,11 @@ use x264::*;
 pub struct Encoder {
     raw: *mut x264_t,
     params: x264_param_t,
+    /// 原始关键帧间隔（force_idr 后恢复）。
+    keyint_max: i32,
+    keyint_min: i32,
+    /// 下一帧强制 IDR（响应远端关键帧请求）。
+    force_idr_pending: bool,
 }
 
 impl Encoder {
@@ -21,7 +26,26 @@ impl Encoder {
         let mut params = MaybeUninit::uninit();
         x264_encoder_parameters(raw, params.as_mut_ptr());
         let params = params.assume_init();
-        Self { raw, params }
+        Self {
+            raw,
+            keyint_max: params.i_keyint_max,
+            keyint_min: params.i_keyint_min,
+            force_idr_pending: false,
+            params,
+        }
+    }
+
+    /// 强制下一帧为 IDR 关键帧（用于响应远端关键帧请求，例如 SFU 新观看端加入）。
+    ///
+    /// x264 无直接“force IDR”开关，标准做法是临时把关键帧间隔改为 1，
+    /// 编完一帧后恢复原间隔。
+    pub fn force_idr(&mut self) {
+        self.params.i_keyint_max = 1;
+        self.params.i_keyint_min = 1;
+        unsafe {
+            x264_encoder_reconfig(self.raw, &mut self.params);
+        }
+        self.force_idr_pending = true;
     }
 
     /// Feeds a frame to the encoder.
@@ -63,6 +87,16 @@ impl Encoder {
             &mut picture,
             raw.as_mut_ptr(),
         );
+
+        // force_idr 只作用于下一帧，编完后恢复原始关键帧间隔。
+        if self.force_idr_pending {
+            self.params.i_keyint_max = self.keyint_max;
+            self.params.i_keyint_min = self.keyint_min;
+            unsafe {
+                x264_encoder_reconfig(self.raw, &mut self.params);
+            }
+            self.force_idr_pending = false;
+        }
 
         if err < 0 {
             Err(Error)

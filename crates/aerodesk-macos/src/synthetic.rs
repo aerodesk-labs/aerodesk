@@ -67,9 +67,9 @@ impl SyntheticSource {
         let t = self.frame;
 
         if self.noise {
-            // 彩条基础 + 底部 1/4 高噪声带（确定性 xorshift，按帧变化）。
-            // 噪声像素量随分辨率缩放：f 层（1280x720）约是 q 层（640x360）的 4 倍，
-            // 码率差可观测但编码量可控（避免全帧噪声把软编压垮）。
+            // 彩条基础 + 底部 1/8 高噪声带（确定性 xorshift，按帧变化）。
+            // 噪声像素量随分辨率缩放（f≈9x q），码率差可观测但编码量可控
+            //（避免关键帧突发超出 pacer 排程，见 #66）。
             let row_bytes = w * 3;
             for y in 0..h {
                 let start = y * row_bytes;

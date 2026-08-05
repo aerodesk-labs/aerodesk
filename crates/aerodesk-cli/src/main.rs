@@ -235,6 +235,9 @@ struct VideoParams {
 
 /// simulcast 层参数（画质档位：0=清晰 f / 1=平衡 h / 2=流畅 q，见 UI quality 映射）。
 /// x264 编码器按 kbps 配置。
+// x264 软编 + 高熵合成源的 simulcast 层参数：分辨率/码率梯度足够大
+// （f/q 码率差 ≥4x），但 f 分辨率与码率控制在 CI 也能实时编码
+//（太大时关键帧突发会超出 pacer 排程，选层 e2e 偶发拿不到 f 层，#66）。
 const SIMULCAST_LAYERS_X264: [(&str, u32, u32, u32); 3] = [
     ("q", 640, 360, 500),
     ("h", 960, 540, 1200),
@@ -469,10 +472,14 @@ fn viewer(signal_url: &str, room: &str, auth: Option<&str>, layer: Option<&str>)
                     }
                 }
                 ClientEvent::IceConnected => info!("ICE connected"),
-                ClientEvent::ChannelOpen(label, _) if label == "input" => {
-                    info!("input channel open");
-                    input_open = true;
+                ClientEvent::ChannelOpen(label, _) if label == "input" || label == "control" => {
+                    if label == "input" {
+                        info!("input channel open");
+                        input_open = true;
+                    }
                     // #29：可选显式选层（--layer q|h|f），经 control 通道发 SFU。
+                    // #66：input 与 control 打开顺序不定——只在 input 打开时发一次，
+                    // 若 control 尚未就绪会静默丢失选层请求；两个通道任一打开都重试。
                     if !layer_sent {
                         let req = serde_json::json!({ "layer": layer });
                         let data = serde_json::to_vec(&req).unwrap();
@@ -611,6 +618,21 @@ fn publisher_x264(signal_url: &str, room: &str, auth: Option<&str>, simulcast: b
                 ClientEvent::Closed => {
                     info!("connection closed");
                     return;
+                }
+                // #66：响应 SFU 关键帧请求（新观看端加入/选层切换时），
+                // 强制对应层下一帧 IDR，避免观看端等几十秒才起流。
+                ClientEvent::KeyframeRequest(req) => {
+                    let mut forced = 0;
+                    for (rid, encoder, _) in &mut layers {
+                        if req.rid.is_none() || *rid == Some(req.rid.unwrap()) {
+                            encoder.force_idr();
+                            forced += 1;
+                        }
+                    }
+                    info!(
+                        "keyframe request rid={:?}: forcing IDR on {forced} layer(s)",
+                        req.rid
+                    );
                 }
                 ev => handle_publisher_input(&mut endpoint, ev),
             }
