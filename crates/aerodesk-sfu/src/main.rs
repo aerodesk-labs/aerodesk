@@ -349,7 +349,13 @@ fn web_request(
         return Response::text("viewer cannot publish media").with_status_code(403);
     }
 
-    let mut rtc = Rtc::builder().build(std::time::Instant::now());
+    let mut rtc = Rtc::builder();
+    {
+        let cfg = rtc.codec_config();
+        // #58 音频：启用 PCMU，转发 publisher 的 G.711 音频（默认配置只有 Opus）。
+        cfg.enable_pcmu(true);
+    }
+    let mut rtc = rtc.build(std::time::Instant::now());
     let candidate = Candidate::host(udp_addr, "udp").expect("a host candidate");
     rtc.add_local_candidate(candidate).unwrap();
     let tcp_candidate = Candidate::builder()

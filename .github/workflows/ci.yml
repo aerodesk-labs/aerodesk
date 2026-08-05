@@ -67,6 +67,11 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/signal-reconnect-e2e.sh
 
+      # #58 音频链路：publisher --audio（PCMU）→ SFU → viewer；静音 viewer 丢弃音频。
+      - name: e2e audio pipeline (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/audio-e2e.sh
+
       - name: windows adapter
         if: runner.os == 'Windows'
         run: cargo check -p aerodesk-windows

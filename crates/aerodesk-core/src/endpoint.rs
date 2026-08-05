@@ -42,6 +42,10 @@ pub struct Endpoint {
     video_direction: str0m::media::Direction,
     /// 可选 simulcast 发送层（q/h/f）；Some 时 offer 携带 simulcast 属性。
     video_simulcast: Option<str0m::media::Simulcast>,
+    /// 是否在下一个 offer 中添加音频（PCMU，8kHz 单声道，见 pcmu.rs）。
+    want_audio: bool,
+    /// 音频方向（viewer 用 RecvOnly，publisher 用 SendRecv）。
+    audio_direction: str0m::media::Direction,
 }
 
 impl Default for Endpoint {
@@ -52,13 +56,21 @@ impl Default for Endpoint {
 
 impl Endpoint {
     pub fn new() -> Self {
+        let mut config = Rtc::builder();
+        {
+            let cfg = config.codec_config();
+            // #58 音频：PCMU（G.711）静态 PT 0，8kHz 单声道。
+            cfg.enable_pcmu(true);
+        }
         Self {
-            rtc: Rtc::new(Instant::now()),
+            rtc: config.build(Instant::now()),
             events: VecDeque::new(),
             channel_labels: HashMap::new(),
             want_video: false,
             video_direction: str0m::media::Direction::SendRecv,
             video_simulcast: None,
+            want_audio: false,
+            audio_direction: str0m::media::Direction::SendRecv,
         }
     }
 
@@ -74,6 +86,8 @@ impl Endpoint {
                 true,
                 0x42e01f, // Constrained Baseline
             );
+            // #58 音频：PCMU（G.711）静态 PT 0，8kHz 单声道。
+            cfg.enable_pcmu(true);
         }
         Self {
             rtc: config.build(Instant::now()),
@@ -82,6 +96,8 @@ impl Endpoint {
             want_video: false,
             video_direction: str0m::media::Direction::SendRecv,
             video_simulcast: None,
+            want_audio: false,
+            audio_direction: str0m::media::Direction::SendRecv,
         }
     }
 
@@ -130,9 +146,23 @@ impl Endpoint {
         self.video_direction = str0m::media::Direction::RecvOnly;
     }
 
+    /// 请求在下一个 offer 中添加音频（发布方向 SendRecv，PCMU）。
+    pub fn add_audio(&mut self) {
+        self.want_audio = true;
+        self.audio_direction = str0m::media::Direction::SendRecv;
+    }
+
+    /// 请求在下一个 offer 中添加音频，方向为 **RecvOnly**（观看端）。
+    pub fn add_audio_recvonly(&mut self) {
+        self.want_audio = true;
+        self.audio_direction = str0m::media::Direction::RecvOnly;
+    }
+
     /// 主动发起：创建 offer（含 video（可选）+ offer/answer + input 两个数据通道）。
     /// 返回 (offer, pending, video_mid)。
-    pub fn create_offer(&mut self) -> Result<(SdpOffer, SdpPendingOffer, Option<Mid>), RtcError> {
+    pub fn create_offer(
+        &mut self,
+    ) -> Result<(SdpOffer, SdpPendingOffer, Option<Mid>, Option<Mid>), RtcError> {
         let mut change = self.rtc.sdp_api();
         let video_mid = if self.want_video {
             Some(change.add_media(
@@ -145,6 +175,11 @@ impl Endpoint {
         } else {
             None
         };
+        let audio_mid = if self.want_audio {
+            Some(change.add_media(MediaKind::Audio, self.audio_direction, None, None, None))
+        } else {
+            None
+        };
         let _ = change.add_channel("offer/answer".into());
         let _ = change.add_channel("input".into());
         // #29 画质/显示切换：观看端 → SFU 的控制通道（选层请求等）。
@@ -152,7 +187,7 @@ impl Endpoint {
         let (offer, pending) = change
             .apply()
             .ok_or(RtcError::Io(std::io::Error::other("no changes")))?;
-        Ok((offer, pending, video_mid))
+        Ok((offer, pending, video_mid, audio_mid))
     }
 
     /// 被动应答：接受 offer。
@@ -277,6 +312,33 @@ impl Endpoint {
         writer.rid(rid).write(pt, Instant::now(), rtp_time, data)
     }
 
+    /// 发送一帧音频（PCMU，RTP 时间戳按 8kHz 时钟）。
+    /// 必须显式匹配 PCMU 参数：默认 codec 配置里 Opus 排最前，
+    /// 用 `payload_params().next()` 会把 μ-law 字节标成 Opus（#58 排查）。
+    pub fn send_audio_frame(
+        &mut self,
+        mid: Mid,
+        data: impl Into<std::sync::Arc<[u8]>>,
+        rtp_time: str0m::media::MediaTime,
+    ) -> Result<(), RtcError> {
+        let Some(writer) = self.rtc.writer(mid) else {
+            return Err(RtcError::Io(std::io::Error::other("no writer for mid")));
+        };
+        let Some(params) = writer
+            .payload_params()
+            .find(|p| p.spec().codec == str0m::format::Codec::PCMU)
+            .cloned()
+        else {
+            return Err(RtcError::Io(std::io::Error::other(
+                "no PCMU payload params",
+            )));
+        };
+        let Some(pt) = writer.match_params(params) else {
+            return Err(RtcError::Io(std::io::Error::other("no matching pt")));
+        };
+        writer.write(pt, Instant::now(), rtp_time, data)
+    }
+
     /// 是否存活。
     pub fn is_alive(&self) -> bool {
         self.rtc.is_alive()
@@ -351,7 +413,7 @@ mod tests {
     fn simulcast_offer_declares_qhf_rids() {
         let mut ep = Endpoint::new();
         ep.add_video_simulcast();
-        let (offer, _pending, video_mid) = ep.create_offer().expect("offer");
+        let (offer, _pending, video_mid, _audio_mid) = ep.create_offer().expect("offer");
         assert!(video_mid.is_some(), "simulcast offer should include video");
         let sdp = offer.to_sdp_string();
         assert!(
@@ -370,7 +432,7 @@ mod tests {
     fn plain_video_offer_has_no_simulcast() {
         let mut ep = Endpoint::new();
         ep.add_video();
-        let (offer, _pending, video_mid) = ep.create_offer().expect("offer");
+        let (offer, _pending, video_mid, _audio_mid) = ep.create_offer().expect("offer");
         assert!(video_mid.is_some());
         assert!(
             !offer.to_sdp_string().contains("simulcast"),

@@ -447,9 +447,23 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     ui.on_toggle_audio({
         let ui = ui.as_weak();
+        // #58 观看端静音：经 control 通道下发真实静音指令（音频链路已接入，
+        // SFU 转发 PCMU；静音后观看端丢弃音频帧）。
+        let muted = Arc::new(AtomicBool::new(false));
+        let muted2 = muted.clone();
         move || {
-            ui.unwrap()
-                .set_session_status("音频：待接入（数据通道/媒体轨道）".into());
+            let ui = ui.unwrap();
+            let m = !muted2.fetch_xor(true, Ordering::SeqCst);
+            if let Some(tx) = CONTROL_TX.lock().unwrap().as_ref() {
+                let _ = tx.send(format!("{{\"audio_mute\":{m}}}"));
+            }
+            ui.set_session_status(
+                format!(
+                    "音频：{}（静音指令已下发）",
+                    if m { "已静音" } else { "已开启" }
+                )
+                .into(),
+            );
         }
     });
     ui.on_toggle_display({
