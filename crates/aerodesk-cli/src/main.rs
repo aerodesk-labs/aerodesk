@@ -46,10 +46,14 @@ fn main() {
     // #58 音频：publisher 发送合成 PCMU 音频 / viewer 接收；--mute-audio 观看端静音。
     let audio = args.iter().any(|a| a == "--audio");
     let mute_audio = args.iter().any(|a| a == "--mute-audio");
+    // #58 显示器：publisher 初始采集显示器 / viewer 请求切换（--display N，0 = 主显示器）。
+    let display: usize = arg(&args, "--display")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
 
     match role.as_str() {
         "publisher" if encoder == "screen" => {
-            publisher_capture(&signal, &room, token.as_deref(), simulcast, audio)
+            publisher_capture(&signal, &room, token.as_deref(), simulcast, audio, display)
         }
         "publisher" if encoder == "vt" => {
             let w: u32 = arg(&args, "--width")
@@ -90,6 +94,7 @@ fn main() {
             arg(&args, "--layer").as_deref(),
             audio,
             mute_audio,
+            display,
         ),
         other => panic!("unknown role {other}"),
     }
@@ -363,6 +368,13 @@ fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
                 if let Ok(frame) = serde_json::from_slice::<InputFrame>(&data) {
                     info!("input: seq={} {:?}", frame.seq, frame.event);
                 }
+            } else if endpoint.channel_label(cid).as_deref() == Some("control") {
+                // #58 显示器切换：viewer → SFU → publisher（control 通道转发）。
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&data)
+                    && let Some(n) = v.get("display").and_then(|d| d.as_u64())
+                {
+                    info!("control: display switch request -> display {n}");
+                }
             }
         }
         _ => {}
@@ -499,6 +511,7 @@ fn viewer(
     layer: Option<&str>,
     audio: bool,
     mute_audio: bool,
+    display_idx: usize,
 ) {
     let (mut signal, mut endpoint, socket, _, _audio_mid) =
         connect(signal_url, room, Role::Viewer, auth, audio);
@@ -516,6 +529,8 @@ fn viewer(
     let audio_muted = mute_audio;
     let mut mute_sent = false;
     let mut dropped_audio_frames = 0u64;
+    // #58 显示器切换：--display N 经 control 通道下发（SFU 转发给被控端）。
+    let mut display_sent = false;
 
     loop {
         let wait = Duration::from_millis(50);
@@ -604,6 +619,15 @@ fn viewer(
                         if endpoint.send_channel_data("control", false, &data) {
                             info!("audio mute command sent");
                             mute_sent = true;
+                        }
+                    }
+                    // #58 显示器切换：经 control 通道下发一次（SFU 转发给被控端）。
+                    if !display_sent {
+                        let req = serde_json::json!({ "display": display_idx });
+                        let data = serde_json::to_vec(&req).unwrap();
+                        if endpoint.send_channel_data("control", false, &data) {
+                            info!("display switch command sent: {display_idx}");
+                            display_sent = true;
                         }
                     }
                 }
@@ -949,6 +973,7 @@ fn publisher_capture(
     auth: Option<&str>,
     simulcast: bool,
     audio: bool,
+    initial_display: usize,
 ) {
     use aerodesk_macos::capture::ScreenCapture;
     use aerodesk_macos::vt_encoder::VtEncoder;
@@ -961,14 +986,42 @@ fn publisher_capture(
     let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
         connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio);
 
+    // #58 显示器切换：按 (display, w, h) 重建采集器（编码器与显示器无关，保留）。
+    let rebuild_captures = |idx: usize,
+                            layers: &mut Vec<(Option<Rid>, VtEncoder, ScreenCapture)>|
+     -> Result<(), String> {
+        let specs: Vec<(Option<Rid>, u32, u32)> = layers
+            .iter()
+            .map(|(rid, _enc, cap)| (*rid, cap.width(), cap.height()))
+            .collect();
+        layers.clear();
+        for (rid, w, h) in specs {
+            let capture = ScreenCapture::start(idx, FPS, w, h)
+                .map_err(|e| format!("display {idx} init failed: {e}"))?;
+            // 重建：编码器按分辨率新建（与 display 无关，但保持同样参数）。
+            let bps = if w >= 1280 { 8_000_000 } else { 4_000_000 };
+            layers.push((
+                rid,
+                VtEncoder::new(w, h, FPS, bps).expect("vt encoder"),
+                capture,
+            ));
+        }
+        info!("screen capture switched to display {idx}");
+        Ok(())
+    };
+
     // (rid, encoder, capture)
     let mut layers: Vec<(Option<Rid>, VtEncoder, ScreenCapture)> = Vec::new();
+    let init_capture = |display: usize, w: u32, h: u32| -> Result<ScreenCapture, String> {
+        ScreenCapture::start(display, FPS, w, h)
+            .map_err(|e| format!("screen capture init failed: {e}"))
+    };
     if simulcast {
         for (rid, w, h, bps) in SIMULCAST_LAYERS_VT.iter() {
-            let capture = match ScreenCapture::start(0, FPS, *w, *h) {
+            let capture = match init_capture(initial_display, *w, *h) {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("screen capture init failed: {e}");
+                    error!("{e}");
                     info!(
                         "grant Screen Recording permission in System Settings > Privacy & Security"
                     );
@@ -982,10 +1035,10 @@ fn publisher_capture(
             ));
         }
     } else {
-        let capture = match ScreenCapture::start(0, FPS, W, H) {
+        let capture = match init_capture(initial_display, W, H) {
             Ok(c) => c,
             Err(e) => {
-                error!("screen capture init failed: {e}");
+                error!("{e}");
                 info!("grant Screen Recording permission in System Settings > Privacy & Security");
                 return;
             }
@@ -1045,6 +1098,24 @@ fn publisher_capture(
                 ClientEvent::Closed => {
                     info!("connection closed");
                     return;
+                }
+                // #58 显示器切换：viewer 经 control 通道请求，SFU 转发到 publisher。
+                ClientEvent::ChannelData(cid, binary, data) => {
+                    if endpoint.channel_label(cid).as_deref() == Some("control") {
+                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&data)
+                            && let Some(n) = v.get("display").and_then(|d| d.as_u64())
+                        {
+                            info!("control: display switch request -> display {n}");
+                            if let Err(e) = rebuild_captures(n as usize, &mut layers) {
+                                warn!("display switch failed（保持当前显示器）: {e}");
+                            }
+                        }
+                    } else {
+                        handle_publisher_input(
+                            &mut endpoint,
+                            ClientEvent::ChannelData(cid, binary, data),
+                        );
+                    }
                 }
                 ev => handle_publisher_input(&mut endpoint, ev),
             }

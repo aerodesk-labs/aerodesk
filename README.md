@@ -55,6 +55,7 @@ cargo run -p aerodesk-cli -- --role publisher --encoder x264 --simulcast --noisy
 cargo run -p aerodesk-cli -- --role viewer --layer f --audio
 
 # 音频：publisher --audio 发送合成 PCMU（G.711 8kHz）；真实系统音频采集待真机接入
+# 显示器：publisher --display N 初始采集；viewer --display N 经 control 切换被控端显示器
 
 # 浏览器：https://<host>:3000/?role=publisher|viewer
 ```

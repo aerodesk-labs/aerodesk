@@ -22,7 +22,7 @@
 | #4 Linux | 采集/注入/软编 ✅ | Linux 真机：VAAPI 解码、Wayland/X11 端到端 |
 | #6 HarmonyOS | NAPI 规约 ✅（文档） | DevEco + OHOS NDK + 鸿蒙真机（ring 交叉编译） |
 | #8 压测 | 工具链/报告 ✅（#38）、netem ✅ | 干净环境 4K60 基线 + 真机矩阵 |
-| #58 工具栏媒体控制 | 画质选层 ✅（publisher `--simulcast` q/h/f + SFU 按 rid 转发，`scripts/simulcast-e2e.sh` 守护）；音频链路 ✅（publisher `--audio` PCMU → SFU → viewer，UI 静音经 control 下发，`scripts/audio-e2e.sh` 守护）；显示器切换待接入 | 真实系统音频采集（AudioUnit/TCC）+ 多显示器切换（macOS 先行） |
+| #58 工具栏媒体控制 | 画质选层 ✅、音频链路 ✅（PCMU → SFU → viewer + UI 静音）、显示器切换 ✅（viewer `--display N` → SFU control 转发 → publisher `ScreenCaptureKit` 重建采集，`scripts/display-e2e.sh` 守护控制链路）；三个 e2e 均已接入 macOS CI | 真实系统音频采集（AudioUnit/TCC）+ 多显示器真机切换验收（macOS 先行） |
 
 ## 自动验证现状
 - CI 三平台（macOS/Ubuntu/Windows）：cargo fmt/clippy/test + macOS e2e smoke ✅
