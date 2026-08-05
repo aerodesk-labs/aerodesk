@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use aerodesk_core::Endpoint;
-use aerodesk_protocol::file::{self, CHUNK_SIZE, FileCancel, FileControl, FileDone, FileMeta};
+use aerodesk_protocol::file::{
+    self, CHUNK_SIZE, FileCancel, FileControl, FileDone, FileMeta, FileNack,
+};
 use sha2::{Digest, Sha256};
 
 fn hex(bytes: &[u8]) -> String {
@@ -66,6 +68,10 @@ struct Sender {
     /// 启动延迟：data channel 双方（经 SFU）打开有先后，过早发 Meta 会被
     /// SFU 丢弃（对端通道未就绪）。3s 覆盖 DCEP 错峰打开。
     start_after: Instant,
+    /// 接收端补包队列（SFU 转发可能丢包，见 #72）。
+    resend: Vec<u64>,
+    /// 接收端已确认完整（收到 FileDone ack）。
+    confirmed: bool,
 }
 
 struct Receiver {
@@ -75,6 +81,7 @@ struct Receiver {
     hash: Option<String>,
     buf: Vec<u8>,
     received: u64,
+    received_flags: Vec<bool>,
 }
 
 impl FileTransfer {
@@ -101,7 +108,7 @@ impl FileTransfer {
             aerodesk_core::ClientEvent::ChannelData(cid, _, data)
                 if endpoint.channel_label(*cid).as_deref() == Some("file") =>
             {
-                self.handle_data(data);
+                self.handle_data(data, endpoint);
             }
             _ => {}
         }
@@ -114,7 +121,7 @@ impl FileTransfer {
         }
     }
 
-    fn handle_data(&mut self, data: &[u8]) {
+    fn handle_data(&mut self, data: &[u8], endpoint: &mut Endpoint) {
         if let Some((id, index, payload)) = file::decode_chunk(data) {
             self.on_chunk(id, index, payload);
             return;
@@ -125,8 +132,43 @@ impl FileTransfer {
         };
         match ctrl {
             FileControl::Meta(m) => self.on_meta(m),
-            FileControl::Done(d) => self.on_done(d),
+            FileControl::Done(d) => {
+                // 发送端收到 Done = 接收端 ack（已完整落盘）；接收端收到 = 发送端完成。
+                if self.send.as_ref().map(|s| s.id == d.id).unwrap_or(false) {
+                    if let Some(s) = &mut self.send {
+                        s.confirmed = true;
+                        tracing::info!(
+                            "file transfer confirmed by receiver: {} ({} bytes)",
+                            s.name,
+                            s.data.len()
+                        );
+                    }
+                } else {
+                    self.on_done(d, endpoint);
+                }
+            }
             FileControl::Cancel(c) => self.on_cancel(c),
+            FileControl::Nack(n) => {
+                if let Some(s) = &mut self.send
+                    && s.id == n.id
+                    && !s.confirmed
+                {
+                    let before = s.resend.len();
+                    for idx in n.missing {
+                        if idx < s.total_chunks && !s.resend.contains(&idx) {
+                            s.resend.push(idx);
+                        }
+                    }
+                    tracing::info!(
+                        "file resend request: {} missing chunks ({} -> {})",
+                        s.name,
+                        before,
+                        s.resend.len()
+                    );
+                    // 重传一批后重新发 Done，让接收端再次校验。
+                    s.done_sent = false;
+                }
+            }
         }
     }
 
@@ -154,6 +196,7 @@ impl FileTransfer {
                 hash: m.hash,
                 buf: vec![0; m.size as usize],
                 received: 0,
+                received_flags: vec![false; m.chunks as usize],
             },
         );
     }
@@ -171,10 +214,13 @@ impl FileTransfer {
             return;
         }
         r.buf[start..start + payload.len()].copy_from_slice(payload);
+        if let Some(f) = r.received_flags.get_mut(index as usize) {
+            *f = true;
+        }
         r.received += 1;
     }
 
-    fn on_done(&mut self, d: FileDone) {
+    fn on_done(&mut self, d: FileDone, endpoint: &mut Endpoint) {
         let Some(r) = self.recv.remove(&d.id) else {
             return;
         };
@@ -183,6 +229,30 @@ impl FileTransfer {
         };
         if !d.ok {
             tracing::warn!("file {} failed: {:?}", r.name, d.error);
+            return;
+        }
+        // 计算缺失分片：SFU 转发可能丢包，缺了要回 Nack 让发送端补。
+        let missing: Vec<u64> = r
+            .received_flags
+            .iter()
+            .enumerate()
+            .filter(|(_, got)| !**got)
+            .map(|(i, _)| i as u64)
+            .collect();
+        if !missing.is_empty() {
+            let nack = FileControl::Nack(FileNack {
+                id: d.id.clone(),
+                missing: missing.iter().take(512).copied().collect(),
+            });
+            if let Ok(json) = serde_json::to_string(&nack) {
+                let _ = endpoint.send_channel_data("file", false, json.as_bytes());
+            }
+            tracing::info!(
+                "file {} missing {} chunks, requested resend",
+                r.name,
+                missing.len()
+            );
+            self.recv.insert(d.id, r);
             return;
         }
         if r.received != r.total_chunks || r.buf.len() as u64 != r.size {
@@ -209,6 +279,15 @@ impl FileTransfer {
             return;
         }
         tracing::info!("file receive complete: {} -> {}", r.name, path.display());
+        // 回 ack：发送端据此停止。
+        let ack = FileControl::Done(FileDone {
+            id: d.id,
+            ok: true,
+            error: None,
+        });
+        if let Ok(json) = serde_json::to_string(&ack) {
+            let _ = endpoint.send_channel_data("file", false, json.as_bytes());
+        }
     }
 
     fn on_cancel(&mut self, c: FileCancel) {
@@ -239,10 +318,15 @@ impl Sender {
             done_sent: false,
             last_progress: Instant::now(),
             start_after: Instant::now() + Duration::from_secs(3),
+            resend: Vec::new(),
+            confirmed: false,
         })
     }
 
     fn tick(&mut self, endpoint: &mut Endpoint) {
+        if self.confirmed {
+            return;
+        }
         if Instant::now() < self.start_after {
             return;
         }
@@ -259,6 +343,16 @@ impl Sender {
             {
                 tracing::info!("file send start: {} ({} bytes)", self.name, self.data.len());
                 self.meta_sent = true;
+            }
+            return;
+        }
+        // 补包优先（接收端 Nack）。
+        if let Some(resend_idx) = self.resend.pop() {
+            let start = (resend_idx as usize) * CHUNK_SIZE;
+            let end = ((resend_idx + 1) as usize * CHUNK_SIZE).min(self.data.len());
+            let frame = file::encode_chunk(&self.id, resend_idx, &self.data[start..end]);
+            if endpoint.send_channel_data("file", true, &frame) {
+                tracing::debug!("file resend chunk {resend_idx}");
             }
             return;
         }

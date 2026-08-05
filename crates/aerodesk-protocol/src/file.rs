@@ -50,6 +50,14 @@ pub struct FileCancel {
     pub id: String,
 }
 
+/// 接收端补包请求（#72：SFU 转发在出站缓冲满时会丢包，需应用层重传）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileNack {
+    pub id: String,
+    /// 缺失分片序号（最多一批 512 个，避免单条消息过大）。
+    pub missing: Vec<u64>,
+}
+
 /// 控制消息（JSON 文本）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -57,6 +65,7 @@ pub enum FileControl {
     Meta(FileMeta),
     Done(FileDone),
     Cancel(FileCancel),
+    Nack(FileNack),
 }
 
 /// 编码一个分片为二进制帧。
