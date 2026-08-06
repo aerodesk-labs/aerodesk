@@ -446,6 +446,9 @@ export component AppWindow inherits Window {
     callback toggle-audio();
     // #75：会话视图指针输入 → Rust 侧转发为 InputFrame（0=Move 1=Down 2=Up）。
     callback send-input(int, float, float);
+    // #75：键盘/滚轮输入 → Rust 侧转发为 InputFrame（send-key: 0=按下 1=抬起）。
+    callback send-key(int, string, bool, bool, bool, bool) -> bool;
+    callback send-wheel(float, float, float, float);
     callback toggle-display();
     callback toggle-quality();
     callback toggle-input();
@@ -464,6 +467,8 @@ export component AppWindow inherits Window {
     callback refresh-perms();
     callback open-screen-perms();
     callback open-a11y-perms();
+
+
 
     title: "AeroDesk";
     width: 1000px;
@@ -1101,16 +1106,53 @@ export component AppWindow inherits Window {
                 Rectangle {
                     background: #000000;
                     vertical-stretch: 1;
+                    // #75：键盘焦点——进入会话/点击视频区即聚焦，键码映射后走 send-key。
+                    fs := FocusScope {
+                        focus-on-click: true;
+                        init => { fs.focus(); }
+                        key-pressed(event) => {
+                            // 键码映射在 Rust 侧（keymap.rs），返回是否已处理。
+                            if root.send-key(
+                                0,
+                                event.text,
+                                event.modifiers.control,
+                                event.modifiers.shift,
+                                event.modifiers.alt,
+                                event.modifiers.meta
+                            ) { accept } else { reject }
+                        }
+                        key-released(event) => {
+                            if root.send-key(
+                                1,
+                                event.text,
+                                event.modifiers.control,
+                                event.modifiers.shift,
+                                event.modifiers.alt,
+                                event.modifiers.meta
+                            ) { accept } else { reject }
+                        }
+                    }
                     TouchArea {
                         width: 100%;
                         height: 100%;
                         enabled: root.in-session && root.session-frames[root.active-session].width > 0;
                         pointer-event(event) => {
+                            if event.kind == PointerEventKind.down { fs.focus(); }
                             root.send-input(
                                 event.kind == PointerEventKind.down ? 1 : (event.kind == PointerEventKind.up ? 2 : 0),
                                 self.mouse-x / max(self.width, 1px),
                                 self.mouse-y / max(self.height, 1px)
                             );
+                        }
+                        // #75：滚轮 → send-wheel（归一化坐标 + 像素增量）。
+                        scroll-event(event) => {
+                            root.send-wheel(
+                                self.mouse-x / max(self.width, 1px),
+                                self.mouse-y / max(self.height, 1px),
+                                event.delta-x / 1px,
+                                event.delta-y / 1px
+                            );
+                            accept
                         }
                     }
                     Image {

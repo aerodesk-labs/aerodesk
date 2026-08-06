@@ -3,6 +3,7 @@
 //! 5 个原生平台（Win/macOS/Linux/Android/iOS）一套 UI；Web 走浏览器原生 WebRTC。
 
 slint::include_modules!();
+mod keymap;
 #[cfg(target_os = "macos")]
 mod macos_media;
 use slint::Model;
@@ -269,6 +270,75 @@ fn main() -> Result<(), slint::PlatformError> {
                     x: x as f64,
                     y: y as f64,
                 },
+            };
+            let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+            let frame = aerodesk_protocol::input::InputFrame::new(seq, event);
+            if let Ok(json) = serde_json::to_string(&frame) {
+                if let Some(tx) = INPUT_TX.lock().unwrap().as_ref() {
+                    let _ = tx.send(json);
+                }
+            }
+        }
+    });
+
+    // #75：会话视图键盘输入 → InputFrame JSON → input 通道 → SFU → 被控端注入。
+    // Slint 在 macOS 上把 Command 报告为 modifiers.control、Control 报告为
+    // modifiers.meta（builtin_structs），此处映射回协议语义（meta=Command）。
+    ui.on_send_key({
+        // 返回是否已处理：未映射的键 reject，让本地 UI 继续处理。
+        move |state: i32,
+              text: slint::SharedString,
+              ctrl: bool,
+              shift: bool,
+              alt: bool,
+              meta: bool|
+              -> bool {
+            let Some(code) = keymap::key_code_for_text(text.as_str()) else {
+                return false;
+            };
+            let state = if state == 0 {
+                aerodesk_protocol::input::ButtonState::Pressed
+            } else {
+                aerodesk_protocol::input::ButtonState::Released
+            };
+            #[cfg(target_os = "macos")]
+            let modifiers = aerodesk_protocol::input::Modifiers {
+                ctrl: meta,
+                shift,
+                alt,
+                meta: ctrl,
+            };
+            #[cfg(not(target_os = "macos"))]
+            let modifiers = aerodesk_protocol::input::Modifiers {
+                ctrl,
+                shift,
+                alt,
+                meta,
+            };
+            let event = aerodesk_protocol::input::InputEvent::Key {
+                code: code.to_string(),
+                state,
+                modifiers,
+            };
+            let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+            let frame = aerodesk_protocol::input::InputFrame::new(seq, event);
+            if let Ok(json) = serde_json::to_string(&frame) {
+                if let Some(tx) = INPUT_TX.lock().unwrap().as_ref() {
+                    let _ = tx.send(json);
+                }
+            }
+            true
+        }
+    });
+
+    // #75：会话视图滚轮输入 → InputFrame JSON（归一化坐标 + 像素增量）。
+    ui.on_send_wheel({
+        move |x: f32, y: f32, dx: f32, dy: f32| {
+            let event = aerodesk_protocol::input::InputEvent::Wheel {
+                x: x as f64,
+                y: y as f64,
+                delta_x: dx as f64,
+                delta_y: dy as f64,
             };
             let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
             let frame = aerodesk_protocol::input::InputFrame::new(seq, event);
