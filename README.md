@@ -57,6 +57,7 @@ cargo run -p aerodesk-cli -- --role viewer --layer f --audio
 # 音频：publisher --audio 发送合成 PCMU（G.711 8kHz）；真实系统音频采集待真机接入
 # 显示器：publisher --display N 初始采集；viewer --display N 经 control 切换被控端显示器
 # 文件传输：publisher --send-file <path>；对端 --recv-dir <dir> 接收（data channel，SHA-256 校验）
+# 多 codec：#74 --encoder ffmpeg --codec h264|h265|vp9|av1（FFmpeg，硬编优先；AV1 有 ~1s 编码延迟）
 
 # 浏览器：https://<host>:3000/?role=publisher|viewer
 ```

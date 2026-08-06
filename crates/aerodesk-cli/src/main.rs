@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media::{Vp8Frame, parse_vp8_pcap};
-use aerodesk_core::{Endpoint, signaling::WsSignalClient};
+use aerodesk_core::{Endpoint, media_pipeline::Codec, signaling::WsSignalClient};
+use aerodesk_ffmpeg::encode::FfmpegEncoder;
 use aerodesk_protocol::input::{INPUT_PROTOCOL_VERSION, InputEvent, InputFrame};
 use aerodesk_protocol::signal::Role;
 use str0m::media::{Frequency, MediaTime};
@@ -56,6 +57,13 @@ fn main() {
     // #72 文件传输：--send-file <path> 发送；--recv-dir <dir> 接收落盘。
     let send_file = arg(&args, "--send-file").map(std::path::PathBuf::from);
     let recv_dir = arg(&args, "--recv-dir").map(std::path::PathBuf::from);
+    // #74 视频编码：--codec h264|h265|vp9|av1（配 --encoder ffmpeg）。
+    let video_codec: Codec = match arg(&args, "--codec").as_deref() {
+        Some("h265") | Some("hevc") => Codec::Hevc,
+        Some("vp9") => Codec::Vp9,
+        Some("av1") => Codec::Av1,
+        _ => Codec::H264,
+    };
 
     // #72 文件传输状态机（进程级单例；发送/接收同一状态机）。
     file_transfer::init(send_file, recv_dir);
@@ -91,6 +99,9 @@ fn main() {
                 noisy,
                 audio,
             );
+        }
+        "publisher" if encoder == "ffmpeg" => {
+            publisher_ffmpeg(&signal, &room, token.as_deref(), audio, video_codec)
         }
         "publisher" if encoder == "x264" => {
             publisher_x264(&signal, &room, token.as_deref(), simulcast, noisy, audio)
@@ -187,7 +198,7 @@ fn connect(
     str0m::media::Mid,
     Option<str0m::media::Mid>,
 ) {
-    connect_inner(signal_url, room, role, false, false, audio, auth)
+    connect_inner(signal_url, room, role, None, false, audio, auth)
 }
 
 fn connect_h264(
@@ -204,14 +215,39 @@ fn connect_h264(
     str0m::media::Mid,
     Option<str0m::media::Mid>,
 ) {
-    connect_inner(signal_url, room, role, true, simulcast, audio, auth)
+    connect_inner(
+        signal_url,
+        room,
+        role,
+        Some(Codec::H264),
+        simulcast,
+        audio,
+        auth,
+    )
+}
+
+fn connect_codec(
+    signal_url: &str,
+    room: &str,
+    role: Role,
+    auth: Option<&str>,
+    audio: bool,
+    codec: Codec,
+) -> (
+    WsSignalClient,
+    Endpoint,
+    UdpSocket,
+    str0m::media::Mid,
+    Option<str0m::media::Mid>,
+) {
+    connect_inner(signal_url, room, role, Some(codec), false, audio, auth)
 }
 
 fn connect_inner(
     signal_url: &str,
     room: &str,
     role: Role,
-    h264_only: bool,
+    codec: Option<Codec>,
     simulcast: bool,
     audio: bool,
     auth: Option<&str>,
@@ -230,10 +266,10 @@ fn connect_inner(
     let addr = socket.local_addr().unwrap();
     info!("local UDP addr: {addr}");
 
-    let mut endpoint = if h264_only {
-        Endpoint::new_h264()
-    } else {
-        Endpoint::new()
+    let mut endpoint = match codec {
+        None => Endpoint::new(),
+        Some(Codec::H264) => Endpoint::new_h264(),
+        Some(c) => Endpoint::new_with_codec(c),
     };
     endpoint
         .add_local_candidate(addr, Protocol::Udp)
@@ -989,6 +1025,106 @@ fn publisher_vt(
         let _ = &mut signal;
     }
 }
+/// FFmpeg 发布端（#74）：合成 RGB → FfmpegEncoder（H264/H265/VP9/AV1）→ SFU。
+/// `--codec h264|h265|vp9|av1` 选择编码格式；AV1(SVT) 有 ~1s 编码延迟。
+fn publisher_ffmpeg(signal_url: &str, room: &str, auth: Option<&str>, audio: bool, codec: Codec) {
+    use aerodesk_macos::synthetic::SyntheticSource;
+
+    const W: u32 = 640;
+    const H: u32 = 360;
+    const FPS: u32 = 30;
+
+    let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
+        connect_codec(signal_url, room, Role::Publisher, auth, audio, codec);
+    let mut encoder = FfmpegEncoder::new(W, H, FPS, 1_500_000, codec).expect("ffmpeg encoder");
+    let mut source = SyntheticSource::new(W, H);
+    let mut connected = false;
+    let mut audio_ticker = AudioTicker::new();
+    let mut next_frame = Instant::now();
+    let mut pts = 0i64;
+
+    loop {
+        let wait = Duration::from_millis(5);
+        socket.set_read_timeout(Some(wait)).ok();
+        let mut buf = [0u8; 2000];
+        if let Ok((n, source)) = socket.recv_from(&mut buf)
+            && let Ok(contents) = buf[..n].try_into()
+        {
+            let input = Input::Receive(
+                Instant::now(),
+                Receive {
+                    proto: Protocol::Udp,
+                    source,
+                    destination: socket.local_addr().unwrap(),
+                    contents,
+                },
+            );
+            let _ = endpoint.handle_input(input);
+        }
+        let _ = endpoint.handle_timeout(Instant::now());
+
+        let mut deadline = Instant::now() + Duration::from_secs(1);
+        while let Some(output) = endpoint.poll_output() {
+            match output {
+                Output::Transmit(t) => {
+                    let _ = socket.send_to(&t.contents, t.destination);
+                }
+                Output::Timeout(t) => {
+                    deadline = deadline.min(t);
+                    break;
+                }
+                Output::Event(_) => {}
+            }
+        }
+
+        while let Some(ev) = endpoint.poll_event() {
+            match ev {
+                ClientEvent::IceConnected => {
+                    info!("ICE connected, starting ffmpeg stream (codec={codec:?})");
+                    connected = true;
+                    next_frame = Instant::now();
+                }
+                ClientEvent::Closed => {
+                    info!("connection closed");
+                    return;
+                }
+                // #74：响应 SFU 关键帧请求。
+                ClientEvent::KeyframeRequest(_) => {
+                    encoder.request_keyframe();
+                }
+                ev => handle_publisher_input(&mut endpoint, ev),
+            }
+        }
+
+        // #58 音频 + #72 文件传输推进。
+        if let Some(amid) = audio_mid {
+            audio_ticker.tick(&mut endpoint, amid, Instant::now());
+        }
+        file_transfer::tick(&mut endpoint);
+
+        if connected && Instant::now() >= next_frame {
+            next_frame += Duration::from_millis(1000 / FPS as u64);
+            let rgb = source.next_frame();
+            if let Some(unit) = encoder.encode_rgb(rgb).expect("encode") {
+                let rtp_time = str0m::media::MediaTime::new(
+                    pts as u64 * 3000,
+                    str0m::media::Frequency::NINETY_KHZ,
+                );
+                if let Err(e) = endpoint.send_video_frame(video_mid, unit.data, rtp_time) {
+                    warn!("send frame failed: {e:?}");
+                }
+                if unit.keyframe {
+                    debug!("sent keyframe #{pts}");
+                }
+            }
+            pts += 1;
+        }
+
+        std::thread::sleep(Duration::from_millis(2));
+        let _ = &mut signal;
+    }
+}
+
 /// 真实屏幕采集发布端：ScreenCaptureKit → VideoToolbox 硬编（零拷贝）→ SFU。
 /// 需要屏幕录制权限（TCC）。`--simulcast`：q/h/f 三层各一路 SCK 采集 + 硬编，
 /// 分辨率越低开销越小，选层切换立即生效。
