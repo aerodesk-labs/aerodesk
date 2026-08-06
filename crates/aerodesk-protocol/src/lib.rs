@@ -6,6 +6,7 @@
 //!
 //! 编码：JSON 起步（Web 端原生兼容），后续可加二进制变体（同类型，不同 codec）。
 
+pub mod cursor;
 pub mod file;
 pub mod input;
 pub mod signal;

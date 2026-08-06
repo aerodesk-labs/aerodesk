@@ -415,6 +415,14 @@ impl AudioTicker {
     }
 }
 
+/// #75 发送远程光标位置（cursor 通道，归一化 0..1）。
+fn send_cursor(endpoint: &mut Endpoint, x: f64, y: f64) {
+    let pos = aerodesk_protocol::cursor::CursorPos::new(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
+    if let Ok(json) = serde_json::to_string(&pos) {
+        endpoint.send_channel_data("cursor", false, json.as_bytes());
+    }
+}
+
 /// 发布端公共事件处理：输入通道（观看端 → 被控端）。
 fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
     // #72 文件传输：file 通道事件交给状态机（非 file 事件为 no-op）。
@@ -474,6 +482,9 @@ fn publisher(signal_url: &str, room: &str, auth: Option<&str>, audio: bool) {
     let mut frame_idx = 0usize;
     let mut last_frame_time = Instant::now();
     let mut next_deadline = Instant::now() + Duration::from_millis(100);
+    // #75 合成远程光标（e2e 用）：30Hz 正弦轨迹，验证 cursor 通道端到端。
+    let cursor_start = Instant::now();
+    let mut last_cursor = Instant::now();
 
     loop {
         // UDP 输入
@@ -554,6 +565,13 @@ fn publisher(signal_url: &str, room: &str, auth: Option<&str>, audio: bool) {
         // #72 文件传输：推进发送。
         file_transfer::tick(&mut endpoint);
 
+        // #75 远程光标（合成轨迹，30Hz）。
+        if last_cursor.elapsed() >= Duration::from_millis(33) {
+            last_cursor = Instant::now();
+            let t = cursor_start.elapsed().as_secs_f64();
+            send_cursor(&mut endpoint, 0.5 + 0.3 * t.sin(), 0.5 + 0.3 * t.cos());
+        }
+
         // 发送帧（按 90kHz 时间戳节奏）
         if connected && frame_idx < frames.len() {
             let f: &Vp8Frame = &frames[frame_idx];
@@ -619,6 +637,8 @@ fn viewer(
     // #58 显示器切换：--display N 经 control 通道下发（SFU 转发给被控端）。
     // 未显式指定时不下发（避免每次连接都切到显示器 0）。
     let mut display_sent = display.is_none();
+    // #75 远程光标：cursor 通道日志（节流 1s，e2e 断言用）。
+    let mut last_cursor_log = Instant::now();
 
     loop {
         let wait = Duration::from_millis(50);
@@ -730,6 +750,18 @@ fn viewer(
                             info!("display switch command sent: {d}");
                             display_sent = true;
                         }
+                    }
+                }
+                // #75 远程光标：被控端广播位置，观看端日志（节流）。
+                ClientEvent::ChannelData(cid, _, data)
+                    if endpoint.channel_label(cid).as_deref() == Some("cursor") =>
+                {
+                    if let Ok(pos) =
+                        serde_json::from_slice::<aerodesk_protocol::cursor::CursorPos>(&data)
+                        && last_cursor_log.elapsed() >= Duration::from_secs(1)
+                    {
+                        info!("CURSOR: x={:.3} y={:.3}", pos.x, pos.y);
+                        last_cursor_log = Instant::now();
                     }
                 }
                 ClientEvent::Closed => {
@@ -1212,6 +1244,8 @@ fn publisher_capture_ffmpeg(
     let mut connected = false;
     let mut audio_ticker = AudioTicker::new();
     let mut pts = 0i64;
+    // #75 远程光标：真实光标位置（30Hz）。
+    let mut last_cursor = Instant::now();
 
     loop {
         let wait = Duration::from_millis(5);
@@ -1268,6 +1302,14 @@ fn publisher_capture_ffmpeg(
             audio_ticker.tick(&mut endpoint, amid, Instant::now());
         }
         file_transfer::tick(&mut endpoint);
+        // #75 远程光标：读取被控端真实光标位置（30Hz）。
+        if last_cursor.elapsed() >= Duration::from_millis(33) {
+            last_cursor = Instant::now();
+            #[cfg(target_os = "macos")]
+            if let Some((x, y)) = aerodesk_macos::cursor::cursor_position_normalized() {
+                send_cursor(&mut endpoint, x, y);
+            }
+        }
 
         if connected && let Some(surface) = capture.next_frame(Duration::from_millis(50)) {
             // IOSurface（BGRA）→ 行复制到 CPU 缓冲 → FFmpeg 编码。
@@ -1313,6 +1355,8 @@ fn publisher_capture(
 
     let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
         connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio);
+    // #75 远程光标：真实光标位置（30Hz）。
+    let mut last_cursor = Instant::now();
 
     // #58 显示器切换：按 (display, w, h) 重建采集器（编码器与显示器无关，保留）。
     let rebuild_captures = |idx: usize,
@@ -1455,6 +1499,14 @@ fn publisher_capture(
         }
         // #72 文件传输：推进发送。
         file_transfer::tick(&mut endpoint);
+        // #75 远程光标：读取被控端真实光标位置（30Hz）。
+        if last_cursor.elapsed() >= Duration::from_millis(33) {
+            last_cursor = Instant::now();
+            #[cfg(target_os = "macos")]
+            if let Some((x, y)) = aerodesk_macos::cursor::cursor_position_normalized() {
+                send_cursor(&mut endpoint, x, y);
+            }
+        }
 
         if connected {
             // 每层各自采集一帧（simulcast 下 SCK 按层分辨率采集；单层维持原路径）。

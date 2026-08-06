@@ -190,6 +190,9 @@ pub fn run_viewer(
                             );
                             let img = Image::from_rgba8(buffer);
                             if let Some(fui) = ui_weak.upgrade() {
+                                // #75：视频源尺寸（letterbox 光标换算用）。
+                                fui.set_frame_w(w as f32);
+                                fui.set_frame_h(h as f32);
                                 // 更新本会话帧槽；当前标签同时更新显示帧。
                                 let mut arr: Vec<slint::Image> =
                                     (0..fui.get_session_frames().row_count())
@@ -208,6 +211,19 @@ pub fn run_viewer(
                             }
                             frames += 1;
                         }
+                    }
+                }
+                // #75 远程光标：被控端经 cursor 通道广播位置 → UI 叠加。
+                ClientEvent::ChannelData(cid, _, data)
+                    if live.endpoint.channel_label(cid).as_deref() == Some("cursor") =>
+                {
+                    if let Ok(pos) =
+                        serde_json::from_slice::<aerodesk_protocol::cursor::CursorPos>(&data)
+                        && let Some(fui) = ui_weak.upgrade()
+                    {
+                        fui.set_remote_cursor_x(pos.x as f32);
+                        fui.set_remote_cursor_y(pos.y as f32);
+                        fui.set_remote_cursor_visible(true);
                     }
                 }
                 ClientEvent::Closed => {
