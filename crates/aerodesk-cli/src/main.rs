@@ -71,10 +71,23 @@ fn main() {
 
     match role.as_str() {
         "publisher" if encoder == "screen" => {
-            if video_codec == Codec::H264 {
-                publisher_capture(&signal, &room, token.as_deref(), simulcast, audio, display)
+            let vt_capable = video_codec == Codec::H264
+                || (video_codec == Codec::Hevc
+                    && aerodesk_macos::vt_encoder::VtEncoder::hevc_encoder_available());
+            if vt_capable {
+                // #74 硬编优先：H264/H265 走 VideoToolbox 硬编（HEVC 无硬编
+                // 时探针失败回退 FFmpeg）。
+                publisher_capture(
+                    &signal,
+                    &room,
+                    token.as_deref(),
+                    simulcast,
+                    audio,
+                    display,
+                    video_codec,
+                )
             } else {
-                // #74：屏幕采集接 FFmpeg 多 codec（H265/VP9/AV1）。
+                // #74：VP9/AV1 或本机无 VT HEVC 时，屏幕采集走 FFmpeg 软编。
                 publisher_capture_ffmpeg(
                     &signal,
                     &room,
@@ -1378,6 +1391,7 @@ fn publisher_capture(
     simulcast: bool,
     audio: bool,
     initial_display: usize,
+    codec: Codec,
 ) {
     use aerodesk_macos::capture::ScreenCapture;
     use aerodesk_macos::vt_encoder::VtEncoder;
@@ -1386,9 +1400,22 @@ fn publisher_capture(
     const FPS: u32 = 30;
     const W: u32 = 1920;
     const H: u32 = 1080;
+    // core Codec -> videotoolbox Codec（仅 H264/HEVC 走此路径）。
+    use videotoolbox::Codec as VtCodec;
+    let vt_codec = match codec {
+        Codec::Hevc => VtCodec::HEVC,
+        _ => VtCodec::H264,
+    };
 
-    let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
-        connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio);
+    let (mut signal, mut endpoint, socket, video_mid, audio_mid) = connect_inner(
+        signal_url,
+        room,
+        Role::Publisher,
+        Some(codec),
+        simulcast,
+        audio,
+        auth,
+    );
     // #75 远程光标：真实光标位置（30Hz）。
     let mut last_cursor = Instant::now();
 
@@ -1408,7 +1435,7 @@ fn publisher_capture(
             let bps = if w >= 1280 { 8_000_000 } else { 4_000_000 };
             layers.push((
                 rid,
-                VtEncoder::new(w, h, FPS, bps).expect("vt encoder"),
+                VtEncoder::new_with_codec(w, h, FPS, bps, vt_codec).expect("vt encoder"),
                 capture,
             ));
         }
@@ -1436,7 +1463,7 @@ fn publisher_capture(
             };
             layers.push((
                 Some(Rid::from(*rid)),
-                VtEncoder::new(*w, *h, FPS, *bps).expect("vt encoder"),
+                VtEncoder::new_with_codec(*w, *h, FPS, *bps, vt_codec).expect("vt encoder"),
                 capture,
             ));
         }
@@ -1451,7 +1478,7 @@ fn publisher_capture(
         };
         layers.push((
             None,
-            VtEncoder::new(W, H, FPS, 8_000_000).expect("vt encoder"),
+            VtEncoder::new_with_codec(W, H, FPS, 8_000_000, vt_codec).expect("vt encoder"),
             capture,
         ));
     }
