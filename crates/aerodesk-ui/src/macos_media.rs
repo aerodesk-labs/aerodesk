@@ -5,7 +5,7 @@
 //! 替换演示帧源；其余平台仍走演示帧（等各自解码管线接入）。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use aerodesk_core::access_unit::AccessUnitAssembler;
@@ -42,6 +42,7 @@ pub fn run_viewer(
     control_rx: std::sync::mpsc::Receiver<String>,
     input_rx: std::sync::mpsc::Receiver<String>,
     file_cmd_rx: std::sync::mpsc::Receiver<FileCmd>,
+    muted: &'static AtomicBool,
     session_idx: usize,
 ) {
     let stale = || epoch.load(Ordering::SeqCst) != my_epoch;
@@ -102,6 +103,16 @@ pub fn run_viewer(
     let mut file_transfer =
         aerodesk_core::file_transfer::FileTransfer::new(Some(default_recv_dir()));
     let mut last_file_status = Instant::now();
+    // #73 音频播放 + A/V 同步：PCMU 解码 → jitter buffer → AudioSink（cpal）；
+    // 无输出设备时降级为仅统计。视频按音频时钟 pacing。
+    let mut avsync = aerodesk_core::avsync::AvSync::new();
+    let mut jitter = aerodesk_core::avsync::AudioJitterBuffer::new(0.08);
+    let audio_sink = aerodesk_macos::audio::AudioSink::new().ok();
+    let mut audio_played: u64 = 0;
+    let mut audio_dropped: u64 = 0;
+    let mut audio_buffered: usize = 0;
+    let mut last_audio = Instant::now();
+    let mut pending_frame: Option<(Vec<u8>, u32, u32, f64)> = None;
 
     while !stale() {
         live.socket
@@ -174,7 +185,25 @@ pub fn run_viewer(
             file_transfer.handle_event(&ev, &mut live.endpoint);
             match ev {
                 ClientEvent::Media(data) => {
-                    if let Some(mid) = live.video_mid
+                    // #58/#73 音频识别：SFU 转发时 mid 是 SFU 本地 mid，用协商
+                    // codec（PCMU）识别音频帧。
+                    if data.params.spec().codec == str0m::format::Codec::PCMU {
+                        last_audio = Instant::now();
+                        if muted.load(Ordering::SeqCst) {
+                            audio_dropped += 1;
+                        } else {
+                            let pcm = aerodesk_core::pcmu::pcmu_decode(&data.data);
+                            avsync.on_audio(data.time.numer(), data.time.denom());
+                            jitter.push(avsync.audio_time_secs(), pcm);
+                            while let Some(pcm) = jitter.pop(avsync.audio_time_secs()) {
+                                if let Some(sink) = &audio_sink {
+                                    sink.push_pcm(&pcm);
+                                }
+                                audio_played += 1;
+                            }
+                            audio_buffered = jitter.buffered();
+                        }
+                    } else if let Some(mid) = live.video_mid
                         && data.mid == mid
                         && let Some(au) = assembler.push(
                             data.data.as_ref(),
@@ -185,31 +214,10 @@ pub fn run_viewer(
                         if let Ok(Some(pixbuf)) = decoder.decode_annexb(&au.data, au.pts_us as i64)
                             && let Some((rgba, w, h)) = to_rgba(&pixbuf)
                         {
-                            let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
-                                &rgba, w as u32, h as u32,
-                            );
-                            let img = Image::from_rgba8(buffer);
-                            if let Some(fui) = ui_weak.upgrade() {
-                                // #75：视频源尺寸（letterbox 光标换算用）。
-                                fui.set_frame_w(w as f32);
-                                fui.set_frame_h(h as f32);
-                                // 更新本会话帧槽；当前标签同时更新显示帧。
-                                let mut arr: Vec<slint::Image> =
-                                    (0..fui.get_session_frames().row_count())
-                                        .filter_map(|i| fui.get_session_frames().row_data(i))
-                                        .collect();
-                                if arr.len() <= session_idx {
-                                    arr.resize(session_idx + 1, slint::Image::default());
-                                }
-                                arr[session_idx] = img.clone();
-                                fui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(
-                                    arr,
-                                )));
-                                if fui.get_active_session() == session_idx as i32 {
-                                    fui.set_video_frame(img);
-                                }
-                            }
-                            frames += 1;
+                            avsync.on_video(data.time.numer(), data.time.denom());
+                            // #73：先缓存最新帧，按音频时钟到点再渲染。
+                            pending_frame =
+                                Some((rgba, w as u32, h as u32, avsync.video_time_secs()));
                         }
                     }
                 }
@@ -234,6 +242,23 @@ pub fn run_viewer(
                     return;
                 }
                 _ => {}
+            }
+        }
+        // #73 A/V 同步渲染：音频活跃时视频不超前 >50ms；无音频时立即渲染兜底。
+        if let Some((rgba, w, h, vtime)) = pending_frame.take() {
+            let audio_active = last_audio.elapsed() < Duration::from_millis(500);
+            let due = !audio_active || avsync.audio_time_secs() + 0.05 >= vtime;
+            if due {
+                present_frame(
+                    &ui_weak,
+                    &rgba,
+                    w as usize,
+                    h as usize,
+                    session_idx,
+                    &mut frames,
+                );
+            } else {
+                pending_frame = Some((rgba, w, h, vtime));
             }
         }
         // #72 文件发送推进 + 远端剪贴板落地 + 进度回显（500ms 节流）。
@@ -279,13 +304,51 @@ pub fn run_viewer(
         }
         if last_stat.elapsed() >= Duration::from_secs(2) {
             if let Some(fui) = ui_weak.upgrade() {
-                fui.set_session_status(format!("会话中 · 真实 H.264 解码 · {frames} 帧/2s").into());
+                let audio = if muted.load(Ordering::SeqCst) {
+                    "音频已静音".to_string()
+                } else {
+                    format!("音频 {audio_played}帧 缓存{audio_buffered} 丢{audio_dropped}")
+                };
+                fui.set_session_status(format!("会话中 · H.264 {frames}帧/2s · {audio}").into());
             }
             frames = 0;
+            audio_played = 0;
+            audio_dropped = 0;
             last_stat = Instant::now();
         }
         std::thread::sleep(Duration::from_millis(1));
     }
+}
+
+/// 把一帧 RGBA 呈现到会话帧槽 + 当前显示帧（#73 抽出的渲染入口）。
+fn present_frame(
+    ui_weak: &slint::Weak<AppWindow>,
+    rgba: &[u8],
+    w: usize,
+    h: usize,
+    session_idx: usize,
+    frames: &mut u64,
+) {
+    let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(rgba, w as u32, h as u32);
+    let img = Image::from_rgba8(buffer);
+    if let Some(fui) = ui_weak.upgrade() {
+        // #75：视频源尺寸（letterbox 光标换算用）。
+        fui.set_frame_w(w as f32);
+        fui.set_frame_h(h as f32);
+        // 更新本会话帧槽；当前标签同时更新显示帧。
+        let mut arr: Vec<slint::Image> = (0..fui.get_session_frames().row_count())
+            .filter_map(|i| fui.get_session_frames().row_data(i))
+            .collect();
+        if arr.len() <= session_idx {
+            arr.resize(session_idx + 1, slint::Image::default());
+        }
+        arr[session_idx] = img.clone();
+        fui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(arr)));
+        if fui.get_active_session() == session_idx as i32 {
+            fui.set_video_frame(img);
+        }
+    }
+    *frames += 1;
 }
 
 #[cfg(test)]

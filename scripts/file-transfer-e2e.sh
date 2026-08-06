@@ -43,8 +43,9 @@ PUB_PID=$!
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/ftx-view.log 2>&1 &
 VIEW_PID=$!
 
-# 等待接收完成（默认最长 30s；大文件按尺寸放大等待窗口）
-WAIT_TICKS=$(( (SIZE_KB / 128 + 150) ))
+# 等待接收完成（默认最长 66s；大文件按尺寸放大等待窗口。
+# 2MB 在共享 CI 上偶发 >33s（补包一轮），窗口留足余量）
+WAIT_TICKS=$(( (SIZE_KB / 64 + 300) ))
 done=0
 for _ in $(seq 1 "$WAIT_TICKS"); do
     if grep -q "file receive complete" /tmp/ftx-view.log 2>/dev/null; then done=1; break; fi
