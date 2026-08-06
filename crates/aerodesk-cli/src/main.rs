@@ -414,6 +414,12 @@ fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
             if endpoint.channel_label(cid).as_deref() == Some("input") {
                 if let Ok(frame) = serde_json::from_slice::<InputFrame>(&data) {
                     info!("input: seq={} {:?}", frame.seq, frame.event);
+                    // #75：把 viewer 输入注入被控端（macOS CGEvent；无辅助功能
+                    // 权限时静默失败，但路径与日志可验证）。
+                    match aerodesk_macos::inject::inject(&frame.event) {
+                        Ok(()) => info!("inject: seq={} {:?}", frame.seq, frame.event),
+                        Err(e) => info!("inject failed: seq={} {:?}: {e}", frame.seq, frame.event),
+                    }
                 }
             } else if endpoint.channel_label(cid).as_deref() == Some("control") {
                 // #58 显示器切换：viewer → SFU → publisher（control 通道转发）。

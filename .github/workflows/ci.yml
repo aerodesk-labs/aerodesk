@@ -87,6 +87,11 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/codec-e2e.sh
 
+      # #75 输入注入：viewer 输入事件 → SFU → publisher 注入（macOS CGEvent）。
+      - name: e2e input injection (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/input-e2e.sh
+
       - name: windows adapter
         if: runner.os == 'Windows'
         run: cargo check -p aerodesk-windows
