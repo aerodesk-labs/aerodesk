@@ -20,3 +20,7 @@ tracing.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cpal = "0.15"
+
+[dev-dependencies]
+aerodesk-core = { path = "../aerodesk-core" }
+aerodesk-ffmpeg = { path = "../aerodesk-ffmpeg" }

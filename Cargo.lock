@@ -228,6 +228,8 @@ dependencies = [
 name = "aerodesk-macos"
 version = "0.1.0"
 dependencies = [
+ "aerodesk-core",
+ "aerodesk-ffmpeg",
  "aerodesk-protocol",
  "aerodesk-softenc",
  "apple-cf",
@@ -305,6 +307,7 @@ name = "aerodesk-ui"
 version = "0.1.0"
 dependencies = [
  "aerodesk-core",
+ "aerodesk-ffmpeg",
  "aerodesk-macos",
  "aerodesk-protocol",
  "getrandom 0.2.17",

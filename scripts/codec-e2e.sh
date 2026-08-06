@@ -39,10 +39,10 @@ for codec in h264 h265 vp9 av1; do
   kill "$PUB_PID" "$VIEW_PID" "$SFU_PID" "$SIG_PID" 2>/dev/null || true
   wait 2>/dev/null || true
 
-  if grep -qE "RECEIVED: [1-9]" "/tmp/codec-$codec-view.log"; then
-    echo "PASS codec=$codec viewer received frames"
+  if grep -qE "DECODED: [1-9]" "/tmp/codec-$codec-view.log"; then
+    echo "PASS codec=$codec viewer decoded frames (FFmpeg)"
   else
-    echo "FAIL codec=$codec"; tail -4 "/tmp/codec-$codec-view.log"; tail -4 "/tmp/codec-$codec-pub.log"; fail=1
+    echo "FAIL codec=$codec (no decoded frames)"; tail -4 "/tmp/codec-$codec-view.log"; tail -4 "/tmp/codec-$codec-pub.log"; fail=1
   fi
 done
 exit $fail

@@ -11,6 +11,7 @@ use apple_cf::cv::CVPixelBuffer;
 use apple_cf::raw::{
     CMBlockBufferCreateWithMemoryBlock, CMBlockBufferRef, CMFormatDescriptionRef,
     CMSampleBufferCreate, CMSampleBufferRef, CMVideoFormatDescriptionCreateFromH264ParameterSets,
+    CMVideoFormatDescriptionCreateFromHEVCParameterSets,
 };
 use videotoolbox::Codec;
 use videotoolbox::decompression::{DecodedFrame, DecompressionSession};
@@ -68,6 +69,33 @@ fn build_format_description(sps: &[u8], pps: &[u8]) -> Result<CMFormatDescriptio
     // apple_cf from_raw 不 retain——这里 Create 已 +1，直接包装（所有权转移）
     CMFormatDescription::from_raw(fmt_out.cast_mut().cast::<std::ffi::c_void>())
         .ok_or_else(|| "fmt desc null".to_string())
+}
+
+/// 从 VPS/SPS/PPS 构造 HEVC CMVideoFormatDescription。
+fn build_hevc_format_description(
+    vps: &[u8],
+    sps: &[u8],
+    pps: &[u8],
+) -> Result<CMFormatDescription, String> {
+    let mut fmt_out: CMFormatDescriptionRef = std::ptr::null();
+    let sets = [vps.as_ptr(), sps.as_ptr(), pps.as_ptr()];
+    let sizes = [vps.len(), sps.len(), pps.len()];
+    let status = unsafe {
+        CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+            std::ptr::null_mut(),
+            3,
+            sets.as_ptr(),
+            sizes.as_ptr(),
+            4, // NAL 长度前缀（AVCC 风格样本）
+            std::ptr::null_mut(),
+            &mut fmt_out,
+        )
+    };
+    if status != 0 || fmt_out.is_null() {
+        return Err(format!("hevc format description: {status}"));
+    }
+    CMFormatDescription::from_raw(fmt_out.cast_mut().cast::<std::ffi::c_void>())
+        .ok_or_else(|| "hevc fmt desc null".to_string())
 }
 
 /// 构造视频样本（AVCC 风格：4 字节长度前缀 + NAL）。
@@ -223,6 +251,113 @@ impl H264Decoder {
     }
 }
 
+/// H.265/HEVC 硬件解码器（VideoToolbox）。
+///
+/// 输入 AnnexB HEVC（str0m MediaData.data），输出 CVPixelBuffer。
+/// 关键帧（含 VPS/SPS/PPS）时重建 CMVideoFormatDescription。
+pub struct HevcDecoder {
+    session: Option<DecompressionSession>,
+    format: Option<CMFormatDescription>,
+    rx: mpsc::Receiver<DecodedFrame>,
+    pending: Option<(CMSampleBuffer, Vec<u8>)>,
+}
+
+impl Default for HevcDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HevcDecoder {
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        let _ = tx;
+        Self {
+            session: None,
+            format: None,
+            rx,
+            pending: None,
+        }
+    }
+
+    pub fn is_hardware_supported() -> bool {
+        DecompressionSession::is_hardware_decode_supported(Codec::HEVC)
+    }
+
+    /// 解码一帧 AnnexB HEVC。关键帧触发 format description 重建。
+    pub fn decode_annexb(
+        &mut self,
+        data: &[u8],
+        _pts: i64,
+    ) -> Result<Option<CVPixelBuffer>, String> {
+        // HEVC NAL type 在 6 位（payload[0] >> 1 & 0x3F）。
+        let nals: Vec<(u8, &[u8])> = parse_annexb_nal(data)
+            .into_iter()
+            .filter(|(_, payload)| !payload.is_empty())
+            .map(|(_, payload)| ((payload[0] >> 1) & 0x3F, payload))
+            .collect();
+        if nals.is_empty() {
+            return Ok(None);
+        }
+
+        let mut vps: Option<&[u8]> = None;
+        let mut sps: Option<&[u8]> = None;
+        let mut pps: Option<&[u8]> = None;
+        for (ty, payload) in &nals {
+            match ty {
+                32 => vps = Some(payload),
+                33 => sps = Some(payload),
+                34 => pps = Some(payload),
+                _ => {}
+            }
+        }
+
+        // 关键帧（VPS/SPS/PPS 齐）：重建 format description + session。
+        if let (Some(vps), Some(sps), Some(pps)) = (vps, sps, pps) {
+            let fmt = build_hevc_format_description(vps, sps, pps)?;
+            let (tx, rx) = mpsc::channel();
+            let session = DecompressionSession::new(&fmt, move |frame: DecodedFrame| {
+                let _ = tx.send(frame);
+            })
+            .map_err(|e| format!("hevc decompress session: {e:?}"))?;
+            self.format = Some(fmt);
+            self.session = Some(session);
+            self.rx = rx;
+        }
+
+        // AVCC 化 VCL NAL（0..=31）。VPS/SPS/PPS 已在 format description 中；
+        // AUD/SEI 等非 VCL（>=32）必须剔除（同 H.264 经验）。
+        let mut avcc = Vec::with_capacity(data.len() + 8);
+        for (ty, payload) in &nals {
+            if *ty > 31 {
+                continue;
+            }
+            let len = (payload.len() as u32).to_be_bytes();
+            avcc.extend_from_slice(&len);
+            avcc.extend_from_slice(payload);
+        }
+
+        let Some(session) = &self.session else {
+            return Ok(None); // 等关键帧
+        };
+        let Some(format) = &self.format else {
+            return Ok(None);
+        };
+
+        let sample = build_sample_buffer(format, &avcc, _pts)?;
+        self.pending = Some((sample, avcc));
+        let (sample, _) = self.pending.as_ref().unwrap();
+        session
+            .decode(sample)
+            .map_err(|e| format!("hevc decode: {e:?}"))?;
+
+        match self.rx.recv_timeout(std::time::Duration::from_millis(2000)) {
+            Ok(frame) => Ok(frame.image_buffer),
+            Err(_) => Ok(None),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +409,41 @@ mod tests {
         assert_eq!(
             decoded_frames, 8,
             "expected all 8 frames decoded, got {decoded_frames}"
+        );
+    }
+
+    /// H.265 硬解回环：#74 FFmpeg(x265) 软编 → HevcDecoder(VT 硬解) → RGBA。
+    #[test]
+    fn hevc_vt_decodes_ffmpeg_annexb() {
+        use crate::synthetic::SyntheticSource;
+        use aerodesk_core::media_pipeline::Codec;
+        use aerodesk_ffmpeg::encode::FfmpegEncoder;
+
+        if !HevcDecoder::is_hardware_supported() {
+            eprintln!("skip: 本机无 HEVC 硬解");
+            return;
+        }
+        let (w, h) = (320u32, 180u32);
+        let mut enc = FfmpegEncoder::new(w, h, 30, 1_000_000, Codec::Hevc).expect("x265 encoder");
+        enc.request_keyframe();
+        let mut src = SyntheticSource::new(w, h);
+        let mut decoder = HevcDecoder::new();
+        let mut decoded = None;
+        for _ in 0..40 {
+            let Some(unit) = enc.encode_bgra(&src.next_frame_bgra()).expect("encode") else {
+                continue; // x265 内部缓冲，等包产出
+            };
+            if let Ok(Some(buf)) = decoder.decode_annexb(&unit.data, 0) {
+                decoded = Some(buf);
+                break;
+            }
+        }
+        let buf = decoded.expect("应在若干帧内解出 HEVC 像素缓冲");
+        let (rgba, dw, dh) = to_rgba(&buf).expect("rgba 转换");
+        assert_eq!((dw, dh), (w as usize, h as usize));
+        assert!(
+            rgba.chunks_exact(4).any(|p| p[3] == 255),
+            "alpha 应全不透明"
         );
     }
 
