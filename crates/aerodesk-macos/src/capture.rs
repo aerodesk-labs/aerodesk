@@ -79,3 +79,22 @@ impl ScreenCapture {
         self.config.height()
     }
 }
+
+/// 从 IOSurface 读取 BGRA 像素（按 bytes_per_row 行复制），供软件编码路径使用。
+pub fn surface_to_bgra(surface: &IOSurface, w: u32, h: u32) -> Result<Vec<u8>, String> {
+    use screencapturekit::cm::IOSurfaceLockOptions;
+    let guard = surface
+        .lock(IOSurfaceLockOptions::READ_ONLY)
+        .map_err(|e| format!("iosurface lock: {e}"))?;
+    let bpr = guard.bytes_per_row();
+    let base = guard.base_address();
+    let mut bgra = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h as usize {
+        let src = unsafe { base.add(y * bpr) };
+        let dst = &mut bgra[y * (w as usize) * 4..(y + 1) * (w as usize) * 4];
+        unsafe {
+            std::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), dst.len());
+        }
+    }
+    Ok(bgra)
+}

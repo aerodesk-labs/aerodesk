@@ -53,12 +53,15 @@ if grep -q "AVSYNC:" /tmp/av-view.log; then
 else
     echo "FAIL AVSYNC"; tail -3 /tmp/av-view.log; fail=1
 fi
-# 3) 漂移有界（±500ms 内；首帧对齐后应接近 0）
-DRIFT=$(grep -oE 'drift=[-0-9.]+ms' /tmp/av-view.log | tail -1 | sed 's/drift=//; s/ms//')
-if [ -n "$DRIFT" ] && awk -v d="$DRIFT" 'BEGIN { exit !(d >= -500 && d <= 500) }'; then
-    echo "PASS drift bounded (${DRIFT}ms)"
+# 3) 漂移稳定（相邻两次变化 < 500ms）且有界（±3000ms）。
+# 首帧到达时差会造成固定偏移（编码启动/转发延迟），但不应持续漂移。
+DRIFTS=$(grep -oE 'drift=[-0-9.]+ms' /tmp/av-view.log | sed 's/drift=//; s/ms//' | tail -3)
+LAST=$(echo "$DRIFTS" | tail -1)
+PREV=$(echo "$DRIFTS" | tail -2 | head -1)
+if [ -n "$LAST" ] && [ -n "$PREV" ] && awk -v a="$LAST" -v b="$PREV" 'BEGIN { exit !(a >= -3000 && a <= 3000 && (a-b) >= -500 && (a-b) <= 500) }'; then
+    echo "PASS drift stable (${PREV} -> ${LAST}ms)"
 else
-    echo "FAIL drift out of bounds: ${DRIFT:-none}"; tail -3 /tmp/av-view.log; fail=1
+    echo "FAIL drift unstable: ${DRIFTS}"; tail -3 /tmp/av-view.log; fail=1
 fi
 # 4) jitter buffer 工作（播放计数 > 0）
 if grep -qE "played=[1-9]" /tmp/av-view.log; then

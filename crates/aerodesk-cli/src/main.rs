@@ -70,7 +70,19 @@ fn main() {
 
     match role.as_str() {
         "publisher" if encoder == "screen" => {
-            publisher_capture(&signal, &room, token.as_deref(), simulcast, audio, display)
+            if video_codec == Codec::H264 {
+                publisher_capture(&signal, &room, token.as_deref(), simulcast, audio, display)
+            } else {
+                // #74：屏幕采集接 FFmpeg 多 codec（H265/VP9/AV1）。
+                publisher_capture_ffmpeg(
+                    &signal,
+                    &room,
+                    token.as_deref(),
+                    audio,
+                    video_codec,
+                    display,
+                )
+            }
         }
         "publisher" if encoder == "vt" => {
             let w: u32 = arg(&args, "--width")
@@ -1152,6 +1164,121 @@ fn publisher_ffmpeg(signal_url: &str, room: &str, auth: Option<&str>, audio: boo
 /// 真实屏幕采集发布端：ScreenCaptureKit → VideoToolbox 硬编（零拷贝）→ SFU。
 /// 需要屏幕录制权限（TCC）。`--simulcast`：q/h/f 三层各一路 SCK 采集 + 硬编，
 /// 分辨率越低开销越小，选层切换立即生效。
+/// 屏幕采集 + FFmpeg 多 codec（#74）：ScreenCaptureKit → IOSurface → BGRA →
+/// FfmpegEncoder（H265/VP9/AV1）。H.264 走原 VtEncoder 零拷贝路径。
+/// 需要屏幕录制权限（TCC）。
+fn publisher_capture_ffmpeg(
+    signal_url: &str,
+    room: &str,
+    auth: Option<&str>,
+    audio: bool,
+    codec: Codec,
+    initial_display: usize,
+) {
+    use aerodesk_ffmpeg::encode::FfmpegEncoder;
+    use aerodesk_macos::capture::ScreenCapture;
+
+    const W: u32 = 1920;
+    const H: u32 = 1080;
+    const FPS: u32 = 30;
+
+    let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
+        connect_codec(signal_url, room, Role::Publisher, auth, audio, codec);
+    let mut capture = match ScreenCapture::start(initial_display, FPS, W, H) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("screen capture init failed: {e}");
+            info!("grant Screen Recording permission in System Settings > Privacy & Security");
+            return;
+        }
+    };
+    let mut encoder = FfmpegEncoder::new(W, H, FPS, 8_000_000, codec).expect("ffmpeg encoder");
+    let mut connected = false;
+    let mut audio_ticker = AudioTicker::new();
+    let mut pts = 0i64;
+
+    loop {
+        let wait = Duration::from_millis(5);
+        socket.set_read_timeout(Some(wait)).ok();
+        let mut buf = [0u8; 2000];
+        if let Ok((n, source)) = socket.recv_from(&mut buf)
+            && let Ok(contents) = buf[..n].try_into()
+        {
+            let input = Input::Receive(
+                Instant::now(),
+                Receive {
+                    proto: Protocol::Udp,
+                    source,
+                    destination: socket.local_addr().unwrap(),
+                    contents,
+                },
+            );
+            let _ = endpoint.handle_input(input);
+        }
+        let _ = endpoint.handle_timeout(Instant::now());
+
+        let mut deadline = Instant::now() + Duration::from_secs(1);
+        while let Some(output) = endpoint.poll_output() {
+            match output {
+                Output::Transmit(t) => {
+                    let _ = socket.send_to(&t.contents, t.destination);
+                }
+                Output::Timeout(t) => {
+                    deadline = deadline.min(t);
+                    break;
+                }
+                Output::Event(_) => {}
+            }
+        }
+
+        while let Some(ev) = endpoint.poll_event() {
+            match ev {
+                ClientEvent::IceConnected => {
+                    info!("ICE connected, starting screen+ffmpeg stream (codec={codec:?})");
+                    connected = true;
+                }
+                ClientEvent::Closed => {
+                    info!("connection closed");
+                    return;
+                }
+                ClientEvent::KeyframeRequest(_) => {
+                    encoder.request_keyframe();
+                }
+                ev => handle_publisher_input(&mut endpoint, ev),
+            }
+        }
+
+        if let Some(amid) = audio_mid {
+            audio_ticker.tick(&mut endpoint, amid, Instant::now());
+        }
+        file_transfer::tick(&mut endpoint);
+
+        if connected && let Some(surface) = capture.next_frame(Duration::from_millis(50)) {
+            // IOSurface（BGRA）→ 行复制到 CPU 缓冲 → FFmpeg 编码。
+            let bgra = match aerodesk_macos::capture::surface_to_bgra(&surface, W, H) {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!("surface read failed: {e}");
+                    continue;
+                }
+            };
+            if let Some(unit) = encoder.encode_bgra(&bgra).expect("encode_bgra") {
+                let rtp_time = str0m::media::MediaTime::new(
+                    pts as u64 * 3000,
+                    str0m::media::Frequency::NINETY_KHZ,
+                );
+                if let Err(e) = endpoint.send_video_frame(video_mid, unit.data, rtp_time) {
+                    warn!("send frame failed: {e:?}");
+                }
+            }
+            pts += 1;
+        }
+
+        std::thread::sleep(Duration::from_millis(2));
+        let _ = &mut signal;
+    }
+}
+
 fn publisher_capture(
     signal_url: &str,
     room: &str,

@@ -41,6 +41,8 @@ fn encoder_names(codec: Codec) -> (&'static [&'static str], ffmpeg_next::codec::
 pub struct FfmpegEncoder {
     encoder: ffmpeg_next::encoder::Video,
     scaler: ScalingContext,
+    /// BGRA → YUV420P（屏幕采集 IOSurface 输入，见 encode_bgra）。
+    bgra_scaler: ScalingContext,
     width: u32,
     height: u32,
     fps: u32,
@@ -124,9 +126,19 @@ impl FfmpegEncoder {
             height,
             ScalingFlags::BILINEAR,
         )?;
+        let bgra_scaler = ScalingContext::get(
+            Pixel::BGRA,
+            width,
+            height,
+            Pixel::YUV420P,
+            width,
+            height,
+            ScalingFlags::BILINEAR,
+        )?;
         Ok(Self {
             encoder,
             scaler,
+            bgra_scaler,
             width,
             height,
             fps,
@@ -163,6 +175,41 @@ impl FfmpegEncoder {
         self.pts += 1;
 
         // 排空所有已产出包（编码器延迟帧会在此补出），按序返回。
+        let mut packet = Packet::empty();
+        while let Ok(()) = self.encoder.receive_packet(&mut packet) {
+            self.pending.push_back(EncodedUnit {
+                data: packet.data().unwrap_or(&[]).to_vec(),
+                keyframe: packet.is_key(),
+                pts_ms: 0,
+                rtp_timestamp: 0,
+            });
+        }
+        Ok(self.pending.pop_front())
+    }
+
+    /// 编码一帧 BGRA32（屏幕采集 IOSurface 读取结果），返回编码包。
+    pub fn encode_bgra(&mut self, bgra: &[u8]) -> Result<Option<EncodedUnit>, String> {
+        if bgra.len() != (self.width * self.height * 4) as usize {
+            return Err("bgra size mismatch".into());
+        }
+        let mut src = Video::new(Pixel::BGRA, self.width, self.height);
+        unsafe {
+            std::ptr::copy_nonoverlapping(bgra.as_ptr(), src.data_mut(0).as_mut_ptr(), bgra.len());
+        }
+        src.set_pts(Some(self.pts));
+        if self.keyframe_pending {
+            src.set_kind(ffmpeg::picture::Type::I);
+            self.keyframe_pending = false;
+        }
+        let mut yuv = Video::empty();
+        self.bgra_scaler
+            .run(&src, &mut yuv)
+            .map_err(|e| format!("scale: {e}"))?;
+        yuv.set_pts(src.pts());
+        self.encoder
+            .send_frame(&yuv)
+            .map_err(|e| format!("send_frame: {e}"))?;
+        self.pts += 1;
         let mut packet = Packet::empty();
         while let Ok(()) = self.encoder.receive_packet(&mut packet) {
             self.pending.push_back(EncodedUnit {
