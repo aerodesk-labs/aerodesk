@@ -42,17 +42,20 @@ jobs:
       # （MSVC 构建，含 include/ + lib/*.lib + bin/*.dll；BtbN 为 MinGW
       # GNU ar 导入库，MSVC link.exe 无法消费），设 FFMPEG_DIR 供 build.rs
       # 使用，并把 bin 加进 PATH 供回环测试运行时加载 DLL。
+      # 注意：windows-latest 自 2024 起不再预装 7-Zip（actions/runner-images#9361），
+      # 因此显式下载 7zr.exe（7-Zip 独立命令行，仅解 7z，无需安装）。
       - name: System deps (Windows FFmpeg dev libs)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $ProgressPreference = 'SilentlyContinue'
           $url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z"
           $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.7z"
           Invoke-WebRequest -Uri $url -OutFile $zip
           $dest = Join-Path $env:RUNNER_TEMP "ffmpeg"
-          $7z = "C:\Program Files\7-Zip\7z.exe"
-          if (-not (Test-Path $7z)) { $7z = "7z" }
-          & $7z x $zip "-o$dest" -y | Out-Null
+          $sevenZip = Join-Path $env:RUNNER_TEMP "7zr.exe"
+          Invoke-WebRequest -Uri "https://www.7-zip.org/a/7zr.exe" -OutFile $sevenZip
+          & $sevenZip x $zip "-o$dest" -y | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "7z extract failed" }
           $root = (Get-ChildItem $dest -Directory | Select-Object -First 1).FullName
           Add-Content $env:GITHUB_ENV "FFMPEG_DIR=$root"
