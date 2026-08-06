@@ -102,9 +102,16 @@ pub struct AudioSink {
 }
 
 impl AudioSink {
-    /// 打开默认输出设备并启动播放。无设备/格式不支持时返回 Err。
+    /// 打开默认输出设备并启动播放（PCMU 8kHz 输入）。无设备/格式不支持时返回 Err。
     #[cfg(target_os = "macos")]
     pub fn new() -> Result<Self, String> {
+        Self::new_with_rate(8000)
+    }
+
+    /// 打开默认输出设备并启动播放，输入 PCM 采样率可指定（#73：
+    /// PCMU=8000，Opus=48000）。无设备/格式不支持时返回 Err。
+    #[cfg(target_os = "macos")]
+    pub fn new_with_rate(in_rate: u32) -> Result<Self, String> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
@@ -114,7 +121,11 @@ impl AudioSink {
             .map_err(|e| format!("default output config: {e}"))?;
         let out_rate = config.sample_rate().0;
         let out_channels = config.channels();
-        let state = Arc::new(Mutex::new(Resampler::new(8000, out_rate, out_channels)));
+        let state = Arc::new(Mutex::new(Resampler::new(
+            in_rate.max(1),
+            out_rate,
+            out_channels,
+        )));
         let muted = Arc::new(AtomicBool::new(false));
         let stream_config: cpal::StreamConfig = config.clone().into();
 
@@ -161,7 +172,7 @@ impl AudioSink {
         })
     }
 
-    /// 写入一段 8kHz PCM（PCMU 解码输出）。
+    /// 写入一段 PCM（PCMU 8kHz / Opus 48kHz，按创建时输入采样率）。
     pub fn push_pcm(&self, pcm: &[i16]) {
         if let Ok(mut st) = self.state.lock() {
             st.push(pcm);

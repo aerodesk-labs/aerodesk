@@ -49,6 +49,8 @@ fn main() {
     let noisy = args.iter().any(|a| a == "--noisy");
     // #58 音频：publisher 发送合成 PCMU 音频 / viewer 接收；--mute-audio 观看端静音。
     let audio = args.iter().any(|a| a == "--audio");
+    // #73 音频：--audio-opus 使用 Opus（48kHz）替代 PCMU（8kHz）。
+    let audio_opus = args.iter().any(|a| a == "--audio-opus");
     let mute_audio = args.iter().any(|a| a == "--mute-audio");
     // #58 显示器：publisher 初始采集显示器 / viewer 请求切换（--display N，0 = 主显示器）。
     let display: usize = arg(&args, "--display")
@@ -83,6 +85,7 @@ fn main() {
                     token.as_deref(),
                     simulcast,
                     audio,
+                    audio_opus,
                     display,
                     video_codec,
                 )
@@ -93,6 +96,7 @@ fn main() {
                     &room,
                     token.as_deref(),
                     audio,
+                    audio_opus,
                     video_codec,
                     display,
                 )
@@ -124,15 +128,27 @@ fn main() {
                 simulcast,
                 noisy,
                 audio,
+                audio_opus,
             );
         }
-        "publisher" if encoder == "ffmpeg" => {
-            publisher_ffmpeg(&signal, &room, token.as_deref(), audio, video_codec)
-        }
-        "publisher" if encoder == "x264" => {
-            publisher_x264(&signal, &room, token.as_deref(), simulcast, noisy, audio)
-        }
-        "publisher" => publisher(&signal, &room, token.as_deref(), audio),
+        "publisher" if encoder == "ffmpeg" => publisher_ffmpeg(
+            &signal,
+            &room,
+            token.as_deref(),
+            audio,
+            audio_opus,
+            video_codec,
+        ),
+        "publisher" if encoder == "x264" => publisher_x264(
+            &signal,
+            &room,
+            token.as_deref(),
+            simulcast,
+            noisy,
+            audio,
+            audio_opus,
+        ),
+        "publisher" => publisher(&signal, &room, token.as_deref(), audio, audio_opus),
         "viewer" => viewer(
             &signal,
             &room,
@@ -388,39 +404,94 @@ fn drain_payload_queue(endpoint: &mut Endpoint, n: usize) {
     }
 }
 
-/// #58 音频节拍器：8kHz 单声道合成正弦（440Hz）→ PCMU，20ms/帧。
+/// #73 音频发送 codec：PCMU（8kHz 电话级）或 Opus（48kHz 高音质）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioCodec {
+    Pcmu,
+    Opus,
+}
+
+/// #58/#73 音频节拍器：合成正弦（440Hz）→ PCMU（8kHz）/ Opus（48kHz），20ms/帧。
 struct AudioTicker {
     next: Instant,
     pts: u64,
     phase: u32,
+    codec: AudioCodec,
+    /// Opus 编码器（首次发帧时惰性创建；libopus 缺失时回退 PCMU）。
+    opus: Option<aerodesk_ffmpeg::audio::OpusEncoder>,
 }
 
 impl AudioTicker {
-    fn new() -> Self {
+    fn new(audio_opus: bool) -> Self {
         Self {
             next: Instant::now(),
             pts: 0,
             phase: 0,
+            codec: if audio_opus {
+                AudioCodec::Opus
+            } else {
+                AudioCodec::Pcmu
+            },
+            opus: None,
         }
     }
 
-    /// 到点则补发若干 20ms PCMU 帧（8kHz：每帧 160 样本）。
+    /// 到点则补发若干 20ms 音频帧（PCMU 160 样本 / Opus 960 样本）。
     fn tick(&mut self, endpoint: &mut Endpoint, mid: str0m::media::Mid, now: Instant) {
         if self.next > now {
             return;
         }
         while self.next <= now {
-            let mut samples = [0i16; 160];
-            for s in &mut samples {
-                let t = self.phase as f64 / 8000.0;
-                *s = ((t * 440.0 * std::f64::consts::TAU).sin() * 8000.0) as i16;
-                self.phase = self.phase.wrapping_add(1);
-            }
-            let data = aerodesk_core::pcmu::pcmu_encode(&samples);
-            let rtp_time =
-                str0m::media::MediaTime::new(self.pts * 160, str0m::media::Frequency::EIGHT_KHZ);
-            if let Err(e) = endpoint.send_audio_frame(mid, data, rtp_time) {
-                warn!("send audio failed: {e:?}");
+            match self.codec {
+                AudioCodec::Pcmu => {
+                    let mut samples = [0i16; 160];
+                    for s in &mut samples {
+                        let t = self.phase as f64 / 8000.0;
+                        *s = ((t * 440.0 * std::f64::consts::TAU).sin() * 8000.0) as i16;
+                        self.phase = self.phase.wrapping_add(1);
+                    }
+                    let data = aerodesk_core::pcmu::pcmu_encode(&samples);
+                    let rtp_time = str0m::media::MediaTime::new(
+                        self.pts * 160,
+                        str0m::media::Frequency::EIGHT_KHZ,
+                    );
+                    if let Err(e) = endpoint.send_audio_frame(mid, data, rtp_time) {
+                        warn!("send audio failed: {e:?}");
+                    }
+                }
+                AudioCodec::Opus => {
+                    // 惰性初始化：libopus 不可用（ffmpeg 未编译）时回退 PCMU。
+                    if self.opus.is_none() {
+                        match aerodesk_ffmpeg::audio::OpusEncoder::new(64_000) {
+                            Ok(enc) => self.opus = Some(enc),
+                            Err(err) => {
+                                warn!("opus encoder init failed, fallback PCMU: {err}");
+                                self.codec = AudioCodec::Pcmu;
+                                self.phase = 0;
+                                return;
+                            }
+                        }
+                    }
+                    let mut samples = [0i16; 960];
+                    for s in &mut samples {
+                        let t = self.phase as f64 / 48_000.0;
+                        *s = ((t * 440.0 * std::f64::consts::TAU).sin() * 8000.0) as i16;
+                        self.phase = self.phase.wrapping_add(1);
+                    }
+                    let data = self
+                        .opus
+                        .as_mut()
+                        .and_then(|enc| enc.encode(&samples).ok().flatten());
+                    if let Some(data) = data {
+                        let rtp_time = str0m::media::MediaTime::new(
+                            self.pts * 960,
+                            str0m::media::Frequency::FORTY_EIGHT_KHZ,
+                        );
+                        if let Err(e) = endpoint.send_audio_frame_opus(mid, data, rtp_time) {
+                            warn!("send opus audio failed: {e:?}");
+                        }
+                    }
+                }
             }
             self.pts += 1;
             self.next += Duration::from_millis(20);
@@ -483,7 +554,7 @@ fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
     }
 }
 
-fn publisher(signal_url: &str, room: &str, auth: Option<&str>, audio: bool) {
+fn publisher(signal_url: &str, room: &str, auth: Option<&str>, audio: bool, audio_opus: bool) {
     let pcap = include_bytes!("../../../crates/aerodesk-core/tests/data/vp8.pcap");
     let frames = parse_vp8_pcap(pcap);
     info!("loaded {} VP8 frames from pcap", frames.len());
@@ -491,7 +562,7 @@ fn publisher(signal_url: &str, room: &str, auth: Option<&str>, audio: bool) {
     let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
         connect(signal_url, room, Role::Publisher, auth, audio);
     let mut connected = false;
-    let mut audio_ticker = AudioTicker::new();
+    let mut audio_ticker = AudioTicker::new(audio_opus);
     let mut frame_idx = 0usize;
     let mut last_frame_time = Instant::now();
     let mut next_deadline = Instant::now() + Duration::from_millis(100);
@@ -655,6 +726,8 @@ fn viewer(
     // #74 解码端验证：FFmpeg 软解全部 codec（H264/H265/VP9/AV1），codec-e2e 断言。
     let mut video_decoder: Option<aerodesk_ffmpeg::decode::FfmpegDecoder> = None;
     let mut decoded_frames: u64 = 0;
+    // #73 Opus 音频：libopus 解码（惰性创建；不可用时降级为仅统计）。
+    let mut opus_decoder: Option<aerodesk_ffmpeg::audio::OpusDecoder> = None;
 
     loop {
         let wait = Duration::from_millis(50);
@@ -702,9 +775,9 @@ fn viewer(
             file_transfer::handle_event(&ev, &mut endpoint);
             match ev {
                 ClientEvent::Media(data) => {
-                    // #58 音频识别：SFU 转发时 RTP mid 扩展用 SFU 本地 mid（与
+                    // #58/#73 音频识别：SFU 转发时 RTP mid 扩展用 SFU 本地 mid（与
                     // viewer 协商的 mid 不同，视频/音频都一样），不能按 mid 过滤；
-                    // 用协商 codec（PCMU）识别音频帧。
+                    // 用协商 codec（PCMU/Opus）识别音频帧。
                     if data.params.spec().codec == str0m::format::Codec::PCMU {
                         // 静音时丢弃（若接播放设备则无声）。
                         if audio_muted {
@@ -715,6 +788,26 @@ fn viewer(
                             // #73：解码 → 入 jitter buffer（目标延迟 80ms），
                             // 以音频时间轴为 now 弹出（模拟播放时钟）。
                             let pcm = aerodesk_core::pcmu::pcmu_decode(&data.data);
+                            avsync.on_audio(data.time.numer(), data.time.denom());
+                            jitter.push(avsync.audio_time_secs(), pcm);
+                            while let Some(_f) = jitter.pop(avsync.audio_time_secs()) {
+                                audio_played += 1;
+                            }
+                        }
+                    } else if data.params.spec().codec == str0m::format::Codec::Opus {
+                        // #73 Opus（48kHz）：解码 → 同一 jitter buffer/时间轴。
+                        if audio_muted {
+                            dropped_audio_frames += 1;
+                        } else {
+                            audio_frames += 1;
+                            audio_bytes += data.data.len() as u64;
+                            if opus_decoder.is_none() {
+                                opus_decoder = aerodesk_ffmpeg::audio::OpusDecoder::new().ok();
+                            }
+                            let pcm = opus_decoder
+                                .as_mut()
+                                .and_then(|dec| dec.decode(&data.data).ok().flatten())
+                                .unwrap_or_default();
                             avsync.on_audio(data.time.numer(), data.time.denom());
                             jitter.push(avsync.audio_time_secs(), pcm);
                             while let Some(_f) = jitter.pop(avsync.audio_time_secs()) {
@@ -867,6 +960,7 @@ fn publisher_x264(
     simulcast: bool,
     noisy: bool,
     audio: bool,
+    audio_opus: bool,
 ) {
     use aerodesk_macos::synthetic::SyntheticSource;
     use aerodesk_softenc::encode::X264Encoder;
@@ -908,7 +1002,7 @@ fn publisher_x264(
     };
 
     let mut connected = false;
-    let mut audio_ticker = AudioTicker::new();
+    let mut audio_ticker = AudioTicker::new(audio_opus);
     let mut next_frame = Instant::now();
     let mut pts = 0i64;
 
@@ -1021,6 +1115,7 @@ fn publisher_vt(
     simulcast: bool,
     noisy: bool,
     audio: bool,
+    audio_opus: bool,
 ) {
     let VideoParams {
         width,
@@ -1067,7 +1162,7 @@ fn publisher_vt(
         layers.len()
     );
     let mut connected = false;
-    let mut audio_ticker = AudioTicker::new();
+    let mut audio_ticker = AudioTicker::new(audio_opus);
     let mut next_frame = Instant::now();
     let mut pts = 0i64;
     let pts_inc = 90_000 / fps.max(1) as i64;
@@ -1158,7 +1253,14 @@ fn publisher_vt(
 }
 /// FFmpeg 发布端（#74）：合成 RGB → FfmpegEncoder（H264/H265/VP9/AV1）→ SFU。
 /// `--codec h264|h265|vp9|av1` 选择编码格式；AV1(SVT) 有 ~1s 编码延迟。
-fn publisher_ffmpeg(signal_url: &str, room: &str, auth: Option<&str>, audio: bool, codec: Codec) {
+fn publisher_ffmpeg(
+    signal_url: &str,
+    room: &str,
+    auth: Option<&str>,
+    audio: bool,
+    audio_opus: bool,
+    codec: Codec,
+) {
     use aerodesk_macos::synthetic::SyntheticSource;
 
     const W: u32 = 640;
@@ -1170,7 +1272,7 @@ fn publisher_ffmpeg(signal_url: &str, room: &str, auth: Option<&str>, audio: boo
     let mut encoder = FfmpegEncoder::new(W, H, FPS, 1_500_000, codec).expect("ffmpeg encoder");
     let mut source = SyntheticSource::new(W, H);
     let mut connected = false;
-    let mut audio_ticker = AudioTicker::new();
+    let mut audio_ticker = AudioTicker::new(audio_opus);
     let mut next_frame = Instant::now();
     let mut pts = 0i64;
 
@@ -1267,6 +1369,7 @@ fn publisher_capture_ffmpeg(
     room: &str,
     auth: Option<&str>,
     audio: bool,
+    audio_opus: bool,
     codec: Codec,
     initial_display: usize,
 ) {
@@ -1289,7 +1392,7 @@ fn publisher_capture_ffmpeg(
     };
     let mut encoder = FfmpegEncoder::new(W, H, FPS, 8_000_000, codec).expect("ffmpeg encoder");
     let mut connected = false;
-    let mut audio_ticker = AudioTicker::new();
+    let mut audio_ticker = AudioTicker::new(audio_opus);
     let mut pts = 0i64;
     // #75 远程光标：真实光标位置（30Hz）。
     let mut last_cursor = Instant::now();
@@ -1390,6 +1493,7 @@ fn publisher_capture(
     auth: Option<&str>,
     simulcast: bool,
     audio: bool,
+    audio_opus: bool,
     initial_display: usize,
     codec: Codec,
 ) {
@@ -1484,7 +1588,7 @@ fn publisher_capture(
     }
 
     let mut connected = false;
-    let mut audio_ticker = AudioTicker::new();
+    let mut audio_ticker = AudioTicker::new(audio_opus);
     let mut pts = 0i64;
     let pts_inc = 90_000 / FPS as i64;
 

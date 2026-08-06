@@ -72,6 +72,11 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/audio-e2e.sh
 
+      # #73 Opus 48kHz：publisher --audio-opus（libopus）→ SFU → viewer 收帧。
+      - name: e2e opus audio pipeline (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/opus-e2e.sh
+
       # #58 显示器切换：viewer --display N → SFU control 转发 → publisher（控制链路）。
       - name: e2e display switch control path (macOS only)
         if: runner.os == 'macOS'

@@ -54,12 +54,13 @@ cargo run -p aerodesk-cli -- --role publisher --encoder x264 --simulcast --noisy
 # 观看端（--layer q|h|f 显式选层；--audio 接收音频，--mute-audio 静音）
 cargo run -p aerodesk-cli -- --role viewer --layer f --audio
 
-# 音频：publisher --audio 发送合成 PCMU（G.711 8kHz）；真实系统音频采集待真机接入
+# 音频：publisher --audio 发送合成 PCMU（G.711 8kHz）；--audio-opus 用 Opus（48kHz，libopus）
+#       （#73）；真实系统音频采集待真机接入
 # 显示器：publisher --display N 初始采集；viewer --display N 经 control 切换被控端显示器
 # 文件传输：publisher --send-file <path>；对端 --recv-dir <dir> 接收（data channel，SHA-256 校验）
 # 多 codec：#74 --encoder ffmpeg --codec h264|h265|vp9|av1（FFmpeg，硬编优先；AV1 有 ~1s 编码延迟）
 # 输入注入：#75 viewer 输入 → SFU → publisher macOS CGEvent（坐标归一化→屏幕点，Wheel/修饰键/完整键码）
-# A/V 同步：#73 viewer AVSYNC 时间轴/漂移统计 + 音频 jitter buffer（真实播放待真机）
+# A/V 同步：#73 viewer AVSYNC 时间轴/漂移统计 + 音频 jitter buffer（PCMU/Opus 真实播放 macOS 已通）
 
 # 浏览器：https://<host>:3000/?role=publisher|viewer
 ```
