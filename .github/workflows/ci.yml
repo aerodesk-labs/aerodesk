@@ -82,6 +82,11 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/file-transfer-e2e.sh
 
+      # #72 剪贴板双向同步：viewer→publisher 与 publisher→viewer 两个方向。
+      - name: e2e clipboard sync (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/clipboard-e2e.sh
+
       # #74 多 codec（H264/H265/VP9/AV1）：--encoder ffmpeg --codec → SFU → viewer 收帧。
       - name: e2e multi-codec (macOS only)
         if: runner.os == 'macOS'

@@ -13,3 +13,4 @@ serde_json.workspace = true
 tracing.workspace = true
 tungstenite = "0.30"
 pcap-file = "2.0.0"
+sha2 = "0.10"

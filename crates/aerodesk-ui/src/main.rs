@@ -19,6 +19,14 @@ const MAX_RECENTS: usize = 10;
 const DEMO_W: u32 = 320;
 const DEMO_H: u32 = 180;
 
+/// #72 UI → 会话文件/剪贴板命令（经 mpsc 传到 run_viewer 线程）。
+pub enum FileCmd {
+    /// 发送一个文件。
+    SendFile(std::path::PathBuf),
+    /// 把文本写入被控端剪贴板。
+    SendClipboard(String),
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     init_log();
     #[cfg(target_os = "macos")]
@@ -146,7 +154,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     *CONTROL_TX.lock().unwrap() = Some(control_tx);
                     let (input_tx, input_rx) = std::sync::mpsc::channel();
                     *INPUT_TX.lock().unwrap() = Some(input_tx);
-                    crate::macos_media::run_viewer(server, room, Some(token), weak2.clone(), epoch2.clone(), my_epoch, control_rx, input_rx, session_idx);
+                    let (file_cmd_tx, file_cmd_rx) = std::sync::mpsc::channel();
+                    *FILE_CMD.lock().unwrap() = Some(file_cmd_tx);
+                    crate::macos_media::run_viewer(server, room, Some(token), weak2.clone(), epoch2.clone(), my_epoch, control_rx, input_rx, file_cmd_rx, session_idx);
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -224,6 +234,7 @@ fn main() -> Result<(), slint::PlatformError> {
             SESSION_NEXT.store(0, Ordering::SeqCst);
             *CONTROL_TX.lock().unwrap() = None;
             *INPUT_TX.lock().unwrap() = None;
+            *FILE_CMD.lock().unwrap() = None;
             ui.set_status("已断开".into());
             ui.set_connecting(false);
         }
@@ -247,6 +258,9 @@ fn main() -> Result<(), slint::PlatformError> {
     static INPUT_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>> =
         std::sync::Mutex::new(None);
     static INPUT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // #72：UI → 会话文件/剪贴板命令。
+    static FILE_CMD: std::sync::Mutex<Option<std::sync::mpsc::Sender<FileCmd>>> =
+        std::sync::Mutex::new(None);
     // #29 多会话：会话槽序号（断开时清零）。
     static SESSION_NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -631,6 +645,70 @@ fn main() -> Result<(), slint::PlatformError> {
             } else {
                 "输入捕获中（Esc 可释放）".into()
             });
+        }
+    });
+
+    // ---- #72 文件/剪贴板 ----
+    // 发文件：macOS 原生文件选择器（osascript choose file）→ file 通道 → 被控端。
+    ui.on_send_file({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            #[cfg(target_os = "macos")]
+            {
+                let out = std::process::Command::new("osascript")
+                    .args(["-e", "POSIX path of (choose file)"])
+                    .output();
+                match out {
+                    Ok(o) if o.status.success() => {
+                        let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                        if path.is_empty() {
+                            ui.set_session_status("已取消选择文件".into());
+                            return;
+                        }
+                        if let Some(tx) = FILE_CMD.lock().unwrap().as_ref() {
+                            let _ = tx.send(FileCmd::SendFile(path.clone().into()));
+                            ui.set_session_status(format!("发送文件：{path}").into());
+                        } else {
+                            ui.set_session_status("发送文件：未连接会话".into());
+                        }
+                    }
+                    _ => {
+                        ui.set_session_status("发送文件：无法打开文件选择器".into());
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                ui.set_session_status("发送文件：仅 macOS 支持".into());
+            }
+        }
+    });
+    // 发送本地剪贴板文本到被控端（macOS pbpaste；其他平台 no-op）。
+    ui.on_send_clipboard({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            #[cfg(target_os = "macos")]
+            {
+                match aerodesk_core::clipboard::read() {
+                    Some(text) if !text.is_empty() => {
+                        if let Some(tx) = FILE_CMD.lock().unwrap().as_ref() {
+                            let _ = tx.send(FileCmd::SendClipboard(text.clone()));
+                            ui.set_session_status("已发送剪贴板到被控端".into());
+                        } else {
+                            ui.set_session_status("剪贴板：未连接会话".into());
+                        }
+                    }
+                    _ => {
+                        ui.set_session_status("剪贴板为空".into());
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                ui.set_session_status("剪贴板：仅 macOS 支持".into());
+            }
         }
     });
 

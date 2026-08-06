@@ -10,6 +10,7 @@
 #[macro_use]
 extern crate tracing;
 
+mod clipboard;
 mod file_transfer;
 
 use std::net::UdpSocket;
@@ -426,11 +427,26 @@ fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
             if endpoint.channel_label(cid).as_deref() == Some("input") {
                 if let Ok(frame) = serde_json::from_slice::<InputFrame>(&data) {
                     info!("input: seq={} {:?}", frame.seq, frame.event);
-                    // #75：把 viewer 输入注入被控端（macOS CGEvent；无辅助功能
-                    // 权限时静默失败，但路径与日志可验证）。
-                    match aerodesk_macos::inject::inject(&frame.event) {
-                        Ok(()) => info!("inject: seq={} {:?}", frame.seq, frame.event),
-                        Err(e) => info!("inject failed: seq={} {:?}: {e}", frame.seq, frame.event),
+                    // #72 剪贴板：viewer 发来的文本写入被控端剪贴板（macOS）。
+                    match &frame.event {
+                        InputEvent::ClipboardText(text) => {
+                            info!(
+                                "clipboard: apply {} chars from viewer",
+                                text.chars().count()
+                            );
+                            clipboard::set_cache(text.clone());
+                            clipboard::write(text);
+                        }
+                        _ => {
+                            // #75：把 viewer 输入注入被控端（macOS CGEvent；无辅助功能
+                            // 权限时静默失败，但路径与日志可验证）。
+                            match aerodesk_macos::inject::inject(&frame.event) {
+                                Ok(()) => info!("inject: seq={} {:?}", frame.seq, frame.event),
+                                Err(e) => {
+                                    info!("inject failed: seq={} {:?}: {e}", frame.seq, frame.event)
+                                }
+                            }
+                        }
                     }
                 }
             } else if endpoint.channel_label(cid).as_deref() == Some("control") {
@@ -724,7 +740,7 @@ fn viewer(
             }
         }
 
-        // #72 文件传输：推进发送。
+        // #72 文件传输：推进发送 + 剪贴板轮询/落地。
         file_transfer::tick(&mut endpoint);
 
         // 输入事件回传：input 通道打开后周期性发送鼠标移动（模拟观看端输入）。

@@ -16,7 +16,20 @@ use aerodesk_protocol::signal::Role;
 use slint::{Image, Model, Rgba8Pixel, SharedPixelBuffer};
 use str0m::net::Protocol;
 
-use crate::AppWindow;
+use crate::{AppWindow, FileCmd};
+
+/// 默认接收目录：~/Downloads/AeroDesk（不存在则创建）。
+fn default_recv_dir() -> std::path::PathBuf {
+    let dir = std::env::var("HOME")
+        .map(|h| {
+            std::path::PathBuf::from(h)
+                .join("Downloads")
+                .join("AeroDesk")
+        })
+        .unwrap_or_else(|_| std::env::temp_dir().join("AeroDesk"));
+    std::fs::create_dir_all(&dir).ok();
+    dir
+}
 
 /// 运行 macOS 观看会话（阻塞直到断开/代际失效）。
 pub fn run_viewer(
@@ -28,6 +41,7 @@ pub fn run_viewer(
     my_epoch: u64,
     control_rx: std::sync::mpsc::Receiver<String>,
     input_rx: std::sync::mpsc::Receiver<String>,
+    file_cmd_rx: std::sync::mpsc::Receiver<FileCmd>,
     session_idx: usize,
 ) {
     let stale = || epoch.load(Ordering::SeqCst) != my_epoch;
@@ -84,6 +98,10 @@ pub fn run_viewer(
     let mut decoder = H264Decoder::new();
     let mut frames: u64 = 0;
     let mut last_stat = Instant::now();
+    // #72 文件传输 + 剪贴板（接收落盘到 ~/Downloads/AeroDesk）。
+    let mut file_transfer =
+        aerodesk_core::file_transfer::FileTransfer::new(Some(default_recv_dir()));
+    let mut last_file_status = Instant::now();
 
     while !stale() {
         live.socket
@@ -121,7 +139,39 @@ pub fn run_viewer(
                 .endpoint
                 .send_channel_data("control", false, req.as_bytes());
         }
+        // #72 文件/剪贴板命令（UI 工具栏按钮）。
+        while let Ok(cmd) = file_cmd_rx.try_recv() {
+            match cmd {
+                FileCmd::SendFile(path) => match file_transfer.send_file(&path) {
+                    Ok(()) => {
+                        if let Some(fui) = ui_weak.upgrade() {
+                            fui.set_session_status(
+                                format!("开始发送文件：{}", path.display()).into(),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(fui) = ui_weak.upgrade() {
+                            fui.set_session_status(format!("发送失败：{e}").into());
+                        }
+                    }
+                },
+                FileCmd::SendClipboard(text) => {
+                    aerodesk_core::clipboard::set_cache(text.clone());
+                    let sent = file_transfer.send_clipboard(&text, &mut live.endpoint);
+                    if let Some(fui) = ui_weak.upgrade() {
+                        fui.set_session_status(if sent {
+                            "已发送剪贴板到被控端".into()
+                        } else {
+                            "剪贴板：file 通道未就绪".into()
+                        });
+                    }
+                }
+            }
+        }
         while let Some(ev) = live.endpoint.poll_event() {
+            // #72 文件通道事件交给状态机（非 file 事件为 no-op）。
+            file_transfer.handle_event(&ev, &mut live.endpoint);
             match ev {
                 ClientEvent::Media(data) => {
                     if let Some(mid) = live.video_mid
@@ -168,6 +218,47 @@ pub fn run_viewer(
                     return;
                 }
                 _ => {}
+            }
+        }
+        // #72 文件发送推进 + 远端剪贴板落地 + 进度回显（500ms 节流）。
+        file_transfer.tick(&mut live.endpoint);
+        if let Some(text) = file_transfer.take_incoming_clipboard() {
+            aerodesk_core::clipboard::set_cache(text.clone());
+            aerodesk_core::clipboard::write(&text);
+            if let Some(fui) = ui_weak.upgrade() {
+                fui.set_session_status("已收到远端剪贴板".into());
+            }
+        }
+        if last_file_status.elapsed() >= Duration::from_millis(500) {
+            last_file_status = Instant::now();
+            let st = file_transfer.status();
+            if let Some(msg) = st.message {
+                if let Some(fui) = ui_weak.upgrade() {
+                    fui.set_session_status(msg.into());
+                    fui.set_file_progress(-1.0);
+                    fui.set_file_label("".into());
+                }
+            } else if let Some((name, done, total)) = st.sending {
+                if let Some(fui) = ui_weak.upgrade() {
+                    let pct = done as f64 * 100.0 / total.max(1) as f64;
+                    fui.set_session_status(
+                        format!("发送文件：{name} {done}/{total} ({pct:.0}%)").into(),
+                    );
+                    fui.set_file_progress((pct / 100.0) as f32);
+                    fui.set_file_label(format!("发送 {name} {pct:.0}%").into());
+                }
+            } else if let Some((name, done, total)) = st.receiving {
+                if let Some(fui) = ui_weak.upgrade() {
+                    let pct = done as f64 * 100.0 / total.max(1) as f64;
+                    fui.set_session_status(
+                        format!("接收文件：{name} {done}/{total} ({pct:.0}%)").into(),
+                    );
+                    fui.set_file_progress((pct / 100.0) as f32);
+                    fui.set_file_label(format!("接收 {name} {pct:.0}%").into());
+                }
+            } else if let Some(fui) = ui_weak.upgrade() {
+                fui.set_file_progress(-1.0);
+                fui.set_file_label("".into());
             }
         }
         if last_stat.elapsed() >= Duration::from_secs(2) {
