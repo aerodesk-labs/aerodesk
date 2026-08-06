@@ -101,6 +101,44 @@ impl Endpoint {
         }
     }
 
+    /// 仅启用指定视频 codec 的端点（H264/H265/VP9/AV1 + PCMU 音频），
+    /// 配合 aerodesk-ffmpeg 编码器（#74）。
+    pub fn new_with_codec(codec: crate::media_pipeline::Codec) -> Self {
+        use crate::media_pipeline::Codec;
+        let mut config = Rtc::builder();
+        {
+            let cfg = config.codec_config();
+            cfg.clear();
+            match codec {
+                Codec::H264 => {
+                    cfg.add_h264(str0m::media::Pt::new_with_value(96), None, true, 0x42e01f);
+                }
+                Codec::Hevc => {
+                    cfg.add_h265(str0m::media::Pt::new_with_value(102), None, 1, 0, 93);
+                }
+                Codec::Vp9 => {
+                    cfg.enable_vp9(true);
+                }
+                Codec::Av1 => {
+                    cfg.enable_av1(true);
+                }
+                other => panic!("endpoint unsupported video codec: {other:?}"),
+            }
+            // #58 音频：PCMU（G.711）静态 PT 0，8kHz 单声道。
+            cfg.enable_pcmu(true);
+        }
+        Self {
+            rtc: config.build(Instant::now()),
+            events: VecDeque::new(),
+            channel_labels: HashMap::new(),
+            want_video: false,
+            video_direction: str0m::media::Direction::SendRecv,
+            video_simulcast: None,
+            want_audio: false,
+            audio_direction: str0m::media::Direction::SendRecv,
+        }
+    }
+
     /// 添加本地 host candidate（调用方绑定 UDP socket 后调用）。
     pub fn add_local_candidate(
         &mut self,

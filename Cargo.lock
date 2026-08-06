@@ -165,6 +165,7 @@ name = "aerodesk-cli"
 version = "0.1.0"
 dependencies = [
  "aerodesk-core",
+ "aerodesk-ffmpeg",
  "aerodesk-macos",
  "aerodesk-protocol",
  "aerodesk-softenc",
