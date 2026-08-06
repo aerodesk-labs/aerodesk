@@ -38,25 +38,23 @@ jobs:
         run: brew install x264 ffmpeg
 
       # #74 Windows FFmpeg 开发库：ffmpeg-sys-next 在 MSVC 下经 vcpkg 或
-      # FFMPEG_DIR 定位开发库。此处用 gyan.dev full-shared 预编译包
-      # （MSVC 构建，含 include/ + lib/*.lib + bin/*.dll；BtbN 为 MinGW
-      # GNU ar 导入库，MSVC link.exe 无法消费），设 FFMPEG_DIR 供 build.rs
-      # 使用，并把 bin 加进 PATH 供回环测试运行时加载 DLL。
-      # 注意：windows-latest 自 2024 起不再预装 7-Zip（actions/runner-images#9361），
-      # 因此显式下载 7zr.exe（7-Zip 独立命令行，仅解 7z，无需安装）。
+      # FFMPEG_DIR 定位开发库。此处用 BtbN win64-gpl-shared **8.1** 预编译包
+      # （与 ffmpeg-sys-next 8.1.x 的 FFmpeg 8.x API 匹配；gyan.dev 当前仅
+      # 提供 9.0，major 版本不匹配有 bindgen/链接风险）。
+      # 该 zip 同时提供 MSVC COFF 导入库 lib/*.lib（含 __imp_*）与 MinGW
+      # *.dll.a；ffmpeg-sys-next FFMPEG_DIR 分支读 lib/ + include/，我们把
+      # bin/ 加进 PATH 供回环测试运行时加载 DLL。zip 用 PowerShell 原生
+      # Expand-Archive 解压（windows-latest 无预装 7-Zip，见 runner-images#9361）。
       - name: System deps (Windows FFmpeg dev libs)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ProgressPreference = 'SilentlyContinue'
-          $url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z"
-          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.7z"
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-shared-8.1.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
           Invoke-WebRequest -Uri $url -OutFile $zip
           $dest = Join-Path $env:RUNNER_TEMP "ffmpeg"
-          $sevenZip = Join-Path $env:RUNNER_TEMP "7zr.exe"
-          Invoke-WebRequest -Uri "https://www.7-zip.org/a/7zr.exe" -OutFile $sevenZip
-          & $sevenZip x $zip "-o$dest" -y | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "7z extract failed" }
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
           $root = (Get-ChildItem $dest -Directory | Select-Object -First 1).FullName
           Add-Content $env:GITHUB_ENV "FFMPEG_DIR=$root"
           Add-Content $env:GITHUB_PATH (Join-Path $root "bin")
