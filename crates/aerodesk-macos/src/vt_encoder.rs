@@ -4,7 +4,10 @@
 //! H.264（str0m packetizer 兼容）。
 
 use apple_cf::iosurface::{IOSurface, IOSurfaceLockOptions};
-use apple_cf::raw::CMVideoFormatDescriptionGetH264ParameterSetAtIndex;
+use apple_cf::raw::{
+    CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
+    CMVideoFormatDescriptionGetHEVCParameterSetAtIndex,
+};
 use videotoolbox::Codec;
 use videotoolbox::compression::{CompressionSession, CompressionSessionBuilder, EncodedFrame};
 
@@ -18,21 +21,35 @@ pub struct VtEncoder {
     pts: i64,
     /// 每帧 RTP 时间戳步进（90kHz / fps；#8 压测发现固定 3000 会把 60fps 压成 30fps）。
     pts_inc: i64,
-    /// 从 format description 提取的 SPS/PPS（VT 关键帧码流默认不含参数集；
-    /// 接收端硬解必须要有，见 #29 回环测试）。
+    /// 从 format description 提取的 SPS/PPS（H.264）/ VPS/SPS/PPS（HEVC）。
+    /// VT 关键帧码流默认不含参数集；接收端硬解必须要有（#29/#74）。
     sps: Option<Vec<u8>>,
     pps: Option<Vec<u8>>,
+    vps: Option<Vec<u8>>,
+    codec: Codec,
 }
 
 impl VtEncoder {
+    /// H.264 编码器（兼容旧调用点）。
     pub fn new(width: u32, height: u32, fps: u32, bitrate_bps: u32) -> Result<Self, String> {
-        let session = CompressionSessionBuilder::new(width as i32, height as i32, Codec::H264)
+        Self::new_with_codec(width, height, fps, bitrate_bps, Codec::H264)
+    }
+
+    /// 指定 codec 的 VideoToolbox 硬编（H.264 / HEVC）。
+    pub fn new_with_codec(
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate_bps: u32,
+        codec: Codec,
+    ) -> Result<Self, String> {
+        let session = CompressionSessionBuilder::new(width as i32, height as i32, codec)
             .with_real_time(true)
             .with_average_bit_rate(bitrate_bps as i32)
             .with_expected_frame_rate(fps as f64)
             .with_max_keyframe_interval((fps * 2) as i32)
             .build()
-            .map_err(|e| format!("vt init: {e:?}"))?;
+            .map_err(|e| format!("vt init ({codec:?}): {e:?}"))?;
         Ok(Self {
             session,
             width,
@@ -41,12 +58,27 @@ impl VtEncoder {
             pts_inc: (90_000 / fps.max(1)) as i64,
             sps: None,
             pps: None,
+            vps: None,
+            codec,
         })
     }
 
-    /// 从编码输出的 format description 提取 SPS/PPS（只在首帧做一次）。
+    pub fn codec(&self) -> Codec {
+        self.codec
+    }
+
+    /// 本机是否有 VT HEVC 硬编（64x64 探针）。
+    pub fn hevc_encoder_available() -> bool {
+        Self::new_with_codec(64, 64, 30, 400_000, Codec::HEVC).is_ok()
+    }
+
+    /// 从编码输出的 format description 提取参数集（只在首帧做一次）。
     fn ensure_parameter_sets(&mut self, frame: &EncodedFrame) {
-        if self.sps.is_some() && self.pps.is_some() {
+        let done = match self.codec {
+            Codec::H264 => self.sps.is_some() && self.pps.is_some(),
+            _ => self.vps.is_some() && self.sps.is_some() && self.pps.is_some(),
+        };
+        if done {
             return;
         }
         let Some(sample) = frame.cm_sample_buffer() else {
@@ -61,26 +93,46 @@ impl VtEncoder {
             let mut count = 0usize;
             let mut nal_len = 0i32;
             let status = unsafe {
-                CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-                    fmt.as_ptr().cast(),
-                    index,
-                    &mut ptr,
-                    &mut size,
-                    &mut count,
-                    &mut nal_len,
-                )
+                match self.codec {
+                    Codec::H264 => CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                        fmt.as_ptr().cast(),
+                        index,
+                        &mut ptr,
+                        &mut size,
+                        &mut count,
+                        &mut nal_len,
+                    ),
+                    _ => CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                        fmt.as_ptr().cast(),
+                        index,
+                        &mut ptr,
+                        &mut size,
+                        &mut count,
+                        &mut nal_len,
+                    ),
+                }
             };
             if status != 0 || ptr.is_null() || size == 0 {
                 return None;
             }
             Some(unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec())
         };
-        self.sps = get(0);
-        self.pps = get(1);
+        match self.codec {
+            Codec::H264 => {
+                self.sps = get(0);
+                self.pps = get(1);
+            }
+            _ => {
+                // HEVC 参数集顺序：VPS(0)/SPS(1)/PPS(2)
+                self.vps = get(0);
+                self.sps = get(1);
+                self.pps = get(2);
+            }
+        }
     }
 
-    /// AVCC 数据里是否含 IDR（NAL type 5）→ 关键帧。
-    fn is_keyframe_avcc(data: &[u8]) -> bool {
+    /// AVCC 数据里是否含关键帧 NAL（H.264 IDR=5；HEVC IDR/BLA/CRA=16..=21）。
+    fn is_keyframe_avcc(&self, data: &[u8]) -> bool {
         let mut i = 0;
         while i + 4 <= data.len() {
             let len = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]) as usize;
@@ -88,18 +140,33 @@ impl VtEncoder {
             if i + len > data.len() {
                 return false;
             }
-            if len > 0 && (data[i] & 0x1F) == 5 {
-                return true;
+            if len > 0 {
+                let ty = if self.codec == Codec::H264 {
+                    data[i] & 0x1F
+                } else {
+                    (data[i] >> 1) & 0x3F
+                };
+                if (self.codec == Codec::H264 && ty == 5)
+                    || (self.codec != Codec::H264 && (16..=21).contains(&ty))
+                {
+                    return true;
+                }
             }
             i += len;
         }
         false
     }
 
-    /// 输出 AnnexB：关键帧前置 SPS/PPS（接收端硬解依赖，见 #29）。
+    /// 输出 AnnexB：关键帧前置参数集（接收端硬解依赖，见 #29/#74）。
     pub fn to_annexb(&self, frame: &EncodedFrame) -> Vec<u8> {
         let mut out = Vec::with_capacity(frame.data.len() + 64);
-        if Self::is_keyframe_avcc(&frame.data) {
+        if self.is_keyframe_avcc(&frame.data) {
+            if self.codec != Codec::H264 {
+                if let Some(vps) = &self.vps {
+                    out.extend_from_slice(&[0, 0, 0, 1]);
+                    out.extend_from_slice(vps);
+                }
+            }
             if let Some(sps) = &self.sps {
                 out.extend_from_slice(&[0, 0, 0, 1]);
                 out.extend_from_slice(sps);
@@ -186,6 +253,39 @@ mod tests {
         assert_eq!(&annexb[4..7], &[0x67, 0x01, 0x02]);
         assert_eq!(&annexb[7..11], &[0, 0, 0, 1]);
         assert_eq!(&annexb[11..13], &[0x68, 0x03]);
+    }
+
+    /// #74 HEVC 硬编回环：VT HEVC 编码 → VT HEVC 硬解 → RGBA。
+    #[test]
+    fn vt_hevc_encode_decode_roundtrip() {
+        use crate::decode::{HevcDecoder, to_rgba};
+        use crate::synthetic::SyntheticSource;
+
+        let (w, h) = (320u32, 180u32);
+        let Ok(mut enc) = VtEncoder::new_with_codec(w, h, 30, 1_000_000, Codec::HEVC) else {
+            eprintln!("skip: 本机无 VT HEVC 编码器");
+            return;
+        };
+        let mut src = SyntheticSource::new(w, h);
+        let mut decoder = HevcDecoder::new();
+        let mut decoded = None;
+        for _ in 0..12 {
+            let Some(frame) = enc.encode_bgra(&src.next_frame_bgra()).expect("encode") else {
+                continue;
+            };
+            let annexb = enc.to_annexb(&frame);
+            if let Ok(Some(buf)) = decoder.decode_annexb(&annexb, 0) {
+                decoded = Some(buf);
+                break;
+            }
+        }
+        let buf = decoded.expect("应在若干帧内解出 HEVC 硬编帧");
+        let (rgba, dw, dh) = to_rgba(&buf).expect("rgba");
+        assert_eq!((dw, dh), (w as usize, h as usize));
+        assert!(
+            rgba.chunks_exact(4).any(|p| p[3] == 255),
+            "alpha 应全不透明"
+        );
     }
 
     #[test]
