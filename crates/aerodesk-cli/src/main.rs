@@ -413,6 +413,7 @@ fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
         ClientEvent::ChannelData(cid, _, data) => {
             if endpoint.channel_label(cid).as_deref() == Some("input") {
                 if let Ok(frame) = serde_json::from_slice::<InputFrame>(&data) {
+                    info!("input: seq={} {:?}", frame.seq, frame.event);
                     // #75：把 viewer 输入注入被控端（macOS CGEvent；无辅助功能
                     // 权限时静默失败，但路径与日志可验证）。
                     match aerodesk_macos::inject::inject(&frame.event) {
