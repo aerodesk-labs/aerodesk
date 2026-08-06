@@ -189,6 +189,8 @@ fn main() -> Result<(), slint::PlatformError> {
                                 let px = demo_frame(t);
                                 let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&px, DEMO_W, DEMO_H);
                                 fui.set_video_frame(slint::Image::from_rgba8(buffer));
+                                fui.set_frame_w(DEMO_W as f32);
+                                fui.set_frame_h(DEMO_H as f32);
                                 t = t.wrapping_add(1);
                                 std::thread::sleep(Duration::from_millis(66));
                             }
@@ -222,6 +224,9 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_input_mode("键鼠已释放".into());
             ui.set_in_session(false);
             ui.set_video_frame(slint::Image::default());
+            ui.set_remote_cursor_visible(false);
+            ui.set_frame_w(0.0);
+            ui.set_frame_h(0.0);
             ui.set_session_tabs(slint::ModelRc::new(slint::VecModel::from(Vec::<
                 slint::SharedString,
             >::new(

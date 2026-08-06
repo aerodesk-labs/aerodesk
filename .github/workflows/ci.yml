@@ -87,6 +87,11 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/clipboard-e2e.sh
 
+      # #75 远程光标：publisher 光标通道 → SFU → viewer 收到轨迹。
+      - name: e2e remote cursor (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/cursor-e2e.sh
+
       # #74 多 codec（H264/H265/VP9/AV1）：--encoder ffmpeg --codec → SFU → viewer 收帧。
       - name: e2e multi-codec (macOS only)
         if: runner.os == 'macOS'

@@ -420,6 +420,12 @@ export component AppWindow inherits Window {
     // #72 文件传输进度（-1 隐藏，0..1 显示）。
     in-out property <float> file-progress: -1;
     in-out property <string> file-label: "";
+    // #75 远程光标（归一化 0..1；visible 控制显示）+ 视频源尺寸（letterbox 换算）。
+    in-out property <float> remote-cursor-x: 0;
+    in-out property <float> remote-cursor-y: 0;
+    in-out property <bool> remote-cursor-visible: false;
+    in-out property <float> frame-w: 0;
+    in-out property <float> frame-h: 0;
     // ---- 设置 ----
     in-out property <int> settings-tab: 0;          // 0=显示 1=网络 2=安全 3=快捷键
     in-out property <int> quality: 1;
@@ -475,6 +481,16 @@ export component AppWindow inherits Window {
     callback open-a11y-perms();
 
 
+
+    // #75：视频区 image-fit: contain 的 letterbox 换算：把归一化光标坐标
+    // 映射到实际显示区域（扣除黑边）。
+    function cursor-pos(view-w: length, view-h: length, fw: float, fh: float, n: float, vertical: bool) -> length {
+        let scale = min(view-w / max(fw * 1px, 1px), view-h / max(fh * 1px, 1px));
+        let draw-w = fw * 1px * scale;
+        let draw-h = fh * 1px * scale;
+        if vertical { return (view-h - draw-h) / 2 + n * draw-h; }
+        return (view-w - draw-w) / 2 + n * draw-w;
+    }
 
     title: "AeroDesk";
     width: 1000px;
@@ -1166,6 +1182,17 @@ export component AppWindow inherits Window {
                         width: 100%;
                         height: 100%;
                         image-fit: contain;
+                    }
+                    // #75 远程光标叠加（箭头形，随被控端光标移动）。
+                    if root.remote-cursor-visible && root.frame-w > 0: Path {
+                        x: root.cursor-pos(parent.width, parent.height, root.frame-w, root.frame-h, root.remote-cursor-x, false);
+                        y: root.cursor-pos(parent.width, parent.height, root.frame-w, root.frame-h, root.remote-cursor-y, true);
+                        width: 14px;
+                        height: 18px;
+                        commands: "M 0 0 L 0 18 L 4 14 L 7 17 L 9 15 L 6 12 L 11 12 Z";
+                        fill: #000000;
+                        stroke: #ffffff;
+                        stroke-width: 1px;
                     }
                     // #72 文件传输进度条（发送/接收中显示）。
                     if root.file-progress >= 0: Rectangle {

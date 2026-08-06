@@ -45,6 +45,10 @@ pub struct FileTransfer {
     incoming_clipboard: Option<String>,
     /// 一次性状态事件（完成/失败/取消），UI 展示后消费。
     message: Option<String>,
+    /// 待补发的剪贴板文本（SFU 转发可能丢首包，1s 幂等重试）。
+    clipboard_pending: Option<String>,
+    clipboard_sends: u32,
+    last_clipboard_send: Option<Instant>,
 }
 
 struct Sender {
@@ -87,6 +91,9 @@ impl FileTransfer {
             recv_dir,
             incoming_clipboard: None,
             message: None,
+            clipboard_pending: None,
+            clipboard_sends: 0,
+            last_clipboard_send: None,
         }
     }
 
@@ -123,6 +130,20 @@ impl FileTransfer {
     pub fn tick(&mut self, endpoint: &mut crate::Endpoint) {
         if let Some(s) = &mut self.send {
             s.tick(endpoint);
+        }
+        // #72 剪贴板补发：首包可能被 SFU 丢弃，1s 后重发（幂等，最多 8 次）。
+        if let Some(text) = self.clipboard_pending.clone() {
+            if self.clipboard_sends >= 8 {
+                self.clipboard_pending = None;
+                self.message = Some("剪贴板发送失败（通道未就绪）".into());
+            } else if self
+                .last_clipboard_send
+                .is_some_and(|t| t.elapsed() >= Duration::from_secs(1))
+            {
+                self.clipboard_sends += 1;
+                self.last_clipboard_send = Some(Instant::now());
+                self.dispatch_clipboard(&text, endpoint);
+            }
         }
         // 未完成的接收器：Nack 超时（1s）未得到补包时重发 Nack，
         // 防 SFU 转发丢 Nack 导致补包死锁。
@@ -177,8 +198,16 @@ impl FileTransfer {
         self.incoming_clipboard.take()
     }
 
-    /// 发送剪贴板文本到远端（同一 file 通道）。
+    /// 发送剪贴板文本到远端（同一 file 通道）；进入补发队列（1s 幂等重试，
+    /// 最多 8 次），应对 SFU 转发丢首包。
     pub fn send_clipboard(&mut self, text: &str, endpoint: &mut crate::Endpoint) -> bool {
+        self.clipboard_pending = Some(text.to_string());
+        self.clipboard_sends = 0;
+        self.last_clipboard_send = Some(Instant::now());
+        self.dispatch_clipboard(text, endpoint)
+    }
+
+    fn dispatch_clipboard(&mut self, text: &str, endpoint: &mut crate::Endpoint) -> bool {
         let ctrl = FileControl::Clipboard {
             text: text.to_string(),
         };
@@ -287,9 +316,15 @@ impl FileTransfer {
             return;
         }
         r.buf[start..start + payload.len()].copy_from_slice(payload);
-        if let Some(f) = r.received_flags.get_mut(index as usize) {
-            *f = true;
+        let Some(f) = r.received_flags.get_mut(index as usize) else {
+            return;
+        };
+        // 去重：SFU 转发/重传可能重复送达同一分片，重复计入会让 received
+        // 超过 total，导致「missing 0 却 incomplete」的补包死循环。
+        if *f {
+            return;
         }
+        *f = true;
         r.received += 1;
     }
 
@@ -354,21 +389,30 @@ impl FileTransfer {
             .filter(|(_, got)| !**got)
             .map(|(i, _)| i as u64)
             .collect();
+        if missing.is_empty() {
+            // 没有缺失分片却 incomplete：重复分片导致计数错乱，无法自愈，
+            // 放弃该接收器避免死循环。
+            tracing::error!(
+                "file {} incomplete but no missing chunks (received {}/{}); dropped",
+                r.name,
+                r.received,
+                r.total_chunks
+            );
+            return;
+        }
         tracing::info!(
             "file {} missing {} chunks, requested resend",
             r.name,
             missing.len()
         );
-        if !missing.is_empty() {
-            let nack = FileControl::Nack(FileNack {
-                id: d.id.clone(),
-                missing: missing.into_iter().take(512).collect(),
-            });
-            if let Ok(json) = serde_json::to_string(&nack) {
-                let _ = endpoint.send_channel_data("file", false, json.as_bytes());
-            }
-            r.last_nack = Some(Instant::now());
+        let nack = FileControl::Nack(FileNack {
+            id: d.id.clone(),
+            missing: missing.into_iter().take(512).collect(),
+        });
+        if let Ok(json) = serde_json::to_string(&nack) {
+            let _ = endpoint.send_channel_data("file", false, json.as_bytes());
         }
+        r.last_nack = Some(Instant::now());
         self.recv.insert(d.id, r);
     }
 

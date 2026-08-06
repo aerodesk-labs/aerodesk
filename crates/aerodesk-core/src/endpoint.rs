@@ -224,6 +224,8 @@ impl Endpoint {
         let _ = change.add_channel("control".into());
         // #72 文件传输：双向 data channel（FileMeta/Chunk/Done，见 aerodesk-protocol::file）。
         let _ = change.add_channel("file".into());
+        // #75 远程光标：被控端 → 观看端（CursorPos JSON，见 aerodesk-protocol::cursor）。
+        let _ = change.add_channel("cursor".into());
         let (offer, pending) = change
             .apply()
             .ok_or(RtcError::Io(std::io::Error::other("no changes")))?;
