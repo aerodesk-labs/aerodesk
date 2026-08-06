@@ -30,6 +30,31 @@ mod tests {
     }
 
     #[test]
+    fn loopback_bgra_h265() {
+        // #74 屏幕采集路径：BGRA → H.265 编码 → 解码。
+        let mut enc = FfmpegEncoder::new(320, 180, 30, 800_000, Codec::Hevc).expect("encoder");
+        let mut dec = FfmpegDecoder::new(Codec::Hevc).expect("decoder");
+        for t in 0..24u64 {
+            let mut bgra = vec![0u8; (320 * 180 * 4) as usize];
+            for (i, px) in bgra.chunks_exact_mut(4).enumerate() {
+                px[0] = (i as u8).wrapping_add((t * 3) as u8); // B
+                px[1] = 128; // G
+                px[2] = 64; // R
+                px[3] = 255; // A
+            }
+            if t == 6 {
+                enc.request_keyframe();
+            }
+            if let Some(unit) = enc.encode_bgra(&bgra).expect("encode_bgra") {
+                if let Some(f) = dec.decode_unit(&unit).expect("decode") {
+                    assert_eq!(f.width, 320);
+                    assert_eq!(f.height, 180);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn loopback_all_codecs() {
         for codec in [Codec::H264, Codec::Hevc, Codec::Vp9, Codec::Av1] {
             let mut enc = FfmpegEncoder::new(320, 180, 30, 800_000, codec).expect("encoder");
