@@ -444,6 +444,8 @@ export component AppWindow inherits Window {
     callback refresh-device-pw();
     callback toggle-fullscreen();
     callback toggle-audio();
+    // #75：会话视图指针输入 → Rust 侧转发为 InputFrame（0=Move 1=Down 2=Up）。
+    callback send-input(int, float, float);
     callback toggle-display();
     callback toggle-quality();
     callback toggle-input();
@@ -1095,10 +1097,22 @@ export component AppWindow inherits Window {
                     if root.session-tabs.length > 2: SessionTab { text: root.session-tabs[2]; selected: root.active-session == 2; clicked => { root.switch-session(2); } }
                     if root.session-tabs.length > 3: SessionTab { text: root.session-tabs[3]; selected: root.active-session == 3; clicked => { root.switch-session(3); } }
                 }
-                // 视频区（占满剩余空间，黑底）
+                // 视频区（占满剩余空间，黑底）；TouchArea 捕获指针 → 输入通道（#75）
                 Rectangle {
                     background: #000000;
                     vertical-stretch: 1;
+                    TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        enabled: root.in-session && root.session-frames[root.active-session].width > 0;
+                        pointer-event(event) => {
+                            root.send-input(
+                                event.kind == PointerEventKind.down ? 1 : (event.kind == PointerEventKind.up ? 2 : 0),
+                                self.mouse-x / max(self.width, 1px),
+                                self.mouse-y / max(self.height, 1px)
+                            );
+                        }
+                    }
                     Image {
                         source: root.session-frames[root.active-session];
                         width: 100%;

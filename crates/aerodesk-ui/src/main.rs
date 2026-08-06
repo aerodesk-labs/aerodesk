@@ -143,7 +143,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     let session_idx = SESSION_NEXT.fetch_add(1, Ordering::SeqCst);
                     let (control_tx, control_rx) = std::sync::mpsc::channel();
                     *CONTROL_TX.lock().unwrap() = Some(control_tx);
-                    crate::macos_media::run_viewer(server, room, Some(token), weak2.clone(), epoch2.clone(), my_epoch, control_rx, session_idx);
+                    let (input_tx, input_rx) = std::sync::mpsc::channel();
+                    *INPUT_TX.lock().unwrap() = Some(input_tx);
+                    crate::macos_media::run_viewer(server, room, Some(token), weak2.clone(), epoch2.clone(), my_epoch, control_rx, input_rx, session_idx);
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -220,6 +222,7 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_active_session(0);
             SESSION_NEXT.store(0, Ordering::SeqCst);
             *CONTROL_TX.lock().unwrap() = None;
+            *INPUT_TX.lock().unwrap() = None;
             ui.set_status("已断开".into());
             ui.set_connecting(false);
         }
@@ -239,8 +242,43 @@ fn main() -> Result<(), slint::PlatformError> {
     // #29：UI → 会话 control 通道（选层请求）。
     static CONTROL_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>> =
         std::sync::Mutex::new(None);
+    // #75：UI → 会话 input 通道（指针输入，发送 InputFrame JSON）。
+    static INPUT_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>> =
+        std::sync::Mutex::new(None);
+    static INPUT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     // #29 多会话：会话槽序号（断开时清零）。
     static SESSION_NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    // #75：会话视图指针输入 → InputFrame JSON → input 通道 → SFU → 被控端注入。
+    ui.on_send_input({
+        move |kind: i32, x: f32, y: f32| {
+            let event = match kind {
+                1 => aerodesk_protocol::input::InputEvent::MouseButton {
+                    button: aerodesk_protocol::input::MouseButton::Left,
+                    state: aerodesk_protocol::input::ButtonState::Pressed,
+                    x: x as f64,
+                    y: y as f64,
+                },
+                2 => aerodesk_protocol::input::InputEvent::MouseButton {
+                    button: aerodesk_protocol::input::MouseButton::Left,
+                    state: aerodesk_protocol::input::ButtonState::Released,
+                    x: x as f64,
+                    y: y as f64,
+                },
+                _ => aerodesk_protocol::input::InputEvent::MouseMove {
+                    x: x as f64,
+                    y: y as f64,
+                },
+            };
+            let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+            let frame = aerodesk_protocol::input::InputFrame::new(seq, event);
+            if let Ok(json) = serde_json::to_string(&frame) {
+                if let Some(tx) = INPUT_TX.lock().unwrap().as_ref() {
+                    let _ = tx.send(json);
+                }
+            }
+        }
+    });
 
     // Peer 标签切换（#57）
     ui.on_set_peer_tab({

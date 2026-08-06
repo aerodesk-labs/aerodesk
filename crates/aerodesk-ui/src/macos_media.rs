@@ -27,6 +27,7 @@ pub fn run_viewer(
     epoch: Arc<AtomicU64>,
     my_epoch: u64,
     control_rx: std::sync::mpsc::Receiver<String>,
+    input_rx: std::sync::mpsc::Receiver<String>,
     session_idx: usize,
 ) {
     let stale = || epoch.load(Ordering::SeqCst) != my_epoch;
@@ -107,6 +108,10 @@ pub fn run_viewer(
             if let str0m::Output::Transmit(t) = output {
                 let _ = live.socket.send_to(&t.contents, t.destination);
             }
+        }
+        // #75：UI 指针输入 → input 通道 → SFU → 被控端注入。
+        while let Ok(req) = input_rx.try_recv() {
+            let _ = live.endpoint.send_channel_data("input", false, req.as_bytes());
         }
         // #29：UI 选层请求（画质/显示器按钮）→ control 通道 → SFU。
         while let Ok(req) = control_rx.try_recv() {
