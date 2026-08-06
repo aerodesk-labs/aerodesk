@@ -66,6 +66,10 @@ pub enum FileControl {
     Done(FileDone),
     Cancel(FileCancel),
     Nack(FileNack),
+    /// 剪贴板文本同步（复用 file 通道，双向）。
+    Clipboard {
+        text: String,
+    },
 }
 
 /// 编码一个分片为二进制帧。
@@ -135,6 +139,21 @@ mod tests {
                 assert_eq!(m.name, "a.bin");
                 assert_eq!(m.size, 1024);
             }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clipboard_json_roundtrip() {
+        // #72 剪贴板复用 file 通道：FileControl::Clipboard 序列化/反序列化。
+        let ctrl = FileControl::Clipboard {
+            text: "hello 你好".into(),
+        };
+        let json = serde_json::to_string(&ctrl).unwrap();
+        assert!(json.contains("\"type\":\"clipboard\""));
+        let back: FileControl = serde_json::from_str(&json).unwrap();
+        match back {
+            FileControl::Clipboard { text } => assert_eq!(text, "hello 你好"),
             other => panic!("unexpected {other:?}"),
         }
     }
