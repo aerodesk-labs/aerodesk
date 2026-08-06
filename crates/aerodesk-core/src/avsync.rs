@@ -92,11 +92,11 @@ impl AudioJitterBuffer {
 
     /// 入队一帧 PCM；若已远迟于播放位置（迟到帧）则丢弃。
     pub fn push(&mut self, t: f64, pcm: Vec<i16>) {
-        if let Some(last) = self.last_play {
-            if t + 0.02 < last {
-                self.dropped += 1;
-                return;
-            }
+        if let Some(last) = self.last_play
+            && t + 0.02 < last
+        {
+            self.dropped += 1;
+            return;
         }
         self.frames.push_back((t, pcm));
     }
