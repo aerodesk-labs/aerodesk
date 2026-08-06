@@ -92,6 +92,11 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/input-e2e.sh
 
+      # #73 A/V 同步：连续视频+音频，AVSYNC 漂移/jitter buffer 统计。
+      - name: e2e av sync (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/avsync-e2e.sh
+
       - name: windows adapter
         if: runner.os == 'Windows'
         run: cargo check -p aerodesk-windows
