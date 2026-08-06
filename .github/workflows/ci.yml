@@ -16,7 +16,7 @@ jobs:
           - os: ubuntu-latest
             skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli
           - os: windows-latest
-            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli --exclude aerodesk-linux --exclude x264 --exclude aerodesk-ffmpeg
+            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli --exclude aerodesk-linux --exclude x264
     runs-on: ${{ matrix.os }}
     env:
       CARGO_TERM_COLOR: always
@@ -36,6 +36,23 @@ jobs:
       - name: System deps (macOS)
         if: runner.os == 'macOS'
         run: brew install x264 ffmpeg
+
+      # #74 Windows FFmpeg 开发库：ffmpeg-sys-next 在 MSVC 下经 vcpkg 或
+      # FFMPEG_DIR 定位开发库。此处用 BtbN win64-gpl-shared 预编译包
+      # （含 include/ + lib/*.lib + bin/*.dll），设 FFMPEG_DIR 供 build.rs
+      # 使用，并把 bin 加进 PATH 供回环测试运行时加载 DLL。
+      - name: System deps (Windows FFmpeg dev libs)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $dest = Join-Path $env:RUNNER_TEMP "ffmpeg"
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $root = (Get-ChildItem $dest -Directory | Select-Object -First 1).FullName
+          Add-Content $env:GITHUB_ENV "FFMPEG_DIR=$root"
+          Add-Content $env:GITHUB_PATH (Join-Path $root "bin")
 
       - uses: dtolnay/rust-toolchain@stable
         with:
