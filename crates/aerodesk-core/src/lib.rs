@@ -12,6 +12,7 @@
 pub mod access_unit;
 pub mod endpoint;
 pub mod media;
+pub mod media_pipeline;
 pub mod pcmu;
 pub mod signaling;
 

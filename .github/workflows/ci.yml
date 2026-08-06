@@ -16,7 +16,7 @@ jobs:
           - os: ubuntu-latest
             skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli
           - os: windows-latest
-            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli --exclude aerodesk-linux --exclude x264
+            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli --exclude aerodesk-linux --exclude x264 --exclude aerodesk-ffmpeg
     runs-on: ${{ matrix.os }}
     env:
       CARGO_TERM_COLOR: always
@@ -32,10 +32,10 @@ jobs:
 
       - name: System deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libx264-dev
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libx264-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
       - name: System deps (macOS)
         if: runner.os == 'macOS'
-        run: brew install x264
+        run: brew install x264 ffmpeg
 
       - uses: dtolnay/rust-toolchain@stable
         with:
