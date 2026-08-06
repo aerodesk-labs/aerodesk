@@ -596,6 +596,8 @@ fn poll_until_timeout(
         if !client.rtc.is_alive() {
             return Instant::now();
         }
+        // #85 出站背压队列：每轮先尝试排空（对端缓冲恢复后继续转发）。
+        client.drain_pending_out();
         let propagated = client.poll_output(socket, tcp_streams, metrics);
         if let Propagated::Timeout(t) = propagated {
             return t;
@@ -676,6 +678,11 @@ pub struct Client {
     pub chosen_rid: Option<Rid>,
     /// 可选录制器引用（录制开启时非空）。
     recorder: Option<Arc<Recorder>>,
+    /// #85 出站 data channel 背压队列：对端 SCTP 缓冲满时排队，下一轮重试，
+    /// 不再静默丢包（此前 write 失败即丢，高速传输下丢包 → 发送端背压死锁）。
+    pending_channel_out: VecDeque<(String, Vec<u8>, bool)>,
+    /// 背压队列字节上限（超限丢弃并告警，防内存失控）。
+    pending_channel_out_bytes: usize,
 }
 
 impl Client {
@@ -695,6 +702,8 @@ impl Client {
             tracks_out: vec![],
             chosen_rid: None,
             recorder: None,
+            pending_channel_out: VecDeque::new(),
+            pending_channel_out_bytes: 0,
         }
     }
 
@@ -1007,8 +1016,41 @@ impl Client {
         let Some(mut channel) = self.rtc.channel(cid) else {
             return;
         };
-        if let Err(e) = channel.write(data.binary, &data.data) {
-            warn!("Client ({}) channel write failed: {:?}", *self.id, e);
+        // 先尝试直接写；缓冲满则入背压队列（下一轮重试），不丢包。
+        if channel.write(data.binary, &data.data).is_ok() {
+            return;
+        }
+        const CAP: usize = 64 << 20; // 64MB
+        if self.pending_channel_out_bytes + data.data.len() > CAP {
+            warn!(
+                "Client ({}) outbound channel queue overflow (label={label}), dropping {} bytes",
+                *self.id,
+                data.data.len()
+            );
+            return;
+        }
+        self.pending_channel_out_bytes += data.data.len();
+        self.pending_channel_out
+            .push_back((label.to_string(), data.data.clone(), data.binary));
+    }
+
+    /// 逐条重试出站背压队列（保持顺序；对端缓冲恢复后自然排空）。
+    fn drain_pending_out(&mut self) {
+        while let Some((label, data, binary)) = self.pending_channel_out.front() {
+            let Some(cid) = self.channels.get(label).copied() else {
+                self.pending_channel_out.pop_front();
+                continue;
+            };
+            let Some(mut channel) = self.rtc.channel(cid) else {
+                self.pending_channel_out.pop_front();
+                continue;
+            };
+            if channel.write(*binary, data).is_err() {
+                break; // 缓冲仍满，保持顺序等待下一轮
+            }
+            let (_, data, _) = self.pending_channel_out.pop_front().unwrap();
+            self.pending_channel_out_bytes =
+                self.pending_channel_out_bytes.saturating_sub(data.len());
         }
     }
 

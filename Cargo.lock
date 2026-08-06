@@ -3520,11 +3520,11 @@ dependencies = [
 [[package]]
 name = "is"
 version = "0.10.0"
-source = "git+https://github.com/PulseBeamDev/str0m.git?rev=7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084#7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084"
+source = "git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e#a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e"
 dependencies = [
  "crc",
  "serde",
- "str0m-proto 0.6.0 (git+https://github.com/PulseBeamDev/str0m.git?rev=7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084)",
+ "str0m-proto 0.6.0 (git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e)",
  "subtle",
  "tracing",
 ]
@@ -6376,7 +6376,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "str0m"
 version = "0.21.0"
-source = "git+https://github.com/PulseBeamDev/str0m.git?rev=7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084#7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084"
+source = "git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e#a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e"
 dependencies = [
  "arrayvec",
  "base64ct",
@@ -6387,7 +6387,7 @@ dependencies = [
  "sctp-proto",
  "serde",
  "str0m-aws-lc-rs",
- "str0m-proto 0.6.0 (git+https://github.com/PulseBeamDev/str0m.git?rev=7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084)",
+ "str0m-proto 0.6.0 (git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e)",
  "str0m-rust-crypto",
  "subtle",
  "time",
@@ -6397,11 +6397,11 @@ dependencies = [
 [[package]]
 name = "str0m-aws-lc-rs"
 version = "0.5.0"
-source = "git+https://github.com/PulseBeamDev/str0m.git?rev=7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084#7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084"
+source = "git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e#a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e"
 dependencies = [
  "aws-lc-rs",
  "dimpl",
- "str0m-proto 0.6.0 (git+https://github.com/PulseBeamDev/str0m.git?rev=7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084)",
+ "str0m-proto 0.6.0 (git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e)",
  "time",
 ]
 
@@ -6427,7 +6427,7 @@ dependencies = [
 [[package]]
 name = "str0m-proto"
 version = "0.6.0"
-source = "git+https://github.com/PulseBeamDev/str0m.git?rev=7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084#7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084"
+source = "git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e#a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e"
 dependencies = [
  "base64ct",
  "dimpl",
@@ -6440,7 +6440,7 @@ dependencies = [
 [[package]]
 name = "str0m-rust-crypto"
 version = "0.5.0"
-source = "git+https://github.com/PulseBeamDev/str0m.git?rev=7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084#7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084"
+source = "git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e#a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -6450,7 +6450,7 @@ dependencies = [
  "p256",
  "sha1 0.10.7",
  "sha2",
- "str0m-proto 0.6.0 (git+https://github.com/PulseBeamDev/str0m.git?rev=7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084)",
+ "str0m-proto 0.6.0 (git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e)",
  "time",
 ]
 
