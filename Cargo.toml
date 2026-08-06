@@ -27,7 +27,9 @@ rust-version = "1.85"
 [workspace.dependencies]
 # PulseBeam's str0m fork (feat/bwe-fixes, pinned): production-grade BWE fixes
 # (pacer/padding, probe robustness, set_current_bitrate). Same MIT/Apache license.
-str0m = { git = "https://github.com/PulseBeamDev/str0m.git", rev = "7db621fe6da657b4ba4ad7e5e6a4acd8a11ad084", default-features = false }
+# 指向 aerodesk-labs 派生（7db621f + #85 dimpl DTLS receive queue 2048），
+# 避免 data channel 大文件突发触发 Receive queue full 断连。
+str0m = { git = "https://github.com/aerodesk-labs/str0m.git", rev = "a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e", default-features = false }
 rouille = { version = "3.6.2", features = ["rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

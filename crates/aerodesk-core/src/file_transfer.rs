@@ -82,6 +82,8 @@ struct Receiver {
     received_flags: Vec<bool>,
     /// 上次发 Nack 的时间：SFU 转发可能丢 Nack，超时后重发（自愈）。
     last_nack: Option<Instant>,
+    /// 进度日志节流（诊断用）。
+    last_progress: Option<Instant>,
 }
 
 impl FileTransfer {
@@ -301,6 +303,7 @@ impl FileTransfer {
                 received: 0,
                 received_flags: vec![false; m.chunks as usize],
                 last_nack: None,
+                last_progress: None,
             },
         );
     }
@@ -328,6 +331,21 @@ impl FileTransfer {
         }
         *f = true;
         r.received += 1;
+        // 诊断：接收进度（500ms 节流）
+        let now = Instant::now();
+        if r.last_progress
+            .map(|t| t.elapsed() >= Duration::from_millis(500))
+            .unwrap_or(true)
+        {
+            r.last_progress = Some(now);
+            tracing::info!(
+                "file receive {}: {}/{} chunks ({:.0}%)",
+                r.name,
+                r.received,
+                r.total_chunks,
+                r.received as f64 * 100.0 / r.total_chunks.max(1) as f64
+            );
+        }
     }
 
     fn on_done(&mut self, d: FileDone, endpoint: &mut crate::Endpoint) {
@@ -495,14 +513,10 @@ impl Sender {
             }
             return;
         }
-        // 单分片/轮：SFU dimpl DTLS 接收队列（max 30）对突发敏感，批量发送
-        // 会在连接初期触发 Receive queue full 断连（#85 实测）；单发 + 循环
-        // 节拍足够低时稳定（100MB ~6min 可完成）。吞吐提升依赖 SFU 侧
-        // DTLS 排空优化，另见 #85。
-        // #85 流控结论：SFU dimpl DTLS 接收队列（max 30）对突发敏感——批量发送
-        // （burst>=2，1KB 分片）会在连接初期触发 Receive queue full 断连（实测）；
-        // 单分片/轮 + 低节拍最稳（100MB 无断连可完成，~7min）。吞吐再提升
-        // 需 SFU/str0m 侧 DTLS 排空优化。
+        // #85 现状：str0m 指向 aerodesk-labs 派生（dimpl DTLS receive queue
+        // 2048），SFU 出站为背压队列（不丢包）；8KB 分片 + 单发可稳定完成
+        // 100MB（~5min，sha256 一致、无断连）。进一步提速受 CLI viewer 事件
+        // 循环速率限制（见 #85）。
         if self.next_chunk < self.total_chunks {
             let start = (self.next_chunk as usize) * CHUNK_SIZE;
             let end = ((self.next_chunk + 1) as usize * CHUNK_SIZE).min(self.data.len());
@@ -560,14 +574,14 @@ mod tests {
         let dir = std::env::temp_dir().join("aerodesk-ft-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sample.bin");
-        std::fs::write(&path, vec![7u8; 3000]).unwrap();
+        std::fs::write(&path, vec![7u8; 20000]).unwrap();
         let mut ft = FileTransfer::new(None);
         ft.send_file(&path).unwrap();
         let st = ft.status();
         let (name, done, total) = st.sending.expect("sending should be Some");
         assert_eq!(name, "sample.bin");
         assert_eq!(done, 0);
-        // 3000B / 1024B 分片 → 3 片
+        // 20000B / 8192B 分片 → 3 片
         assert_eq!(total, 3);
     }
 
