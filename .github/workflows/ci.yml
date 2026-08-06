@@ -209,4 +209,15 @@ jobs:
         run: bash scripts/build-android-lib.sh
 
       - name: Build debug APK
-        run: cd android && ./gradlew assembleDebug --no-daemon
+        shell: bash
+        run: |
+          cd android
+          # #93：Maven 镜像偶发超时（Gradle 会禁用出错的仓库），重试覆盖。
+          for i in 1 2 3; do
+            echo "== gradle attempt $i =="
+            if ./gradlew assembleDebug --no-daemon; then
+              exit 0
+            fi
+            sleep 15
+          done
+          exit 1
