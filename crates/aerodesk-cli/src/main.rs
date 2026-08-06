@@ -584,6 +584,10 @@ fn viewer(
     let audio_muted = mute_audio;
     let mut mute_sent = false;
     let mut dropped_audio_frames = 0u64;
+    // #73 A/V 同步：统一时间轴 + 漂移跟踪 + 音频 jitter buffer。
+    let mut avsync = aerodesk_core::avsync::AvSync::new();
+    let mut jitter = aerodesk_core::avsync::AudioJitterBuffer::new(0.08);
+    let mut audio_played = 0u64;
     // #58 显示器切换：--display N 经 control 通道下发（SFU 转发给被控端）。
     // 未显式指定时不下发（避免每次连接都切到显示器 0）。
     let mut display_sent = display.is_none();
@@ -644,10 +648,19 @@ fn viewer(
                         } else {
                             audio_frames += 1;
                             audio_bytes += data.data.len() as u64;
+                            // #73：解码 → 入 jitter buffer（目标延迟 80ms），
+                            // 以音频时间轴为 now 弹出（模拟播放时钟）。
+                            let pcm = aerodesk_core::pcmu::pcmu_decode(&data.data);
+                            avsync.on_audio(data.time.numer(), data.time.denom());
+                            jitter.push(avsync.audio_time_secs(), pcm);
+                            while let Some(_f) = jitter.pop(avsync.audio_time_secs()) {
+                                audio_played += 1;
+                            }
                         }
                     } else {
                         frames += 1;
                         bytes += data.data.len() as u64;
+                        avsync.on_video(data.time.numer(), data.time.denom());
                         if data.is_keyframe() {
                             keyframes += 1;
                         }
@@ -722,8 +735,13 @@ fn viewer(
         }
 
         if last_report.elapsed() >= Duration::from_secs(2) {
+            let audio_ms = avsync.audio_time_secs() * 1000.0;
+            let video_ms = avsync.video_time_secs() * 1000.0;
+            let drift_ms = avsync.drift_ms();
+            let buffered = jitter.buffered();
+            let jdropped = jitter.dropped();
             info!(
-                "RECEIVED: {frames} frames, {bytes} bytes, {keyframes} keyframes, input sent: {input_seq}, AUDIO: {audio_frames} frames {audio_bytes} bytes muted={audio_muted} dropped={dropped_audio_frames}"
+                "RECEIVED: {frames} frames, {bytes} bytes, {keyframes} keyframes, input sent: {input_seq}, AUDIO: {audio_frames} frames {audio_bytes} bytes muted={audio_muted} dropped={dropped_audio_frames} AVSYNC: audio={audio_ms:.0}ms video={video_ms:.0}ms drift={drift_ms:.0}ms buffered={buffered} dropped={jdropped} played={audio_played}"
             );
             last_report = Instant::now();
         }

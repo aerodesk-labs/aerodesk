@@ -10,6 +10,7 @@
 //! ```
 
 pub mod access_unit;
+pub mod avsync;
 pub mod endpoint;
 pub mod media;
 pub mod media_pipeline;
