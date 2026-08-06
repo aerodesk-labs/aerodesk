@@ -38,18 +38,22 @@ jobs:
         run: brew install x264 ffmpeg
 
       # #74 Windows FFmpeg 开发库：ffmpeg-sys-next 在 MSVC 下经 vcpkg 或
-      # FFMPEG_DIR 定位开发库。此处用 BtbN win64-gpl-shared 预编译包
-      # （含 include/ + lib/*.lib + bin/*.dll），设 FFMPEG_DIR 供 build.rs
+      # FFMPEG_DIR 定位开发库。此处用 gyan.dev full-shared 预编译包
+      # （MSVC 构建，含 include/ + lib/*.lib + bin/*.dll；BtbN 为 MinGW
+      # GNU ar 导入库，MSVC link.exe 无法消费），设 FFMPEG_DIR 供 build.rs
       # 使用，并把 bin 加进 PATH 供回环测试运行时加载 DLL。
       - name: System deps (Windows FFmpeg dev libs)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
-          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+          $url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z"
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.7z"
           Invoke-WebRequest -Uri $url -OutFile $zip
           $dest = Join-Path $env:RUNNER_TEMP "ffmpeg"
-          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $7z = "C:\Program Files\7-Zip\7z.exe"
+          if (-not (Test-Path $7z)) { $7z = "7z" }
+          & $7z x $zip "-o$dest" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7z extract failed" }
           $root = (Get-ChildItem $dest -Directory | Select-Object -First 1).FullName
           Add-Content $env:GITHUB_ENV "FFMPEG_DIR=$root"
           Add-Content $env:GITHUB_PATH (Join-Path $root "bin")
