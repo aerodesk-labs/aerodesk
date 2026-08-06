@@ -59,7 +59,9 @@ struct Sender {
     total_chunks: u64,
     next_chunk: u64,
     meta_sent: bool,
+    last_meta_send: Instant,
     done_sent: bool,
+    last_done_send: Instant,
     last_progress: Instant,
     /// 启动延迟：data channel 双方（经 SFU）打开有先后，过早发 Meta 会被
     /// SFU 丢弃（对端通道未就绪）。3s 覆盖 DCEP 错峰打开。
@@ -443,7 +445,9 @@ impl Sender {
             total_chunks,
             next_chunk: 0,
             meta_sent: false,
+            last_meta_send: Instant::now(),
             done_sent: false,
+            last_done_send: Instant::now(),
             last_progress: Instant::now(),
             start_after: Instant::now() + Duration::from_secs(3),
             resend: Vec::new(),
@@ -458,7 +462,9 @@ impl Sender {
         if Instant::now() < self.start_after {
             return;
         }
-        if !self.meta_sent {
+        // #85：SFU 转发可能丢一次性消息——Meta/Done 在未确认前每 1s 重传，
+        // 直到接收端 ack（Done ok=true）。接收端对重复 Meta 去重。
+        if !self.meta_sent || self.last_meta_send.elapsed() >= Duration::from_secs(1) {
             let meta = FileControl::Meta(FileMeta {
                 id: self.id.clone(),
                 name: self.name.clone(),
@@ -469,10 +475,15 @@ impl Sender {
             if let Ok(json) = serde_json::to_string(&meta)
                 && endpoint.send_channel_data("file", false, json.as_bytes())
             {
-                tracing::info!("file send start: {} ({} bytes)", self.name, self.data.len());
+                if !self.meta_sent {
+                    tracing::info!("file send start: {} ({} bytes)", self.name, self.data.len());
+                }
                 self.meta_sent = true;
+                self.last_meta_send = Instant::now();
             }
-            return;
+            if !self.meta_sent {
+                return;
+            }
         }
         // 补包优先（接收端 Nack）。
         if let Some(resend_idx) = self.resend.pop() {
@@ -484,6 +495,14 @@ impl Sender {
             }
             return;
         }
+        // 单分片/轮：SFU dimpl DTLS 接收队列（max 30）对突发敏感，批量发送
+        // 会在连接初期触发 Receive queue full 断连（#85 实测）；单发 + 循环
+        // 节拍足够低时稳定（100MB ~6min 可完成）。吞吐提升依赖 SFU 侧
+        // DTLS 排空优化，另见 #85。
+        // #85 流控结论：SFU dimpl DTLS 接收队列（max 30）对突发敏感——批量发送
+        // （burst>=2，1KB 分片）会在连接初期触发 Receive queue full 断连（实测）；
+        // 单分片/轮 + 低节拍最稳（100MB 无断连可完成，~7min）。吞吐再提升
+        // 需 SFU/str0m 侧 DTLS 排空优化。
         if self.next_chunk < self.total_chunks {
             let start = (self.next_chunk as usize) * CHUNK_SIZE;
             let end = ((self.next_chunk + 1) as usize * CHUNK_SIZE).min(self.data.len());
@@ -503,7 +522,7 @@ impl Sender {
             }
             return;
         }
-        if !self.done_sent {
+        if !self.done_sent || self.last_done_send.elapsed() >= Duration::from_secs(1) {
             let done = FileControl::Done(FileDone {
                 id: self.id.clone(),
                 ok: true,
@@ -512,8 +531,11 @@ impl Sender {
             if let Ok(json) = serde_json::to_string(&done)
                 && endpoint.send_channel_data("file", false, json.as_bytes())
             {
-                tracing::info!("file send done: {}", self.name);
+                if !self.done_sent {
+                    tracing::info!("file send done: {}", self.name);
+                }
                 self.done_sent = true;
+                self.last_done_send = Instant::now();
             }
         }
     }

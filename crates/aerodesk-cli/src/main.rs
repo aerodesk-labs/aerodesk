@@ -613,6 +613,9 @@ fn publisher(signal_url: &str, room: &str, auth: Option<&str>, audio: bool) {
             }
         }
 
+        // #85 流控：pcap 发布端 ~2ms 节拍 → 单发 ~250-300 chunks/s 是
+        // SFU/str0m DTLS 接收队列的稳定速率上界；过快（>600/s）会触发
+        // SACK 突发导致 Receive queue full 断连（实测）。
         std::thread::sleep(Duration::from_millis(2));
         let _ = &mut signal;
     }

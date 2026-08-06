@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ROOM="${1:-ftx-$(date +%s)}"
-SIZE_KB="${2:-2048}"
+SIZE_KB="${2:-2048}"  # CI 默认 2MB（共享 runner 上 8MB 补包轮次会超窗口）；大文件用手动 100MB 验收
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
@@ -43,9 +43,9 @@ PUB_PID=$!
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/ftx-view.log 2>&1 &
 VIEW_PID=$!
 
-# 等待接收完成（默认最长 66s；大文件按尺寸放大等待窗口。
-# 2MB 在共享 CI 上偶发 >33s（补包一轮），窗口留足余量）
-WAIT_TICKS=$(( (SIZE_KB / 64 + 300) ))
+# 等待接收完成：按尺寸放大窗口（100MB 单发流控 ~7min，窗口留足余量；
+# 成功会提前退出，不拖慢小文件）
+WAIT_TICKS=$(( (SIZE_KB / 32 + 300) ))
 done=0
 for _ in $(seq 1 "$WAIT_TICKS"); do
     if grep -q "file receive complete" /tmp/ftx-view.log 2>/dev/null; then done=1; break; fi
