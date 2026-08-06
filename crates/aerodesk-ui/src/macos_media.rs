@@ -111,7 +111,9 @@ pub fn run_viewer(
         }
         // #75：UI 指针输入 → input 通道 → SFU → 被控端注入。
         while let Ok(req) = input_rx.try_recv() {
-            let _ = live.endpoint.send_channel_data("input", false, req.as_bytes());
+            let _ = live
+                .endpoint
+                .send_channel_data("input", false, req.as_bytes());
         }
         // #29：UI 选层请求（画质/显示器按钮）→ control 通道 → SFU。
         while let Ok(req) = control_rx.try_recv() {
