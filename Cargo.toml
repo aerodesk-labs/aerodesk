@@ -14,6 +14,7 @@ members = [
     "crates/aerodesk-windows",
     "crates/aerodesk-ohos",
     "crates/aerodesk-ui",
+    "crates/aerodesk-ffmpeg",
 ]
 
 [workspace.package]
