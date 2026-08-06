@@ -7,6 +7,8 @@
 //! 屏幕采集（ScreenCaptureKit → VideoToolbox 硬编）为 P2 后续项：
 //! screen-capture-kit crate 已就绪，接入时注意 macOS 屏幕录制权限（TCC）。
 
+#[cfg(target_os = "macos")]
+pub mod audio;
 pub mod capture;
 pub mod cursor;
 pub mod decode;

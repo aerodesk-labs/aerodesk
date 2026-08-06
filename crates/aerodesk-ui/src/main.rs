@@ -156,7 +156,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     *INPUT_TX.lock().unwrap() = Some(input_tx);
                     let (file_cmd_tx, file_cmd_rx) = std::sync::mpsc::channel();
                     *FILE_CMD.lock().unwrap() = Some(file_cmd_tx);
-                    crate::macos_media::run_viewer(server, room, Some(token), weak2.clone(), epoch2.clone(), my_epoch, control_rx, input_rx, file_cmd_rx, session_idx);
+                    crate::macos_media::run_viewer(server, room, Some(token), weak2.clone(), epoch2.clone(), my_epoch, control_rx, input_rx, file_cmd_rx, &AUDIO_MUTED, session_idx);
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -240,6 +240,7 @@ fn main() -> Result<(), slint::PlatformError> {
             *CONTROL_TX.lock().unwrap() = None;
             *INPUT_TX.lock().unwrap() = None;
             *FILE_CMD.lock().unwrap() = None;
+            AUDIO_MUTED.store(false, Ordering::SeqCst);
             ui.set_status("已断开".into());
             ui.set_connecting(false);
         }
@@ -266,6 +267,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // #72：UI → 会话文件/剪贴板命令。
     static FILE_CMD: std::sync::Mutex<Option<std::sync::mpsc::Sender<FileCmd>>> =
         std::sync::Mutex::new(None);
+    // #73/#58：观看端静音开关（run_viewer 读取，真实丢弃音频）。
+    static AUDIO_MUTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     // #29 多会话：会话槽序号（断开时清零）。
     static SESSION_NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -581,6 +584,7 @@ fn main() -> Result<(), slint::PlatformError> {
         move || {
             let ui = ui.unwrap();
             let m = !muted2.fetch_xor(true, Ordering::SeqCst);
+            AUDIO_MUTED.store(m, Ordering::SeqCst);
             if let Some(tx) = CONTROL_TX.lock().unwrap().as_ref() {
                 let _ = tx.send(format!("{{\"audio_mute\":{m}}}"));
             }
