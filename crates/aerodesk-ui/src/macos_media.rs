@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use aerodesk_core::access_unit::AccessUnitAssembler;
 use aerodesk_core::connect::connect_live_role;
 use aerodesk_core::endpoint::ClientEvent;
-use aerodesk_macos::decode::{H264Decoder, to_rgba};
+use aerodesk_core::media_pipeline::Codec;
+use aerodesk_macos::decode::{H264Decoder, HevcDecoder, to_rgba};
 use aerodesk_protocol::signal::Role;
 use slint::{Image, Model, Rgba8Pixel, SharedPixelBuffer};
 use str0m::net::Protocol;
@@ -29,6 +30,66 @@ fn default_recv_dir() -> std::path::PathBuf {
         .unwrap_or_else(|_| std::env::temp_dir().join("AeroDesk"));
     std::fs::create_dir_all(&dir).ok();
     dir
+}
+
+/// #74 观看端多 codec 解码器：H264/H265 走 VideoToolbox 硬解（H265 无硬解
+/// 时回退 FFmpeg），VP9/AV1 走 FFmpeg 软解。统一输出 RGBA。
+enum UiDecoder {
+    H264(H264Decoder),
+    Hevc(HevcDecoder),
+    Ffmpeg(aerodesk_ffmpeg::decode::FfmpegDecoder),
+}
+
+impl UiDecoder {
+    fn for_codec(codec: Codec) -> Option<Self> {
+        match codec {
+            Codec::H264 => Some(UiDecoder::H264(H264Decoder::new())),
+            Codec::Hevc if HevcDecoder::is_hardware_supported() => {
+                Some(UiDecoder::Hevc(HevcDecoder::new()))
+            }
+            Codec::Hevc | Codec::Vp9 | Codec::Av1 => {
+                aerodesk_ffmpeg::decode::FfmpegDecoder::new(codec)
+                    .ok()
+                    .map(UiDecoder::Ffmpeg)
+            }
+            _ => None,
+        }
+    }
+
+    fn matches(&self, codec: Codec) -> bool {
+        matches!(
+            (self, codec),
+            (UiDecoder::H264(_), Codec::H264)
+                | (UiDecoder::Hevc(_), Codec::Hevc)
+                | (UiDecoder::Ffmpeg(_), Codec::Vp9 | Codec::Av1 | Codec::Hevc)
+        )
+    }
+
+    fn decode_rgba(
+        &mut self,
+        codec: Codec,
+        data: &[u8],
+        pts: i64,
+    ) -> Result<Option<(Vec<u8>, u32, u32)>, String> {
+        match self {
+            UiDecoder::H264(d) => d
+                .decode_annexb(data, pts)
+                .map(|pb| pb.and_then(|pb| to_rgba(&pb).map(|(r, w, h)| (r, w as u32, h as u32)))),
+            UiDecoder::Hevc(d) => d
+                .decode_annexb(data, pts)
+                .map(|pb| pb.and_then(|pb| to_rgba(&pb).map(|(r, w, h)| (r, w as u32, h as u32)))),
+            UiDecoder::Ffmpeg(d) => {
+                let unit = aerodesk_core::media_pipeline::EncodedUnit {
+                    data: data.to_vec(),
+                    keyframe: false,
+                    pts_ms: pts.max(0) as u64 / 1000,
+                    rtp_timestamp: 0,
+                };
+                d.decode_unit(&unit)
+                    .map(|f| f.and_then(|f| f.raw.map(|raw| (raw, f.width, f.height))))
+            }
+        }
+    }
 }
 
 /// 运行 macOS 观看会话（阻塞直到断开/代际失效）。
@@ -66,7 +127,7 @@ pub fn run_viewer(
     ui.set_status(format!("已连接：peer={} ice={}", live.peer_id, live.ice_connected).into());
     ui.set_log(
         format!(
-            "房间: {room}\n服务器: {server}\nSDP 交换: OK\nICE: {}\n\n真实 H.264 解码渲染（VideoToolbox）。",
+            "房间: {room}\n服务器: {server}\nSDP 交换: OK\nICE: {}\n\n真实解码渲染（H.264/H.265 硬解优先，VP9/AV1 FFmpeg）。",
             if live.ice_connected { "connected" } else { "pending(5s 超时)" }
         )
         .into(),
@@ -74,7 +135,7 @@ pub fn run_viewer(
     crate::add_recent(&ui, &room, &server);
     ui.set_conn_state(2);
     ui.set_in_session(true);
-    ui.set_session_status("会话中 · 真实 H.264 解码（VideoToolbox）".into());
+    ui.set_session_status("会话中 · 真实解码（H.264/H.265/VP9/AV1）".into());
 
     // #29 多会话标签：登记会话房间与帧槽。
     {
@@ -96,7 +157,7 @@ pub fn run_viewer(
     }
 
     let mut assembler = AccessUnitAssembler::new();
-    let mut decoder = H264Decoder::new();
+    let mut decoder: Option<UiDecoder> = None;
     let mut frames: u64 = 0;
     let mut last_stat = Instant::now();
     // #72 文件传输 + 剪贴板（接收落盘到 ~/Downloads/AeroDesk）。
@@ -205,19 +266,32 @@ pub fn run_viewer(
                         }
                     } else if let Some(mid) = live.video_mid
                         && data.mid == mid
-                        && let Some(au) = assembler.push(
-                            data.data.as_ref(),
-                            data.time.as_micros(),
-                            data.is_keyframe(),
-                        )
                     {
-                        if let Ok(Some(pixbuf)) = decoder.decode_annexb(&au.data, au.pts_us as i64)
-                            && let Some((rgba, w, h)) = to_rgba(&pixbuf)
-                        {
-                            avsync.on_video(data.time.numer(), data.time.denom());
-                            // #73：先缓存最新帧，按音频时钟到点再渲染。
-                            pending_frame =
-                                Some((rgba, w as u32, h as u32, avsync.video_time_secs()));
+                        // #74 按协商 codec 选解码器（硬解优先，FFmpeg 回退）。
+                        let codec = match data.params.spec().codec {
+                            str0m::format::Codec::H264 => Some(Codec::H264),
+                            str0m::format::Codec::H265 => Some(Codec::Hevc),
+                            str0m::format::Codec::Vp9 => Some(Codec::Vp9),
+                            str0m::format::Codec::Av1 => Some(Codec::Av1),
+                            _ => None,
+                        };
+                        if let Some(cc) = codec {
+                            if decoder.as_ref().map(|d| !d.matches(cc)).unwrap_or(true) {
+                                decoder = UiDecoder::for_codec(cc);
+                            }
+                            if let Some(dec) = &mut decoder
+                                && let Some(au) = assembler.push(
+                                    data.data.as_ref(),
+                                    data.time.as_micros(),
+                                    data.is_keyframe(),
+                                )
+                                && let Ok(Some((rgba, w, h))) =
+                                    dec.decode_rgba(cc, &au.data, au.pts_us as i64)
+                            {
+                                avsync.on_video(data.time.numer(), data.time.denom());
+                                // #73：先缓存最新帧，按音频时钟到点再渲染。
+                                pending_frame = Some((rgba, w, h, avsync.video_time_secs()));
+                            }
                         }
                     }
                 }
@@ -430,6 +504,35 @@ mod tests {
             rgba.chunks_exact(4).any(|p| p[3] == 255),
             "alpha 应全不透明"
         );
+    }
+
+    /// #74 UI 解码器（硬解优先 + FFmpeg 回退）对全部 codec 回环出 RGBA。
+    #[test]
+    fn ui_decoder_decodes_all_codecs() {
+        use aerodesk_ffmpeg::encode::FfmpegEncoder;
+
+        let (w, h) = (320u32, 180u32);
+        for codec in [Codec::H264, Codec::Hevc, Codec::Vp9, Codec::Av1] {
+            let mut enc = FfmpegEncoder::new(w, h, 30, 1_000_000, codec).expect("encoder");
+            enc.request_keyframe();
+            let mut dec = UiDecoder::for_codec(codec).expect("decoder");
+            let mut ok = false;
+            for i in 0..80u32 {
+                let bgra: Vec<u8> = (0..(w * h * 4) as usize)
+                    .map(|j| ((i * 7 + (j as u32) / 4) & 0xff) as u8)
+                    .collect();
+                let Some(unit) = enc.encode_bgra(&bgra).expect("encode") else {
+                    continue;
+                };
+                if let Ok(Some((rgba, dw, dh))) = dec.decode_rgba(codec, &unit.data, 0) {
+                    assert_eq!((dw, dh), (w, h));
+                    assert_eq!(rgba.len(), (w * h * 4) as usize);
+                    ok = true;
+                    break;
+                }
+            }
+            assert!(ok, "{codec:?} 应解出 RGBA");
+        }
     }
 
     #[test]

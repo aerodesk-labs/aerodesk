@@ -639,6 +639,9 @@ fn viewer(
     let mut display_sent = display.is_none();
     // #75 远程光标：cursor 通道日志（节流 1s，e2e 断言用）。
     let mut last_cursor_log = Instant::now();
+    // #74 解码端验证：FFmpeg 软解全部 codec（H264/H265/VP9/AV1），codec-e2e 断言。
+    let mut video_decoder: Option<aerodesk_ffmpeg::decode::FfmpegDecoder> = None;
+    let mut decoded_frames: u64 = 0;
 
     loop {
         let wait = Duration::from_millis(50);
@@ -711,6 +714,37 @@ fn viewer(
                         avsync.on_video(data.time.numer(), data.time.denom());
                         if data.is_keyframe() {
                             keyframes += 1;
+                        }
+                        // #74 解码端：FFmpeg 软解 H264/H265/VP9/AV1 → RGBA。
+                        let core_codec = match data.params.spec().codec {
+                            str0m::format::Codec::H264 => Some(Codec::H264),
+                            str0m::format::Codec::H265 => Some(Codec::Hevc),
+                            str0m::format::Codec::Vp9 => Some(Codec::Vp9),
+                            str0m::format::Codec::Av1 => Some(Codec::Av1),
+                            _ => None,
+                        };
+                        if let Some(cc) = core_codec {
+                            if video_decoder
+                                .as_ref()
+                                .map(|d| d.codec() != cc)
+                                .unwrap_or(true)
+                            {
+                                video_decoder =
+                                    aerodesk_ffmpeg::decode::FfmpegDecoder::new(cc).ok();
+                            }
+                            if let Some(dec) = &mut video_decoder {
+                                let unit = aerodesk_core::media_pipeline::EncodedUnit {
+                                    data: data.data.as_ref().to_vec(),
+                                    keyframe: data.is_keyframe(),
+                                    pts_ms: 0,
+                                    rtp_timestamp: 0,
+                                };
+                                if let Ok(Some(frame)) = dec.decode_unit(&unit)
+                                    && frame.raw.is_some()
+                                {
+                                    decoded_frames += 1;
+                                }
+                            }
                         }
                     }
                 }
@@ -801,7 +835,7 @@ fn viewer(
             let buffered = jitter.buffered();
             let jdropped = jitter.dropped();
             info!(
-                "RECEIVED: {frames} frames, {bytes} bytes, {keyframes} keyframes, input sent: {input_seq}, AUDIO: {audio_frames} frames {audio_bytes} bytes muted={audio_muted} dropped={dropped_audio_frames} AVSYNC: audio={audio_ms:.0}ms video={video_ms:.0}ms drift={drift_ms:.0}ms buffered={buffered} dropped={jdropped} played={audio_played}"
+                "RECEIVED: {frames} frames, {bytes} bytes, {keyframes} keyframes, DECODED: {decoded_frames}, input sent: {input_seq}, AUDIO: {audio_frames} frames {audio_bytes} bytes muted={audio_muted} dropped={dropped_audio_frames} AVSYNC: audio={audio_ms:.0}ms video={video_ms:.0}ms drift={drift_ms:.0}ms buffered={buffered} dropped={jdropped} played={audio_played}"
             );
             last_report = Instant::now();
         }

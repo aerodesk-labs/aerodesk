@@ -128,3 +128,52 @@ impl std::fmt::Debug for FfmpegDecoder {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encode::FfmpegEncoder;
+
+    fn roundtrip(codec: Codec) {
+        let (w, h) = (320u32, 180u32);
+        let mut enc = FfmpegEncoder::new(w, h, 30, 1_000_000, codec).expect("encoder");
+        enc.request_keyframe();
+        // 解码器必须跨帧复用：SPS/PPS/参考帧状态在关键帧建立，P 帧续解。
+        let mut dec = FfmpegDecoder::new(codec).expect("decoder");
+        let mut decoded = None;
+        for i in 0..60u32 {
+            let bgra: Vec<u8> = (0..(w * h * 4) as usize)
+                .map(|j| ((i * 17 + (j as u32) / 4) & 0xff) as u8)
+                .collect();
+            let Some(unit) = enc.encode_bgra(&bgra).expect("encode") else {
+                continue;
+            };
+            if let Ok(Some(frame)) = dec.decode_unit(&unit) {
+                decoded = Some((frame.raw.expect("raw rgba"), frame.width, frame.height));
+            }
+        }
+        let (rgba, dw, dh) = decoded.expect("应在若干帧内解出 RGBA");
+        assert_eq!((dw, dh), (w, h));
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+    }
+
+    #[test]
+    fn h264_roundtrip() {
+        roundtrip(Codec::H264);
+    }
+
+    #[test]
+    fn h265_roundtrip() {
+        roundtrip(Codec::Hevc);
+    }
+
+    #[test]
+    fn vp9_roundtrip() {
+        roundtrip(Codec::Vp9);
+    }
+
+    #[test]
+    fn av1_roundtrip() {
+        roundtrip(Codec::Av1);
+    }
+}
