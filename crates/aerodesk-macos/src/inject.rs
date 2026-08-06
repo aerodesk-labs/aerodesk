@@ -80,6 +80,17 @@ pub fn keycode_for_code(code: &str) -> Option<u16> {
         "Digit7" => Some(KeyCode::ANSI_7),
         "Digit8" => Some(KeyCode::ANSI_8),
         "Digit9" => Some(KeyCode::ANSI_9),
+        "Minus" => Some(KeyCode::ANSI_MINUS),
+        "Equal" => Some(KeyCode::ANSI_EQUAL),
+        "BracketLeft" => Some(KeyCode::ANSI_LEFT_BRACKET),
+        "BracketRight" => Some(KeyCode::ANSI_RIGHT_BRACKET),
+        "Backslash" => Some(KeyCode::ANSI_BACKSLASH),
+        "Semicolon" => Some(KeyCode::ANSI_SEMICOLON),
+        "Quote" => Some(KeyCode::ANSI_QUOTE),
+        "Backquote" => Some(KeyCode::ANSI_GRAVE),
+        "Comma" => Some(KeyCode::ANSI_COMMA),
+        "Period" => Some(KeyCode::ANSI_PERIOD),
+        "Slash" => Some(KeyCode::ANSI_SLASH),
         "Enter" => Some(KeyCode::RETURN),
         "Tab" => Some(KeyCode::TAB),
         "Space" => Some(KeyCode::SPACE),
@@ -102,6 +113,7 @@ pub fn keycode_for_code(code: &str) -> Option<u16> {
         "AltRight" => Some(KeyCode::OPTION),
         "MetaLeft" => Some(KeyCode::COMMAND),
         "MetaRight" => Some(KeyCode::COMMAND),
+        "CapsLock" => Some(KeyCode::CAPS_LOCK),
         "F1" => Some(KeyCode::F1),
         "F2" => Some(KeyCode::F2),
         "F3" => Some(KeyCode::F3),
@@ -230,6 +242,32 @@ mod tests {
         assert!(keycode_for_code("ArrowUp").is_some());
         assert!(keycode_for_code("F5").is_some());
         assert!(keycode_for_code("UnknownKey").is_none());
+    }
+
+    #[test]
+    fn keycodes_cover_punctuation() {
+        // #75 键盘注入：标点/符号（viewer key-code 映射输出）。
+        for code in [
+            "Minus",
+            "Equal",
+            "BracketLeft",
+            "BracketRight",
+            "Backslash",
+            "Semicolon",
+            "Quote",
+            "Backquote",
+            "Comma",
+            "Period",
+            "Slash",
+            "CapsLock",
+        ] {
+            assert!(
+                keycode_for_code(code).is_some(),
+                "{code} 应能映射到 CGKeyCode"
+            );
+        }
+        assert_eq!(keycode_for_code("Period"), Some(0x2F)); // ANSI_PERIOD
+        assert_eq!(keycode_for_code("Minus"), Some(0x1B)); // ANSI_MINUS
     }
 
     #[test]
