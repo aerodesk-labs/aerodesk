@@ -82,6 +82,11 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/file-transfer-e2e.sh
 
+      # #72 取消回归：publisher --cancel-send-after 中途取消 → viewer 不落盘、无残留。
+      - name: e2e file transfer cancel/cleanup (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/file-cancel-e2e.sh
+
       # #72 剪贴板双向同步：viewer→publisher 与 publisher→viewer 两个方向。
       - name: e2e clipboard sync (macOS only)
         if: runner.os == 'macOS'

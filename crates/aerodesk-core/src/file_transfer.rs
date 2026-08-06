@@ -202,6 +202,20 @@ impl FileTransfer {
         self.incoming_clipboard.take()
     }
 
+    /// 取消当前发送：向接收端下发 FileCancel 并清空发送状态（#72 回归：
+    /// 接收端 on_cancel 移除接收器，不落盘，无残留临时文件）。
+    pub fn cancel_send(&mut self, endpoint: &mut crate::Endpoint) {
+        let Some(s) = self.send.take() else {
+            return;
+        };
+        let cancel = FileControl::Cancel(FileCancel { id: s.id.clone() });
+        if let Ok(json) = serde_json::to_string(&cancel) {
+            let _ = endpoint.send_channel_data("file", false, json.as_bytes());
+        }
+        self.message = Some(format!("已取消发送：{}", s.name));
+        tracing::info!("file send cancelled: {}", s.name);
+    }
+
     /// 发送剪贴板文本到远端（同一 file 通道）；进入补发队列（1s 幂等重试，
     /// 最多 8 次），应对 SFU 转发丢首包。
     pub fn send_clipboard(&mut self, text: &str, endpoint: &mut crate::Endpoint) -> bool {
@@ -583,6 +597,36 @@ mod tests {
         assert_eq!(done, 0);
         // 20000B / 8192B 分片 → 3 片
         assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn cancel_send_clears_sender_and_sets_message() {
+        // 写临时文件触发发送；cancel_send 后：发送任务清空、message 标记取消。
+        // send_channel_data 在无 file 通道时返回 false（不 panic），不影响状态清理。
+        let dir = std::env::temp_dir().join("aerodesk-ft-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cancel.bin");
+        std::fs::write(&path, vec![9u8; 20000]).unwrap();
+        let mut ft = FileTransfer::new(None);
+        ft.send_file(&path).unwrap();
+        assert!(ft.status().sending.is_some(), "sending should start");
+        let mut ep = crate::Endpoint::new();
+        ft.cancel_send(&mut ep);
+        let st = ft.status();
+        assert!(st.sending.is_none(), "sender should be cleared");
+        assert!(
+            st.message.as_deref().is_some_and(|m| m.contains("已取消")),
+            "message should mention cancel, got {:?}",
+            st.message
+        );
+    }
+
+    #[test]
+    fn cancel_send_without_sender_is_noop() {
+        let mut ft = FileTransfer::new(None);
+        let mut ep = crate::Endpoint::new();
+        ft.cancel_send(&mut ep); // 不应 panic，也不应产生取消 message
+        assert!(ft.status().message.is_none());
     }
 
     #[test]
