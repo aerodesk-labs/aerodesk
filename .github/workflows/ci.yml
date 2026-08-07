@@ -113,9 +113,12 @@ jobs:
         run: ./scripts/display-e2e.sh
 
       # #72 文件传输：publisher --send-file → SFU → viewer --recv-dir，SHA-256 一致。
+      # #85：用 release 构建——debug 下 str0m/sctp-proto 高吞吐 data channel
+      # 深调用链会 stack overflow（#102 已知，SFU shard 已 8MB 栈缓解）；
+      # 吞吐验收本就需 release（LESSON 性能压测）。
       - name: e2e file transfer (macOS only)
         if: runner.os == 'macOS'
-        run: ./scripts/file-transfer-e2e.sh
+        run: PROFILE=release ./scripts/file-transfer-e2e.sh
 
       # #72 取消回归：publisher --cancel-send-after 中途取消 → viewer 不落盘、无残留。
       - name: e2e file transfer cancel/cleanup (macOS only)
