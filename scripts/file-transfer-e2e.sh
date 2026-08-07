@@ -44,8 +44,9 @@ PUB_PID=$!
 VIEW_PID=$!
 
 # 等待接收完成：按尺寸放大窗口（100MB 单发流控 ~7min，窗口留足余量；
-# 成功会提前退出，不拖慢小文件）
-WAIT_TICKS=$(( (SIZE_KB / 32 + 300) ))
+# 成功会提前退出，不拖慢小文件）。CI 共享 runner 上 2MB 也曾超过原 73s
+# 窗口（"receive not completed" flake），基础窗口放宽到 ~133s。
+WAIT_TICKS=$(( (SIZE_KB / 32 + 600) ))
 done=0
 for _ in $(seq 1 "$WAIT_TICKS"); do
     if grep -q "file receive complete" /tmp/ftx-view.log 2>/dev/null; then done=1; break; fi
