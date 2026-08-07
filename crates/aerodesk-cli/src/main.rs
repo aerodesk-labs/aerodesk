@@ -414,6 +414,13 @@ fn drain_payload_queue(endpoint: &mut Endpoint, n: usize) {
     }
 }
 
+/// #73 A/V 同步验收：合成源的帧间隔必须精确到纳秒。
+/// `Duration::from_millis(1000 / fps)` 在 fps=30 时截断为 33ms → 实际
+/// 30.3fps，视频时钟比音频快 ~1%，10 分钟累积漂移可达 ~6s（验收 <50ms 不达标）。
+fn frame_interval(fps: u32) -> Duration {
+    Duration::from_nanos(1_000_000_000 / fps.max(1) as u64)
+}
+
 /// #73 音频发送 codec：PCMU（8kHz 电话级）或 Opus（48kHz 高音质）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AudioCodec {
@@ -1139,7 +1146,7 @@ fn publisher_x264(
 
         // 30fps 节奏编码发送（simulcast 各层同一 rtp_time，SFU 按 rid 选层）
         if connected && Instant::now() >= next_frame {
-            next_frame += Duration::from_millis(1000 / FPS as u64);
+            next_frame += frame_interval(FPS);
             let rtp_time = str0m::media::MediaTime::new(
                 pts as u64 * 3000,
                 str0m::media::Frequency::NINETY_KHZ,
@@ -1284,7 +1291,7 @@ fn publisher_vt(
         file_transfer::tick(&mut endpoint);
 
         if connected && Instant::now() >= next_frame {
-            next_frame += Duration::from_millis(1000 / fps as u64);
+            next_frame += frame_interval(fps);
             let rtp_time = str0m::media::MediaTime::new(
                 pts as u64 * pts_inc as u64,
                 str0m::media::Frequency::NINETY_KHZ,
@@ -1396,7 +1403,7 @@ fn publisher_ffmpeg(
         file_transfer::tick(&mut endpoint);
 
         if connected && Instant::now() >= next_frame {
-            next_frame += Duration::from_millis(1000 / FPS as u64);
+            next_frame += frame_interval(FPS);
             let rgb = source.next_frame();
             if let Some(unit) = encoder.encode_rgb(rgb).expect("encode") {
                 let rtp_time = str0m::media::MediaTime::new(
@@ -1764,5 +1771,28 @@ fn publisher_capture(
 
         std::thread::sleep(Duration::from_millis(2));
         let _ = &mut signal;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #73 合成源帧间隔精度：30fps 必须是 1/30s（33333333ns），
+    /// 而不是 1000/30=33ms 截断导致的 30.3fps（10 分钟漂移 ~6s）。
+    #[test]
+    fn frame_interval_is_precise_for_30fps() {
+        let d = frame_interval(30);
+        assert_eq!(d.as_nanos(), 33_333_333);
+        // 30 帧累计应≈1s（误差 < 1ms）
+        let total = (0..30).map(|_| d.as_nanos()).sum::<u128>();
+        assert!(
+            (total as i128 - 1_000_000_000i128).abs() < 1_000_000,
+            "30帧累计 {total}ns"
+        );
+        // 60fps 同样精确
+        assert_eq!(frame_interval(60).as_nanos(), 16_666_666);
+        // fps=0 不应除零
+        assert!(frame_interval(0).as_nanos() > 0);
     }
 }
