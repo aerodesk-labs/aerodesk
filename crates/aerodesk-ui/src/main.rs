@@ -715,6 +715,63 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }
     });
+    // #109 AI 远控权限/审计管理（本机设置页）。
+    ui.on_cmd_allowlist_refresh({
+        let ui = ui.as_weak();
+        move || {
+            let Some(ui) = ui.upgrade() else { return };
+            let items: Vec<slint::SharedString> = aerodesk_core::cmd_exec::allowlist()
+                .into_iter()
+                .map(Into::into)
+                .collect();
+            ui.set_cmd_allowlist(slint::ModelRc::new(slint::VecModel::from(items)));
+        }
+    });
+    ui.on_cmd_allowlist_add({
+        let ui = ui.as_weak();
+        move || {
+            let Some(ui) = ui.upgrade() else { return };
+            let input = ui.get_cmd_allowlist_input().to_string();
+            if input.trim().is_empty() {
+                return;
+            }
+            match aerodesk_core::cmd_exec::add_allow_prefix(&input) {
+                Ok(()) => {
+                    ui.set_cmd_allowlist_input("".into());
+                    ui.invoke_cmd_allowlist_refresh();
+                    ui.set_settings_status(format!("已添加白名单：{input}").into());
+                }
+                Err(e) => ui.set_settings_status(format!("添加失败：{e}").into()),
+            }
+        }
+    });
+    ui.on_cmd_allowlist_remove({
+        let ui = ui.as_weak();
+        move |prefix: slint::SharedString| {
+            let Some(ui) = ui.upgrade() else { return };
+            match aerodesk_core::cmd_exec::remove_allow_prefix(prefix.as_str()) {
+                Ok(()) => {
+                    ui.invoke_cmd_allowlist_refresh();
+                    ui.set_settings_status(format!("已移除白名单：{prefix}").into());
+                }
+                Err(e) => ui.set_settings_status(format!("移除失败：{e}").into()),
+            }
+        }
+    });
+    ui.on_cmd_audit_refresh({
+        let ui = ui.as_weak();
+        move || {
+            let Some(ui) = ui.upgrade() else { return };
+            let text = aerodesk_core::cmd_exec::tail_audit(30)
+                .map(|lines| lines.join("\n"))
+                .unwrap_or_else(|_| "（无审计记录或读取失败）".to_string());
+            ui.set_cmd_audit(text.into());
+        }
+    });
+    // 启动时预填设置页数据。
+    ui.invoke_cmd_allowlist_refresh();
+    ui.invoke_cmd_audit_refresh();
+
     ui.on_toggle_display({
         let ui = ui.as_weak();
         // #58 显示器切换：经 control 通道下发 {"display":N}（SFU 转发给被控端）。
