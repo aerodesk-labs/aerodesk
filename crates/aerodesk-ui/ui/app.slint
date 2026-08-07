@@ -431,7 +431,11 @@ export component AppWindow inherits Window {
     in-out property <float> frame-w: 0;
     in-out property <float> frame-h: 0;
     // ---- 设置 ----
-    in-out property <int> settings-tab: 0;          // 0=显示 1=网络 2=安全 3=快捷键
+    in-out property <int> settings-tab: 0;          // 0=显示 1=网络 2=安全 3=快捷键 4=AI 远控
+    // #109 AI 远控：命令白名单 + 审计（本机管理入口）。
+    in-out property <[string]> cmd-allowlist: [];
+    in-out property <string> cmd-allowlist-input: "";
+    in-out property <string> cmd-audit: "";
     in-out property <int> quality: 1;
     in-out property <string> server-default: "signal.aerodesk.io";
     in-out property <bool> remember-token: false;
@@ -472,6 +476,11 @@ export component AppWindow inherits Window {
     callback send-clipboard();
     callback switch-session(int);
     callback set-settings-tab(int);
+    // #109 AI 远控管理：白名单增删/刷新 + 审计刷新。
+    callback cmd-allowlist-add();
+    callback cmd-allowlist-remove(string);
+    callback cmd-allowlist-refresh();
+    callback cmd-audit-refresh();
     callback set-quality(int);
     callback set-peer-tab(int);
     callback toggle-favorite(string);
@@ -1033,6 +1042,7 @@ export component AppWindow inherits Window {
                     RdButton { text: "网络"; width: 72px; checked: root.settings-tab == 1; clicked => { root.set-settings-tab(1); } }
                     RdButton { text: "安全"; width: 72px; checked: root.settings-tab == 2; clicked => { root.set-settings-tab(2); } }
                     RdButton { text: "快捷键"; width: 84px; checked: root.settings-tab == 3; clicked => { root.set-settings-tab(3); } }
+                    RdButton { text: "AI 远控"; width: 84px; checked: root.settings-tab == 4; clicked => { root.set-settings-tab(4); } }
                 }
                 Rectangle { height: 1px; background: #efeff2; }
 
@@ -1069,6 +1079,47 @@ export component AppWindow inherits Window {
                     Text { text: "全屏：F11（待绑定）"; font-size: 14px; color: #4d4d52; height: 18px; vertical-stretch: 0; }
                     Text { text: "输入捕获/释放：Esc（待绑定）"; font-size: 14px; color: #4d4d52; height: 18px; vertical-stretch: 0; }
                     Text { text: "断开：Ctrl+Alt+D（待绑定）"; font-size: 14px; color: #4d4d52; height: 18px; vertical-stretch: 0; }
+                }
+                if root.settings-tab == 4: VerticalLayout {
+                    spacing: 10px;
+                    Text { text: "AI 远控权限（#109）"; font-size: 15px; font-weight: 600; color: #212121; height: 20px; vertical-stretch: 0; }
+                    Text { text: "命令白名单：每行一个前缀；危险命令（rm -rf/dd/shutdown/交互式等）默认拦截，前缀命中可放行。文件在 ~/AeroDesk/cmd-allowlist.txt。"; font-size: 13px; color: #7d7d84; height: 32px; vertical-stretch: 0; }
+                    HorizontalLayout {
+                        cross-axis-alignment: center;
+                        spacing: 8px;
+                        RdInput { text <=> root.cmd-allowlist-input; placeholder: "命令前缀，如 /tmp/safe"; font-size: 14px; edited => { root.cmd-allowlist-add(); } }
+                        RdButton { text: "添加"; width: 72px; clicked => { root.cmd-allowlist-add(); } }
+                        RdButton { text: "刷新"; width: 72px; clicked => { root.cmd-allowlist-refresh(); } }
+                    }
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 2px;
+                            if root.cmd-allowlist.length == 0: Text { text: "（空）"; font-size: 13px; color: #9a9aa0; height: 24px; }
+                            for item in root.cmd-allowlist: Rectangle {
+                                height: 34px;
+                                border-radius: 6px;
+                                background: #f7f7f9;
+                                HorizontalLayout {
+                                    cross-axis-alignment: center;
+                                    padding-left: 10px;
+                                    spacing: 8px;
+                                    Text { text: item; font-size: 13px; color: #212121; vertical-alignment: center; overflow: elide; }
+                                    Rectangle { width: 0px; horizontal-stretch: 1; }
+                                    IconBtn { icon: "\u{e872}"; danger: true; tooltip: "移除"; clicked => { root.cmd-allowlist-remove(item); } }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle { height: 1px; background: #efeff2; }
+                    Text { text: "命令审计（最近 30 条，~/AeroDesk/cmd-audit.jsonl）"; font-size: 14px; color: #4d4d52; height: 18px; vertical-stretch: 0; }
+                    HorizontalLayout {
+                        RdButton { text: "刷新审计"; width: 96px; clicked => { root.cmd-audit-refresh(); } }
+                    }
+                    ScrollView {
+                        vertical-stretch: 1;
+                        Text { text: root.cmd-audit; font-size: 11px; color: #4d4d52; }
+                    }
                 }
                 Text { text: "所有设置修改后自动保存"; font-size: 13px; color: #9a9aa0; height: 18px; vertical-stretch: 0; }
             }
