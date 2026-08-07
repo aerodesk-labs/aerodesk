@@ -550,9 +550,15 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn output_is_truncated_at_cap_windows() {
-        // PowerShell 输出 2MB；读端到 1MB 上限后停读，子进程写满管道阻塞，超时强杀。
-        let cmd = "powershell -NoProfile -Command \"$c='x'*2000000; [Console]::Out.Write($c)\"";
-        let out = run_command(cmd, None, Some(8000), &[]);
+        // PowerShell -EncodedCommand（UTF-16LE base64）避免 cmd /C 引号解析：
+        // 输出 2MB；读端到 1MB 上限后停读，子进程写满管道阻塞，超时强杀。
+        let script = "$c='x'*2000000; [Console]::Out.Write($c)";
+        let le: Vec<u8> = script
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        let cmd = format!("powershell -NoProfile -EncodedCommand {}", encode_b64(&le));
+        let out = run_command(&cmd, None, Some(8000), &[]);
         assert!(out.truncated, "应标记截断");
         assert!(out.stdout.len() <= MAX_OUTPUT_BYTES + 1);
     }
@@ -594,17 +600,19 @@ mod tests {
         // 敏感路径默认禁止
         let err = write_file("/etc/aerodesk-test.txt", &encode_b64(b"x"), &[]).unwrap_err();
         assert!(err.contains("blocked by policy"));
-        // 白名单放行：策略不再拦截（剩余为系统权限错误，而非 blocked by policy）
-        let err2 = write_file(
+        // 白名单放行：策略不再拦截（写入可能成功（如 Windows 根路径可写）或报
+        // 系统权限错误，但都不应再是 blocked by policy）。
+        match write_file(
             "/etc/aerodesk-test.txt",
             &encode_b64(b"x"),
             &["/etc/aerodesk-test".to_string()],
-        )
-        .unwrap_err();
-        assert!(
-            !err2.contains("blocked by policy"),
-            "白名单应放行策略层拦截: {err2}"
-        );
+        ) {
+            Ok(()) => {}
+            Err(e) => assert!(
+                !e.contains("blocked by policy"),
+                "白名单应放行策略层拦截: {e}"
+            ),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
