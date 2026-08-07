@@ -178,6 +178,24 @@ fn tool_definitions() -> Vec<Value> {
                 "required": ["text"]
             }
         }),
+        json!({
+            "name": "download_file",
+            "description": "从被控端下载文件（走 file 通道，大文件无 4MB 限制）；返回保存到控制端的路径。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"remote_path": {"type": "string", "description": "被控端文件绝对路径"}},
+                "required": ["remote_path"]
+            }
+        }),
+        json!({
+            "name": "upload_file",
+            "description": "上传本地文件到被控端（走 file 通道，大文件无 4MB 限制）。被控端 publisher 需以 --recv-dir <dir> 启动。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"local_path": {"type": "string", "description": "控制端本地文件绝对路径"}},
+                "required": ["local_path"]
+            }
+        }),
     ]
 }
 
@@ -277,6 +295,9 @@ fn call_tool(params: &Value, state: &State) -> Value {
     if name == "mouse_move" || name == "mouse_click" || name == "type_text" {
         return call_mouse_tool(id, name, &args, state);
     }
+    if name == "download_file" || name == "upload_file" {
+        return call_file_tool(id, name, &args, state);
+    }
 
     let cmd_args = match build_args(state, name, &args) {
         Ok(v) => v,
@@ -299,6 +320,104 @@ fn call_tool(params: &Value, state: &State) -> Value {
     };
     let (text, ok) = format_result(&resp);
     json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":!ok}})
+}
+
+/// 大文件上传/下载：#122 经 file 通道桥接（--request-file / --send-file）。
+fn call_file_tool(id: Option<Value>, name: &str, args: &Value, state: &State) -> Value {
+    let err = |msg: String| json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":msg}],"isError":true}});
+    if name == "download_file" {
+        let Some(remote) = args.get("remote_path").and_then(|v| v.as_str()) else {
+            return err("download_file 缺少 remote_path".into());
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "aerodesk-mcp-dl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return err(format!("mkdir: {e}"));
+        }
+        let status = Command::new(&state.cli_bin)
+            .args([
+                "--role",
+                "viewer",
+                "--signal",
+                &state.signal,
+                "--room",
+                &state.room,
+                "--request-file",
+                remote,
+                "--recv-dir",
+                dir.to_str().unwrap_or("/tmp"),
+            ])
+            .status();
+        return match status {
+            Ok(st) if st.success() => {
+                let files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+                    .map(|it| {
+                        it.flatten()
+                            .map(|e| e.path())
+                            .filter(|p| p.is_file())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                match files.first() {
+                    Some(f) => {
+                        let size = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+                        let hash = sha256_hex(&std::fs::read(f).unwrap_or_default());
+                        json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":format!("downloaded: {remote} -> {} ({} bytes, sha256={hash})", f.display(), size)}],"isError":false}})
+                    }
+                    None => err("下载完成但未找到落盘文件".into()),
+                }
+            }
+            Ok(st) => err(format!("download failed: exit {:?}", st.code())),
+            Err(e) => err(format!("spawn: {e}")),
+        };
+    }
+
+    // upload_file
+    let Some(local) = args.get("local_path").and_then(|v| v.as_str()) else {
+        return err("upload_file 缺少 local_path".into());
+    };
+    let Ok(meta) = std::fs::metadata(local) else {
+        return err(format!("本地文件不可读: {local}"));
+    };
+    if !meta.is_file() {
+        return err(format!("{local} 不是文件"));
+    }
+    let status = Command::new(&state.cli_bin)
+        .args([
+            "--role",
+            "viewer",
+            "--signal",
+            &state.signal,
+            "--room",
+            &state.room,
+            "--send-file",
+            local,
+        ])
+        .status();
+    match status {
+        Ok(st) if st.success() => {
+            let name = std::path::Path::new(local)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| local.to_string());
+            json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":format!("uploaded: {name} ({} bytes) -> 被控端（publisher 需 --recv-dir）", meta.len())}],"isError":false}})
+        }
+        Ok(st) => err(format!("upload failed: exit {:?}", st.code())),
+        Err(e) => err(format!("spawn: {e}")),
+    }
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(data);
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// 键鼠工具：--send-input 桥接（按 CLI 退出码判定成功）。

@@ -20,7 +20,7 @@ echo "== 构建"
 cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli -p aerodesk-mcp
 
 REC="$(mktemp -d)"
-echo "== 启动 sfu/signal + publisher"
+echo "== 启动 sfu/signal + publisher（含 --recv-dir 供大文件上传落盘）"
 RECORD_DIR="$REC" ./target/debug/aerodesk-sfu >/tmp/mcp-sfu.log 2>&1 &
 SFU_PID=$!
 ./target/debug/aerodesk-signal >/tmp/mcp-sig.log 2>&1 &
@@ -30,13 +30,15 @@ for _ in $(seq 1 50); do
     sleep 0.2
 done
 sleep 0.3
+DIR="/tmp/aerodesk-mcp-file-$ROOM"
+mkdir -p "$DIR/recv"
 ./target/debug/aerodesk-cli --role publisher --encoder x264 \
-    --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/mcp-pub.log 2>&1 &
+    --signal ws://127.0.0.1:3003 --room "$ROOM" --recv-dir "$DIR/recv" >/tmp/mcp-pub.log 2>&1 &
 PUB_PID=$!
 sleep 2
 
-DIR="/tmp/aerodesk-mcp-file-$ROOM"
-mkdir -p "$DIR"
+# #122：5MB 本地文件（上传源 + 下载校验）
+dd if=/dev/urandom of="$DIR/upload-5m.bin" bs=1M count=5 2>/dev/null
 
 echo "== 驱动 MCP stdio 会话"
 cat > /tmp/mcp-in.txt <<INEOF
@@ -49,6 +51,8 @@ cat > /tmp/mcp-in.txt <<INEOF
 {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"list_processes","arguments":{}}}
 {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"mouse_move","arguments":{"x":0.5,"y":0.5}}}
 {"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"type_text","arguments":{"text":"hello-123"}}}
+{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"upload_file","arguments":{"local_path":"$DIR/upload-5m.bin"}}}
+{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"download_file","arguments":{"remote_path":"$DIR/recv/upload-5m.bin"}}}
 INEOF
 
 AERODESK_SIGNAL="ws://127.0.0.1:3003" AERODESK_ROOM="$ROOM" \
@@ -106,6 +110,20 @@ if grep -q "type_text ok" /tmp/mcp-out.txt; then
     echo "PASS type_text"
 else
     echo "FAIL type_text"; tail -8 /tmp/mcp-out.txt; fail=1
+fi
+# 8) 大文件上传（5MB → 被控端 recv 目录）
+if grep -q "uploaded: upload-5m.bin (5242880 bytes)" /tmp/mcp-out.txt && [ -f "$DIR/recv/upload-5m.bin" ]; then
+    echo "PASS upload_file（5MB 落盘被控端）"
+else
+    echo "FAIL upload_file"; tail -6 /tmp/mcp-out.txt; fail=1
+fi
+# 9) 大文件下载（从被控端拉回，sha256 一致）
+DL_HASH=$(grep -oE "downloaded: .*sha256=[0-9a-f]{64}" /tmp/mcp-out.txt | grep -oE "[0-9a-f]{64}" | tail -1)
+SRC_HASH=$(shasum -a 256 "$DIR/upload-5m.bin" | awk '{print $1}')
+if [ -n "$DL_HASH" ] && [ "$DL_HASH" = "$SRC_HASH" ]; then
+    echo "PASS download_file（5MB sha256 一致）"
+else
+    echo "FAIL download_file"; tail -6 /tmp/mcp-out.txt; fail=1
 fi
 # 6) 无 panic
 if grep -qiE "panic" /tmp/mcp-out.txt /tmp/mcp-err.txt /tmp/mcp-pub.log /tmp/mcp-sfu.log; then

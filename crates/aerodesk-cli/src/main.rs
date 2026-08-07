@@ -30,6 +30,16 @@ use str0m::net::Protocol;
 use str0m::{Input, Output, net::Receive};
 
 fn main() {
+    // #122/#102：sctp-proto 深调用链在文件传输/高负载下会栈溢出（与 SFU 修复 #104
+    // 同根因）；主逻辑放到 8MB 栈线程执行。
+    let handle = std::thread::Builder::new()
+        .stack_size(32 << 20)
+        .spawn(run)
+        .expect("spawn main thread");
+    handle.join().expect("main thread join");
+}
+
+fn run() {
     init_log();
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--issue-token") {
@@ -88,6 +98,8 @@ fn main() {
     // --cancel-send-after <secs>：启动后到达该时刻自动取消发送（e2e 回归用）。
     let send_file = arg(&args, "--send-file").map(std::path::PathBuf::from);
     let recv_dir = arg(&args, "--recv-dir").map(std::path::PathBuf::from);
+    // #122：viewer --request-file <path> 请求被控端发送文件（大文件下载）。
+    let request_file = arg(&args, "--request-file");
     // #75 输入回传：--input-script 让 viewer 脚本化发送全部事件类型（e2e 断言用）。
     let input_script = args.iter().any(|a| a == "--input-script");
     // #72 取消回归：--cancel-send-after <secs> 启动后定时取消发送。
@@ -204,6 +216,7 @@ fn main() {
             type_text.as_deref(),
             cmd_intent.as_ref(),
             cmd_json,
+            request_file.as_deref(),
         ),
         other => panic!("unknown role {other}"),
     }
@@ -972,6 +985,7 @@ fn viewer(
     type_text: Option<&str>,
     cmd_intent: Option<&cmd_exec::Intent>,
     cmd_json: bool,
+    request_file: Option<&str>,
 ) {
     let (mut signal, mut endpoint, socket, _, _audio_mid) =
         connect(signal_url, room, Role::Viewer, auth, audio);
@@ -1002,6 +1016,10 @@ fn viewer(
     let mut last_latency_log = Instant::now();
     // #75/#109 单次输入（MCP 键鼠）：input 通道打开后发送一次/序列，500ms 后退出。
     let mut input_sent = send_input.is_none() && type_text.is_none();
+    // #122 大文件下载：file 通道打开后发送 FileControl::Request，轮询 recv-dir 落盘后退出。
+    let mut file_request_sent = false;
+    let mut file_request_done = false;
+    let mut file_request_started: Option<Instant> = None;
     let mut input_exit_at: Option<Instant> = None;
     // #109 远程命令/文件/进程（控制端一次执行）：请求每 1s 重传直到响应（首包可能被
     // SFU 在通道未就绪时丢弃；被控端按 id 去重，重复执行安全）。
@@ -1148,6 +1166,21 @@ fn viewer(
                     }
                 }
                 ClientEvent::IceConnected => info!("ICE connected"),
+                ClientEvent::ChannelOpen(label, _) if label == "file" => {
+                    // #122：请求被控端发送指定文件（配合 --recv-dir 落盘）。
+                    if !file_request_sent && request_file.is_some() {
+                        let req = aerodesk_protocol::file::FileControl::Request {
+                            path: request_file.unwrap().to_string(),
+                        };
+                        if let Ok(json) = serde_json::to_string(&req)
+                            && endpoint.send_channel_data("file", false, json.as_bytes())
+                        {
+                            file_request_sent = true;
+                            file_request_started = Some(Instant::now());
+                            info!("file request sent: {}", request_file.unwrap());
+                        }
+                    }
+                }
                 ClientEvent::ChannelOpen(label, _) if label == "input" || label == "control" => {
                     if label == "input" {
                         info!("input channel open");
@@ -1360,6 +1393,35 @@ fn viewer(
         if let Some(t) = input_exit_at
             && Instant::now() >= t
         {
+            std::process::exit(0);
+        }
+        // #122 大文件下载：请求后轮询 recv-dir 出现文件 → 退出；超时 120s 失败。
+        if file_request_sent && !file_request_done {
+            if let Some(rd) = file_transfer::recv_dir() {
+                let has_file = std::fs::read_dir(&rd)
+                    .map(|mut it| {
+                        it.any(|e| {
+                            e.map(|f| f.metadata().map(|m| m.len() > 0).unwrap_or(false))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false);
+                if has_file {
+                    file_request_done = true;
+                    info!("file request received; exiting");
+                    std::process::exit(0);
+                }
+            }
+            if let Some(start) = file_request_started
+                && start.elapsed() >= Duration::from_secs(120)
+            {
+                eprintln!("file request timeout");
+                std::process::exit(1);
+            }
+        }
+        // #122 大文件上传：viewer --send-file 发送被确认后退出。
+        if file_transfer::send_confirmed() {
+            info!("file upload confirmed; exiting");
             std::process::exit(0);
         }
         let _ = &mut signal;
