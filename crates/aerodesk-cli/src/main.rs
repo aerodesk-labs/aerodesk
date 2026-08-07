@@ -55,6 +55,9 @@ fn main() {
     // #73 音频：--audio-opus 使用 Opus（48kHz）替代 PCMU（8kHz）。
     let audio_opus = args.iter().any(|a| a == "--audio-opus");
     let mute_audio = args.iter().any(|a| a == "--mute-audio");
+    // #75/#109 MCP 键鼠：--send-input '<InputEvent JSON>' 单次发送输入事件后退出。
+    let send_input: Option<InputEvent> =
+        arg(&args, "--send-input").and_then(|json| serde_json::from_str::<InputEvent>(&json).ok());
     // #109 远程命令/文件/进程：控制端一次执行（打印结果后以 ok 语义退出）。
     // --cmd-json：把 CmdResponse 以 JSON 输出到 stdout（MCP 桥接用）。
     let cmd_json = args.iter().any(|a| a == "--cmd-json");
@@ -195,6 +198,7 @@ fn main() {
             mute_audio,
             viewer_display,
             input_script,
+            send_input.as_ref(),
             cmd_intent.as_ref(),
             cmd_json,
         ),
@@ -814,6 +818,7 @@ fn viewer(
     mute_audio: bool,
     display: Option<usize>,
     input_script: bool,
+    send_input: Option<&InputEvent>,
     cmd_intent: Option<&cmd_exec::Intent>,
     cmd_json: bool,
 ) {
@@ -844,6 +849,9 @@ fn viewer(
     let mut last_cursor_log = Instant::now();
     // #8 端到端延迟：cursor 带发送时间戳，viewer 计算 one-way latency（节流 1s）。
     let mut last_latency_log = Instant::now();
+    // #75/#109 单次输入（MCP 键鼠）：input 通道打开后发送一次，500ms 后退出。
+    let mut input_sent = send_input.is_none();
+    let mut input_exit_at: Option<Instant> = None;
     // #109 远程命令/文件/进程（控制端一次执行）：请求每 1s 重传直到响应（首包可能被
     // SFU 在通道未就绪时丢弃；被控端按 id 去重，重复执行安全）。
     let cmd_pending = cmd_intent.is_some();
@@ -1088,6 +1096,24 @@ fn viewer(
         }
         cmd_exec::tick(&mut endpoint);
 
+        // #75/#109 单次输入（MCP 键鼠）：input 通道打开后发送一次。
+        if input_open && !input_sent {
+            if let Some(ev) = send_input {
+                let frame = InputFrame {
+                    version: INPUT_PROTOCOL_VERSION,
+                    seq: 1,
+                    timestamp_ms: now_ms(),
+                    event: ev.clone(),
+                };
+                if let Ok(json) = serde_json::to_string(&frame)
+                    && endpoint.send_channel_data("input", false, json.as_bytes())
+                {
+                    input_sent = true;
+                    input_exit_at = Some(Instant::now() + Duration::from_millis(500));
+                    info!("input sent once: {ev:?}");
+                }
+            }
+        }
         // 输入事件回传：input 通道打开后周期性发送鼠标移动（模拟观看端输入）。
         // #75 --input-script：脚本化轮换发送全部事件类型（MouseMove/Button/Wheel/
         // Key+修饰键），供 e2e 断言各事件类型均到达被控端注入路径。
@@ -1165,6 +1191,12 @@ fn viewer(
         }
         if !got_any {
             std::thread::sleep(Duration::from_millis(2));
+        }
+        // #75/#109 单次输入：发送后短暂等待即退出（CLI/MCP 桥接语义）。
+        if let Some(t) = input_exit_at
+            && Instant::now() >= t
+        {
+            std::process::exit(0);
         }
         let _ = &mut signal;
     }
