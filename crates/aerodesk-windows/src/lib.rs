@@ -4,6 +4,7 @@
 //! - 采集：Windows Graphics Capture（Win11）/ DXGI Desktop Duplication（Win10 回退）
 //! - 编码：Media Foundation H.264/HEVC（或 NVENC/QSV/AMF）
 //! - 注入：SendInput / mouse_event + keybd_event
+//! - 虚拟显示器：Parsec VDD（ADR-0001，vdd 模块）
 //!
 //! `windows` crate 依赖仅 Windows 目标启用；非 Windows 主机上本 crate 编译为
 //! 纯 trait 骨架（用于 workspace 测试与文档）。
@@ -11,6 +12,7 @@
 pub mod capture;
 pub mod encode;
 pub mod inject;
+pub mod vdd;
 
 /// 采集帧（BGRA，DXGI 输出格式）。
 #[derive(Debug, Clone)]
