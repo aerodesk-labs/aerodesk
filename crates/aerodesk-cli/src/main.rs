@@ -1474,6 +1474,8 @@ fn publisher_capture_ffmpeg(
             return;
         }
     };
+    // #75：输入注入坐标按被控显示器（不总是主屏）换算。
+    aerodesk_macos::inject::set_active_display(Some(capture.display_id()));
     let mut encoder = FfmpegEncoder::new(W, H, FPS, 8_000_000, codec).expect("ffmpeg encoder");
     let mut connected = false;
     let mut audio_ticker = AudioTicker::new(audio_opus);
@@ -1627,6 +1629,10 @@ fn publisher_capture(
                 capture,
             ));
         }
+        // #75：切换显示器后输入注入坐标基准同步。
+        if let Some((_, _, cap)) = layers.first() {
+            aerodesk_macos::inject::set_active_display(Some(cap.display_id()));
+        }
         info!("screen capture switched to display {idx}");
         Ok(())
     };
@@ -1655,6 +1661,9 @@ fn publisher_capture(
                 capture,
             ));
         }
+        if let Some((_, _, cap)) = layers.first() {
+            aerodesk_macos::inject::set_active_display(Some(cap.display_id()));
+        }
     } else {
         let capture = match init_capture(initial_display, W, H) {
             Ok(c) => c,
@@ -1669,6 +1678,7 @@ fn publisher_capture(
             VtEncoder::new_with_codec(W, H, FPS, 8_000_000, vt_codec).expect("vt encoder"),
             capture,
         ));
+        aerodesk_macos::inject::set_active_display(Some(layers[0].2.display_id()));
     }
 
     let mut connected = false;

@@ -18,6 +18,8 @@ pub struct ScreenCapture {
     filter: SCContentFilter,
     config: SCStreamConfiguration,
     seq: i64,
+    /// CGDirectDisplayID（#75：输入注入按被控显示器换算坐标，不只主屏）。
+    display_id: u32,
 }
 
 impl ScreenCapture {
@@ -26,6 +28,7 @@ impl ScreenCapture {
         let content = SCShareableContent::get().map_err(|e| format!("SCK content: {e}"))?;
         let displays = content.displays();
         let display = displays.get(display_idx).ok_or("display not found")?;
+        let display_id = display.display_id();
 
         let filter = SCContentFilter::create().with_display(display).build();
 
@@ -39,7 +42,13 @@ impl ScreenCapture {
             filter,
             config,
             seq: 0,
+            display_id,
         })
+    }
+
+    /// 被采集显示器的 CGDirectDisplayID（输入注入坐标换算用）。
+    pub fn display_id(&self) -> u32 {
+        self.display_id
     }
 
     /// 采集一帧，返回 IOSurface（零拷贝，可直接进 VideoToolbox）。
