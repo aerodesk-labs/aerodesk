@@ -43,13 +43,18 @@ PUB_PID=$!
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/ftx-view.log 2>&1 &
 VIEW_PID=$!
 
+OUT_FILE="$OUT/$(basename "$SRC")"
 # 等待接收完成：按尺寸放大窗口（100MB 单发流控 ~7min，窗口留足余量；
 # 成功会提前退出，不拖慢小文件）。CI 共享 runner 上 2MB 也曾超过原 73s
 # 窗口（"receive not completed" flake），基础窗口放宽到 ~133s。
+# 完成判定 = "receive complete" 日志 **且** 输出文件已落盘（日志先于写盘，
+# 仅匹配日志会抢跑 kill 导致 "output file missing" 竞态）。
 WAIT_TICKS=$(( (SIZE_KB / 32 + 600) ))
 done=0
 for _ in $(seq 1 "$WAIT_TICKS"); do
-    if grep -q "file receive complete" /tmp/ftx-view.log 2>/dev/null; then done=1; break; fi
+    if grep -q "file receive complete" /tmp/ftx-view.log 2>/dev/null && [ -f "$OUT_FILE" ]; then
+        done=1; break
+    fi
     if ! kill -0 "$PUB_PID" 2>/dev/null || ! kill -0 "$VIEW_PID" 2>/dev/null; then break; fi
     sleep 0.2
 done
@@ -63,7 +68,6 @@ if [ "$done" = "1" ]; then
 else
     echo "FAIL receive not completed"; tail -5 /tmp/ftx-view.log; tail -5 /tmp/ftx-pub.log; fail=1
 fi
-OUT_FILE="$OUT/$(basename "$SRC")"
 if [ -f "$OUT_FILE" ]; then
     OUT_HASH="$(shasum -a 256 "$OUT_FILE" | awk '{print $1}')"
     if [ "$OUT_HASH" = "$SRC_HASH" ]; then
