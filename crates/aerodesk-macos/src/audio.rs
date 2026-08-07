@@ -3,7 +3,7 @@
 //! cpal 拉模型回调从内部缓冲取数；无输出设备/权限时 `AudioSink::new()` 返回
 //! Err，调用方降级为「仅统计不播放」。静音在 sink 层生效（丢弃缓冲）。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "macos")]
@@ -99,6 +99,8 @@ pub struct AudioSink {
     _stream: cpal::Stream,
     state: Arc<Mutex<Resampler>>,
     muted: Arc<AtomicBool>,
+    /// 音量 0..=100（#73 观看端音量滑块；100=原音量）。
+    volume: Arc<AtomicU16>,
 }
 
 impl AudioSink {
@@ -127,16 +129,18 @@ impl AudioSink {
             out_channels,
         )));
         let muted = Arc::new(AtomicBool::new(false));
+        let volume = Arc::new(AtomicU16::new(100));
         let stream_config: cpal::StreamConfig = config.clone().into();
 
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => {
                 let st = state.clone();
                 let mu = muted.clone();
+                let vo = volume.clone();
                 device
                     .build_output_stream(
                         &stream_config,
-                        move |data: &mut [f32], _| fill_f32(data, &st, &mu),
+                        move |data: &mut [f32], _| fill_f32(data, &st, &mu, &vo),
                         |e| tracing::warn!("audio stream error: {e}"),
                         None,
                     )
@@ -145,10 +149,11 @@ impl AudioSink {
             cpal::SampleFormat::I16 => {
                 let st = state.clone();
                 let mu = muted.clone();
+                let vo = volume.clone();
                 device
                     .build_output_stream(
                         &stream_config,
-                        move |data: &mut [i16], _| fill_i16(data, &st, &mu),
+                        move |data: &mut [i16], _| fill_i16(data, &st, &mu, &vo),
                         |e| tracing::warn!("audio stream error: {e}"),
                         None,
                     )
@@ -169,6 +174,7 @@ impl AudioSink {
             _stream: stream,
             state,
             muted,
+            volume,
         })
     }
 
@@ -188,10 +194,31 @@ impl AudioSink {
             }
         }
     }
+
+    /// 设置音量 0..=100（#73 观看端音量滑块）。
+    pub fn set_volume(&self, volume: u16) {
+        self.volume.store(volume.min(100), Ordering::SeqCst);
+    }
+}
+
+/// 应用音量增益（i16，0..=100；100=原样）。
+pub fn apply_gain_i16(sample: i16, volume: u16) -> i16 {
+    if volume >= 100 {
+        return sample;
+    }
+    ((sample as f32 * volume as f32 / 100.0).round()).clamp(-32768.0, 32767.0) as i16
+}
+
+/// 应用音量增益（f32，0..=100；100=原样）。
+pub fn apply_gain_f32(sample: f32, volume: u16) -> f32 {
+    if volume >= 100 {
+        return sample;
+    }
+    (sample * volume as f32 / 100.0).clamp(-1.0, 1.0)
 }
 
 #[cfg(target_os = "macos")]
-fn fill_f32(data: &mut [f32], state: &Mutex<Resampler>, muted: &AtomicBool) {
+fn fill_f32(data: &mut [f32], state: &Mutex<Resampler>, muted: &AtomicBool, volume: &AtomicU16) {
     if muted.load(Ordering::SeqCst) {
         data.fill(0.0);
         return;
@@ -201,10 +228,14 @@ fn fill_f32(data: &mut [f32], state: &Mutex<Resampler>, muted: &AtomicBool) {
     } else {
         data.fill(0.0);
     }
+    let vol = volume.load(Ordering::SeqCst);
+    for s in data.iter_mut() {
+        *s = apply_gain_f32(*s, vol);
+    }
 }
 
 #[cfg(target_os = "macos")]
-fn fill_i16(data: &mut [i16], state: &Mutex<Resampler>, muted: &AtomicBool) {
+fn fill_i16(data: &mut [i16], state: &Mutex<Resampler>, muted: &AtomicBool, volume: &AtomicU16) {
     if muted.load(Ordering::SeqCst) {
         data.fill(0);
         return;
@@ -213,6 +244,10 @@ fn fill_i16(data: &mut [i16], state: &Mutex<Resampler>, muted: &AtomicBool) {
         st.fill_i16(data);
     } else {
         data.fill(0);
+    }
+    let vol = volume.load(Ordering::SeqCst);
+    for s in data.iter_mut() {
+        *s = apply_gain_i16(*s, vol);
     }
 }
 
@@ -257,5 +292,28 @@ mod tests {
         let mut out = vec![0i16; 480];
         r.fill_i16(&mut out);
         assert!(out.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn gain_i16_scales_and_clamps() {
+        assert_eq!(apply_gain_i16(1000, 100), 1000);
+        assert_eq!(apply_gain_i16(1000, 50), 500);
+        assert_eq!(apply_gain_i16(-1000, 50), -500);
+        assert_eq!(apply_gain_i16(0, 0), 0);
+        assert_eq!(apply_gain_i16(i16::MAX, 100), i16::MAX);
+        // 0 音量 → 静音
+        assert_eq!(apply_gain_i16(12345, 0), 0);
+        // 超过 100 的输入按 100 处理
+        assert_eq!(apply_gain_i16(1000, 200), 1000);
+    }
+
+    #[test]
+    fn gain_f32_scales_and_clamps() {
+        assert_eq!(apply_gain_f32(0.5, 100), 0.5);
+        assert!((apply_gain_f32(0.5, 50) - 0.25).abs() < 1e-6);
+        assert!((apply_gain_f32(-0.5, 50) + 0.25).abs() < 1e-6);
+        assert_eq!(apply_gain_f32(0.0, 0), 0.0);
+        assert_eq!(apply_gain_f32(0.9, 0), 0.0);
+        assert_eq!(apply_gain_f32(0.9, 200), 0.9);
     }
 }

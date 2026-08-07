@@ -3,7 +3,7 @@
 //   grayBg #EFEFF2（左栏 / 输入框填充 / 卡片描边）
 //   accent #0071FF（左栏蓝色竖条 / 主按钮）
 //   主区白底，正文 black87 #212121，次要文字 50% 透明度
-import { CheckBox, ProgressIndicator, ScrollView, Switch } from "std-widgets.slint";
+import { CheckBox, ProgressIndicator, ScrollView, Slider, Switch } from "std-widgets.slint";
 import "fonts/MaterialIcons-Regular.ttf";
 
 // Material 图标（对齐 RustDesk 的 Material Icons 工具栏/标签栏/导航）。
@@ -417,6 +417,8 @@ export component AppWindow inherits Window {
     in-out property <[image]> session-frames: [];
     in-out property <string> session-status: "";
     in-out property <string> input-mode: "键鼠已释放";
+    // #73 观看端音量 0..1（默认 100%）。
+    in-out property <float> volume: 1.0;
     // #72 文件传输进度（-1 隐藏，0..1 显示）。
     in-out property <float> file-progress: -1;
     in-out property <string> file-label: "";
@@ -453,6 +455,8 @@ export component AppWindow inherits Window {
     callback refresh-device-pw();
     callback toggle-fullscreen();
     callback toggle-audio();
+    // #73 观看端音量滑块（0..1）。
+    callback change-volume(float);
     // #75：会话视图指针输入 → Rust 侧转发为 InputFrame（0=Move 1=Down 2=Up）。
     callback send-input(int, float, float);
     // #75：键盘/滚轮输入 → Rust 侧转发为 InputFrame（send-key: 0=按下 1=抬起）。
@@ -1232,7 +1236,7 @@ export component AppWindow inherits Window {
                     Rectangle {
                         x: 12px;
                         y: 12px;
-                        width: 400px;
+                        width: 470px;
                         height: 44px;
                         border-radius: 6px;
                         background: #ffffff;
@@ -1245,6 +1249,16 @@ export component AppWindow inherits Window {
                             spacing: 2px;
                             IconBtn { icon: "\u{e5d0}"; tooltip: "全屏"; clicked => { root.toggle-fullscreen(); } }
                             IconBtn { icon: "\u{e050}"; tooltip: "音频"; clicked => { root.toggle-audio(); } }
+                            Slider {
+                                width: 80px;
+                                minimum: 0;
+                                maximum: 1;
+                                value: root.volume;
+                                changed(value) => {
+                                    root.volume = value;
+                                    root.change-volume(value);
+                                }
+                            }
                             IconBtn { icon: "\u{e30c}"; tooltip: "显示器"; clicked => { root.toggle-display(); } }
                             IconBtn { icon: "\u{e429}"; tooltip: "画质"; clicked => { root.toggle-quality(); } }
                             IconBtn { icon: "\u{e312}"; tooltip: "输入"; clicked => { root.toggle-input(); } }

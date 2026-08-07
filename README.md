@@ -60,7 +60,7 @@ cargo run -p aerodesk-cli -- --role viewer --layer f --audio
 # 文件传输：publisher --send-file <path>；对端 --recv-dir <dir> 接收（data channel，SHA-256 校验）
 # 多 codec：#74 --encoder ffmpeg --codec h264|h265|vp9|av1（FFmpeg，硬编优先；AV1 有 ~1s 编码延迟）
 # 输入注入：#75 viewer 输入 → SFU → publisher macOS CGEvent（坐标归一化→屏幕点，Wheel/修饰键/完整键码）
-# A/V 同步：#73 viewer AVSYNC 时间轴/漂移统计 + 音频 jitter buffer（PCMU/Opus 真实播放 macOS 已通）
+# A/V 同步：#73 viewer AVSYNC 时间轴/漂移统计 + 音频 jitter buffer（PCMU/Opus 真实播放 macOS 已通；会话工具栏音量滑块）
 
 # 浏览器：https://<host>:3000/?role=publisher|viewer
 ```
