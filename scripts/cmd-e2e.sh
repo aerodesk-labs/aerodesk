@@ -77,10 +77,75 @@ else
     echo "FAIL dangerous"; tail -5 /tmp/cmd-view3.log; fail=1
 fi
 
+DIR="/tmp/aerodesk-cmd-e2e-$ROOM"
+rm -rf "$DIR"; mkdir -p "$DIR"
+# 4) 写文件 + 读回
+echo "== case: write-file"
+./target/debug/aerodesk-cli --role viewer --write-file "$DIR/hello.txt" "hello-aerodesk-file" \
+    --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/cmd-view4.log 2>&1 &
+VPID=$!
+for _ in $(seq 1 60); do ! kill -0 "$VPID" 2>/dev/null && break; sleep 0.5; done
+kill "$VPID" 2>/dev/null || true; wait "$VPID" 2>/dev/null || true
+if grep -q "CMD_RESULT: ok=true type=file" /tmp/cmd-view4.log; then
+    echo "PASS write-file"
+else
+    echo "FAIL write-file"; tail -5 /tmp/cmd-view4.log; fail=1
+fi
+echo "== case: read-file"
+./target/debug/aerodesk-cli --role viewer --read-file "$DIR/hello.txt" \
+    --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/cmd-view5.log 2>&1 &
+VPID=$!
+for _ in $(seq 1 60); do ! kill -0 "$VPID" 2>/dev/null && break; sleep 0.5; done
+kill "$VPID" 2>/dev/null || true; wait "$VPID" 2>/dev/null || true
+if grep -q "CMD_RESULT: ok=true type=file" /tmp/cmd-view5.log && grep -q "hello-aerodesk-file" /tmp/cmd-view5.log; then
+    echo "PASS read-file 内容一致"
+else
+    echo "FAIL read-file"; tail -5 /tmp/cmd-view5.log; fail=1
+fi
+# 5) 进程列表
+echo "== case: list-processes"
+./target/debug/aerodesk-cli --role viewer --list-processes \
+    --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/cmd-view6.log 2>&1 &
+VPID=$!
+for _ in $(seq 1 60); do ! kill -0 "$VPID" 2>/dev/null && break; sleep 0.5; done
+kill "$VPID" 2>/dev/null || true; wait "$VPID" 2>/dev/null || true
+if grep -q "CMD_RESULT: ok=true type=ps count=[1-9]" /tmp/cmd-view6.log; then
+    echo "PASS list-processes"
+else
+    echo "FAIL list-processes"; tail -5 /tmp/cmd-view6.log; fail=1
+fi
+# 6) kill：后台 sleep → 记 pid → kill → 进程消失
+echo "== case: kill-process"
+run_case "kill-spawn" "sleep 100 & echo \$! > $DIR/pid" /tmp/cmd-view7.log
+if ! grep -q "CMD_RESULT: ok=true" /tmp/cmd-view7.log; then
+    echo "FAIL kill-spawn"; tail -5 /tmp/cmd-view7.log; fail=1
+fi
+PID=$(cat "$DIR/pid" 2>/dev/null || true)
+if [ -z "$PID" ]; then echo "FAIL kill-spawn: 未拿到 pid"; fail=1; fi
+if [ -n "$PID" ]; then
+    # 用 --kill-pid 走协议层结束后台 sleep
+    ./target/debug/aerodesk-cli --role viewer --kill-pid "$PID" \
+        --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/cmd-view9.log 2>&1 &
+    VPID=$!
+    for _ in $(seq 1 60); do ! kill -0 "$VPID" 2>/dev/null && break; sleep 0.5; done
+    kill "$VPID" 2>/dev/null || true; wait "$VPID" 2>/dev/null || true
+    if grep -q "CMD_RESULT: ok=true type=kill pid=$PID" /tmp/cmd-view9.log; then
+        echo "PASS kill-process"
+    else
+        echo "FAIL kill-process"; tail -5 /tmp/cmd-view9.log; fail=1
+    fi
+    run_case "kill-verify-gone" "ps -p $PID" /tmp/cmd-view10.log || true
+    if ! grep -qE "CMD_STDOUT:.*$PID" /tmp/cmd-view10.log; then
+        echo "PASS kill 后进程不存在"
+    else
+        echo "FAIL kill 后进程仍存在"; tail -5 /tmp/cmd-view10.log; fail=1
+    fi
+fi
+
 kill "$PUB_PID" "$SFU_PID" "$SIG_PID" 2>/dev/null || true
 wait 2>/dev/null || true
 
-if grep -qiE "panic" /tmp/cmd-pub.log /tmp/cmd-view1.log /tmp/cmd-view2.log /tmp/cmd-view3.log /tmp/cmd-sfu.log; then
+if grep -qiE "panic" /tmp/cmd-pub.log /tmp/cmd-view[0-9]*.log /tmp/cmd-sfu.log; then
     echo "FAIL panic in logs"; fail=1
 else
     echo "PASS no panics"

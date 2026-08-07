@@ -185,6 +185,7 @@ name = "aerodesk-core"
 version = "0.1.0"
 dependencies = [
  "aerodesk-protocol",
+ "libc",
  "pcap-file",
  "serde",
  "serde_json",

@@ -14,3 +14,4 @@ tracing.workspace = true
 tungstenite = "0.30"
 pcap-file = "2.0.0"
 sha2 = "0.10"
+libc = "0.2"
