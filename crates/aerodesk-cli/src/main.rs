@@ -56,6 +56,8 @@ fn main() {
     let audio_opus = args.iter().any(|a| a == "--audio-opus");
     let mute_audio = args.iter().any(|a| a == "--mute-audio");
     // #109 远程命令/文件/进程：控制端一次执行（打印结果后以 ok 语义退出）。
+    // --cmd-json：把 CmdResponse 以 JSON 输出到 stdout（MCP 桥接用）。
+    let cmd_json = args.iter().any(|a| a == "--cmd-json");
     let cmd_intent: Option<cmd_exec::Intent> = if let Some(c) = arg(&args, "--run-command") {
         Some(cmd_exec::Intent::Run(c))
     } else if let Some(p) = arg(&args, "--read-file") {
@@ -194,6 +196,7 @@ fn main() {
             viewer_display,
             input_script,
             cmd_intent.as_ref(),
+            cmd_json,
         ),
         other => panic!("unknown role {other}"),
     }
@@ -258,7 +261,8 @@ fn init_log() {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("aerodesk_cli=info"));
     tracing_subscriber::registry()
-        .with(fmt::layer())
+        // 日志写 stderr：`--cmd-json` 需要 stdout 只有 JSON（#109 MCP 桥接）。
+        .with(fmt::layer().with_writer(std::io::stderr))
         .with(filter)
         .init();
 }
@@ -811,6 +815,7 @@ fn viewer(
     display: Option<usize>,
     input_script: bool,
     cmd_intent: Option<&cmd_exec::Intent>,
+    cmd_json: bool,
 ) {
     let (mut signal, mut endpoint, socket, _, _audio_mid) =
         connect(signal_url, room, Role::Viewer, auth, audio);
@@ -1028,7 +1033,15 @@ fn viewer(
                     if !cmd_done {
                         cmd_done = true;
                         if let Some(resp) = cmd_exec::handle_response(&data) {
-                            print_cmd_result(&resp);
+                            if cmd_json {
+                                // MCP 桥接：stdout 输出纯 JSON。
+                                println!(
+                                    "{}",
+                                    serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into())
+                                );
+                            } else {
+                                print_cmd_result(&resp);
+                            }
                             std::process::exit(if resp.result.ok() { 0 } else { 1 });
                         }
                     }
