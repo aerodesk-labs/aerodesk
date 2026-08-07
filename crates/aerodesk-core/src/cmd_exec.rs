@@ -98,12 +98,9 @@ pub fn allowlist_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join("AeroDesk/cmd-allowlist.txt"))
 }
 
-/// 读取白名单前缀列表。
-pub fn allowlist() -> Vec<String> {
-    let Some(p) = allowlist_path() else {
-        return Vec::new();
-    };
-    std::fs::read_to_string(p)
+/// 读取指定白名单文件的前缀列表。
+pub fn allowlist_at(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
         .map(|s| {
             s.lines()
                 .map(|l| l.trim().to_string())
@@ -113,17 +110,24 @@ pub fn allowlist() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// 追加白名单前缀（已存在则 no-op）。
-pub fn add_allow_prefix(prefix: &str) -> Result<(), String> {
+/// 读取默认白名单前缀列表（`$AERODESK_CMD_ALLOWLIST` 或 `~/AeroDesk/cmd-allowlist.txt`）。
+pub fn allowlist() -> Vec<String> {
+    let Some(p) = allowlist_path() else {
+        return Vec::new();
+    };
+    allowlist_at(&p)
+}
+
+/// 追加白名单前缀到指定文件（已存在则 no-op）。
+pub fn add_allow_prefix_at(path: &Path, prefix: &str) -> Result<(), String> {
     let prefix = prefix.trim().to_string();
     if prefix.is_empty() {
         return Err("empty prefix".into());
     }
-    let path = allowlist_path().ok_or_else(|| "no allowlist path".to_string())?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
     }
-    let existing = allowlist();
+    let existing = allowlist_at(path);
     if existing.iter().any(|l| *l == prefix) {
         return Ok(()); // 已存在
     }
@@ -131,24 +135,32 @@ pub fn add_allow_prefix(prefix: &str) -> Result<(), String> {
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
         .map_err(|e| format!("open allowlist: {e}"))?;
     writeln!(f, "{prefix}").map_err(|e| format!("append: {e}"))
 }
 
-/// 移除白名单前缀（精确匹配）。
-pub fn remove_allow_prefix(prefix: &str) -> Result<(), String> {
+/// 追加默认白名单前缀。
+pub fn add_allow_prefix(prefix: &str) -> Result<(), String> {
     let path = allowlist_path().ok_or_else(|| "no allowlist path".to_string())?;
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    add_allow_prefix_at(&path, prefix)
+}
+
+/// 从指定白名单文件移除前缀（精确匹配）。
+pub fn remove_allow_prefix_at(path: &Path, prefix: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
     let kept: Vec<&str> = text.lines().filter(|l| l.trim() != prefix.trim()).collect();
-    let mut out = kept.join(
-        "
-",
-    );
+    let mut out = kept.join("\n");
     if !out.is_empty() {
         out.push('\n');
     }
-    std::fs::write(&path, out).map_err(|e| format!("write allowlist: {e}"))
+    std::fs::write(path, out).map_err(|e| format!("write allowlist: {e}"))
+}
+
+/// 从默认白名单文件移除前缀。
+pub fn remove_allow_prefix(prefix: &str) -> Result<(), String> {
+    let path = allowlist_path().ok_or_else(|| "no allowlist path".to_string())?;
+    remove_allow_prefix_at(&path, prefix)
 }
 
 /// 审计文件路径：`$AERODESK_CMD_AUDIT` 或 `$HOME/AeroDesk/cmd-audit.jsonl`。
@@ -229,11 +241,13 @@ fn read_with_cap<R: Read>(
 }
 
 /// 执行命令（含策略/超时/截断/审计）。allowlist 为命令前缀放行清单。
-pub fn run_command(
+/// 执行命令（含策略/超时/截断），审计写到显式路径（None = 不审计）。
+pub fn run_command_with(
     command: &str,
     cwd: Option<&str>,
     timeout_ms: Option<u64>,
     allowlist: &[String],
+    audit_path: Option<&Path>,
 ) -> CmdOutput {
     let command = command.trim().to_string();
     if command.is_empty() {
@@ -251,7 +265,7 @@ pub fn run_command(
             error: Some(format!("blocked by policy: {command}")),
             ..Default::default()
         };
-        audit(&command, cwd, &out);
+        audit_opt(audit_path, &command, cwd, &out);
         return out;
     }
 
@@ -278,7 +292,7 @@ pub fn run_command(
                 error: Some(format!("spawn failed: {e}")),
                 ..Default::default()
             };
-            audit(&command, cwd, &out);
+            audit_opt(audit_path, &command, cwd, &out);
             return out;
         }
     };
@@ -329,7 +343,7 @@ pub fn run_command(
                     error: Some(format!("wait failed: {e}")),
                     ..Default::default()
                 };
-                audit(&command, cwd, &out);
+                audit_opt(audit_path, &command, cwd, &out);
                 return out;
             }
         }
@@ -357,15 +371,22 @@ pub fn run_command(
             None
         },
     };
-    audit(&command, cwd, &out);
+    audit_opt(audit_path, &command, cwd, &out);
     out
 }
 
+/// 执行命令（审计写入默认路径 `$AERODESK_CMD_AUDIT` 或 `~/AeroDesk/cmd-audit.jsonl`）。
+pub fn run_command(
+    command: &str,
+    cwd: Option<&str>,
+    timeout_ms: Option<u64>,
+    allowlist: &[String],
+) -> CmdOutput {
+    run_command_with(command, cwd, timeout_ms, allowlist, audit_path().as_deref())
+}
+
 /// 追加审计记录（JSONL）：时间/命令/工作目录/退出码/错误/输出字节数。
-pub fn audit(command: &str, cwd: Option<&str>, out: &CmdOutput) {
-    let Some(path) = audit_path() else {
-        return;
-    };
+pub fn audit_at(path: &Path, command: &str, cwd: Option<&str>, out: &CmdOutput) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -387,9 +408,16 @@ pub fn audit(command: &str, cwd: Option<&str>, out: &CmdOutput) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
     {
         let _ = writeln!(f, "{rec}");
+    }
+}
+
+/// 可选审计路径版本（None = 不审计）。
+fn audit_opt(path: Option<&Path>, command: &str, cwd: Option<&str>, out: &CmdOutput) {
+    if let Some(p) = path {
+        audit_at(p, command, cwd, out);
     }
 }
 
@@ -515,22 +543,23 @@ pub fn kill_process(pid: u32, allowlist: &[String]) -> Result<(), String> {
     }
 }
 
-/// 审计尾部 n 行（管理查询用）。
-pub fn tail_audit(n: usize) -> Result<Vec<String>, String> {
-    let Some(path) = audit_path() else {
-        return Err("no audit path".into());
-    };
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("read audit: {e}"))?;
+/// 指定审计文件尾部 n 行。
+pub fn tail_audit_at(path: &Path, n: usize) -> Result<Vec<String>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("read audit: {e}"))?;
     let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
     let start = lines.len().saturating_sub(n.max(1));
     Ok(lines[start..].to_vec())
 }
 
+/// 默认审计文件尾部 n 行（管理查询用）。
+pub fn tail_audit(n: usize) -> Result<Vec<String>, String> {
+    let path = audit_path().ok_or_else(|| "no audit path".to_string())?;
+    tail_audit_at(&path, n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// 环境变量（AERODESK_CMD_*）测试并行会互相干扰，串行化。
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn dangerous_patterns_are_blocked() {
@@ -616,13 +645,9 @@ mod tests {
 
     #[test]
     fn audit_writes_jsonl() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("aerodesk-cmd-audit-{}", std::process::id()));
         let audit = dir.join("audit.jsonl");
-        // edition 2024：进程环境变量修改为 unsafe。
-        unsafe { std::env::set_var("AERODESK_CMD_AUDIT", &audit) };
-        let out = run_command("echo audited", None, Some(1000), &[]);
-        unsafe { std::env::remove_var("AERODESK_CMD_AUDIT") };
+        let out = run_command_with("echo audited", None, Some(1000), &[], Some(&audit));
         assert_eq!(out.exit_code, Some(0));
         let text = std::fs::read_to_string(&audit).expect("audit file");
         assert!(text.contains("echo audited"));
@@ -688,33 +713,24 @@ mod tests {
 
     #[test]
     fn allowlist_add_remove_tail_audit() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("aerodesk-cmd-admin-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let allow = dir.join("allowlist.txt");
         let audit = dir.join("audit.jsonl");
-        unsafe {
-            std::env::set_var("AERODESK_CMD_ALLOWLIST", &allow);
-            std::env::set_var("AERODESK_CMD_AUDIT", &audit);
-        }
-        // 增删查
-        add_allow_prefix("/tmp/safe").unwrap();
-        add_allow_prefix("/tmp/safe").unwrap(); // 幂等
-        add_allow_prefix("/tmp/other").unwrap();
-        assert!(allowlist().contains(&"/tmp/safe".to_string()));
-        remove_allow_prefix("/tmp/safe").unwrap();
-        assert!(!allowlist().contains(&"/tmp/safe".to_string()));
-        assert!(allowlist().contains(&"/tmp/other".to_string()));
-        // 审计尾部
-        let _ = run_command("echo audit-1", None, Some(1000), &[]);
-        let _ = run_command("echo audit-2", None, Some(1000), &[]);
-        let tail = tail_audit(10).unwrap();
+        // 增删查（显式路径，不经进程环境，避免多线程测试 UB/竞态）
+        add_allow_prefix_at(&allow, "/tmp/safe").unwrap();
+        add_allow_prefix_at(&allow, "/tmp/safe").unwrap(); // 幂等
+        add_allow_prefix_at(&allow, "/tmp/other").unwrap();
+        assert!(allowlist_at(&allow).contains(&"/tmp/safe".to_string()));
+        remove_allow_prefix_at(&allow, "/tmp/safe").unwrap();
+        assert!(!allowlist_at(&allow).contains(&"/tmp/safe".to_string()));
+        assert!(allowlist_at(&allow).contains(&"/tmp/other".to_string()));
+        // 审计尾部（显式路径）
+        let _ = run_command_with("echo audit-1", None, Some(1000), &[], Some(&audit));
+        let _ = run_command_with("echo audit-2", None, Some(1000), &[], Some(&audit));
+        let tail = tail_audit_at(&audit, 10).unwrap();
         assert!(tail.len() >= 2);
         assert!(tail.last().unwrap().contains("audit-2"));
-        unsafe {
-            std::env::remove_var("AERODESK_CMD_ALLOWLIST");
-            std::env::remove_var("AERODESK_CMD_AUDIT");
-        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
