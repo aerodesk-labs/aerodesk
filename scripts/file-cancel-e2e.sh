@@ -8,21 +8,31 @@ cd "$(dirname "$0")/.."
 ROOM="${1:-ftc-$(date +%s)}"
 export RUST_LOG="${RUST_LOG:-info}"
 
-echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+# #85：取消回归也走 release——debug 下 str0m/sctp-proto 高吞吐 data channel
+# 深链栈溢出为已知限制（#102），且吞吐验收需 release（LESSON 性能压测）。
+PROFILE="${PROFILE:-release}"
+echo "== 构建（${PROFILE}）"
+if [ "$PROFILE" = "release" ]; then
+    cargo build -q --release -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+    BIN=./target/release
+else
+    cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+    BIN=./target/debug
+fi
 
 REC="$(mktemp -d)"
 SRC="$REC/send-cancel.bin"
 OUT="$REC/out"
 mkdir -p "$OUT"
-# 16MB：发送端 3s 启动延迟后单发节拍，6s 取消时仍在中途（覆盖 Meta 已到、
-# 分片部分到达后取消的真实路径）。
-dd if=/dev/urandom of="$SRC" bs=1M count=16 2>/dev/null
+# 64MB：#85 背压突发下 16MB 会秒传完导致 6s 取消落在传输结束后；64MB
+# （~28s @2.3MB/s）保证 6s 取消时仍在中途（覆盖 Meta 已到、分片部分到达
+# 后取消的真实路径）。
+dd if=/dev/urandom of="$SRC" bs=1M count=64 2>/dev/null
 
 echo "== 启动 sfu/signal"
-RECORD_DIR="$REC" ./target/debug/aerodesk-sfu >/tmp/ftc-sfu.log 2>&1 &
+RECORD_DIR="$REC" "$BIN/aerodesk-sfu" >/tmp/ftc-sfu.log 2>&1 &
 SFU_PID=$!
-./target/debug/aerodesk-signal >/tmp/ftc-sig.log 2>&1 &
+"$BIN/aerodesk-signal" >/tmp/ftc-sig.log 2>&1 &
 SIG_PID=$!
 for _ in $(seq 1 50); do
     if nc -z 127.0.0.1 3003 2>/dev/null; then break; fi
@@ -34,10 +44,10 @@ done
 sleep 0.3
 
 echo "== 启动 viewer（--recv-dir）+ publisher（--send-file --cancel-send-after 6）"
-./target/debug/aerodesk-cli --role viewer --recv-dir "$OUT" \
+"$BIN/aerodesk-cli" --role viewer --recv-dir "$OUT" \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/ftc-view.log 2>&1 &
 VIEW_PID=$!
-./target/debug/aerodesk-cli --role publisher --send-file "$SRC" --cancel-send-after 6 \
+"$BIN/aerodesk-cli" --role publisher --send-file "$SRC" --cancel-send-after 6 \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/ftc-pub.log 2>&1 &
 PUB_PID=$!
 
