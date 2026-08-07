@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// 注意：SCTP data channel 远端默认 max message size 为 64KB（str0m
 /// `DEFAULT_REMOTE_MAX_MESSAGE_SIZE`），且 str0m 跨流缓冲上限 128KB；
 /// 实测经 SFU 转发大分片会卡在缓冲排空，取 8KB 在吞吐与可靠性间平衡。
-pub const CHUNK_SIZE: usize = 1024;
+pub const CHUNK_SIZE: usize = 8192;
 
 /// 分片二进制帧类型标记。
 pub const CHUNK_MAGIC: u8 = 0x01;

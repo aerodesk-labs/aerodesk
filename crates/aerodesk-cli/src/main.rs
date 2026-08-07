@@ -20,7 +20,9 @@ use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media::{Vp8Frame, parse_vp8_pcap};
 use aerodesk_core::{Endpoint, media_pipeline::Codec, signaling::WsSignalClient};
 use aerodesk_ffmpeg::encode::FfmpegEncoder;
-use aerodesk_protocol::input::{INPUT_PROTOCOL_VERSION, InputEvent, InputFrame};
+use aerodesk_protocol::input::{
+    ButtonState, INPUT_PROTOCOL_VERSION, InputEvent, InputFrame, Modifiers, MouseButton,
+};
 use aerodesk_protocol::signal::Role;
 use str0m::media::{Frequency, MediaTime};
 use str0m::net::Protocol;
@@ -57,9 +59,16 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     let viewer_display: Option<usize> = arg(&args, "--display").and_then(|v| v.parse().ok());
-    // #72 文件传输：--send-file <path> 发送；--recv-dir <dir> 接收落盘。
+    // #72 文件传输：--send-file <path> 发送；--recv-dir <dir> 接收落盘；
+    // --cancel-send-after <secs>：启动后到达该时刻自动取消发送（e2e 回归用）。
     let send_file = arg(&args, "--send-file").map(std::path::PathBuf::from);
     let recv_dir = arg(&args, "--recv-dir").map(std::path::PathBuf::from);
+    // #75 输入回传：--input-script 让 viewer 脚本化发送全部事件类型（e2e 断言用）。
+    let input_script = args.iter().any(|a| a == "--input-script");
+    // #72 取消回归：--cancel-send-after <secs> 启动后定时取消发送。
+    let cancel_send_after = arg(&args, "--cancel-send-after")
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs);
     // #74 视频编码：--codec h264|h265|vp9|av1（配 --encoder ffmpeg）。
     let video_codec: Codec = match arg(&args, "--codec").as_deref() {
         Some("h265") | Some("hevc") => Codec::Hevc,
@@ -69,7 +78,7 @@ fn main() {
     };
 
     // #72 文件传输状态机（进程级单例；发送/接收同一状态机）。
-    file_transfer::init(send_file, recv_dir);
+    file_transfer::init(send_file, recv_dir, cancel_send_after);
 
     match role.as_str() {
         "publisher" if encoder == "screen" => {
@@ -157,6 +166,7 @@ fn main() {
             audio,
             mute_audio,
             viewer_display,
+            input_script,
         ),
         other => panic!("unknown role {other}"),
     }
@@ -684,11 +694,15 @@ fn publisher(signal_url: &str, room: &str, auth: Option<&str>, audio: bool, audi
             }
         }
 
+        // #85 流控：pcap 发布端 ~2ms 节拍 → 单发 ~250-300 chunks/s 是
+        // SFU/str0m DTLS 接收队列的稳定速率上界；过快（>600/s）会触发
+        // SACK 突发导致 Receive queue full 断连（实测）。
         std::thread::sleep(Duration::from_millis(2));
         let _ = &mut signal;
     }
 }
 
+#[allow(clippy::too_many_arguments)] // #75 e2e 输入脚本开关；与既有 publisher 系列函数同风格。
 fn viewer(
     signal_url: &str,
     room: &str,
@@ -697,6 +711,7 @@ fn viewer(
     audio: bool,
     mute_audio: bool,
     display: Option<usize>,
+    input_script: bool,
 ) {
     let (mut signal, mut endpoint, socket, _, _audio_mid) =
         connect(signal_url, room, Role::Viewer, auth, audio);
@@ -916,7 +931,52 @@ fn viewer(
         file_transfer::tick(&mut endpoint);
 
         // 输入事件回传：input 通道打开后周期性发送鼠标移动（模拟观看端输入）。
+        // #75 --input-script：脚本化轮换发送全部事件类型（MouseMove/Button/Wheel/
+        // Key+修饰键），供 e2e 断言各事件类型均到达被控端注入路径。
         if input_open && last_input.elapsed() >= Duration::from_millis(100) {
+            let event = if input_script {
+                match input_seq % 6 {
+                    0 => InputEvent::MouseMove { x: 0.3, y: 0.4 },
+                    1 => InputEvent::MouseButton {
+                        button: MouseButton::Left,
+                        state: ButtonState::Pressed,
+                        x: 0.5,
+                        y: 0.5,
+                    },
+                    2 => InputEvent::MouseButton {
+                        button: MouseButton::Left,
+                        state: ButtonState::Released,
+                        x: 0.5,
+                        y: 0.5,
+                    },
+                    3 => InputEvent::Wheel {
+                        x: 0.5,
+                        y: 0.5,
+                        delta_x: 0.0,
+                        delta_y: -3.0,
+                    },
+                    4 => InputEvent::Key {
+                        code: "KeyA".into(),
+                        state: ButtonState::Pressed,
+                        modifiers: Modifiers {
+                            ctrl: true,
+                            shift: true,
+                            ..Default::default()
+                        },
+                    },
+                    _ => InputEvent::Key {
+                        code: "KeyA".into(),
+                        state: ButtonState::Released,
+                        modifiers: Modifiers {
+                            ctrl: true,
+                            shift: true,
+                            ..Default::default()
+                        },
+                    },
+                }
+            } else {
+                InputEvent::MouseMove { x: 0.5, y: 0.5 }
+            };
             let frame = InputFrame {
                 version: INPUT_PROTOCOL_VERSION,
                 seq: input_seq,
@@ -924,7 +984,7 @@ fn viewer(
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0),
-                event: InputEvent::MouseMove { x: 0.5, y: 0.5 },
+                event,
             };
             if let Ok(json) = serde_json::to_string(&frame)
                 && endpoint.send_channel_data("input", false, json.as_bytes())

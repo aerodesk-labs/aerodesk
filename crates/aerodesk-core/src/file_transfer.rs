@@ -59,7 +59,9 @@ struct Sender {
     total_chunks: u64,
     next_chunk: u64,
     meta_sent: bool,
+    last_meta_send: Instant,
     done_sent: bool,
+    last_done_send: Instant,
     last_progress: Instant,
     /// 启动延迟：data channel 双方（经 SFU）打开有先后，过早发 Meta 会被
     /// SFU 丢弃（对端通道未就绪）。3s 覆盖 DCEP 错峰打开。
@@ -80,6 +82,8 @@ struct Receiver {
     received_flags: Vec<bool>,
     /// 上次发 Nack 的时间：SFU 转发可能丢 Nack，超时后重发（自愈）。
     last_nack: Option<Instant>,
+    /// 进度日志节流（诊断用）。
+    last_progress: Option<Instant>,
 }
 
 impl FileTransfer {
@@ -198,6 +202,20 @@ impl FileTransfer {
         self.incoming_clipboard.take()
     }
 
+    /// 取消当前发送：向接收端下发 FileCancel 并清空发送状态（#72 回归：
+    /// 接收端 on_cancel 移除接收器，不落盘，无残留临时文件）。
+    pub fn cancel_send(&mut self, endpoint: &mut crate::Endpoint) {
+        let Some(s) = self.send.take() else {
+            return;
+        };
+        let cancel = FileControl::Cancel(FileCancel { id: s.id.clone() });
+        if let Ok(json) = serde_json::to_string(&cancel) {
+            let _ = endpoint.send_channel_data("file", false, json.as_bytes());
+        }
+        self.message = Some(format!("已取消发送：{}", s.name));
+        tracing::info!("file send cancelled: {}", s.name);
+    }
+
     /// 发送剪贴板文本到远端（同一 file 通道）；进入补发队列（1s 幂等重试，
     /// 最多 8 次），应对 SFU 转发丢首包。
     pub fn send_clipboard(&mut self, text: &str, endpoint: &mut crate::Endpoint) -> bool {
@@ -299,6 +317,7 @@ impl FileTransfer {
                 received: 0,
                 received_flags: vec![false; m.chunks as usize],
                 last_nack: None,
+                last_progress: None,
             },
         );
     }
@@ -326,6 +345,21 @@ impl FileTransfer {
         }
         *f = true;
         r.received += 1;
+        // 诊断：接收进度（500ms 节流）
+        let now = Instant::now();
+        if r.last_progress
+            .map(|t| t.elapsed() >= Duration::from_millis(500))
+            .unwrap_or(true)
+        {
+            r.last_progress = Some(now);
+            tracing::info!(
+                "file receive {}: {}/{} chunks ({:.0}%)",
+                r.name,
+                r.received,
+                r.total_chunks,
+                r.received as f64 * 100.0 / r.total_chunks.max(1) as f64
+            );
+        }
     }
 
     fn on_done(&mut self, d: FileDone, endpoint: &mut crate::Endpoint) {
@@ -443,7 +477,9 @@ impl Sender {
             total_chunks,
             next_chunk: 0,
             meta_sent: false,
+            last_meta_send: Instant::now(),
             done_sent: false,
+            last_done_send: Instant::now(),
             last_progress: Instant::now(),
             start_after: Instant::now() + Duration::from_secs(3),
             resend: Vec::new(),
@@ -458,7 +494,9 @@ impl Sender {
         if Instant::now() < self.start_after {
             return;
         }
-        if !self.meta_sent {
+        // #85：SFU 转发可能丢一次性消息——Meta/Done 在未确认前每 1s 重传，
+        // 直到接收端 ack（Done ok=true）。接收端对重复 Meta 去重。
+        if !self.meta_sent || self.last_meta_send.elapsed() >= Duration::from_secs(1) {
             let meta = FileControl::Meta(FileMeta {
                 id: self.id.clone(),
                 name: self.name.clone(),
@@ -469,10 +507,15 @@ impl Sender {
             if let Ok(json) = serde_json::to_string(&meta)
                 && endpoint.send_channel_data("file", false, json.as_bytes())
             {
-                tracing::info!("file send start: {} ({} bytes)", self.name, self.data.len());
+                if !self.meta_sent {
+                    tracing::info!("file send start: {} ({} bytes)", self.name, self.data.len());
+                }
                 self.meta_sent = true;
+                self.last_meta_send = Instant::now();
             }
-            return;
+            if !self.meta_sent {
+                return;
+            }
         }
         // 补包优先（接收端 Nack）。
         if let Some(resend_idx) = self.resend.pop() {
@@ -484,6 +527,10 @@ impl Sender {
             }
             return;
         }
+        // #85 现状：str0m 指向 aerodesk-labs 派生（dimpl DTLS receive queue
+        // 2048），SFU 出站为背压队列（不丢包）；8KB 分片 + 单发可稳定完成
+        // 100MB（~5min，sha256 一致、无断连）。进一步提速受 CLI viewer 事件
+        // 循环速率限制（见 #85）。
         if self.next_chunk < self.total_chunks {
             let start = (self.next_chunk as usize) * CHUNK_SIZE;
             let end = ((self.next_chunk + 1) as usize * CHUNK_SIZE).min(self.data.len());
@@ -503,7 +550,7 @@ impl Sender {
             }
             return;
         }
-        if !self.done_sent {
+        if !self.done_sent || self.last_done_send.elapsed() >= Duration::from_secs(1) {
             let done = FileControl::Done(FileDone {
                 id: self.id.clone(),
                 ok: true,
@@ -512,8 +559,11 @@ impl Sender {
             if let Ok(json) = serde_json::to_string(&done)
                 && endpoint.send_channel_data("file", false, json.as_bytes())
             {
-                tracing::info!("file send done: {}", self.name);
+                if !self.done_sent {
+                    tracing::info!("file send done: {}", self.name);
+                }
                 self.done_sent = true;
+                self.last_done_send = Instant::now();
             }
         }
     }
@@ -538,15 +588,45 @@ mod tests {
         let dir = std::env::temp_dir().join("aerodesk-ft-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sample.bin");
-        std::fs::write(&path, vec![7u8; 3000]).unwrap();
+        std::fs::write(&path, vec![7u8; 20000]).unwrap();
         let mut ft = FileTransfer::new(None);
         ft.send_file(&path).unwrap();
         let st = ft.status();
         let (name, done, total) = st.sending.expect("sending should be Some");
         assert_eq!(name, "sample.bin");
         assert_eq!(done, 0);
-        // 3000B / 1024B 分片 → 3 片
+        // 20000B / 8192B 分片 → 3 片
         assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn cancel_send_clears_sender_and_sets_message() {
+        // 写临时文件触发发送；cancel_send 后：发送任务清空、message 标记取消。
+        // send_channel_data 在无 file 通道时返回 false（不 panic），不影响状态清理。
+        let dir = std::env::temp_dir().join("aerodesk-ft-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cancel.bin");
+        std::fs::write(&path, vec![9u8; 20000]).unwrap();
+        let mut ft = FileTransfer::new(None);
+        ft.send_file(&path).unwrap();
+        assert!(ft.status().sending.is_some(), "sending should start");
+        let mut ep = crate::Endpoint::new();
+        ft.cancel_send(&mut ep);
+        let st = ft.status();
+        assert!(st.sending.is_none(), "sender should be cleared");
+        assert!(
+            st.message.as_deref().is_some_and(|m| m.contains("已取消")),
+            "message should mention cancel, got {:?}",
+            st.message
+        );
+    }
+
+    #[test]
+    fn cancel_send_without_sender_is_noop() {
+        let mut ft = FileTransfer::new(None);
+        let mut ep = crate::Endpoint::new();
+        ft.cancel_send(&mut ep); // 不应 panic，也不应产生取消 message
+        assert!(ft.status().message.is_none());
     }
 
     #[test]
