@@ -11,15 +11,36 @@ use core_graphics::event::{
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics_types::geometry::CGPoint;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 /// Convert normalized (0..1) coordinates to display points.
 pub fn normalized_to_points(x: f64, y: f64, width: f64, height: f64) -> (f64, f64) {
     (x.clamp(0.0, 1.0) * width, y.clamp(0.0, 1.0) * height)
 }
 
-/// Main display size in points (CGEvent coordinates are in points, DPI-aware).
+/// 当前活动（被控）显示器 CGDirectDisplayID；-1 = 主显示器（默认）。
+/// #75：发布端切换显示器（--display N / control 切换）时必须同步，
+/// 否则注入坐标仍按主屏换算，副屏 DPI/分辨率不同时鼠标位置错误。
+static ACTIVE_DISPLAY: AtomicI64 = AtomicI64::new(-1);
+
+/// 设置输入注入使用的活动显示器（发布端在采集初始化/切换显示器时调用）。
+pub fn set_active_display(display_id: Option<u32>) {
+    ACTIVE_DISPLAY.store(display_id.map(|d| d as i64).unwrap_or(-1), Ordering::SeqCst);
+}
+
+/// 当前活动显示器 CGDirectDisplayID（无则 None = 主显示器）。
+pub fn active_display() -> Option<u32> {
+    let id = ACTIVE_DISPLAY.load(Ordering::SeqCst);
+    if id >= 0 { Some(id as u32) } else { None }
+}
+
+/// Display size in points (CGEvent coordinates are in points, DPI-aware).
+/// 有活动显示器时用其 bounds，否则主显示器。
 pub fn screen_size_points() -> Result<(f64, f64), String> {
-    let bounds = CGDisplay::main().bounds();
+    let bounds = match active_display() {
+        Some(id) => CGDisplay::new(id).bounds(),
+        None => CGDisplay::main().bounds(),
+    };
     Ok((bounds.size.width, bounds.size.height))
 }
 
@@ -268,6 +289,38 @@ mod tests {
         }
         assert_eq!(keycode_for_code("Period"), Some(0x2F)); // ANSI_PERIOD
         assert_eq!(keycode_for_code("Minus"), Some(0x1B)); // ANSI_MINUS
+    }
+
+    #[test]
+    fn active_display_set_get_roundtrip() {
+        // 纯状态读写，无需硬件。
+        set_active_display(Some(42));
+        assert_eq!(active_display(), Some(42));
+        set_active_display(None);
+        assert_eq!(active_display(), None);
+        set_active_display(Some(0));
+        assert_eq!(active_display(), Some(0));
+    }
+
+    #[test]
+    fn dpi_mapping_common_display_sizes() {
+        // #75 高 DPI/多分辨率：CGEvent 坐标为 points，normalized 0..1 直接映射。
+        // Retina 2x（物理 3456x2234 → 逻辑 1728x1117 points）
+        let (x, y) = normalized_to_points(0.5, 0.5, 1728.0, 1117.0);
+        assert_eq!(x, 864.0);
+        assert_eq!(y, 558.5);
+        // 4K 电视 @200% → 逻辑 1920x1080 points
+        let (x, y) = normalized_to_points(0.25, 0.75, 1920.0, 1080.0);
+        assert_eq!(x, 480.0);
+        assert_eq!(y, 810.0);
+        // 1440p
+        let (x, y) = normalized_to_points(1.0, 0.0, 2560.0, 1440.0);
+        assert_eq!(x, 2560.0);
+        assert_eq!(y, 0.0);
+        // 720p
+        let (x, y) = normalized_to_points(0.0, 1.0, 1280.0, 720.0);
+        assert_eq!(x, 0.0);
+        assert_eq!(y, 720.0);
     }
 
     #[test]
