@@ -75,8 +75,11 @@ else
 fi
 if grep -qiE "panic" /tmp/ftx-pub.log /tmp/ftx-view.log /tmp/ftx-sfu.log; then
     echo "FAIL panic in logs"; fail=1
-else
-    echo "PASS no panics"
+    echo "---- sfu log ----"; tail -30 /tmp/ftx-sfu.log
+fi
+# #102：SFU 崩溃（Abort）时输出日志（仅在断言失败时，且 SFU 已非正常退出）
+if [ "$fail" != "0" ] && ! kill -0 "$SFU_PID" 2>/dev/null && [ -f /tmp/ftx-sfu.log ]; then
+    echo "NOTE sfu exited; log tail:"; tail -20 /tmp/ftx-sfu.log
 fi
 
 exit $fail

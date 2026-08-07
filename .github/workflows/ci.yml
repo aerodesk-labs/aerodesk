@@ -20,6 +20,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       CARGO_TERM_COLOR: always
+      # #102：SFU 偶发 Abort 定位——panic 时输出完整回溯
+      RUST_BACKTRACE: 1
     steps:
       - uses: actions/checkout@v4
 

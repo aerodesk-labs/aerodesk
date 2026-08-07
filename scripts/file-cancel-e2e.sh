@@ -70,8 +70,11 @@ fi
 # 无 panic
 if grep -qiE "panic" /tmp/ftc-pub.log /tmp/ftc-view.log /tmp/ftc-sfu.log; then
     echo "FAIL panic in logs"; fail=1
-else
-    echo "PASS no panics"
+    echo "---- sfu log ----"; tail -30 /tmp/ftc-sfu.log
+fi
+# #102：SFU 崩溃（Abort）时输出日志（仅在断言失败时，且 SFU 已非正常退出）
+if [ "$fail" != "0" ] && ! kill -0 "$SFU_PID" 2>/dev/null && [ -f /tmp/ftc-sfu.log ]; then
+    echo "NOTE sfu exited; log tail:"; tail -20 /tmp/ftc-sfu.log
 fi
 
 exit $fail
