@@ -64,6 +64,7 @@ cargo run -p aerodesk-cli -- --role viewer --layer f --audio
 #       （危险命令默认拦截，白名单 $HOME/AeroDesk/cmd-allowlist.txt，审计 $HOME/AeroDesk/cmd-audit.jsonl）
 #       文件/进程：--read-file <path> / --write-file <path> <content> / --list-processes / --kill-pid <pid>
 #       （写文件敏感路径默认禁止；kill pid 0/1 默认禁止）
+#       权限/审计管理（本地）：--cmd-allowlist list|add <prefix>|remove <prefix> / --cmd-audit [n]
 # A/V 同步：#73 viewer AVSYNC 时间轴/漂移统计 + 音频 jitter buffer（PCMU/Opus 真实播放 macOS 已通；会话工具栏音量滑块）
 
 # 浏览器：https://<host>:3000/?role=publisher|viewer

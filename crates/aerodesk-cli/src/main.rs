@@ -100,6 +100,11 @@ fn main() {
     // #109 远程命令通道：被控端执行器（publisher）/ 控制端响应（viewer）。
     cmd_exec::init();
 
+    // #109 权限/审计本地管理（无需会话；处理完直接退出）。
+    if cmd_exec::run_admin(&args) {
+        return;
+    }
+
     match role.as_str() {
         "publisher" if encoder == "screen" => {
             let vt_capable = video_codec == Codec::H264
