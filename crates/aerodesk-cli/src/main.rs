@@ -1413,7 +1413,7 @@ fn viewer(
                 }
             }
             if let Some(start) = file_request_started
-                && start.elapsed() >= Duration::from_secs(120)
+                && start.elapsed() >= Duration::from_secs(240)
             {
                 eprintln!("file request timeout");
                 std::process::exit(1);

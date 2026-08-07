@@ -62,10 +62,10 @@ python3 - <<'PYEOF'
 import subprocess, os, sys
 try:
     with open("/tmp/mcp-in.txt","rb") as fin, open("/tmp/mcp-out.txt","wb") as fout, open("/tmp/mcp-err.txt","wb") as ferr:
-        r = subprocess.run(["./target/debug/aerodesk-mcp"], stdin=fin, stdout=fout, stderr=ferr, env=os.environ.copy(), timeout=300)
+        r = subprocess.run(["./target/debug/aerodesk-mcp"], stdin=fin, stdout=fout, stderr=ferr, env=os.environ.copy(), timeout=600)
     print("mcp server rc:", r.returncode)
 except subprocess.TimeoutExpired:
-    print("mcp server TIMEOUT 300s")
+    print("mcp server TIMEOUT 600s")
     sys.exit(1)
 PYEOF
 
@@ -126,7 +126,7 @@ fi
 if grep -q "uploaded: upload-5m.bin (5242880 bytes)" /tmp/mcp-out.txt && [ -f "$DIR/recv/upload-5m.bin" ]; then
     echo "PASS upload_file（5MB 落盘被控端）"
 else
-    echo "FAIL upload_file"; tail -6 /tmp/mcp-out.txt; fail=1
+    echo "FAIL upload_file"; grep -oE '"text":"[^"]*"' /tmp/mcp-out.txt | tail -3; fail=1
 fi
 # 9) 大文件下载（从被控端拉回，sha256 一致）
 DL_HASH=$(grep -oE "downloaded: .*sha256=[0-9a-f]{64}" /tmp/mcp-out.txt | grep -oE "[0-9a-f]{64}" | tail -1)

@@ -354,7 +354,7 @@ fn call_file_tool(id: Option<Value>, name: &str, args: &Value, state: &State) ->
                 "--recv-dir",
                 dir.to_str().unwrap_or("/tmp"),
             ],
-            std::time::Duration::from_secs(150),
+            std::time::Duration::from_secs(300),
         );
         return match status {
             Some(st) if st.success() => {
@@ -402,7 +402,7 @@ fn call_file_tool(id: Option<Value>, name: &str, args: &Value, state: &State) ->
             "--send-file",
             local,
         ],
-        std::time::Duration::from_secs(150),
+        std::time::Duration::from_secs(300),
     );
     match status {
         Some(st) if st.success() => {
