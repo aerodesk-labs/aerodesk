@@ -30,7 +30,8 @@ echo "== 启动 publisher + viewer"
 ./target/debug/aerodesk-cli --role publisher --encoder x264 \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/input-pub.log 2>&1 &
 PUB_PID=$!
-./target/debug/aerodesk-cli --role viewer \
+# --input-script：#75 脚本化轮换发送全部事件类型（MouseMove/Button/Wheel/Key+修饰键）。
+./target/debug/aerodesk-cli --role viewer --input-script \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/input-view.log 2>&1 &
 VIEW_PID=$!
 sleep 6
@@ -39,11 +40,19 @@ wait 2>/dev/null || true
 
 echo "== 断言"
 fail=0
-# viewer 持续发送 MouseMove（模拟输入）→ publisher 注入（inject 日志证明收到+尝试注入）
-if grep -qE "inject: seq=" /tmp/input-pub.log; then
-    echo "PASS publisher received input and injected (macOS CGEvent)"
+# #75：viewer --input-script 轮换发送全部事件类型 → publisher 注入路径
+# （inject 日志证明收到+尝试注入；CI 无辅助功能权限时 CGEvent 静默但路径可证）。
+for evt in MouseMove MouseButton Wheel Key; do
+    if grep -qE "inject: seq=.*$evt" /tmp/input-pub.log; then
+        echo "PASS input event type reached inject: $evt"
+    else
+        echo "FAIL input event type missing: $evt"; grep "inject" /tmp/input-pub.log | tail -3; fail=1
+    fi
+done
+if ! grep -qE "inject: seq=.*Key.*ctrl: true" /tmp/input-pub.log; then
+    echo "FAIL key modifiers (ctrl) not carried"; grep "inject: seq=.*Key" /tmp/input-pub.log | tail -3; fail=1
 else
-    echo "FAIL inject path"; tail -5 /tmp/input-pub.log; fail=1
+    echo "PASS key modifiers (ctrl) carried through"
 fi
 if grep -qiE "panic" /tmp/input-pub.log /tmp/input-view.log /tmp/input-sfu.log; then
     echo "FAIL panic in logs"; fail=1
