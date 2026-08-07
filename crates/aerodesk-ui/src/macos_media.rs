@@ -5,7 +5,7 @@
 //! 替换演示帧源；其余平台仍走演示帧（等各自解码管线接入）。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use aerodesk_core::access_unit::AccessUnitAssembler;
@@ -104,6 +104,7 @@ pub fn run_viewer(
     input_rx: std::sync::mpsc::Receiver<String>,
     file_cmd_rx: std::sync::mpsc::Receiver<FileCmd>,
     muted: &'static AtomicBool,
+    volume: &'static AtomicU16,
     session_idx: usize,
 ) {
     let stale = || epoch.load(Ordering::SeqCst) != my_epoch;
@@ -178,6 +179,10 @@ pub fn run_viewer(
     let mut pending_frame: Option<(Vec<u8>, u32, u32, f64)> = None;
 
     while !stale() {
+        // #73 音量滑块：每次循环同步到 AudioSink（sink 可能尚未创建）。
+        if let Some(sink) = &audio_sink {
+            sink.set_volume(volume.load(Ordering::SeqCst));
+        }
         live.socket
             .set_read_timeout(Some(Duration::from_millis(10)))
             .ok();

@@ -156,7 +156,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     *INPUT_TX.lock().unwrap() = Some(input_tx);
                     let (file_cmd_tx, file_cmd_rx) = std::sync::mpsc::channel();
                     *FILE_CMD.lock().unwrap() = Some(file_cmd_tx);
-                    crate::macos_media::run_viewer(server, room, Some(token), weak2.clone(), epoch2.clone(), my_epoch, control_rx, input_rx, file_cmd_rx, &AUDIO_MUTED, session_idx);
+                    crate::macos_media::run_viewer(server, room, Some(token), weak2.clone(), epoch2.clone(), my_epoch, control_rx, input_rx, file_cmd_rx, &AUDIO_MUTED, &AUDIO_VOLUME, session_idx);
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -269,6 +269,8 @@ fn main() -> Result<(), slint::PlatformError> {
         std::sync::Mutex::new(None);
     // #73/#58：观看端静音开关（run_viewer 读取，真实丢弃音频）。
     static AUDIO_MUTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    // #73：观看端音量 0..=100（run_viewer 同步到 AudioSink，滑块驱动）。
+    static AUDIO_VOLUME: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(100);
     // #29 多会话：会话槽序号（断开时清零）。
     static SESSION_NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -595,6 +597,17 @@ fn main() -> Result<(), slint::PlatformError> {
                 )
                 .into(),
             );
+        }
+    });
+    // #73 观看端音量滑块：写 AUDIO_VOLUME（run_viewer 同步到 AudioSink）。
+    ui.on_change_volume({
+        let ui = ui.as_weak();
+        move |v: f32| {
+            let pct = (v.clamp(0.0, 1.0) * 100.0).round() as u16;
+            AUDIO_VOLUME.store(pct, Ordering::SeqCst);
+            if let Some(ui) = ui.upgrade() {
+                ui.set_session_status(format!("音量：{pct}%").into());
+            }
         }
     });
     ui.on_toggle_display({
