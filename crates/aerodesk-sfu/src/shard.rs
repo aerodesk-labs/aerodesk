@@ -182,6 +182,10 @@ impl Shard {
     ) -> thread::JoinHandle<()> {
         thread::Builder::new()
             .name(format!("rd-shard-{index}"))
+            // #102/#85：sctp-proto data channel 分片重组深调用链在 2MB 默认栈下
+            // 偶发 stack overflow（file-transfer/cancel e2e 中 Abort）。放大到
+            // 8MB 作为缓解，避免 SFU 崩溃导致整个分片断连。
+            .stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 let _ = run_shard(index, socket, rx, shared, cross_tx, manager_tx);
             })
