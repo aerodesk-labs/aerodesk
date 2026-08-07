@@ -423,15 +423,13 @@ pub fn list_processes() -> Result<Vec<ProcessInfo>, String> {
     let text = String::from_utf8_lossy(&out.stdout);
     let mut procs = Vec::new();
     if cfg!(windows) {
+        // tasklist /FO CSV：`"image.exe","PID","Session",...`（PID 在第二列）。
         for line in text.lines().skip(1) {
-            let mut parts = line.trim_matches('"').split("\",\"");
-            if let Some(pid_s) = parts.next() {
-                if let Ok(pid) = pid_s.trim().parse::<u32>() {
-                    procs.push(ProcessInfo {
-                        pid,
-                        name: "?".into(),
-                    });
-                }
+            let mut parts = line.split("\",\"");
+            let name = parts.next().unwrap_or("?").trim_matches('"').to_string();
+            let pid_s = parts.next().unwrap_or("").trim_matches('"');
+            if let Ok(pid) = pid_s.parse::<u32>() {
+                procs.push(ProcessInfo { pid, name });
             }
         }
     } else {
@@ -541,9 +539,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn output_is_truncated_at_cap() {
         // 产出 >1MB：单流截断。
         let out = run_command("yes x | head -c 2000000", None, Some(5000), &[]);
+        assert!(out.truncated, "应标记截断");
+        assert!(out.stdout.len() <= MAX_OUTPUT_BYTES + 1);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn output_is_truncated_at_cap_windows() {
+        // PowerShell 输出 2MB；读端到 1MB 上限后停读，子进程写满管道阻塞，超时强杀。
+        let cmd = "powershell -NoProfile -Command \"$c='x'*2000000; [Console]::Out.Write($c)\"";
+        let out = run_command(cmd, None, Some(8000), &[]);
         assert!(out.truncated, "应标记截断");
         assert!(out.stdout.len() <= MAX_OUTPUT_BYTES + 1);
     }
