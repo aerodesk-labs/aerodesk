@@ -169,6 +169,15 @@ fn tool_definitions() -> Vec<Value> {
                 "required": ["x", "y"]
             }
         }),
+        json!({
+            "name": "type_text",
+            "description": "在远程设备逐字符输入文本（US 布局，自动处理大写/符号 Shift）。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"text": {"type": "string", "description": "要输入的文本"}},
+                "required": ["text"]
+            }
+        }),
     ]
 }
 
@@ -265,7 +274,7 @@ fn call_tool(params: &Value, state: &State) -> Value {
     }
 
     // 键鼠工具：经 --send-input 桥接（无 CmdResponse，按 CLI 退出码判定）。
-    if name == "mouse_move" || name == "mouse_click" {
+    if name == "mouse_move" || name == "mouse_click" || name == "type_text" {
         return call_mouse_tool(id, name, &args, state);
     }
 
@@ -300,7 +309,10 @@ fn call_mouse_tool(id: Option<Value>, name: &str, args: &Value, state: &State) -
         .get("button")
         .and_then(|v| v.as_str())
         .unwrap_or("left");
-    let (events, label) = if name == "mouse_move" {
+    let (events, label) = if name == "type_text" {
+        let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        (vec![text.to_string()], "type_text".to_string())
+    } else if name == "mouse_move" {
         (
             vec![format!("{{\"type\":\"mouse_move\",\"x\":{x},\"y\":{y}}}")],
             "mouse_move".to_string(),
@@ -314,6 +326,11 @@ fn call_mouse_tool(id: Option<Value>, name: &str, args: &Value, state: &State) -
             "mouse_click".to_string(),
         )
     };
+    let flag = if name == "type_text" {
+        "--type-text"
+    } else {
+        "--send-input"
+    };
     let mut failures = Vec::new();
     for ev in &events {
         let status = Command::new(&state.cli_bin)
@@ -324,7 +341,7 @@ fn call_mouse_tool(id: Option<Value>, name: &str, args: &Value, state: &State) -
                 &state.signal,
                 "--room",
                 &state.room,
-                "--send-input",
+                flag,
                 ev,
             ])
             .status();
