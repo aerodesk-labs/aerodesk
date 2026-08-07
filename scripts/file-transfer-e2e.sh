@@ -9,8 +9,16 @@ ROOM="${1:-ftx-$(date +%s)}"
 SIZE_KB="${2:-2048}"  # CI 默认 2MB（共享 runner 上 8MB 补包轮次会超窗口）；大文件用手动 100MB 验收
 export RUST_LOG="${RUST_LOG:-info}"
 
-echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+# 大文件验收建议 PROFILE=release（debug 传输太慢且时序失真，见 LESSON 性能压测）
+PROFILE="${PROFILE:-debug}"
+echo "== 构建（${PROFILE}）"
+if [ "$PROFILE" = "release" ]; then
+    cargo build -q --release -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+    BIN=./target/release
+else
+    cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+    BIN=./target/debug
+fi
 
 REC="$(mktemp -d)"
 SRC="$REC/send-${SIZE_KB}kb.bin"
@@ -22,9 +30,9 @@ SRC_HASH="$(shasum -a 256 "$SRC" | awk '{print $1}')"
 echo "src: $SRC ($SIZE_KB KB) sha256=$SRC_HASH"
 
 echo "== 启动 sfu/signal"
-RECORD_DIR="$REC" ./target/debug/aerodesk-sfu >/tmp/ftx-sfu.log 2>&1 &
+RECORD_DIR="$REC" "$BIN/aerodesk-sfu" >/tmp/ftx-sfu.log 2>&1 &
 SFU_PID=$!
-./target/debug/aerodesk-signal >/tmp/ftx-sig.log 2>&1 &
+"$BIN/aerodesk-signal" >/tmp/ftx-sig.log 2>&1 &
 SIG_PID=$!
 for _ in $(seq 1 50); do
     if nc -z 127.0.0.1 3003 2>/dev/null; then break; fi
@@ -36,10 +44,10 @@ done
 sleep 0.3
 
 echo "== 启动 publisher（--send-file）+ viewer（--recv-dir）"
-./target/debug/aerodesk-cli --role publisher --send-file "$SRC" \
+"$BIN/aerodesk-cli" --role publisher --send-file "$SRC" \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/ftx-pub.log 2>&1 &
 PUB_PID=$!
-./target/debug/aerodesk-cli --role viewer --recv-dir "$OUT" \
+"$BIN/aerodesk-cli" --role viewer --recv-dir "$OUT" \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/ftx-view.log 2>&1 &
 VIEW_PID=$!
 
