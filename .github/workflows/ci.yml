@@ -16,7 +16,7 @@ jobs:
           - os: ubuntu-latest
             skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli
           - os: windows-latest
-            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli --exclude aerodesk-linux --exclude x264 --exclude aerodesk-ffmpeg
+            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli --exclude aerodesk-linux --exclude x264
     runs-on: ${{ matrix.os }}
     env:
       CARGO_TERM_COLOR: always
@@ -36,6 +36,28 @@ jobs:
       - name: System deps (macOS)
         if: runner.os == 'macOS'
         run: brew install x264 ffmpeg
+
+      # #74 Windows FFmpeg 开发库：ffmpeg-sys-next 在 MSVC 下经 vcpkg 或
+      # FFMPEG_DIR 定位开发库。此处用 BtbN win64-gpl-shared **8.1** 预编译包
+      # （与 ffmpeg-sys-next 8.1.x 的 FFmpeg 8.x API 匹配；gyan.dev 当前仅
+      # 提供 9.0，major 版本不匹配有 bindgen/链接风险）。
+      # 该 zip 同时提供 MSVC COFF 导入库 lib/*.lib（含 __imp_*）与 MinGW
+      # *.dll.a；ffmpeg-sys-next FFMPEG_DIR 分支读 lib/ + include/，我们把
+      # bin/ 加进 PATH 供回环测试运行时加载 DLL。zip 用 PowerShell 原生
+      # Expand-Archive 解压（windows-latest 无预装 7-Zip，见 runner-images#9361）。
+      - name: System deps (Windows FFmpeg dev libs)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-shared-8.1.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $dest = Join-Path $env:RUNNER_TEMP "ffmpeg"
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $root = (Get-ChildItem $dest -Directory | Select-Object -First 1).FullName
+          Add-Content $env:GITHUB_ENV "FFMPEG_DIR=$root"
+          Add-Content $env:GITHUB_PATH (Join-Path $root "bin")
 
       - uses: dtolnay/rust-toolchain@stable
         with:
