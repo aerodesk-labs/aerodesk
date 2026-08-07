@@ -1,5 +1,7 @@
 # AeroDesk 压测方法学与基线（#8）
 
+> 完整实测报告（2026-08-07）：[`PERFORMANCE_REPORT_20260807.md`](PERFORMANCE_REPORT_20260807.md)
+
 ## 工具
 
 | 脚本 | 作用 |
