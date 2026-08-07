@@ -517,12 +517,15 @@ impl Sender {
                 return;
             }
         }
-        // 补包优先（接收端 Nack）。
-        if let Some(resend_idx) = self.resend.pop() {
+        // 补包优先（接收端 Nack）。先发送成功再出队：若 send 失败（SCTP 缓冲
+        // 满/背压），下一轮重试同一块——pop 后再 send 会把失败块永久丢失，
+        // 接收端无限 Nack 挂起（#72/#85 的间歇性 "receive not completed"）。
+        if let Some(&resend_idx) = self.resend.last() {
             let start = (resend_idx as usize) * CHUNK_SIZE;
             let end = ((resend_idx + 1) as usize * CHUNK_SIZE).min(self.data.len());
             let frame = file::encode_chunk(&self.id, resend_idx, &self.data[start..end]);
             if endpoint.send_channel_data("file", true, &frame) {
+                self.resend.pop();
                 tracing::debug!("file resend chunk {resend_idx}");
             }
             return;

@@ -41,21 +41,30 @@ VIEW_PID=$!
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/ftc-pub.log 2>&1 &
 PUB_PID=$!
 
-# 等 12s（3s 启动延迟 + 3s 发送 + 取消传播 + 收尾）
-sleep 12
+# 轮询等取消传播（3s 启动延迟 + 发送 + 取消 + 收尾；CI 慢启动时固定 sleep
+# 会误判，最多 ~30s）
+PUB_CANCEL=0
+VIEW_CANCEL=0
+for _ in $(seq 1 60); do
+    grep -q "file send cancelled" /tmp/ftc-pub.log 2>/dev/null && PUB_CANCEL=1
+    grep -q "file .* cancelled" /tmp/ftc-view.log 2>/dev/null && VIEW_CANCEL=1
+    if [ "$PUB_CANCEL" = "1" ] && [ "$VIEW_CANCEL" = "1" ]; then break; fi
+    if ! kill -0 "$PUB_PID" 2>/dev/null || ! kill -0 "$VIEW_PID" 2>/dev/null; then break; fi
+    sleep 0.5
+done
 kill "$PUB_PID" "$VIEW_PID" "$SFU_PID" "$SIG_PID" 2>/dev/null || true
 wait 2>/dev/null || true
 
 echo "== 断言"
 fail=0
 # 发送端确实触发了取消
-if grep -q "file send cancelled" /tmp/ftc-pub.log; then
+if [ "$PUB_CANCEL" = "1" ]; then
     echo "PASS publisher cancelled send"
 else
     echo "FAIL publisher cancel not triggered"; tail -5 /tmp/ftc-pub.log; fail=1
 fi
 # 接收端处理了 FileCancel（on_cancel 日志）
-if grep -q "file .* cancelled" /tmp/ftc-view.log; then
+if [ "$VIEW_CANCEL" = "1" ]; then
     echo "PASS viewer handled FileCancel"
 else
     echo "FAIL viewer cancel handler"; tail -5 /tmp/ftc-view.log; fail=1

@@ -147,6 +147,7 @@ fn main() {
             audio,
             audio_opus,
             video_codec,
+            noisy,
         ),
         "publisher" if encoder == "x264" => publisher_x264(
             &signal,
@@ -752,31 +753,39 @@ fn viewer(
     let mut opus_decoder: Option<aerodesk_ffmpeg::audio::OpusDecoder> = None;
 
     loop {
+        // #8 高码率吞吐：每轮尽量排空 socket（最多 512 包），有数据时不再
+        // sleep 2ms——否则 4K/大帧流 ~5k pps 时每轮只读 1 包，内核缓冲溢出
+        // 丢包，关键帧永远不完整（0 keyframes / 解码 0 帧）。
         let wait = Duration::from_millis(50);
         socket.set_read_timeout(Some(wait)).ok();
-        let mut buf = [0u8; 2000];
-        match socket.recv_from(&mut buf) {
-            Ok((n, source)) => {
-                debug!("recv {} bytes from {} type={:#04x}", n, source, buf[0]);
-                let Ok(contents) = buf[..n].try_into() else {
-                    continue;
-                };
-                let input = Input::Receive(
-                    Instant::now(),
-                    Receive {
-                        proto: Protocol::Udp,
-                        source,
-                        destination: socket.local_addr().unwrap(),
-                        contents,
-                    },
-                );
-                let _ = endpoint.handle_input(input);
-            }
-            Err(e) => {
-                if e.kind() != std::io::ErrorKind::WouldBlock
-                    && e.kind() != std::io::ErrorKind::TimedOut
-                {
-                    debug!("recv error: {e:?}");
+        let mut got_any = false;
+        for _ in 0..512 {
+            let mut buf = [0u8; 2000];
+            match socket.recv_from(&mut buf) {
+                Ok((n, source)) => {
+                    got_any = true;
+                    debug!("recv {} bytes from {} type={:#04x}", n, source, buf[0]);
+                    let Ok(contents) = buf[..n].try_into() else {
+                        continue;
+                    };
+                    let input = Input::Receive(
+                        Instant::now(),
+                        Receive {
+                            proto: Protocol::Udp,
+                            source,
+                            destination: socket.local_addr().unwrap(),
+                            contents,
+                        },
+                    );
+                    let _ = endpoint.handle_input(input);
+                }
+                Err(e) => {
+                    if e.kind() != std::io::ErrorKind::WouldBlock
+                        && e.kind() != std::io::ErrorKind::TimedOut
+                    {
+                        debug!("recv error: {e:?}");
+                    }
+                    break;
                 }
             }
         }
@@ -1012,7 +1021,9 @@ fn viewer(
             );
             last_report = Instant::now();
         }
-        std::thread::sleep(Duration::from_millis(2));
+        if !got_any {
+            std::thread::sleep(Duration::from_millis(2));
+        }
         let _ = &mut signal;
     }
 }
@@ -1327,6 +1338,7 @@ fn publisher_ffmpeg(
     audio: bool,
     audio_opus: bool,
     codec: Codec,
+    noisy: bool,
 ) {
     use aerodesk_macos::synthetic::SyntheticSource;
 
@@ -1337,7 +1349,12 @@ fn publisher_ffmpeg(
     let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
         connect_codec(signal_url, room, Role::Publisher, auth, audio, codec);
     let mut encoder = FfmpegEncoder::new(W, H, FPS, 1_500_000, codec).expect("ffmpeg encoder");
-    let mut source = SyntheticSource::new(W, H);
+    // #8：--noisy 高熵合成源（码率贴近目标档位，压测/高码率回归用）。
+    let mut source = if noisy {
+        SyntheticSource::new_noisy(W, H)
+    } else {
+        SyntheticSource::new(W, H)
+    };
     let mut connected = false;
     let mut audio_ticker = AudioTicker::new(audio_opus);
     let mut next_frame = Instant::now();

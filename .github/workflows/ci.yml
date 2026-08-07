@@ -86,6 +86,12 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/simulcast-e2e.sh
 
+      # #8 高码率（大帧）回归：VT 1080p60 --noisy ~5k pps → viewer 关键帧/解码
+      # 正常（防 CLI viewer 单包读取丢关键帧回归；VT 不可用时 SKIP）。
+      - name: e2e high-rate large-frame (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/highrate-e2e.sh
+
       # #66 回归：kill 一个连接后，新连接必须能正常 Join（信号服务器无死锁）。
       - name: e2e signal reconnect after disconnect (macOS only)
         if: runner.os == 'macOS'

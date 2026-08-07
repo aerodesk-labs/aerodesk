@@ -16,6 +16,9 @@ FPS="${6:-30}"
 SIGNAL="${SIGNAL:-ws://127.0.0.1:3003}"
 BIN="${BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/debug/aerodesk-cli}"
 BITRATE="${BITRATE:-8000000}"
+# #8 高熵合成源（NOISY=1）：码率贴近目标档位，避免彩条源过度可压缩导致
+# 吞吐失真（实测彩条 4K 只有 ~0.3Mbps）。
+NOISY="${NOISY:-0}"
 TOKEN="${JWT_TOKEN:-}"
 
 pids=()
@@ -30,7 +33,8 @@ for r in $(seq 1 "$ROOMS"); do
   for p in $(seq 1 "$PAIRS"); do
     room="load-r${r}"
     "$BIN" --role publisher --signal "$SIGNAL" --room "$room" --encoder vt \
-      --width "$W" --height "$H" --fps "$FPS" --bitrate "$BITRATE" $TARG \
+      --width "$W" --height "$H" --fps "$FPS" --bitrate "$BITRATE" \
+      $([ "$NOISY" = "1" ] && echo --noisy) $TARG \
       >"/tmp/load-pub-${r}-${p}.log" 2>&1 &
     pids+=($!)
     "$BIN" --role viewer --signal "$SIGNAL" --room "$room" $TARG \
