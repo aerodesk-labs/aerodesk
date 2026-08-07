@@ -11,8 +11,17 @@ use aerodesk_core::Endpoint;
 static FILE_TX: std::sync::Mutex<Option<aerodesk_core::file_transfer::FileTransfer>> =
     std::sync::Mutex::new(None);
 
+/// #72 取消回归：启动后多少秒触发发送端取消（None = 不触发）。
+static CANCEL_SEND_AFTER: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+static CANCEL_SEND_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// 初始化进程内状态机（main 入口调用一次）。
-pub fn init(send_file: Option<PathBuf>, recv_dir: Option<PathBuf>) {
+/// `cancel_send_after` 为可选秒数：到达后自动取消当前发送（e2e 回归用）。
+pub fn init(
+    send_file: Option<PathBuf>,
+    recv_dir: Option<PathBuf>,
+    cancel_send_after: Option<Duration>,
+) {
     let mut ft = aerodesk_core::file_transfer::FileTransfer::new(recv_dir);
     if let Some(path) = send_file {
         if let Err(e) = ft.send_file(&path) {
@@ -21,6 +30,8 @@ pub fn init(send_file: Option<PathBuf>, recv_dir: Option<PathBuf>) {
         }
     }
     *FILE_TX.lock().unwrap() = Some(ft);
+    *CANCEL_SEND_AFTER.lock().unwrap() = cancel_send_after.map(|d| Instant::now() + d);
+    CANCEL_SEND_DONE.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// 路由 data channel 事件到状态机（no-op 除非 label == "file"）。
@@ -37,6 +48,16 @@ pub fn tick(endpoint: &mut Endpoint) {
     if let Ok(mut ft) = FILE_TX.lock()
         && let Some(ft) = ft.as_mut()
     {
+        // #72 取消回归：到达设定时刻自动取消当前发送（只触发一次）。
+        if !CANCEL_SEND_DONE.load(std::sync::atomic::Ordering::SeqCst)
+            && CANCEL_SEND_AFTER
+                .lock()
+                .unwrap()
+                .is_some_and(|t| Instant::now() >= t)
+        {
+            ft.cancel_send(endpoint);
+            CANCEL_SEND_DONE.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         ft.tick(endpoint);
         maybe_poll_clipboard(ft, endpoint);
         // #72 远端剪贴板落地（publisher/viewer 共用；UI 用 core 状态机自行处理）。

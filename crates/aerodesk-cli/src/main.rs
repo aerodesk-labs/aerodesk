@@ -57,11 +57,16 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     let viewer_display: Option<usize> = arg(&args, "--display").and_then(|v| v.parse().ok());
-    // #72 文件传输：--send-file <path> 发送；--recv-dir <dir> 接收落盘。
+    // #72 文件传输：--send-file <path> 发送；--recv-dir <dir> 接收落盘；
+    // --cancel-send-after <secs>：启动后到达该时刻自动取消发送（e2e 回归用）。
     let send_file = arg(&args, "--send-file").map(std::path::PathBuf::from);
     let recv_dir = arg(&args, "--recv-dir").map(std::path::PathBuf::from);
     // #75 输入回传：--input-script 让 viewer 脚本化发送全部事件类型（e2e 断言用）。
     let input_script = args.iter().any(|a| a == "--input-script");
+    // #72 取消回归：--cancel-send-after <secs> 启动后定时取消发送。
+    let cancel_send_after = arg(&args, "--cancel-send-after")
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs);
     // #74 视频编码：--codec h264|h265|vp9|av1（配 --encoder ffmpeg）。
     let video_codec: Codec = match arg(&args, "--codec").as_deref() {
         Some("h265") | Some("hevc") => Codec::Hevc,
@@ -71,7 +76,7 @@ fn main() {
     };
 
     // #72 文件传输状态机（进程级单例；发送/接收同一状态机）。
-    file_transfer::init(send_file, recv_dir);
+    file_transfer::init(send_file, recv_dir, cancel_send_after);
 
     match role.as_str() {
         "publisher" if encoder == "screen" => {
