@@ -340,8 +340,9 @@ fn call_file_tool(id: Option<Value>, name: &str, args: &Value, state: &State) ->
         if let Err(e) = std::fs::create_dir_all(&dir) {
             return err(format!("mkdir: {e}"));
         }
-        let status = Command::new(&state.cli_bin)
-            .args([
+        let status = run_cli_timeout(
+            &[
+                &state.cli_bin,
                 "--role",
                 "viewer",
                 "--signal",
@@ -352,10 +353,11 @@ fn call_file_tool(id: Option<Value>, name: &str, args: &Value, state: &State) ->
                 remote,
                 "--recv-dir",
                 dir.to_str().unwrap_or("/tmp"),
-            ])
-            .status();
+            ],
+            std::time::Duration::from_secs(150),
+        );
         return match status {
-            Ok(st) if st.success() => {
+            Some(st) if st.success() => {
                 let files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
                     .map(|it| {
                         it.flatten()
@@ -373,8 +375,8 @@ fn call_file_tool(id: Option<Value>, name: &str, args: &Value, state: &State) ->
                     None => err("下载完成但未找到落盘文件".into()),
                 }
             }
-            Ok(st) => err(format!("download failed: exit {:?}", st.code())),
-            Err(e) => err(format!("spawn: {e}")),
+            Some(st) => err(format!("download failed: exit {:?}", st.code())),
+            None => err("download CLI 超时(150s)".into()),
         };
     }
 
@@ -388,8 +390,9 @@ fn call_file_tool(id: Option<Value>, name: &str, args: &Value, state: &State) ->
     if !meta.is_file() {
         return err(format!("{local} 不是文件"));
     }
-    let status = Command::new(&state.cli_bin)
-        .args([
+    let status = run_cli_timeout(
+        &[
+            &state.cli_bin,
             "--role",
             "viewer",
             "--signal",
@@ -398,18 +401,19 @@ fn call_file_tool(id: Option<Value>, name: &str, args: &Value, state: &State) ->
             &state.room,
             "--send-file",
             local,
-        ])
-        .status();
+        ],
+        std::time::Duration::from_secs(150),
+    );
     match status {
-        Ok(st) if st.success() => {
+        Some(st) if st.success() => {
             let name = std::path::Path::new(local)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| local.to_string());
             json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":format!("uploaded: {name} ({} bytes) -> 被控端（publisher 需 --recv-dir）", meta.len())}],"isError":false}})
         }
-        Ok(st) => err(format!("upload failed: exit {:?}", st.code())),
-        Err(e) => err(format!("spawn: {e}")),
+        Some(st) => err(format!("upload failed: exit {:?}", st.code())),
+        None => err("upload CLI 超时(150s)".into()),
     }
 }
 
@@ -418,6 +422,32 @@ fn sha256_hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(data);
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 运行 aerodesk-cli 并等待退出（超时 kill，返回 None = 超时）。
+fn run_cli_timeout(
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Option<std::process::ExitStatus> {
+    let mut child = match Command::new(&args[0]).args(&args[1..]).spawn() {
+        Ok(c) => c,
+        Err(e) => return None,
+    };
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => return Some(st),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 /// 键鼠工具：--send-input 桥接（按 CLI 退出码判定成功）。
@@ -452,8 +482,9 @@ fn call_mouse_tool(id: Option<Value>, name: &str, args: &Value, state: &State) -
     };
     let mut failures = Vec::new();
     for ev in &events {
-        let status = Command::new(&state.cli_bin)
-            .args([
+        let status = run_cli_timeout(
+            &[
+                &state.cli_bin,
                 "--role",
                 "viewer",
                 "--signal",
@@ -462,12 +493,13 @@ fn call_mouse_tool(id: Option<Value>, name: &str, args: &Value, state: &State) -
                 &state.room,
                 flag,
                 ev,
-            ])
-            .status();
+            ],
+            std::time::Duration::from_secs(60),
+        );
         match status {
-            Ok(st) if st.success() => {}
-            Ok(st) => failures.push(format!("{ev} -> exit {:?}", st.code())),
-            Err(e) => failures.push(format!("spawn: {e}")),
+            Some(st) if st.success() => {}
+            Some(st) => failures.push(format!("{ev} -> exit {:?}", st.code())),
+            None => failures.push(format!("{ev} -> CLI 超时(60s)")),
         }
     }
     let ok = failures.is_empty();

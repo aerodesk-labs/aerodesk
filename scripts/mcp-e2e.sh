@@ -55,9 +55,20 @@ cat > /tmp/mcp-in.txt <<INEOF
 {"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"download_file","arguments":{"remote_path":"$DIR/recv/upload-5m.bin"}}}
 INEOF
 
-AERODESK_SIGNAL="ws://127.0.0.1:3003" AERODESK_ROOM="$ROOM" \
-AERODESK_CLI_BIN="$PWD/target/debug/aerodesk-cli" \
-  ./target/debug/aerodesk-mcp < /tmp/mcp-in.txt > /tmp/mcp-out.txt 2>/tmp/mcp-err.txt || true
+export AERODESK_SIGNAL="ws://127.0.0.1:3003"
+export AERODESK_ROOM="$ROOM"
+export AERODESK_CLI_BIN="$PWD/target/debug/aerodesk-cli"
+python3 - <<'PYEOF'
+import subprocess, os, sys
+try:
+    with open("/tmp/mcp-in.txt","rb") as fin, open("/tmp/mcp-out.txt","wb") as fout, open("/tmp/mcp-err.txt","wb") as ferr:
+        r = subprocess.run(["./target/debug/aerodesk-mcp"], stdin=fin, stdout=fout, stderr=ferr, env=os.environ.copy(), timeout=300)
+    print("mcp server rc:", r.returncode)
+except subprocess.TimeoutExpired:
+    print("mcp server TIMEOUT 300s")
+    sys.exit(1)
+PYEOF
+
 
 kill "$PUB_PID" "$SFU_PID" "$SIG_PID" 2>/dev/null || true
 wait 2>/dev/null || true
