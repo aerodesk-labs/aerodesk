@@ -3530,11 +3530,11 @@ dependencies = [
 [[package]]
 name = "is"
 version = "0.10.0"
-source = "git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e#a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e"
+source = "git+https://github.com/aerodesk-labs/str0m.git?rev=acd7e773d668b74411242951b716c22b162ca751#acd7e773d668b74411242951b716c22b162ca751"
 dependencies = [
  "crc",
  "serde",
- "str0m-proto 0.6.0 (git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e)",
+ "str0m-proto 0.6.0 (git+https://github.com/aerodesk-labs/str0m.git?rev=acd7e773d668b74411242951b716c22b162ca751)",
  "subtle",
  "tracing",
 ]
@@ -6386,7 +6386,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "str0m"
 version = "0.21.0"
-source = "git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e#a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e"
+source = "git+https://github.com/aerodesk-labs/str0m.git?rev=acd7e773d668b74411242951b716c22b162ca751#acd7e773d668b74411242951b716c22b162ca751"
 dependencies = [
  "arrayvec",
  "base64ct",
@@ -6397,7 +6397,7 @@ dependencies = [
  "sctp-proto",
  "serde",
  "str0m-aws-lc-rs",
- "str0m-proto 0.6.0 (git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e)",
+ "str0m-proto 0.6.0 (git+https://github.com/aerodesk-labs/str0m.git?rev=acd7e773d668b74411242951b716c22b162ca751)",
  "str0m-rust-crypto",
  "subtle",
  "time",
@@ -6407,11 +6407,11 @@ dependencies = [
 [[package]]
 name = "str0m-aws-lc-rs"
 version = "0.5.0"
-source = "git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e#a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e"
+source = "git+https://github.com/aerodesk-labs/str0m.git?rev=acd7e773d668b74411242951b716c22b162ca751#acd7e773d668b74411242951b716c22b162ca751"
 dependencies = [
  "aws-lc-rs",
  "dimpl",
- "str0m-proto 0.6.0 (git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e)",
+ "str0m-proto 0.6.0 (git+https://github.com/aerodesk-labs/str0m.git?rev=acd7e773d668b74411242951b716c22b162ca751)",
  "time",
 ]
 
@@ -6437,7 +6437,7 @@ dependencies = [
 [[package]]
 name = "str0m-proto"
 version = "0.6.0"
-source = "git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e#a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e"
+source = "git+https://github.com/aerodesk-labs/str0m.git?rev=acd7e773d668b74411242951b716c22b162ca751#acd7e773d668b74411242951b716c22b162ca751"
 dependencies = [
  "base64ct",
  "dimpl",
@@ -6450,7 +6450,7 @@ dependencies = [
 [[package]]
 name = "str0m-rust-crypto"
 version = "0.5.0"
-source = "git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e#a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e"
+source = "git+https://github.com/aerodesk-labs/str0m.git?rev=acd7e773d668b74411242951b716c22b162ca751#acd7e773d668b74411242951b716c22b162ca751"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -6460,7 +6460,7 @@ dependencies = [
  "p256",
  "sha1 0.10.7",
  "sha2",
- "str0m-proto 0.6.0 (git+https://github.com/aerodesk-labs/str0m.git?rev=a9c8de747d6e70cf1404e57b75e005e8ea0e2d9e)",
+ "str0m-proto 0.6.0 (git+https://github.com/aerodesk-labs/str0m.git?rev=acd7e773d668b74411242951b716c22b162ca751)",
  "time",
 ]
 

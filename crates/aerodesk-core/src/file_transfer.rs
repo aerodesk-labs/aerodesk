@@ -530,16 +530,24 @@ impl Sender {
             }
             return;
         }
-        // #85 现状：str0m 指向 aerodesk-labs 派生（dimpl DTLS receive queue
-        // 2048），SFU 出站为背压队列（不丢包）；8KB 分片 + 单发可稳定完成
-        // 100MB（~5min，sha256 一致、无断连）。进一步提速受 CLI viewer 事件
-        // 循环速率限制（见 #85）。
+        // #85 吞吐：背压突发发送——只要 SCTP 缓冲可接受就连续发（str0m
+        // MAX_BUFFERED 8MB + rwnd 8MB 下安全，不会触发 DTLS 队列溢出），
+        // 突破单发节拍（1 chunk/轮 ≈ 1.6MB/s）上限；send 失败即停，下一轮续。
+        // 每轮最多 32 chunk（256KB）：既达到 100MB <60s（实测 ~44s），又避免
+        // 单轮占用事件循环过久；debug 下 str0m/sctp-proto 高吞吐 data channel
+        // 深链栈溢出为已知限制（#102，SFU 8MB 栈缓解），CI 文件传输 e2e 已
+        // 改用 release 构建规避。
         if self.next_chunk < self.total_chunks {
-            let start = (self.next_chunk as usize) * CHUNK_SIZE;
-            let end = ((self.next_chunk + 1) as usize * CHUNK_SIZE).min(self.data.len());
-            let frame = file::encode_chunk(&self.id, self.next_chunk, &self.data[start..end]);
-            if endpoint.send_channel_data("file", true, &frame) {
+            let mut sent = 0usize;
+            while self.next_chunk < self.total_chunks && sent < 32 {
+                let start = (self.next_chunk as usize) * CHUNK_SIZE;
+                let end = ((self.next_chunk + 1) as usize * CHUNK_SIZE).min(self.data.len());
+                let frame = file::encode_chunk(&self.id, self.next_chunk, &self.data[start..end]);
+                if !endpoint.send_channel_data("file", true, &frame) {
+                    break;
+                }
                 self.next_chunk += 1;
+                sent += 1;
                 if self.last_progress.elapsed() >= Duration::from_millis(500) {
                     tracing::info!(
                         "file send {}: {}/{} chunks ({:.0}%)",

@@ -20,6 +20,7 @@ const DEMO_W: u32 = 320;
 const DEMO_H: u32 = 180;
 
 /// #72 UI → 会话文件/剪贴板命令（经 mpsc 传到 run_viewer 线程）。
+#[derive(Debug, PartialEq, Eq)]
 pub enum FileCmd {
     /// 发送一个文件。
     SendFile(std::path::PathBuf),
@@ -27,8 +28,110 @@ pub enum FileCmd {
     SendClipboard(String),
 }
 
+/// #72 UI → 会话文件/剪贴板命令通道（会话建立时 set，断开时清空）。
+static FILE_CMD: std::sync::Mutex<Option<std::sync::mpsc::Sender<FileCmd>>> =
+    std::sync::Mutex::new(None);
+
+/// #72 UI 拖拽发送：在 winit 事件进入 Slint 前拦截外部文件拖放。
+///
+/// Slint 1.17 的 DropArea 只支持应用内 DragArea，外部文件拖放需后端支持；
+/// 但 winit 0.30（macOS 已注册 NSDraggingDestination）会派发
+/// `WindowEvent::DroppedFile`，而 Slint 1.17.1 的
+/// `Backend::builder().with_custom_application_handler()` 允许在 Slint 处理前
+/// 拦截任意 winit 窗口事件，因此无需等 Slint 上游即可实现外部拖放。
+#[cfg(target_os = "macos")]
+struct FileDropHandler {
+    /// 会话视图弱引用（AppWindow::new 后填充），用于状态/高亮提示。
+    ui: std::sync::Arc<std::sync::Mutex<Option<slint::Weak<AppWindow>>>>,
+}
+
+#[cfg(target_os = "macos")]
+impl FileDropHandler {
+    fn new(ui: std::sync::Arc<std::sync::Mutex<Option<slint::Weak<AppWindow>>>>) -> Self {
+        Self { ui }
+    }
+
+    /// 处理 winit 窗口事件；返回是否继续交给 Slint 处理。
+    fn handle_window_event(
+        &self,
+        event: &i_slint_backend_winit::winit::event::WindowEvent,
+    ) -> i_slint_backend_winit::EventResult {
+        use i_slint_backend_winit::winit::event::WindowEvent;
+        match event {
+            // macOS：每个文件一个 DroppedFile（winit 0.30 各平台一致，无批量变体）。
+            WindowEvent::DroppedFile(path) => {
+                let status = self.dispatch_drop(std::slice::from_ref(path));
+                self.set_hover(false);
+                self.set_status(&status);
+                i_slint_backend_winit::EventResult::PreventDefault
+            }
+            WindowEvent::HoveredFile(_) => {
+                self.set_hover(true);
+                i_slint_backend_winit::EventResult::Propagate
+            }
+            WindowEvent::HoveredFileCancelled => {
+                self.set_hover(false);
+                i_slint_backend_winit::EventResult::Propagate
+            }
+            _ => i_slint_backend_winit::EventResult::Propagate,
+        }
+    }
+
+    /// 把拖放路径派发到会话 file 通道；返回给用户的状态文案。
+    fn dispatch_drop(&self, paths: &[std::path::PathBuf]) -> String {
+        if paths.is_empty() {
+            return "发送文件：未选择文件".to_string();
+        }
+        let guard = FILE_CMD.lock().unwrap();
+        let Some(tx) = guard.as_ref() else {
+            return "发送文件：未连接会话".to_string();
+        };
+        // 只接受存在的普通文件（目录拖入不发送，避免误把目录当文件传）。
+        let files: Vec<_> = paths.iter().filter(|p| p.is_file()).cloned().collect();
+        if files.is_empty() {
+            return format!("发送文件：{} 不是文件", paths[0].display());
+        }
+        for f in &files {
+            let _ = tx.send(FileCmd::SendFile(f.clone()));
+        }
+        if files.len() == 1 {
+            format!("发送文件：{}", files[0].display())
+        } else {
+            format!("发送文件：{} 个文件", files.len())
+        }
+    }
+
+    fn set_status(&self, msg: &str) {
+        if let Some(ui) = self.ui.lock().unwrap().as_ref().and_then(|w| w.upgrade()) {
+            ui.set_session_status(msg.into());
+        }
+    }
+
+    fn set_hover(&self, active: bool) {
+        if let Some(ui) = self.ui.lock().unwrap().as_ref().and_then(|w| w.upgrade()) {
+            ui.set_file_drop_hover(active);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl i_slint_backend_winit::CustomApplicationHandler for FileDropHandler {
+    fn window_event(
+        &mut self,
+        _event_loop: &i_slint_backend_winit::winit::event_loop::ActiveEventLoop,
+        _window_id: i_slint_backend_winit::winit::window::WindowId,
+        _winit_window: Option<&i_slint_backend_winit::winit::window::Window>,
+        _slint_window: Option<&slint::Window>,
+        event: &i_slint_backend_winit::winit::event::WindowEvent,
+    ) -> i_slint_backend_winit::EventResult {
+        self.handle_window_event(event)
+    }
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     init_log();
+    let drop_ui: std::sync::Arc<std::sync::Mutex<Option<slint::Weak<AppWindow>>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
     #[cfg(target_os = "macos")]
     {
         // winit WindowAttributes hook：标题栏透明 + 隐藏标题文字 + 内容铺满，
@@ -42,11 +145,16 @@ fn main() -> Result<(), slint::PlatformError> {
                     .with_title_hidden(true)
                     .with_fullsize_content_view(true)
             })
+            // #72 拖放发送：拦截 winit DroppedFile（backend 先于 AppWindow 创建，
+            // 弱引用在 AppWindow::new 后填充）。
+            .with_custom_application_handler(Box::new(FileDropHandler::new(drop_ui.clone())))
             .build()
             .expect("slint winit backend");
         slint::platform::set_platform(Box::new(backend)).expect("set slint platform");
     }
     let ui = AppWindow::new()?;
+    // #72 拖放发送：填充会话 UI 弱引用（非 macOS 无 handler，仅写入无副作用）。
+    *drop_ui.lock().unwrap() = Some(ui.as_weak());
 
     // 最近会话 / 收藏（本地持久化）
     ui.set_recents(slint::ModelRc::new(slint::VecModel::from(load_recents())));
@@ -264,9 +372,6 @@ fn main() -> Result<(), slint::PlatformError> {
     static INPUT_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>> =
         std::sync::Mutex::new(None);
     static INPUT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    // #72：UI → 会话文件/剪贴板命令。
-    static FILE_CMD: std::sync::Mutex<Option<std::sync::mpsc::Sender<FileCmd>>> =
-        std::sync::Mutex::new(None);
     // #73/#58：观看端静音开关（run_viewer 读取，真实丢弃音频）。
     static AUDIO_MUTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     // #73：观看端音量 0..=100（run_viewer 同步到 AudioSink，滑块驱动）。
@@ -1154,6 +1259,108 @@ mod tests {
         );
         assert_eq!(display_server("ws://127.0.0.1:3003"), "127.0.0.1:3003");
         assert_eq!(display_server("signal.aerodesk.io"), "signal.aerodesk.io");
+    }
+    // ---- #72 拖放发送（macOS winit 拦截）----
+    #[cfg(target_os = "macos")]
+    fn drop_handler() -> FileDropHandler {
+        FileDropHandler::new(std::sync::Arc::new(std::sync::Mutex::new(None)))
+    }
+
+    /// FILE_CMD 是全局单例，相关测试必须串行执行，避免并行互相覆盖。
+    static FILE_CMD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(target_os = "macos")]
+    fn is_prevent_default(r: i_slint_backend_winit::EventResult) -> bool {
+        matches!(r, i_slint_backend_winit::EventResult::PreventDefault)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dropped_file_sends_file_cmd_and_consumes_event() {
+        let _guard = FILE_CMD_TEST_LOCK.lock().unwrap();
+        use i_slint_backend_winit::winit::event::WindowEvent;
+        let (tx, rx) = std::sync::mpsc::channel();
+        *FILE_CMD.lock().unwrap() = Some(tx);
+        let h = drop_handler();
+        let path = std::env::temp_dir().join("aerodesk-ui-drop-test.txt");
+        std::fs::write(&path, b"hello").unwrap();
+        let r = h.handle_window_event(&WindowEvent::DroppedFile(path.clone()));
+        assert!(is_prevent_default(r));
+        assert_eq!(rx.recv().unwrap(), FileCmd::SendFile(path.clone()));
+        *FILE_CMD.lock().unwrap() = None;
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dropped_file_without_session_is_still_consumed() {
+        let _guard = FILE_CMD_TEST_LOCK.lock().unwrap();
+        use i_slint_backend_winit::winit::event::WindowEvent;
+        *FILE_CMD.lock().unwrap() = None;
+        let h = drop_handler();
+        let r = h.handle_window_event(&WindowEvent::DroppedFile(std::path::PathBuf::from(
+            "/tmp/x",
+        )));
+        assert!(is_prevent_default(r));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dropped_directory_is_not_sent() {
+        let _guard = FILE_CMD_TEST_LOCK.lock().unwrap();
+        use i_slint_backend_winit::winit::event::WindowEvent;
+        let (tx, rx) = std::sync::mpsc::channel();
+        *FILE_CMD.lock().unwrap() = Some(tx);
+        let h = drop_handler();
+        let dir = std::env::temp_dir().join("aerodesk-ui-drop-dir-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let r = h.handle_window_event(&WindowEvent::DroppedFile(dir.clone()));
+        assert!(is_prevent_default(r));
+        assert!(rx.try_recv().is_err());
+        *FILE_CMD.lock().unwrap() = None;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn multiple_dropped_files_each_sent() {
+        let _guard = FILE_CMD_TEST_LOCK.lock().unwrap();
+        use i_slint_backend_winit::winit::event::WindowEvent;
+        let (tx, rx) = std::sync::mpsc::channel();
+        *FILE_CMD.lock().unwrap() = Some(tx);
+        let h = drop_handler();
+        let dir = std::env::temp_dir();
+        let p1 = dir.join("aerodesk-ui-drop-batch-1.txt");
+        let p2 = dir.join("aerodesk-ui-drop-batch-2.txt");
+        std::fs::write(&p1, b"1").unwrap();
+        std::fs::write(&p2, b"2").unwrap();
+        // winit 0.30 无批量变体：macOS 每个文件一个 DroppedFile 事件。
+        let _ = h.handle_window_event(&WindowEvent::DroppedFile(p1.clone()));
+        let _ = h.handle_window_event(&WindowEvent::DroppedFile(p2.clone()));
+        let mut got = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            got.push(cmd);
+        }
+        assert_eq!(
+            got,
+            vec![FileCmd::SendFile(p1.clone()), FileCmd::SendFile(p2.clone())]
+        );
+        *FILE_CMD.lock().unwrap() = None;
+        let _ = std::fs::remove_file(p1);
+        let _ = std::fs::remove_file(p2);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hover_events_propagate() {
+        use i_slint_backend_winit::winit::event::WindowEvent;
+        let h = drop_handler();
+        let r = h.handle_window_event(&WindowEvent::HoveredFile(std::path::PathBuf::from(
+            "/tmp/x",
+        )));
+        assert!(matches!(r, i_slint_backend_winit::EventResult::Propagate));
+        let r = h.handle_window_event(&WindowEvent::HoveredFileCancelled);
+        assert!(matches!(r, i_slint_backend_winit::EventResult::Propagate));
     }
 }
 

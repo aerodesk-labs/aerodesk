@@ -422,6 +422,8 @@ export component AppWindow inherits Window {
     // #72 文件传输进度（-1 隐藏，0..1 显示）。
     in-out property <float> file-progress: -1;
     in-out property <string> file-label: "";
+    // #72 拖放发送：外部文件悬停高亮（Rust 侧拦截 winit DroppedFile 驱动）。
+    in-out property <bool> file-drop-hover: false;
     // #75 远程光标（归一化 0..1；visible 控制显示）+ 视频源尺寸（letterbox 换算）。
     in-out property <float> remote-cursor-x: 0;
     in-out property <float> remote-cursor-y: 0;
@@ -1231,6 +1233,32 @@ export component AppWindow inherits Window {
                         horizontal-alignment: center;
                         width: 100%;
                         height: 100%;
+                    }
+                    // #72 拖放发送：外部文件悬停时高亮提示（松开放入即发送）。
+                    if root.file-drop-hover: Rectangle {
+                        x: 0px;
+                        y: 0px;
+                        width: 100%;
+                        height: 100%;
+                        background: #34a85333;
+                        border-width: 2px;
+                        border-color: #34a853;
+                        border-radius: 6px;
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 6px;
+                            Text {
+                                text: "松开发送文件";
+                                color: #34a853;
+                                font-size: 22px;
+                                font-weight: 700;
+                            }
+                            Text {
+                                text: "拖拽任意文件到会话窗口";
+                                color: #ffffff;
+                                font-size: 13px;
+                            }
+                        }
                     }
                     // 悬浮工具栏（对齐 RustDesk remote_toolbar：白底圆角、图标按钮）
                     Rectangle {
