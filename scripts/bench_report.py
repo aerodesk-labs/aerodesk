@@ -98,6 +98,28 @@ def main():
     except Exception:
         eff_fps = 0.0
 
+    # 端到端延迟（#8）：viewer 日志 "LATENCY: N ms"（cursor 通道带发送时间戳）。
+    latencies = []
+    try:
+        for logf in glob.glob("/tmp/load-view-*.log"):
+            try:
+                with open(logf) as lf:
+                    for line in lf:
+                        m = re.search(r"LATENCY: (\d+) ms", line)
+                        if m:
+                            latencies.append(int(m.group(1)))
+            except OSError:
+                pass
+    except Exception:
+        latencies = []
+    lat_sorted = sorted(latencies)
+    latency = {
+        "avg": round(sum(lat_sorted) / len(lat_sorted), 1) if lat_sorted else None,
+        "max": lat_sorted[-1] if lat_sorted else None,
+        "p99": lat_sorted[int(len(lat_sorted) * 0.99)] if lat_sorted else None,
+        "samples": len(lat_sorted),
+    }
+
     # loadtest.log 连接统计
     load = ""
     try:
@@ -122,6 +144,7 @@ def main():
         },
         "results": {
             "effective_stream_fps": eff_fps,
+            "latency_ms": latency,
             "publishers_connected": int(m_pub.group(1)) if m_pub else None,
             "viewers_connected": int(m_view.group(1)) if m_view else None,
             "peak_clients": clients,
@@ -161,6 +184,11 @@ def main():
     print(f"| 发布端连接 | {r['publishers_connected']} / {report['config']['expected_sessions'] // 2} |")
     print(f"| 观看端连接 | {r['viewers_connected']} / {report['config']['expected_sessions'] // 2} |")
     print(f"| 实际流帧率 | {r['effective_stream_fps']} fps（目标 {report['config']['fps']}）|")
+    if r['latency_ms']['samples']:
+        lat = r['latency_ms']
+        print(f"| 端到端延迟 | avg {lat['avg']} ms / max {lat['max']} ms / p99 {lat['p99']} ms（{lat['samples']} 样本）|")
+    else:
+        print("| 端到端延迟 | 无样本（发布端未启用 cursor 通道） |")
     print(f"| 峰值客户端 | {r['peak_clients']} |")
     print(f"| 吞吐 | {r['bandwidth_mbps']['avg']} Mbps 平均 / {r['bandwidth_mbps']['max']} Mbps 峰值 |")
     print(f"| 收/发包 | {r['rx_packets']} / {r['tx_packets']} |")

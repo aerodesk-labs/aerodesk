@@ -20,6 +20,7 @@ BITRATE=10000000 REPORT_DIR=/tmp/bench-4k60 scripts/bench.sh 1 1 30 3840 2160 60
 
 - **吞吐**：SFU `/metrics` 各分片 rx/tx 字节差分 × 8 / 采样间隔（Mbps）
 - **实际流帧率**：观看端 CLI 日志 `RECEIVED: N frames` 差分 / 时长
+- **端到端延迟**（#8）：发布端 cursor 通道带发送墙钟（`CursorPos.sent_ms`），观看端 `LATENCY: N ms`；bench 报告 avg/max/p99（同机测量=真实 one-way 延迟）
 - **CPU/RSS**：`ps` 每秒采样 sfu/signal 进程
 - **连接成功率**：loadtest 结束后各端 "ICE connected" 计数
 
