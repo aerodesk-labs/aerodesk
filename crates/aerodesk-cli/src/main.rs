@@ -1018,7 +1018,6 @@ fn viewer(
     let mut input_sent = send_input.is_none() && type_text.is_none();
     // #122 大文件下载：file 通道打开后发送 FileControl::Request，轮询 recv-dir 落盘后退出。
     let mut file_request_sent = false;
-    let mut file_request_done = false;
     let mut file_request_started: Option<Instant> = None;
     let mut input_exit_at: Option<Instant> = None;
     // #109 远程命令/文件/进程（控制端一次执行）：请求每 1s 重传直到响应（首包可能被
@@ -1396,7 +1395,7 @@ fn viewer(
             std::process::exit(0);
         }
         // #122 大文件下载：请求后轮询 recv-dir 出现文件 → 退出；超时 120s 失败。
-        if file_request_sent && !file_request_done {
+        if file_request_sent {
             if let Some(rd) = file_transfer::recv_dir() {
                 let has_file = std::fs::read_dir(&rd)
                     .map(|mut it| {
@@ -1407,7 +1406,6 @@ fn viewer(
                     })
                     .unwrap_or(false);
                 if has_file {
-                    file_request_done = true;
                     info!("file request received; exiting");
                     std::process::exit(0);
                 }
