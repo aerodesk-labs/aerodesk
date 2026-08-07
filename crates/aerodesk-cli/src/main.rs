@@ -11,6 +11,7 @@
 extern crate tracing;
 
 mod clipboard;
+mod cmd_exec;
 mod file_transfer;
 
 use std::net::UdpSocket;
@@ -54,6 +55,8 @@ fn main() {
     // #73 音频：--audio-opus 使用 Opus（48kHz）替代 PCMU（8kHz）。
     let audio_opus = args.iter().any(|a| a == "--audio-opus");
     let mute_audio = args.iter().any(|a| a == "--mute-audio");
+    // #109 远程命令：控制端一次执行（--run-command "<cmd>"，打印 stdout/stderr/exit 后退出）。
+    let run_command = arg(&args, "--run-command");
     // #58 显示器：publisher 初始采集显示器 / viewer 请求切换（--display N，0 = 主显示器）。
     let display: usize = arg(&args, "--display")
         .and_then(|v| v.parse().ok())
@@ -79,6 +82,8 @@ fn main() {
 
     // #72 文件传输状态机（进程级单例；发送/接收同一状态机）。
     file_transfer::init(send_file, recv_dir, cancel_send_after);
+    // #109 远程命令通道：被控端执行器（publisher）/ 控制端响应（viewer）。
+    cmd_exec::init();
 
     match role.as_str() {
         "publisher" if encoder == "screen" => {
@@ -168,6 +173,7 @@ fn main() {
             mute_audio,
             viewer_display,
             input_script,
+            run_command.as_deref(),
         ),
         other => panic!("unknown role {other}"),
     }
@@ -539,6 +545,8 @@ fn send_cursor(endpoint: &mut Endpoint, x: f64, y: f64) {
 fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
     // #72 文件传输：file 通道事件交给状态机（非 file 事件为 no-op）。
     file_transfer::handle_event(&ev, endpoint);
+    // #109 远程命令：cmd 通道请求交给执行器（后台线程执行，主循环回传响应）。
+    cmd_exec::handle_event(&ev, endpoint);
     match ev {
         ClientEvent::ChannelOpen(label, _) if label == "input" => {
             info!("input channel open");
@@ -676,6 +684,7 @@ fn publisher(signal_url: &str, room: &str, auth: Option<&str>, audio: bool, audi
         }
         // #72 文件传输：推进发送。
         file_transfer::tick(&mut endpoint);
+        cmd_exec::tick(&mut endpoint);
 
         // #75 远程光标（合成轨迹，30Hz）。
         if last_cursor.elapsed() >= Duration::from_millis(33) {
@@ -730,6 +739,7 @@ fn viewer(
     mute_audio: bool,
     display: Option<usize>,
     input_script: bool,
+    run_command: Option<&str>,
 ) {
     let (mut signal, mut endpoint, socket, _, _audio_mid) =
         connect(signal_url, room, Role::Viewer, auth, audio);
@@ -758,6 +768,11 @@ fn viewer(
     let mut last_cursor_log = Instant::now();
     // #8 端到端延迟：cursor 带发送时间戳，viewer 计算 one-way latency（节流 1s）。
     let mut last_latency_log = Instant::now();
+    // #109 远程命令（控制端一次执行）：cmd 请求每 1s 重传直到响应（首包可能被
+    // SFU 在通道未就绪时丢弃；被控端按 id 去重，重复执行安全）。
+    let cmd_pending = run_command.is_some();
+    let mut cmd_done = false;
+    let mut last_cmd_send = Instant::now() - Duration::from_secs(1);
     // #74 解码端验证：FFmpeg 软解全部 codec（H264/H265/VP9/AV1），codec-e2e 断言。
     let mut video_decoder: Option<aerodesk_ffmpeg::decode::FfmpegDecoder> = None;
     let mut decoded_frames: u64 = 0;
@@ -935,6 +950,23 @@ fn viewer(
                         }
                     }
                 }
+                // #109 远程命令：响应打印 stdout/stderr/exit code 后退出（exit code 语义）。
+                ClientEvent::ChannelData(cid, _, data)
+                    if endpoint.channel_label(cid).as_deref() == Some("cmd") =>
+                {
+                    if !cmd_done {
+                        cmd_done = true;
+                        if let Some(resp) = cmd_exec::handle_response(&data) {
+                            info!(
+                                "CMD_RESULT: ok={} exit={:?} truncated={} error={:?}",
+                                resp.ok, resp.exit_code, resp.truncated, resp.error
+                            );
+                            info!("CMD_STDOUT:\n{}", resp.stdout);
+                            info!("CMD_STDERR:\n{}", resp.stderr);
+                            std::process::exit(if resp.ok { 0 } else { 1 });
+                        }
+                    }
+                }
                 // #75 远程光标：被控端广播位置，观看端日志（节流）。
                 ClientEvent::ChannelData(cid, _, data)
                     if endpoint.channel_label(cid).as_deref() == Some("cursor") =>
@@ -967,6 +999,15 @@ fn viewer(
 
         // #72 文件传输：推进发送 + 剪贴板轮询/落地。
         file_transfer::tick(&mut endpoint);
+        // #109 远程命令：未收到响应前每 1s 重传请求（首包丢失自愈）。
+        if cmd_pending && !cmd_done && last_cmd_send.elapsed() >= Duration::from_secs(1) {
+            if let Some(cmd) = run_command {
+                let sent = cmd_exec::send_request(&mut endpoint, cmd, None);
+                info!("cmd request sent (retry={sent}): {cmd}");
+                last_cmd_send = Instant::now();
+            }
+        }
+        cmd_exec::tick(&mut endpoint);
 
         // 输入事件回传：input 通道打开后周期性发送鼠标移动（模拟观看端输入）。
         // #75 --input-script：脚本化轮换发送全部事件类型（MouseMove/Button/Wheel/
@@ -1176,6 +1217,7 @@ fn publisher_x264(
         }
         // #72 文件传输：推进发送。
         file_transfer::tick(&mut endpoint);
+        cmd_exec::tick(&mut endpoint);
 
         // 30fps 节奏编码发送（simulcast 各层同一 rtp_time，SFU 按 rid 选层）
         if connected && Instant::now() >= next_frame {
@@ -1325,6 +1367,7 @@ fn publisher_vt(
         }
         // #72 文件传输：推进发送。
         file_transfer::tick(&mut endpoint);
+        cmd_exec::tick(&mut endpoint);
         // #8 端到端延迟：合成光标轨迹（30Hz）。
         if last_cursor.elapsed() >= Duration::from_millis(33) {
             last_cursor = Instant::now();
@@ -1452,6 +1495,7 @@ fn publisher_ffmpeg(
             audio_ticker.tick(&mut endpoint, amid, Instant::now());
         }
         file_transfer::tick(&mut endpoint);
+        cmd_exec::tick(&mut endpoint);
         // #8 端到端延迟：合成光标轨迹（30Hz）。
         if last_cursor.elapsed() >= Duration::from_millis(33) {
             last_cursor = Instant::now();
@@ -1578,6 +1622,7 @@ fn publisher_capture_ffmpeg(
             audio_ticker.tick(&mut endpoint, amid, Instant::now());
         }
         file_transfer::tick(&mut endpoint);
+        cmd_exec::tick(&mut endpoint);
         // #75 远程光标：读取被控端真实光标位置（30Hz）。
         if last_cursor.elapsed() >= Duration::from_millis(33) {
             last_cursor = Instant::now();
@@ -1798,6 +1843,7 @@ fn publisher_capture(
         }
         // #72 文件传输：推进发送。
         file_transfer::tick(&mut endpoint);
+        cmd_exec::tick(&mut endpoint);
         // #75 远程光标：读取被控端真实光标位置（30Hz）。
         if last_cursor.elapsed() >= Duration::from_millis(33) {
             last_cursor = Instant::now();

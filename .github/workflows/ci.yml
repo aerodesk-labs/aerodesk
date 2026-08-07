@@ -142,6 +142,11 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/input-e2e.sh
 
+      # #109 远程命令：viewer --run-command → SFU → publisher 执行 → stdout/stderr/exit。
+      - name: e2e remote command (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/cmd-e2e.sh
+
       # #73 A/V 同步：连续视频+音频，AVSYNC 漂移/jitter buffer 统计。
       - name: e2e av sync (macOS only)
         if: runner.os == 'macOS'

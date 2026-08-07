@@ -232,6 +232,8 @@ impl Endpoint {
         let _ = change.add_channel("file".into());
         // #75 远程光标：被控端 → 观看端（CursorPos JSON，见 aerodesk-protocol::cursor）。
         let _ = change.add_channel("cursor".into());
+        // #109 远程命令：控制端 → 被控端（CmdRequest/CmdResponse，见 cmd.rs）。
+        let _ = change.add_channel("cmd".into());
         let (offer, pending) = change
             .apply()
             .ok_or(RtcError::Io(std::io::Error::other("no changes")))?;

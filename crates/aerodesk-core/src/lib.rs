@@ -12,6 +12,7 @@
 pub mod access_unit;
 pub mod avsync;
 pub mod clipboard;
+pub mod cmd_exec;
 pub mod endpoint;
 pub mod file_transfer;
 pub mod media;
