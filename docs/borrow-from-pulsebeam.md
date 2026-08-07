@@ -48,9 +48,9 @@ Data Plane（每核一个 Shard）：SO_REUSEPORT UDP:443 + TCP:443 复用
 ## 三、借鉴清单
 
 ### ✅ 已落地（v0.1）
-1. **str0m 依赖切到 bwe-fixes fork（pin rev 7db621f）**
-   - 直接获得全部 17 个 BWE 修复；License 不变（MIT/Apache）
-   - 验证：构建通过、`POST /start` 应答正常、UDP/TCP/SSL-TCP 三候选正常
+1. **str0m 依赖切到 aerodesk-labs 派生（pin rev a9c8de7，PulseBeam bwe-fixes + #85 dimpl DTLS 接收队列 30→2048）**
+   - 直接获得全部 17 个 BWE 修复 + 大文件 data channel 不再因 `Receive queue full` 断连；License 不变（MIT/Apache）
+   - 验证：构建通过、`POST /start` 应答正常、UDP/TCP/SSL-TCP 三候选正常、100MB 文件传输 ~5min 稳定（sha256 一致）
 2. **UnifiedSocket：UDP+TCP+SSL-TCP 同端口复用（3478，生产 443）**
    - libwebrtc fake-SSL hello exchange 完整实现（72B client hello → 79B server hello，
      字节级精确匹配，握手后明文，无真实 TLS）

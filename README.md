@@ -11,7 +11,7 @@
 > 服务端生产化部署（JWT/TLS/多 PoP/录制审计）见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
 > PulseBeam 架构借鉴见 [`docs/borrow-from-pulsebeam.md`](docs/borrow-from-pulsebeam.md)。
 
-服务端与客户端共用 str0m（含 PulseBeam bwe-fixes fork，pin `7db621f`）作为协议底座。
+服务端与客户端共用 str0m（aerodesk-labs 派生：PulseBeam bwe-fixes + dimpl DTLS 接收队列扩容，pin `a9c8de7`，见 `Cargo.toml` 注释）作为协议底座。
 
 ## Workspace 结构
 
