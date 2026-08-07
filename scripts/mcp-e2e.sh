@@ -48,6 +48,7 @@ cat > /tmp/mcp-in.txt <<INEOF
 {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"$DIR/hello.txt"}}}
 {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"list_processes","arguments":{}}}
 {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"mouse_move","arguments":{"x":0.5,"y":0.5}}}
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"type_text","arguments":{"text":"hello-123"}}}
 INEOF
 
 AERODESK_SIGNAL="ws://127.0.0.1:3003" AERODESK_ROOM="$ROOM" \
@@ -99,6 +100,12 @@ if grep -q "mouse_move ok" /tmp/mcp-out.txt; then
     echo "PASS mouse_move"
 else
     echo "FAIL mouse_move"; tail -8 /tmp/mcp-out.txt; fail=1
+fi
+# 7) type_text（逐字符按键序列）
+if grep -q "type_text ok" /tmp/mcp-out.txt; then
+    echo "PASS type_text"
+else
+    echo "FAIL type_text"; tail -8 /tmp/mcp-out.txt; fail=1
 fi
 # 6) 无 panic
 if grep -qiE "panic" /tmp/mcp-out.txt /tmp/mcp-err.txt /tmp/mcp-pub.log /tmp/mcp-sfu.log; then
