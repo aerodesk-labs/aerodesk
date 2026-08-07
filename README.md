@@ -65,6 +65,9 @@ cargo run -p aerodesk-cli -- --role viewer --layer f --audio
 #       文件/进程：--read-file <path> / --write-file <path> <content> / --list-processes / --kill-pid <pid>
 #       （写文件敏感路径默认禁止；kill pid 0/1 默认禁止）
 #       权限/审计管理（本地）：--cmd-allowlist list|add <prefix>|remove <prefix> / --cmd-audit [n]
+# MCP 工具面：#109 提供 aerodesk-mcp（stdio JSON-RPC）——tools: connect/run_command/
+#       read_file/write_file/list_processes/kill_process，经 aerodesk-cli 桥接操作被控端
+#       （AERODESK_SIGNAL/AERODESK_ROOM/AERODESK_CLI_BIN 环境变量配置）
 # A/V 同步：#73 viewer AVSYNC 时间轴/漂移统计 + 音频 jitter buffer（PCMU/Opus 真实播放 macOS 已通；会话工具栏音量滑块）
 
 # 浏览器：https://<host>:3000/?role=publisher|viewer

@@ -247,6 +247,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aerodesk-mcp"
+version = "0.1.0"
+dependencies = [
+ "aerodesk-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aerodesk-ohos"
 version = "0.1.0"
 dependencies = [
