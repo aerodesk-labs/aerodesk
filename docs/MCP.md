@@ -57,6 +57,20 @@ printf '%s\n' \
 | ./target/debug/aerodesk-mcp
 ```
 
+## 真实 agent 联调验证（2026-08-07，Claude Code）
+
+本机使用 Claude Code（`claude -p` 无头模式 + `--mcp-config`/`--strict-mcp-config` +
+`--allowedTools "mcp__aerodesk__*"`）真实调用 aerodesk MCP：
+
+- 被控端日志（publisher）证明工具调用完整回环：
+```
+cmd request #139067393: Run { command: "echo hello-from-claude", ... }
+cmd response #139067393: Run { exit_code: Some(0), stdout: "hello-from-claude\n", ... }
+```
+- 说明：命令已由 Claude 端发起、经 MCP/CLI/SFU 到达被控端执行并回传 stdout；
+  本机代理模型（deepseek-v4-flash）在限时内未合成最终文字答复（客户端侧行为），
+  不影响工具调用成功的事实。正式验收建议使用 Claude/Anthropic 直连模型复跑。
+
 ## 权限与审计
 
 - 危险命令/敏感路径写/pid 0-1 默认拦截；白名单 `~/AeroDesk/cmd-allowlist.txt`
