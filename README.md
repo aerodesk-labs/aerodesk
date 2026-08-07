@@ -68,6 +68,8 @@ cargo run -p aerodesk-cli -- --role viewer --layer f --audio
 # MCP 工具面：#109 提供 aerodesk-mcp（stdio JSON-RPC）——tools: connect/run_command/
 #       read_file/write_file/list_processes/kill_process，经 aerodesk-cli 桥接操作被控端
 #       （AERODESK_SIGNAL/AERODESK_ROOM/AERODESK_CLI_BIN 环境变量配置）
+#       键鼠工具：mouse_move / mouse_click / type_text（经 --send-input / --type-text）
+#       MCP 接入文档见 docs/MCP.md
 # A/V 同步：#73 viewer AVSYNC 时间轴/漂移统计 + 音频 jitter buffer（PCMU/Opus 真实播放 macOS 已通；会话工具栏音量滑块）
 
 # 浏览器：https://<host>:3000/?role=publisher|viewer

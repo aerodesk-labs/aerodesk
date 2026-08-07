@@ -55,6 +55,11 @@ fn main() {
     // #73 音频：--audio-opus 使用 Opus（48kHz）替代 PCMU（8kHz）。
     let audio_opus = args.iter().any(|a| a == "--audio-opus");
     let mute_audio = args.iter().any(|a| a == "--mute-audio");
+    // #75/#109 MCP 键鼠：--send-input '<InputEvent JSON>' 单次发送输入事件后退出。
+    let send_input: Option<InputEvent> =
+        arg(&args, "--send-input").and_then(|json| serde_json::from_str::<InputEvent>(&json).ok());
+    // #109 MCP 键鼠：--type-text "<text>" 逐字符按键（US 布局 + Shift）。
+    let type_text = arg(&args, "--type-text");
     // #109 远程命令/文件/进程：控制端一次执行（打印结果后以 ok 语义退出）。
     // --cmd-json：把 CmdResponse 以 JSON 输出到 stdout（MCP 桥接用）。
     let cmd_json = args.iter().any(|a| a == "--cmd-json");
@@ -195,6 +200,8 @@ fn main() {
             mute_audio,
             viewer_display,
             input_script,
+            send_input.as_ref(),
+            type_text.as_deref(),
             cmd_intent.as_ref(),
             cmd_json,
         ),
@@ -607,6 +614,153 @@ fn print_cmd_result(resp: &aerodesk_protocol::cmd::CmdResponse) {
     }
 }
 
+/// #109 MCP 键鼠：字符 → (键码名, 是否需要 Shift)（US 布局）。
+fn char_key(c: char) -> Option<(&'static str, bool)> {
+    Some(match c {
+        'a'..='z' => (
+            match c {
+                'a' => "KeyA",
+                'b' => "KeyB",
+                'c' => "KeyC",
+                'd' => "KeyD",
+                'e' => "KeyE",
+                'f' => "KeyF",
+                'g' => "KeyG",
+                'h' => "KeyH",
+                'i' => "KeyI",
+                'j' => "KeyJ",
+                'k' => "KeyK",
+                'l' => "KeyL",
+                'm' => "KeyM",
+                'n' => "KeyN",
+                'o' => "KeyO",
+                'p' => "KeyP",
+                'q' => "KeyQ",
+                'r' => "KeyR",
+                's' => "KeyS",
+                't' => "KeyT",
+                'u' => "KeyU",
+                'v' => "KeyV",
+                'w' => "KeyW",
+                'x' => "KeyX",
+                'y' => "KeyY",
+                _ => "KeyZ",
+            },
+            false,
+        ),
+        'A'..='Z' => (
+            match c {
+                'A' => "KeyA",
+                'B' => "KeyB",
+                'C' => "KeyC",
+                'D' => "KeyD",
+                'E' => "KeyE",
+                'F' => "KeyF",
+                'G' => "KeyG",
+                'H' => "KeyH",
+                'I' => "KeyI",
+                'J' => "KeyJ",
+                'K' => "KeyK",
+                'L' => "KeyL",
+                'M' => "KeyM",
+                'N' => "KeyN",
+                'O' => "KeyO",
+                'P' => "KeyP",
+                'Q' => "KeyQ",
+                'R' => "KeyR",
+                'S' => "KeyS",
+                'T' => "KeyT",
+                'U' => "KeyU",
+                'V' => "KeyV",
+                'W' => "KeyW",
+                'X' => "KeyX",
+                'Y' => "KeyY",
+                _ => "KeyZ",
+            },
+            true,
+        ),
+        '0'..='9' => (
+            match c {
+                '0' => "Digit0",
+                '1' => "Digit1",
+                '2' => "Digit2",
+                '3' => "Digit3",
+                '4' => "Digit4",
+                '5' => "Digit5",
+                '6' => "Digit6",
+                '7' => "Digit7",
+                '8' => "Digit8",
+                _ => "Digit9",
+            },
+            false,
+        ),
+        ' ' => ("Space", false),
+        '\n' => ("Enter", false),
+        '\t' => ("Tab", false),
+        '-' => ("Minus", false),
+        '_' => ("Minus", true),
+        '=' => ("Equal", false),
+        '+' => ("Equal", true),
+        '[' => ("BracketLeft", false),
+        '{' => ("BracketLeft", true),
+        ']' => ("BracketRight", false),
+        '}' => ("BracketRight", true),
+        '\\' => ("Backslash", false),
+        '|' => ("Backslash", true),
+        ';' => ("Semicolon", false),
+        ':' => ("Semicolon", true),
+        '\'' => ("Quote", false),
+        '"' => ("Quote", true),
+        '`' => ("Backquote", false),
+        '~' => ("Backquote", true),
+        ',' => ("Comma", false),
+        '<' => ("Comma", true),
+        '.' => ("Period", false),
+        '>' => ("Period", true),
+        '/' => ("Slash", false),
+        '?' => ("Slash", true),
+        '!' => ("Digit1", true),
+        '@' => ("Digit2", true),
+        '#' => ("Digit3", true),
+        '$' => ("Digit4", true),
+        '%' => ("Digit5", true),
+        '^' => ("Digit6", true),
+        '&' => ("Digit7", true),
+        '*' => ("Digit8", true),
+        '(' => ("Digit9", true),
+        ')' => ("Digit0", true),
+        _ => return None,
+    })
+}
+
+/// #109 MCP 键鼠：文本 → 按键事件序列（每个字符 按下+抬起，必要时带 Shift）。
+fn type_text_events(text: &str) -> Vec<InputEvent> {
+    let mut events = Vec::new();
+    for c in text.chars() {
+        let Some((code, shift)) = char_key(c) else {
+            tracing::warn!("type_text: 跳过不支持字符 {c:?}");
+            continue;
+        };
+        let modifiers = Modifiers {
+            ctrl: false,
+            shift,
+            alt: false,
+            meta: false,
+        };
+        events.push(InputEvent::Key {
+            code: code.to_string(),
+            state: ButtonState::Pressed,
+            modifiers: modifiers.clone(),
+        });
+        events.push(InputEvent::Key {
+            code: code.to_string(),
+            state: ButtonState::Released,
+            modifiers,
+        });
+    }
+    events
+}
+
 /// 发送远程光标（#75）。附带发送端墙钟，viewer 据此计算 one-way latency（#8）。
 fn send_cursor(endpoint: &mut Endpoint, x: f64, y: f64) {
     let pos = aerodesk_protocol::cursor::CursorPos::new(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0))
@@ -814,6 +968,8 @@ fn viewer(
     mute_audio: bool,
     display: Option<usize>,
     input_script: bool,
+    send_input: Option<&InputEvent>,
+    type_text: Option<&str>,
     cmd_intent: Option<&cmd_exec::Intent>,
     cmd_json: bool,
 ) {
@@ -844,6 +1000,9 @@ fn viewer(
     let mut last_cursor_log = Instant::now();
     // #8 端到端延迟：cursor 带发送时间戳，viewer 计算 one-way latency（节流 1s）。
     let mut last_latency_log = Instant::now();
+    // #75/#109 单次输入（MCP 键鼠）：input 通道打开后发送一次/序列，500ms 后退出。
+    let mut input_sent = send_input.is_none() && type_text.is_none();
+    let mut input_exit_at: Option<Instant> = None;
     // #109 远程命令/文件/进程（控制端一次执行）：请求每 1s 重传直到响应（首包可能被
     // SFU 在通道未就绪时丢弃；被控端按 id 去重，重复执行安全）。
     let cmd_pending = cmd_intent.is_some();
@@ -1088,6 +1247,37 @@ fn viewer(
         }
         cmd_exec::tick(&mut endpoint);
 
+        // #75/#109 单次输入（MCP 键鼠）：input 通道打开后发送事件（单事件或逐字符按键序列）。
+        if input_open && !input_sent {
+            let events: Vec<InputEvent> = if let Some(ev) = send_input {
+                vec![ev.clone()]
+            } else if let Some(text) = type_text {
+                type_text_events(text)
+            } else {
+                Vec::new()
+            };
+            if !events.is_empty() {
+                let mut sent = 0usize;
+                for (i, ev) in events.iter().enumerate() {
+                    let frame = InputFrame {
+                        version: INPUT_PROTOCOL_VERSION,
+                        seq: i as u64 + 1,
+                        timestamp_ms: now_ms(),
+                        event: ev.clone(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&frame)
+                        && endpoint.send_channel_data("input", false, json.as_bytes())
+                    {
+                        sent += 1;
+                    }
+                }
+                if sent > 0 {
+                    input_sent = true;
+                    input_exit_at = Some(Instant::now() + Duration::from_millis(500));
+                    info!("input sent: {sent} events");
+                }
+            }
+        }
         // 输入事件回传：input 通道打开后周期性发送鼠标移动（模拟观看端输入）。
         // #75 --input-script：脚本化轮换发送全部事件类型（MouseMove/Button/Wheel/
         // Key+修饰键），供 e2e 断言各事件类型均到达被控端注入路径。
@@ -1165,6 +1355,12 @@ fn viewer(
         }
         if !got_any {
             std::thread::sleep(Duration::from_millis(2));
+        }
+        // #75/#109 单次输入：发送后短暂等待即退出（CLI/MCP 桥接语义）。
+        if let Some(t) = input_exit_at
+            && Instant::now() >= t
+        {
+            std::process::exit(0);
         }
         let _ = &mut signal;
     }
@@ -1972,6 +2168,45 @@ mod tests {
 
     /// #73 合成源帧间隔精度：30fps 必须是 1/30s（33333333ns），
     /// 而不是 1000/30=33ms 截断导致的 30.3fps（10 分钟漂移 ~6s）。
+    #[test]
+    fn char_key_maps_ascii_and_shift() {
+        assert_eq!(char_key('a'), Some(("KeyA", false)));
+        assert_eq!(char_key('A'), Some(("KeyA", true)));
+        assert_eq!(char_key('5'), Some(("Digit5", false)));
+        assert_eq!(char_key('!'), Some(("Digit1", true)));
+        assert_eq!(char_key(' '), Some(("Space", false)));
+        assert_eq!(char_key('\n'), Some(("Enter", false)));
+        assert_eq!(char_key('中'), None);
+    }
+
+    #[test]
+    fn type_text_events_cover_shift_and_release() {
+        let evs = type_text_events("Ab1!");
+        // 4 字符 × (按下+抬起) = 8 事件
+        assert_eq!(evs.len(), 8);
+        // 'A' 按下带 shift
+        if let InputEvent::Key {
+            code,
+            state,
+            modifiers,
+        } = &evs[0]
+        {
+            assert_eq!(code, "KeyA");
+            assert_eq!(*state, ButtonState::Pressed);
+            assert!(modifiers.shift);
+        } else {
+            panic!("expect Key");
+        }
+        // 每个字符后有 Released
+        assert!(matches!(
+            &evs[1],
+            InputEvent::Key {
+                state: ButtonState::Released,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn frame_interval_is_precise_for_30fps() {
         let d = frame_interval(30);
