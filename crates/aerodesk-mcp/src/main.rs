@@ -144,6 +144,31 @@ fn tool_definitions() -> Vec<Value> {
                 "required": ["pid"]
             }
         }),
+        json!({
+            "name": "mouse_move",
+            "description": "移动远程鼠标到归一化坐标（0..1）。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "number", "minimum": 0, "maximum": 1},
+                    "y": {"type": "number", "minimum": 0, "maximum": 1}
+                },
+                "required": ["x", "y"]
+            }
+        }),
+        json!({
+            "name": "mouse_click",
+            "description": "在远程设备点击（左/右/中键，归一化坐标；按下+抬起）。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "button": {"type": "string", "enum": ["left", "right", "middle"], "description": "默认 left"},
+                    "x": {"type": "number", "minimum": 0, "maximum": 1},
+                    "y": {"type": "number", "minimum": 0, "maximum": 1}
+                },
+                "required": ["x", "y"]
+            }
+        }),
     ]
 }
 
@@ -198,10 +223,29 @@ fn build_args(state: &State, name: &str, args: &Value) -> Result<Vec<String>, St
             cmd.push("--kill-pid".into());
             cmd.push(pid.to_string());
         }
+        "mouse_move" => {
+            let x = args
+                .get("x")
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| "mouse_move 缺少 x".to_string())?;
+            let y = args
+                .get("y")
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| "mouse_move 缺少 y".to_string())?;
+            cmd.push("--send-input".into());
+            cmd.push(format!("{{\"type\":\"mouse_move\",\"x\":{x},\"y\":{y}}}"));
+        }
         other => return Err(format!("unknown tool: {other}")),
     }
     cmd.push("--cmd-json".into());
     Ok(cmd)
+}
+
+/// 构造鼠标按下/抬起事件 JSON（供 --send-input）。
+fn mouse_button_json(button: &str, state: &str, x: f64, y: f64) -> String {
+    format!(
+        "{{\"type\":\"mouse_button\",\"button\":\"{button}\",\"state\":\"{state}\",\"x\":{x},\"y\":{y}}}"
+    )
 }
 
 /// 执行工具并返回 MCP tools/call 响应。
@@ -218,6 +262,11 @@ fn call_tool(params: &Value, state: &State) -> Value {
         // 这里返回当前目标用于确认）。
         let text = format!("connected: signal={} room={}", state.signal, state.room);
         return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":false}});
+    }
+
+    // 键鼠工具：经 --send-input 桥接（无 CmdResponse，按 CLI 退出码判定）。
+    if name == "mouse_move" || name == "mouse_click" {
+        return call_mouse_tool(id, name, &args, state);
     }
 
     let cmd_args = match build_args(state, name, &args) {
@@ -240,6 +289,57 @@ fn call_tool(params: &Value, state: &State) -> Value {
         return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":format!("CLI 输出非 JSON（可能连接失败）: {tail}")}],"isError":true}});
     };
     let (text, ok) = format_result(&resp);
+    json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":!ok}})
+}
+
+/// 键鼠工具：--send-input 桥接（按 CLI 退出码判定成功）。
+fn call_mouse_tool(id: Option<Value>, name: &str, args: &Value, state: &State) -> Value {
+    let x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.5);
+    let y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.5);
+    let button = args
+        .get("button")
+        .and_then(|v| v.as_str())
+        .unwrap_or("left");
+    let (events, label) = if name == "mouse_move" {
+        (
+            vec![format!("{{\"type\":\"mouse_move\",\"x\":{x},\"y\":{y}}}")],
+            "mouse_move".to_string(),
+        )
+    } else {
+        (
+            vec![
+                mouse_button_json(button, "pressed", x, y),
+                mouse_button_json(button, "released", x, y),
+            ],
+            "mouse_click".to_string(),
+        )
+    };
+    let mut failures = Vec::new();
+    for ev in &events {
+        let status = Command::new(&state.cli_bin)
+            .args([
+                "--role",
+                "viewer",
+                "--signal",
+                &state.signal,
+                "--room",
+                &state.room,
+                "--send-input",
+                ev,
+            ])
+            .status();
+        match status {
+            Ok(st) if st.success() => {}
+            Ok(st) => failures.push(format!("{ev} -> exit {:?}", st.code())),
+            Err(e) => failures.push(format!("spawn: {e}")),
+        }
+    }
+    let ok = failures.is_empty();
+    let text = if ok {
+        format!("{label} ok: x={x} y={y} button={button}")
+    } else {
+        format!("{label} failed: {}", failures.join("; "))
+    };
     json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":!ok}})
 }
 
@@ -334,6 +434,15 @@ mod tests {
         let kill = build_args(&s, "kill_process", &json!({"pid":123})).unwrap();
         assert!(kill.contains(&"--kill-pid".into()));
         assert!(kill.contains(&"123".into()));
+        let mm = build_args(&s, "mouse_move", &json!({"x":0.25,"y":0.75})).unwrap();
+        assert!(mm.contains(&"--send-input".into()));
+        let ev = mm
+            .iter()
+            .position(|a| a == "--send-input")
+            .map(|i| mm[i + 1].clone())
+            .unwrap();
+        assert!(ev.contains("mouse_move"));
+        assert!(ev.contains("0.25"));
         assert!(build_args(&s, "nope", &json!({})).is_err());
     }
 
