@@ -32,7 +32,8 @@ done
 sleep 0.3
 DIR="/tmp/aerodesk-mcp-file-$ROOM"
 mkdir -p "$DIR/recv"
-./target/debug/aerodesk-cli --role publisher --encoder x264 \
+# 用 pcap 发布端（48 帧后停止）：避免连续视频解码与文件传输争 CPU（CI 慢 runner）
+./target/debug/aerodesk-cli --role publisher \
     --signal ws://127.0.0.1:3003 --room "$ROOM" --recv-dir "$DIR/recv" >/tmp/mcp-pub.log 2>&1 &
 PUB_PID=$!
 sleep 2

@@ -376,7 +376,7 @@ fn call_file_tool(id: Option<Value>, name: &str, args: &Value, state: &State) ->
                 }
             }
             Some(st) => err(format!("download failed: exit {:?}", st.code())),
-            None => err("download CLI 超时(150s)".into()),
+            None => err("download CLI 超时(300s)".into()),
         };
     }
 
@@ -413,7 +413,7 @@ fn call_file_tool(id: Option<Value>, name: &str, args: &Value, state: &State) ->
             json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":format!("uploaded: {name} ({} bytes) -> 被控端（publisher 需 --recv-dir）", meta.len())}],"isError":false}})
         }
         Some(st) => err(format!("upload failed: exit {:?}", st.code())),
-        None => err("upload CLI 超时(150s)".into()),
+        None => err("upload CLI 超时(300s)".into()),
     }
 }
 
