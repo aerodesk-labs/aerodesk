@@ -11,6 +11,9 @@ cd "$(dirname "$0")/.."
 
 ROOM="${1:-cmd-$(date +%s)}"
 export RUST_LOG="${RUST_LOG:-info}"
+# #109 权限/审计：e2e 用临时路径，避免污染 $HOME。
+export AERODESK_CMD_ALLOWLIST="/tmp/aerodesk-cmd-allow-$ROOM.txt"
+export AERODESK_CMD_AUDIT="/tmp/aerodesk-cmd-audit-$ROOM.jsonl"
 
 echo "== 构建"
 cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
@@ -142,8 +145,39 @@ if [ -n "$PID" ]; then
     fi
 fi
 
+# 7) 审计查询：此前已执行多条命令，--cmd-audit 应能查到。
+echo "== case: audit"
+./target/debug/aerodesk-cli --cmd-audit 50 >/tmp/cmd-audit.log 2>&1 || true
+if grep -q "echo hello-aerodesk-cmd" /tmp/cmd-audit.log && grep -q "rm -rf /" /tmp/cmd-audit.log; then
+    echo "PASS audit tail 含命令记录"
+else
+    echo "FAIL audit"; tail -5 /tmp/cmd-audit.log; fail=1
+fi
+# 8) 白名单管理：add → list 可见 → remove → list 消失。
+echo "== case: allowlist"
+AERODESK_CMD_ALLOWLIST="$AERODESK_CMD_ALLOWLIST" ./target/debug/aerodesk-cli --cmd-allowlist add "/tmp/aerodesk-cmd-e2e-$ROOM" >/tmp/cmd-allow1.log 2>&1
+AERODESK_CMD_ALLOWLIST="$AERODESK_CMD_ALLOWLIST" ./target/debug/aerodesk-cli --cmd-allowlist list >/tmp/cmd-allow2.log 2>&1
+if grep -q "/tmp/aerodesk-cmd-e2e-$ROOM" /tmp/cmd-allow2.log; then
+    echo "PASS allowlist add+list"
+else
+    echo "FAIL allowlist add"; tail -3 /tmp/cmd-allow2.log; fail=1
+fi
+AERODESK_CMD_ALLOWLIST="$AERODESK_CMD_ALLOWLIST" ./target/debug/aerodesk-cli --cmd-allowlist remove "/tmp/aerodesk-cmd-e2e-$ROOM" >/tmp/cmd-allow3.log 2>&1
+AERODESK_CMD_ALLOWLIST="$AERODESK_CMD_ALLOWLIST" ./target/debug/aerodesk-cli --cmd-allowlist list >/tmp/cmd-allow4.log 2>&1
+if ! grep -q "/tmp/aerodesk-cmd-e2e-$ROOM" /tmp/cmd-allow4.log; then
+    echo "PASS allowlist remove"
+else
+    echo "FAIL allowlist remove"; tail -3 /tmp/cmd-allow4.log; fail=1
+fi
+
 kill "$PUB_PID" "$SFU_PID" "$SIG_PID" 2>/dev/null || true
 wait 2>/dev/null || true
+python3 - <<PYEOF
+import os
+for p in ["$AERODESK_CMD_ALLOWLIST", "$AERODESK_CMD_AUDIT"]:
+    if os.path.exists(p):
+        os.remove(p)
+PYEOF
 
 if grep -qiE "panic" /tmp/cmd-pub.log /tmp/cmd-view[0-9]*.log /tmp/cmd-sfu.log; then
     echo "FAIL panic in logs"; fail=1

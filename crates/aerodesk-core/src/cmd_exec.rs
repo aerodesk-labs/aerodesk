@@ -113,6 +113,44 @@ pub fn allowlist() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// 追加白名单前缀（已存在则 no-op）。
+pub fn add_allow_prefix(prefix: &str) -> Result<(), String> {
+    let prefix = prefix.trim().to_string();
+    if prefix.is_empty() {
+        return Err("empty prefix".into());
+    }
+    let path = allowlist_path().ok_or_else(|| "no allowlist path".to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
+    }
+    let existing = allowlist();
+    if existing.iter().any(|l| *l == prefix) {
+        return Ok(()); // 已存在
+    }
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("open allowlist: {e}"))?;
+    writeln!(f, "{prefix}").map_err(|e| format!("append: {e}"))
+}
+
+/// 移除白名单前缀（精确匹配）。
+pub fn remove_allow_prefix(prefix: &str) -> Result<(), String> {
+    let path = allowlist_path().ok_or_else(|| "no allowlist path".to_string())?;
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let kept: Vec<&str> = text.lines().filter(|l| l.trim() != prefix.trim()).collect();
+    let mut out = kept.join(
+        "
+",
+    );
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    std::fs::write(&path, out).map_err(|e| format!("write allowlist: {e}"))
+}
+
 /// 审计文件路径：`$AERODESK_CMD_AUDIT` 或 `$HOME/AeroDesk/cmd-audit.jsonl`。
 pub fn audit_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("AERODESK_CMD_AUDIT") {
@@ -477,9 +515,22 @@ pub fn kill_process(pid: u32, allowlist: &[String]) -> Result<(), String> {
     }
 }
 
+/// 审计尾部 n 行（管理查询用）。
+pub fn tail_audit(n: usize) -> Result<Vec<String>, String> {
+    let Some(path) = audit_path() else {
+        return Err("no audit path".into());
+    };
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("read audit: {e}"))?;
+    let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+    let start = lines.len().saturating_sub(n.max(1));
+    Ok(lines[start..].to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 环境变量（AERODESK_CMD_*）测试并行会互相干扰，串行化。
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn dangerous_patterns_are_blocked() {
@@ -565,6 +616,7 @@ mod tests {
 
     #[test]
     fn audit_writes_jsonl() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("aerodesk-cmd-audit-{}", std::process::id()));
         let audit = dir.join("audit.jsonl");
         // edition 2024：进程环境变量修改为 unsafe。
@@ -632,6 +684,38 @@ mod tests {
                 .unwrap_err()
                 .contains("blocked by policy")
         );
+    }
+
+    #[test]
+    fn allowlist_add_remove_tail_audit() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("aerodesk-cmd-admin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let allow = dir.join("allowlist.txt");
+        let audit = dir.join("audit.jsonl");
+        unsafe {
+            std::env::set_var("AERODESK_CMD_ALLOWLIST", &allow);
+            std::env::set_var("AERODESK_CMD_AUDIT", &audit);
+        }
+        // 增删查
+        add_allow_prefix("/tmp/safe").unwrap();
+        add_allow_prefix("/tmp/safe").unwrap(); // 幂等
+        add_allow_prefix("/tmp/other").unwrap();
+        assert!(allowlist().contains(&"/tmp/safe".to_string()));
+        remove_allow_prefix("/tmp/safe").unwrap();
+        assert!(!allowlist().contains(&"/tmp/safe".to_string()));
+        assert!(allowlist().contains(&"/tmp/other".to_string()));
+        // 审计尾部
+        let _ = run_command("echo audit-1", None, Some(1000), &[]);
+        let _ = run_command("echo audit-2", None, Some(1000), &[]);
+        let tail = tail_audit(10).unwrap();
+        assert!(tail.len() >= 2);
+        assert!(tail.last().unwrap().contains("audit-2"));
+        unsafe {
+            std::env::remove_var("AERODESK_CMD_ALLOWLIST");
+            std::env::remove_var("AERODESK_CMD_AUDIT");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

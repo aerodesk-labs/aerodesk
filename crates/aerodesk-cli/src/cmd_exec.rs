@@ -187,3 +187,65 @@ pub fn send_intent(endpoint: &mut Endpoint, intent: &Intent) -> bool {
 pub fn handle_response(data: &[u8]) -> Option<CmdResponse> {
     serde_json::from_slice::<CmdResponse>(data).ok()
 }
+
+/// 本地管理命令（#109 权限/审计入口，无需会话）：
+/// `--cmd-allowlist list|add <prefix>|remove <prefix>` / `--cmd-audit [n]`。
+/// 返回 true 表示已处理（应直接退出）。
+pub fn run_admin(args: &[String]) -> bool {
+    let Some(pos) = args.iter().position(|a| a == "--cmd-allowlist") else {
+        if let Some(pos) = args.iter().position(|a| a == "--cmd-audit") {
+            let n = args
+                .get(pos + 1)
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(10);
+            match aerodesk_core::cmd_exec::tail_audit(n) {
+                Ok(lines) => {
+                    for l in lines {
+                        println!("{l}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("audit: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return true;
+        }
+        return false;
+    };
+    let sub = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("list");
+    match sub {
+        "list" => {
+            for p in aerodesk_core::cmd_exec::allowlist() {
+                println!("{p}");
+            }
+        }
+        "add" => {
+            let Some(prefix) = args.get(pos + 2) else {
+                eprintln!("usage: --cmd-allowlist add <prefix>");
+                std::process::exit(2);
+            };
+            if let Err(e) = aerodesk_core::cmd_exec::add_allow_prefix(prefix) {
+                eprintln!("add allowlist: {e}");
+                std::process::exit(1);
+            }
+            println!("added: {prefix}");
+        }
+        "remove" => {
+            let Some(prefix) = args.get(pos + 2) else {
+                eprintln!("usage: --cmd-allowlist remove <prefix>");
+                std::process::exit(2);
+            };
+            if let Err(e) = aerodesk_core::cmd_exec::remove_allow_prefix(prefix) {
+                eprintln!("remove allowlist: {e}");
+                std::process::exit(1);
+            }
+            println!("removed: {prefix}");
+        }
+        other => {
+            eprintln!("unknown allowlist subcommand: {other}");
+            std::process::exit(2);
+        }
+    }
+    true
+}
