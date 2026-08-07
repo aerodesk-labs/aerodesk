@@ -35,6 +35,7 @@ export AERODESK_CLI_BIN="$PWD/target/release/aerodesk-cli"
 | `list_processes` / `kill_process` | 进程管理（pid 0/1 禁止） |
 | `mouse_move` / `mouse_click` | 归一化坐标移动/点击（左/右/中键） |
 | `type_text` | 逐字符输入（US 布局，自动 Shift） |
+| `download_file` / `upload_file` | 大文件双向传输（走 file 通道，无 4MB 上限；upload 需被控端 publisher 以 `--recv-dir` 启动） |
 
 ## 与主流 agent 接入
 

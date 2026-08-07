@@ -70,6 +70,10 @@ pub enum FileControl {
     Clipboard {
         text: String,
     },
+    /// #122：控制端请求被控端发送指定路径文件（大文件下载，走 file 通道）。
+    Request {
+        path: String,
+    },
 }
 
 /// 编码一个分片为二进制帧。
@@ -139,6 +143,21 @@ mod tests {
                 assert_eq!(m.name, "a.bin");
                 assert_eq!(m.size, 1024);
             }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_json_roundtrip() {
+        // #122：下载请求消息序列化/反序列化。
+        let ctrl = FileControl::Request {
+            path: "/var/log/system.log".into(),
+        };
+        let json = serde_json::to_string(&ctrl).unwrap();
+        assert!(json.contains("\"type\":\"request\""));
+        let back: FileControl = serde_json::from_str(&json).unwrap();
+        match back {
+            FileControl::Request { path } => assert_eq!(path, "/var/log/system.log"),
             other => panic!("unexpected {other:?}"),
         }
     }

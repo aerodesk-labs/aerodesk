@@ -107,6 +107,16 @@ impl FileTransfer {
     }
 
     /// 触发发送一个文件（当前无发送任务时生效）。
+    /// 发送是否已被接收端确认（#122：viewer --send-file 模式发送完成判定）。
+    pub fn send_complete(&self) -> bool {
+        self.send.as_ref().is_some_and(|s| s.confirmed)
+    }
+
+    /// 当前接收落盘目录（#122：--request-file 模式轮询落盘判定）。
+    pub fn recv_dir(&self) -> Option<&Path> {
+        self.recv_dir.as_deref()
+    }
+
     pub fn send_file(&mut self, path: &Path) -> Result<(), String> {
         if self.send.as_ref().is_some_and(|s| !s.confirmed) {
             return Err("已有文件传输进行中".into());
@@ -287,6 +297,17 @@ impl FileTransfer {
             FileControl::Clipboard { text } => {
                 tracing::info!("file clipboard received ({} chars)", text.chars().count());
                 self.incoming_clipboard = Some(text);
+            }
+            FileControl::Request { path } => {
+                // #122：控制端请求被控端发送文件（大文件下载）。
+                if self.send.is_some() {
+                    tracing::warn!("file request ignored: 已有发送任务（{path}）");
+                } else {
+                    match self.send_file(std::path::Path::new(&path)) {
+                        Ok(()) => tracing::info!("file request: 开始发送 {path}"),
+                        Err(e) => tracing::warn!("file request failed: {e}"),
+                    }
+                }
             }
         }
     }
