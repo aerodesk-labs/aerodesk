@@ -1,29 +1,41 @@
-//! #109 远程命令通道（CLI 侧）：被控端执行器接线 + 控制端请求/响应。
+//! #109 远程命令/文件/进程通道（CLI 侧）：被控端执行器接线 + 控制端意图。
 //!
 //! 被控端（publisher）：收到 `CmdRequest` → 后台线程执行（aerodesk-core::cmd_exec）
 //! → 经 mpsc 回传主循环 → 通过 `cmd` data channel 发 `CmdResponse`。
-//! 控制端（viewer `--run-command`）：cmd 通道打开后发请求，收到响应后打印并退出。
+//! 控制端（viewer）：cmd 通道打开后发意图请求（每 1s 重传直到响应），打印结果并退出。
 
 use std::sync::Mutex;
 
-use aerodesk_core::cmd_exec::{allowlist, run_command};
+use aerodesk_core::cmd_exec::{
+    allowlist, kill_process, list_processes, read_file, run_command, write_file,
+};
 use aerodesk_core::endpoint::{ClientEvent, Endpoint};
-use aerodesk_protocol::cmd::{CmdRequest, CmdResponse};
+use aerodesk_protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult, encode_b64};
 
 static CMD_TX: Mutex<Option<std::sync::mpsc::Sender<CmdResponse>>> = Mutex::new(None);
 static CMD_RX: Mutex<Option<std::sync::mpsc::Receiver<CmdResponse>>> = Mutex::new(None);
 /// 最近处理过的请求 (id, 时间)：控制端重传（首包丢失）按 id 去重防重复执行；
-/// 新会话复用相同 id（如 1）超过窗口后重新放行。
+/// 新会话复用相同 id 超过窗口后重新放行。
 static LAST_CMD: Mutex<Option<(u64, std::time::Instant)>> = Mutex::new(None);
 
-/// 初始化命令通道（main 调用一次；viewer 只发请求不启用执行器也无需 rx）。
+/// 控制端意图（viewer 命令行）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Intent {
+    Run(String),
+    Read(String),
+    Write(String, String),
+    Ps,
+    Kill(u32),
+}
+
+/// 初始化命令通道（main 调用一次）。
 pub fn init() {
     let (tx, rx) = std::sync::mpsc::channel::<CmdResponse>();
     *CMD_TX.lock().unwrap() = Some(tx);
     *CMD_RX.lock().unwrap() = Some(rx);
 }
 
-/// 被控端处理 cmd 通道数据：后台线程执行命令，结果经 mpsc 回传主循环。
+/// 被控端处理 cmd 通道数据：后台线程执行，结果经 mpsc 回传主循环。
 pub fn handle_event(ev: &ClientEvent, endpoint: &mut Endpoint) {
     let ClientEvent::ChannelData(cid, _, data) = ev else {
         return;
@@ -56,58 +68,122 @@ pub fn handle_event(ev: &ClientEvent, endpoint: &mut Endpoint) {
         tracing::debug!("cmd request #{} duplicate, ignore", req.id);
         return;
     }
-    tracing::info!("cmd request #{}: {}", req.id, req.command);
+    tracing::info!("cmd request #{}: {:?}", req.id, req.action);
     let tx = CMD_TX.lock().unwrap().clone();
-    let allow = allowlist();
     std::thread::spawn(move || {
-        let out = run_command(&req.command, req.cwd.as_deref(), req.timeout_ms, &allow);
-        let resp = CmdResponse {
-            id: req.id,
-            ok: out.error.is_none() && out.exit_code == Some(0),
-            exit_code: out.exit_code,
-            stdout: out.stdout,
-            stderr: out.stderr,
-            truncated: out.truncated,
-            error: out.error,
-        };
+        let result = execute(&req.action);
+        let resp = CmdResponse { id: req.id, result };
         if let Some(tx) = tx {
             let _ = tx.send(resp);
         }
     });
 }
 
-/// 被控端主循环：把已完成命令的响应发回控制端。
+/// 执行一个动作（被控端线程内）。
+fn execute(action: &CmdAction) -> CmdResult {
+    let allow = allowlist();
+    match action {
+        CmdAction::Run {
+            command,
+            cwd,
+            timeout_ms,
+        } => {
+            let out = run_command(command, cwd.as_deref(), *timeout_ms, &allow);
+            CmdResult::Run {
+                exit_code: out.exit_code,
+                stdout: out.stdout,
+                stderr: out.stderr,
+                truncated: out.truncated,
+                error: out.error,
+            }
+        }
+        CmdAction::ReadFile { path, max_bytes } => match read_file(path, *max_bytes) {
+            Ok(data) => CmdResult::File {
+                data: Some(encode_b64(&data)),
+                size: data.len() as u64,
+                error: None,
+            },
+            Err(e) => CmdResult::File {
+                data: None,
+                size: 0,
+                error: Some(e),
+            },
+        },
+        CmdAction::WriteFile { path, data } => match write_file(path, data, &allow) {
+            Ok(()) => CmdResult::File {
+                data: None,
+                size: 0,
+                error: None,
+            },
+            Err(e) => CmdResult::File {
+                data: None,
+                size: 0,
+                error: Some(e),
+            },
+        },
+        CmdAction::ListProcesses => match list_processes() {
+            Ok(processes) => CmdResult::ProcessList {
+                processes,
+                error: None,
+            },
+            Err(e) => CmdResult::ProcessList {
+                processes: vec![],
+                error: Some(e),
+            },
+        },
+        CmdAction::KillProcess { pid } => match kill_process(*pid, &allow) {
+            Ok(()) => CmdResult::Killed {
+                pid: *pid,
+                error: None,
+            },
+            Err(e) => CmdResult::Killed {
+                pid: *pid,
+                error: Some(e),
+            },
+        },
+    }
+}
+
+/// 被控端主循环：把已完成动作的响应发回控制端。
 pub fn tick(endpoint: &mut Endpoint) {
     if let Some(rx) = CMD_RX.lock().unwrap().as_ref() {
         while let Ok(resp) = rx.try_recv() {
             if let Ok(json) = serde_json::to_string(&resp) {
-                tracing::info!(
-                    "cmd response #{}: ok={} exit={:?} stdout={}B stderr={}B",
-                    resp.id,
-                    resp.ok,
-                    resp.exit_code,
-                    resp.stdout.len(),
-                    resp.stderr.len()
-                );
+                tracing::info!("cmd response #{}: {:?}", resp.id, resp.result);
                 endpoint.send_channel_data("cmd", false, json.as_bytes());
             }
         }
     }
 }
 
-/// 控制端（viewer --run-command）：发送一个命令请求并等待响应。
-/// 请求 id 按进程唯一（pid<<16|1）：同一控制端重传同 id（被控端去重），
-/// 不同控制端（不同 pid）id 不同，避免跨会话误去重。
-pub fn send_request(endpoint: &mut Endpoint, command: &str, timeout_ms: Option<u64>) -> bool {
+/// 控制端：发送一个意图请求（id 按进程唯一：pid<<16|1）。
+pub fn send_intent(endpoint: &mut Endpoint, intent: &Intent) -> bool {
     let id = ((std::process::id() as u64) << 16) | 1;
-    let req = CmdRequest::new(id, command).timeout(timeout_ms.unwrap_or(30_000));
+    let action = match intent {
+        Intent::Run(cmd) => CmdAction::Run {
+            command: cmd.clone(),
+            cwd: None,
+            timeout_ms: None,
+        },
+        Intent::Read(path) => CmdAction::ReadFile {
+            path: path.clone(),
+            max_bytes: None,
+        },
+        Intent::Write(path, content) => CmdAction::WriteFile {
+            path: path.clone(),
+            data: encode_b64(content.as_bytes()),
+        },
+        Intent::Ps => CmdAction::ListProcesses,
+        Intent::Kill(pid) => CmdAction::KillProcess { pid: *pid },
+    };
+    let req = CmdRequest::new(id, action);
     let Ok(json) = serde_json::to_string(&req) else {
         return false;
     };
     endpoint.send_channel_data("cmd", false, json.as_bytes())
 }
 
-/// 控制端：处理 cmd 通道响应（--run-command 模式：打印并退出）。
+/// 控制端：解析 cmd 通道响应。
 pub fn handle_response(data: &[u8]) -> Option<CmdResponse> {
     serde_json::from_slice::<CmdResponse>(data).ok()
 }

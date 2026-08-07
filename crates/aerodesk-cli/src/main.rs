@@ -55,8 +55,23 @@ fn main() {
     // #73 音频：--audio-opus 使用 Opus（48kHz）替代 PCMU（8kHz）。
     let audio_opus = args.iter().any(|a| a == "--audio-opus");
     let mute_audio = args.iter().any(|a| a == "--mute-audio");
-    // #109 远程命令：控制端一次执行（--run-command "<cmd>"，打印 stdout/stderr/exit 后退出）。
-    let run_command = arg(&args, "--run-command");
+    // #109 远程命令/文件/进程：控制端一次执行（打印结果后以 ok 语义退出）。
+    let cmd_intent: Option<cmd_exec::Intent> = if let Some(c) = arg(&args, "--run-command") {
+        Some(cmd_exec::Intent::Run(c))
+    } else if let Some(p) = arg(&args, "--read-file") {
+        Some(cmd_exec::Intent::Read(p))
+    } else if let Some(idx) = args.iter().position(|a| a == "--write-file") {
+        let path = args.get(idx + 1).cloned();
+        let content = args.get(idx + 2).cloned();
+        path.zip(content)
+            .map(|(p, c)| cmd_exec::Intent::Write(p, c))
+    } else if args.iter().any(|a| a == "--list-processes") {
+        Some(cmd_exec::Intent::Ps)
+    } else if let Some(pid) = arg(&args, "--kill-pid").and_then(|v| v.parse().ok()) {
+        Some(cmd_exec::Intent::Kill(pid))
+    } else {
+        None
+    };
     // #58 显示器：publisher 初始采集显示器 / viewer 请求切换（--display N，0 = 主显示器）。
     let display: usize = arg(&args, "--display")
         .and_then(|v| v.parse().ok())
@@ -173,7 +188,7 @@ fn main() {
             mute_audio,
             viewer_display,
             input_script,
-            run_command.as_deref(),
+            cmd_intent.as_ref(),
         ),
         other => panic!("unknown role {other}"),
     }
@@ -532,6 +547,57 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// #109 控制端：打印命令/文件/进程结果（e2e/CLI 断言用）。
+fn print_cmd_result(resp: &aerodesk_protocol::cmd::CmdResponse) {
+    use aerodesk_protocol::cmd::CmdResult;
+    match &resp.result {
+        CmdResult::Run {
+            exit_code,
+            stdout,
+            stderr,
+            truncated,
+            error,
+        } => {
+            info!(
+                "CMD_RESULT: ok={} exit={:?} truncated={} error={:?}",
+                error.is_none() && *exit_code == Some(0),
+                exit_code,
+                truncated,
+                error
+            );
+            info!("CMD_STDOUT:\n{stdout}");
+            info!("CMD_STDERR:\n{stderr}");
+        }
+        CmdResult::File { data, size, error } => {
+            info!(
+                "CMD_RESULT: ok={} type=file size={size} error={error:?}",
+                error.is_none()
+            );
+            if let Some(b64) = data {
+                if let Some(bytes) = aerodesk_protocol::cmd::decode_b64(b64) {
+                    info!("CMD_FILE_CONTENT:\n{}", String::from_utf8_lossy(&bytes));
+                }
+            }
+        }
+        CmdResult::ProcessList { processes, error } => {
+            info!(
+                "CMD_RESULT: ok={} type=ps count={} error={error:?}",
+                error.is_none(),
+                processes.len()
+            );
+            for p in processes {
+                info!("CMD_PROC: {} {}", p.pid, p.name);
+            }
+        }
+        CmdResult::Killed { pid, error } => {
+            info!(
+                "CMD_RESULT: ok={} type=kill pid={pid} error={error:?}",
+                error.is_none()
+            );
+        }
+    }
+}
+
 /// 发送远程光标（#75）。附带发送端墙钟，viewer 据此计算 one-way latency（#8）。
 fn send_cursor(endpoint: &mut Endpoint, x: f64, y: f64) {
     let pos = aerodesk_protocol::cursor::CursorPos::new(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0))
@@ -739,7 +805,7 @@ fn viewer(
     mute_audio: bool,
     display: Option<usize>,
     input_script: bool,
-    run_command: Option<&str>,
+    cmd_intent: Option<&cmd_exec::Intent>,
 ) {
     let (mut signal, mut endpoint, socket, _, _audio_mid) =
         connect(signal_url, room, Role::Viewer, auth, audio);
@@ -768,9 +834,9 @@ fn viewer(
     let mut last_cursor_log = Instant::now();
     // #8 端到端延迟：cursor 带发送时间戳，viewer 计算 one-way latency（节流 1s）。
     let mut last_latency_log = Instant::now();
-    // #109 远程命令（控制端一次执行）：cmd 请求每 1s 重传直到响应（首包可能被
+    // #109 远程命令/文件/进程（控制端一次执行）：请求每 1s 重传直到响应（首包可能被
     // SFU 在通道未就绪时丢弃；被控端按 id 去重，重复执行安全）。
-    let cmd_pending = run_command.is_some();
+    let cmd_pending = cmd_intent.is_some();
     let mut cmd_done = false;
     let mut last_cmd_send = Instant::now() - Duration::from_secs(1);
     // #74 解码端验证：FFmpeg 软解全部 codec（H264/H265/VP9/AV1），codec-e2e 断言。
@@ -957,13 +1023,8 @@ fn viewer(
                     if !cmd_done {
                         cmd_done = true;
                         if let Some(resp) = cmd_exec::handle_response(&data) {
-                            info!(
-                                "CMD_RESULT: ok={} exit={:?} truncated={} error={:?}",
-                                resp.ok, resp.exit_code, resp.truncated, resp.error
-                            );
-                            info!("CMD_STDOUT:\n{}", resp.stdout);
-                            info!("CMD_STDERR:\n{}", resp.stderr);
-                            std::process::exit(if resp.ok { 0 } else { 1 });
+                            print_cmd_result(&resp);
+                            std::process::exit(if resp.result.ok() { 0 } else { 1 });
                         }
                     }
                 }
@@ -1001,9 +1062,9 @@ fn viewer(
         file_transfer::tick(&mut endpoint);
         // #109 远程命令：未收到响应前每 1s 重传请求（首包丢失自愈）。
         if cmd_pending && !cmd_done && last_cmd_send.elapsed() >= Duration::from_secs(1) {
-            if let Some(cmd) = run_command {
-                let sent = cmd_exec::send_request(&mut endpoint, cmd, None);
-                info!("cmd request sent (retry={sent}): {cmd}");
+            if let Some(intent) = cmd_intent {
+                let sent = cmd_exec::send_intent(&mut endpoint, intent);
+                info!("cmd request sent (retry={sent}): {intent:?}");
                 last_cmd_send = Instant::now();
             }
         }
