@@ -61,6 +61,8 @@ impl Endpoint {
             let cfg = config.codec_config();
             // #58 音频：PCMU（G.711）静态 PT 0，8kHz 单声道。
             cfg.enable_pcmu(true);
+            // #73 音频：Opus（48kHz 立体声，PT 111）——发布端可按需选择发送。
+            cfg.enable_opus(true);
         }
         Self {
             rtc: config.build(Instant::now()),
@@ -88,6 +90,8 @@ impl Endpoint {
             );
             // #58 音频：PCMU（G.711）静态 PT 0，8kHz 单声道。
             cfg.enable_pcmu(true);
+            // #73 音频：Opus（48kHz 立体声，PT 111）——发布端可按需选择发送。
+            cfg.enable_opus(true);
         }
         Self {
             rtc: config.build(Instant::now()),
@@ -126,6 +130,8 @@ impl Endpoint {
             }
             // #58 音频：PCMU（G.711）静态 PT 0，8kHz 单声道。
             cfg.enable_pcmu(true);
+            // #73 音频：Opus（48kHz 立体声，PT 111）——发布端可按需选择发送。
+            cfg.enable_opus(true);
         }
         Self {
             rtc: config.build(Instant::now()),
@@ -373,6 +379,32 @@ impl Endpoint {
         else {
             return Err(RtcError::Io(std::io::Error::other(
                 "no PCMU payload params",
+            )));
+        };
+        let Some(pt) = writer.match_params(params) else {
+            return Err(RtcError::Io(std::io::Error::other("no matching pt")));
+        };
+        writer.write(pt, Instant::now(), rtp_time, data)
+    }
+
+    /// 发送一帧音频（Opus，RTP 时间戳按 48kHz 时钟，#73）。
+    /// 与 PCMU 一样必须显式匹配 Opus 参数（默认 codec 配置里 Opus 排最前）。
+    pub fn send_audio_frame_opus(
+        &mut self,
+        mid: Mid,
+        data: impl Into<std::sync::Arc<[u8]>>,
+        rtp_time: str0m::media::MediaTime,
+    ) -> Result<(), RtcError> {
+        let Some(writer) = self.rtc.writer(mid) else {
+            return Err(RtcError::Io(std::io::Error::other("no writer for mid")));
+        };
+        let Some(params) = writer
+            .payload_params()
+            .find(|p| p.spec().codec == str0m::format::Codec::Opus)
+            .cloned()
+        else {
+            return Err(RtcError::Io(std::io::Error::other(
+                "no Opus payload params",
             )));
         };
         let Some(pt) = writer.match_params(params) else {

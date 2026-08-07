@@ -1,6 +1,7 @@
 //! FFmpeg 编解码器（#74）：H.265/HEVC + AV1 + VP9（含 H.264），
 //! 有硬件编码器时优先硬编（macOS VideoToolbox），否则 FFmpeg 软编回退。
 
+pub mod audio;
 pub mod decode;
 pub mod encode;
 

@@ -164,11 +164,13 @@ pub fn run_viewer(
     let mut file_transfer =
         aerodesk_core::file_transfer::FileTransfer::new(Some(default_recv_dir()));
     let mut last_file_status = Instant::now();
-    // #73 音频播放 + A/V 同步：PCMU 解码 → jitter buffer → AudioSink（cpal）；
-    // 无输出设备时降级为仅统计。视频按音频时钟 pacing。
+    // #73 音频播放 + A/V 同步：PCMU/Opus 解码 → jitter buffer → AudioSink（cpal）；
+    // sink 按首个音频帧的 codec 采样率惰性创建；无输出设备时降级为仅统计。
     let mut avsync = aerodesk_core::avsync::AvSync::new();
     let mut jitter = aerodesk_core::avsync::AudioJitterBuffer::new(0.08);
-    let audio_sink = aerodesk_macos::audio::AudioSink::new().ok();
+    let mut audio_sink: Option<aerodesk_macos::audio::AudioSink> = None;
+    // #73 Opus 音频：libopus 解码（惰性创建）。
+    let mut opus_decoder: Option<aerodesk_ffmpeg::audio::OpusDecoder> = None;
     let mut audio_played: u64 = 0;
     let mut audio_dropped: u64 = 0;
     let mut audio_buffered: usize = 0;
@@ -247,13 +249,46 @@ pub fn run_viewer(
             match ev {
                 ClientEvent::Media(data) => {
                     // #58/#73 音频识别：SFU 转发时 mid 是 SFU 本地 mid，用协商
-                    // codec（PCMU）识别音频帧。
+                    // codec（PCMU/Opus）识别音频帧。
                     if data.params.spec().codec == str0m::format::Codec::PCMU {
                         last_audio = Instant::now();
                         if muted.load(Ordering::SeqCst) {
                             audio_dropped += 1;
                         } else {
                             let pcm = aerodesk_core::pcmu::pcmu_decode(&data.data);
+                            if audio_sink.is_none() {
+                                audio_sink =
+                                    aerodesk_macos::audio::AudioSink::new_with_rate(8000).ok();
+                            }
+                            avsync.on_audio(data.time.numer(), data.time.denom());
+                            jitter.push(avsync.audio_time_secs(), pcm);
+                            while let Some(pcm) = jitter.pop(avsync.audio_time_secs()) {
+                                if let Some(sink) = &audio_sink {
+                                    sink.push_pcm(&pcm);
+                                }
+                                audio_played += 1;
+                            }
+                            audio_buffered = jitter.buffered();
+                        }
+                    } else if data.params.spec().codec == str0m::format::Codec::Opus {
+                        // #73 Opus（48kHz）：libopus 解码 → 同一 jitter buffer/时间轴。
+                        last_audio = Instant::now();
+                        if muted.load(Ordering::SeqCst) {
+                            audio_dropped += 1;
+                        } else {
+                            if opus_decoder.is_none() {
+                                opus_decoder = aerodesk_ffmpeg::audio::OpusDecoder::new().ok();
+                            }
+                            let pcm = opus_decoder
+                                .as_mut()
+                                .and_then(|dec| dec.decode(&data.data).ok().flatten())
+                                .unwrap_or_default();
+                            if audio_sink.is_none() {
+                                audio_sink = aerodesk_macos::audio::AudioSink::new_with_rate(
+                                    aerodesk_ffmpeg::audio::OPUS_SAMPLE_RATE,
+                                )
+                                .ok();
+                            }
                             avsync.on_audio(data.time.numer(), data.time.denom());
                             jitter.push(avsync.audio_time_secs(), pcm);
                             while let Some(pcm) = jitter.pop(avsync.audio_time_secs()) {
