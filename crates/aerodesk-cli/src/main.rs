@@ -518,8 +518,18 @@ impl AudioTicker {
 }
 
 /// #75 发送远程光标位置（cursor 通道，归一化 0..1）。
+/// 当前墙钟（unix ms，#8 端到端延迟测量）。
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 发送远程光标（#75）。附带发送端墙钟，viewer 据此计算 one-way latency（#8）。
 fn send_cursor(endpoint: &mut Endpoint, x: f64, y: f64) {
-    let pos = aerodesk_protocol::cursor::CursorPos::new(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
+    let pos = aerodesk_protocol::cursor::CursorPos::new(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0))
+        .with_sent_ms(now_ms());
     if let Ok(json) = serde_json::to_string(&pos) {
         endpoint.send_channel_data("cursor", false, json.as_bytes());
     }
@@ -746,6 +756,8 @@ fn viewer(
     let mut display_sent = display.is_none();
     // #75 远程光标：cursor 通道日志（节流 1s，e2e 断言用）。
     let mut last_cursor_log = Instant::now();
+    // #8 端到端延迟：cursor 带发送时间戳，viewer 计算 one-way latency（节流 1s）。
+    let mut last_latency_log = Instant::now();
     // #74 解码端验证：FFmpeg 软解全部 codec（H264/H265/VP9/AV1），codec-e2e 断言。
     let mut video_decoder: Option<aerodesk_ffmpeg::decode::FfmpegDecoder> = None;
     let mut decoded_frames: u64 = 0;
@@ -929,10 +941,20 @@ fn viewer(
                 {
                     if let Ok(pos) =
                         serde_json::from_slice::<aerodesk_protocol::cursor::CursorPos>(&data)
-                        && last_cursor_log.elapsed() >= Duration::from_secs(1)
                     {
-                        info!("CURSOR: x={:.3} y={:.3}", pos.x, pos.y);
-                        last_cursor_log = Instant::now();
+                        if last_cursor_log.elapsed() >= Duration::from_secs(1) {
+                            info!("CURSOR: x={:.3} y={:.3}", pos.x, pos.y);
+                            last_cursor_log = Instant::now();
+                        }
+                        // #8 端到端延迟：本地墙钟 - 发送墙钟（同机/同一时钟域有效）。
+                        let now = now_ms();
+                        if pos.sent_ms > 0
+                            && now >= pos.sent_ms
+                            && last_latency_log.elapsed() >= Duration::from_secs(1)
+                        {
+                            info!("LATENCY: {} ms", now - pos.sent_ms);
+                            last_latency_log = Instant::now();
+                        }
                     }
                 }
                 ClientEvent::Closed => {
@@ -1244,6 +1266,9 @@ fn publisher_vt(
     let mut next_frame = Instant::now();
     let mut pts = 0i64;
     let pts_inc = 90_000 / fps.max(1) as i64;
+    // #8 端到端延迟：合成光标轨迹（30Hz，随 cursor 通道带发送时间戳）。
+    let cursor_start = Instant::now();
+    let mut last_cursor = Instant::now();
 
     loop {
         let wait = Duration::from_millis(5);
@@ -1300,6 +1325,12 @@ fn publisher_vt(
         }
         // #72 文件传输：推进发送。
         file_transfer::tick(&mut endpoint);
+        // #8 端到端延迟：合成光标轨迹（30Hz）。
+        if last_cursor.elapsed() >= Duration::from_millis(33) {
+            last_cursor = Instant::now();
+            let t = cursor_start.elapsed().as_secs_f64();
+            send_cursor(&mut endpoint, 0.5 + 0.3 * t.sin(), 0.5 + 0.3 * t.cos());
+        }
 
         if connected && Instant::now() >= next_frame {
             next_frame += frame_interval(fps);
@@ -1359,6 +1390,9 @@ fn publisher_ffmpeg(
     let mut audio_ticker = AudioTicker::new(audio_opus);
     let mut next_frame = Instant::now();
     let mut pts = 0i64;
+    // #8 端到端延迟：合成光标轨迹（30Hz）。
+    let cursor_start = Instant::now();
+    let mut last_cursor = Instant::now();
 
     loop {
         let wait = Duration::from_millis(5);
@@ -1418,6 +1452,12 @@ fn publisher_ffmpeg(
             audio_ticker.tick(&mut endpoint, amid, Instant::now());
         }
         file_transfer::tick(&mut endpoint);
+        // #8 端到端延迟：合成光标轨迹（30Hz）。
+        if last_cursor.elapsed() >= Duration::from_millis(33) {
+            last_cursor = Instant::now();
+            let t = cursor_start.elapsed().as_secs_f64();
+            send_cursor(&mut endpoint, 0.5 + 0.3 * t.sin(), 0.5 + 0.3 * t.cos());
+        }
 
         if connected && Instant::now() >= next_frame {
             next_frame += frame_interval(FPS);

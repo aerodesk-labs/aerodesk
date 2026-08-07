@@ -9,11 +9,20 @@ use serde::{Deserialize, Serialize};
 pub struct CursorPos {
     pub x: f64,
     pub y: f64,
+    /// 发送端墙钟（unix ms，#8 端到端延迟测量；旧端无此字段视为 0）。
+    #[serde(default)]
+    pub sent_ms: u64,
 }
 
 impl CursorPos {
     pub fn new(x: f64, y: f64) -> Self {
-        Self { x, y }
+        Self { x, y, sent_ms: 0 }
+    }
+
+    /// 附带发送时间戳（端到端延迟测量用）。
+    pub fn with_sent_ms(mut self, sent_ms: u64) -> Self {
+        self.sent_ms = sent_ms;
+        self
     }
 }
 
@@ -23,10 +32,19 @@ mod tests {
 
     #[test]
     fn roundtrip_json() {
-        let pos = CursorPos::new(0.5, 0.25);
+        let pos = CursorPos::new(0.5, 0.25).with_sent_ms(12345);
         let json = serde_json::to_string(&pos).unwrap();
         assert!(json.contains("\"x\":0.5"));
+        assert!(json.contains("\"sent_ms\":12345"));
         let back: CursorPos = serde_json::from_str(&json).unwrap();
         assert_eq!(back, pos);
+        assert_eq!(back.sent_ms, 12345);
+    }
+
+    #[test]
+    fn old_json_without_sent_ms_parses_to_zero() {
+        // 向后兼容：旧发布端消息无 sent_ms 字段。
+        let back: CursorPos = serde_json::from_str("{\"x\":0.1,\"y\":0.2}").unwrap();
+        assert_eq!(back.sent_ms, 0);
     }
 }
