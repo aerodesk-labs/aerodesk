@@ -29,6 +29,37 @@ use str0m::media::{Frequency, MediaTime};
 use str0m::net::Protocol;
 use str0m::{Input, Output, net::Receive};
 
+/// 重连退避（#173）：1s、2s、4s、8s，之后封顶 10s。
+fn reconnect_backoff(attempt: u32) -> Duration {
+    let secs = 1u64 << attempt.min(4);
+    Duration::from_secs(secs.min(10))
+}
+
+/// 会话自动重连包装（#173）：Err 且开启重连且未达上限 → 退避重试；否则退出。
+fn run_with_reconnect<F>(mut f: F, reconnect: bool, max: u32)
+where
+    F: FnMut() -> Result<(), String>,
+{
+    let mut attempt = 0u32;
+    loop {
+        match f() {
+            Ok(()) => break,
+            Err(e) if reconnect && attempt < max => {
+                attempt += 1;
+                warn!(
+                    "session ended: {e}; reconnecting in {:?} (attempt {attempt}/{max})",
+                    reconnect_backoff(attempt)
+                );
+                std::thread::sleep(reconnect_backoff(attempt));
+            }
+            Err(e) => {
+                eprintln!("session error: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
 fn main() {
     // #122/#102：sctp-proto 深调用链在文件传输/高负载下会栈溢出（与 SFU 修复 #104
     // 同根因）；主逻辑放到 8MB 栈线程执行。
@@ -55,6 +86,11 @@ fn run() {
     };
     let room = arg(&args, "--room").unwrap_or_else(|| "demo".into());
     let token = arg(&args, "--token");
+    // #173 自动重连：会话结束/连接失败时指数退避重试（--reconnect 开启）。
+    let reconnect = args.iter().any(|a| a == "--reconnect");
+    let reconnect_max: u32 = arg(&args, "--reconnect-max")
+        .and_then(|m| m.parse().ok())
+        .unwrap_or(5);
     let encoder = arg(&args, "--encoder").unwrap_or_else(|| "pcap".into());
     // #58：publisher 多路编码（q/h/f 三层），SFU 选层请求才能真正切换画质。
     let simulcast = args.iter().any(|a| a == "--simulcast");
@@ -202,22 +238,47 @@ fn run() {
             audio,
             audio_opus,
         ),
-        "publisher" => publisher(&signal, &room, token.as_deref(), audio, audio_opus),
-        "viewer" => viewer(
-            &signal,
-            &room,
-            token.as_deref(),
-            arg(&args, "--layer").as_deref(),
-            audio,
-            mute_audio,
-            viewer_display,
-            input_script,
-            send_input.as_ref(),
-            type_text.as_deref(),
-            cmd_intent.as_ref(),
-            cmd_json,
-            request_file.as_deref(),
-        ),
+        "publisher" => {
+            let sig = signal.clone();
+            let r = room.clone();
+            let tok = token.clone();
+            run_with_reconnect(
+                move || publisher(&sig, &r, tok.as_deref(), audio, audio_opus),
+                reconnect,
+                reconnect_max,
+            )
+        }
+        "viewer" => {
+            let sig = signal.clone();
+            let r = room.clone();
+            let tok = token.clone();
+            let layer = arg(&args, "--layer");
+            let si = send_input.clone();
+            let tt = type_text.clone();
+            let ci = cmd_intent.clone();
+            let rf = request_file.clone();
+            run_with_reconnect(
+                move || {
+                    viewer(
+                        &sig,
+                        &r,
+                        tok.as_deref(),
+                        layer.as_deref(),
+                        audio,
+                        mute_audio,
+                        viewer_display,
+                        input_script,
+                        si.as_ref(),
+                        tt.as_deref(),
+                        ci.as_ref(),
+                        cmd_json,
+                        rf.as_deref(),
+                    )
+                },
+                reconnect,
+                reconnect_max,
+            )
+        }
         other => panic!("unknown role {other}"),
     }
 }
@@ -296,13 +357,16 @@ fn connect(
     role: Role,
     auth: Option<&str>,
     audio: bool,
-) -> (
-    WsSignalClient,
-    Endpoint,
-    UdpSocket,
-    str0m::media::Mid,
-    Option<str0m::media::Mid>,
-) {
+) -> Result<
+    (
+        WsSignalClient,
+        Endpoint,
+        UdpSocket,
+        str0m::media::Mid,
+        Option<str0m::media::Mid>,
+    ),
+    String,
+> {
     connect_inner(signal_url, room, role, None, false, audio, auth)
 }
 
@@ -313,13 +377,16 @@ fn connect_h264(
     auth: Option<&str>,
     simulcast: bool,
     audio: bool,
-) -> (
-    WsSignalClient,
-    Endpoint,
-    UdpSocket,
-    str0m::media::Mid,
-    Option<str0m::media::Mid>,
-) {
+) -> Result<
+    (
+        WsSignalClient,
+        Endpoint,
+        UdpSocket,
+        str0m::media::Mid,
+        Option<str0m::media::Mid>,
+    ),
+    String,
+> {
     connect_inner(
         signal_url,
         room,
@@ -338,13 +405,16 @@ fn connect_codec(
     auth: Option<&str>,
     audio: bool,
     codec: Codec,
-) -> (
-    WsSignalClient,
-    Endpoint,
-    UdpSocket,
-    str0m::media::Mid,
-    Option<str0m::media::Mid>,
-) {
+) -> Result<
+    (
+        WsSignalClient,
+        Endpoint,
+        UdpSocket,
+        str0m::media::Mid,
+        Option<str0m::media::Mid>,
+    ),
+    String,
+> {
     connect_inner(signal_url, room, role, Some(codec), false, audio, auth)
 }
 
@@ -356,19 +426,23 @@ fn connect_inner(
     simulcast: bool,
     audio: bool,
     auth: Option<&str>,
-) -> (
-    WsSignalClient,
-    Endpoint,
-    UdpSocket,
-    str0m::media::Mid,
-    Option<str0m::media::Mid>,
-) {
-    let mut signal = WsSignalClient::connect(signal_url).expect("signal connect");
-    let (peer_id, turn) = signal.join(room, role, auth).expect("join");
+) -> Result<
+    (
+        WsSignalClient,
+        Endpoint,
+        UdpSocket,
+        str0m::media::Mid,
+        Option<str0m::media::Mid>,
+    ),
+    String,
+> {
+    let mut signal =
+        WsSignalClient::connect(signal_url).map_err(|e| format!("signal connect: {e}"))?;
+    let (peer_id, turn) = signal.join(room, role, auth)?;
     info!("joined room {room} as {peer_id}");
 
-    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp");
-    let addr = socket.local_addr().unwrap();
+    let socket = UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("bind udp: {e}"))?;
+    let addr = socket.local_addr().map_err(|e| e.to_string())?;
     info!("local UDP addr: {addr}");
 
     let mut endpoint = match codec {
@@ -378,7 +452,7 @@ fn connect_inner(
     };
     endpoint
         .add_local_candidate(addr, Protocol::Udp)
-        .expect("candidate");
+        .map_err(|e| format!("candidate: {e}"))?;
     let _ = turn;
 
     // #12：viewer 的 offer 用 recvonly（SFU 拒绝 viewer 发布媒体）。
@@ -398,21 +472,22 @@ fn connect_inner(
             endpoint.add_audio();
         }
     }
-    let (offer, pending, video_mid, audio_mid) = endpoint.create_offer().expect("offer");
+    let (offer, pending, video_mid, audio_mid) =
+        endpoint.create_offer().map_err(|e| format!("offer: {e}"))?;
     info!("video mid: {video_mid:?} audio mid: {audio_mid:?}");
-    let offer_json = serde_json::to_string(&offer).unwrap();
-    let answer_json = signal.exchange_description(&offer_json).expect("answer");
+    let offer_json = serde_json::to_string(&offer).map_err(|e| e.to_string())?;
+    let answer_json = signal.exchange_description(&offer_json)?;
     let answer: str0m::change::SdpAnswer =
-        serde_json::from_str(&answer_json).expect("answer parse");
+        serde_json::from_str(&answer_json).map_err(|e| format!("answer parse: {e}"))?;
     debug!("answer media lines: {:?}", answer.media_lines);
     debug!("offer media lines: {:?}", offer.media_lines);
     endpoint
         .accept_answer(pending, answer)
-        .expect("accept answer");
+        .map_err(|e| format!("accept answer: {e}"))?;
 
     info!("SDP negotiated, awaiting ICE...");
-    let video_mid = video_mid.expect("video mid");
-    (signal, endpoint, socket, video_mid, audio_mid)
+    let video_mid = video_mid.ok_or("no video mid")?;
+    Ok((signal, endpoint, socket, video_mid, audio_mid))
 }
 
 /// VideoToolbox 合成源编码参数（--width/--height/--fps/--bitrate）。
@@ -834,13 +909,20 @@ fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
     }
 }
 
-fn publisher(signal_url: &str, room: &str, auth: Option<&str>, audio: bool, audio_opus: bool) {
+/// 返回 Err=会话结束需重连（#173）。
+fn publisher(
+    signal_url: &str,
+    room: &str,
+    auth: Option<&str>,
+    audio: bool,
+    audio_opus: bool,
+) -> Result<(), String> {
     let pcap = include_bytes!("../../../crates/aerodesk-core/tests/data/vp8.pcap");
     let frames = parse_vp8_pcap(pcap);
     info!("loaded {} VP8 frames from pcap", frames.len());
 
     let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
-        connect(signal_url, room, Role::Publisher, auth, audio);
+        connect(signal_url, room, Role::Publisher, auth, audio)?;
     let mut connected = false;
     let mut audio_ticker = AudioTicker::new(audio_opus);
     let mut frame_idx = 0usize;
@@ -851,6 +933,11 @@ fn publisher(signal_url: &str, room: &str, auth: Option<&str>, audio: bool, audi
     let mut last_cursor = Instant::now();
 
     loop {
+        // #173 自动重连：ICE 失效时退出会话由主流程重连。
+        if !endpoint.is_alive() {
+            info!("publisher: ICE session ended, exiting session for reconnect");
+            return Err("ICE session ended".into());
+        }
         // UDP 输入
         let wait = next_deadline
             .saturating_duration_since(Instant::now())
@@ -916,7 +1003,7 @@ fn publisher(signal_url: &str, room: &str, auth: Option<&str>, audio: bool, audi
                 }
                 ClientEvent::Closed => {
                     info!("connection closed");
-                    return;
+                    return Err("connection closed".into());
                 }
                 ev => handle_publisher_input(&mut endpoint, ev),
             }
@@ -974,6 +1061,7 @@ fn publisher(signal_url: &str, room: &str, auth: Option<&str>, audio: bool, audi
 }
 
 #[allow(clippy::too_many_arguments)] // #75 e2e 输入脚本开关；与既有 publisher 系列函数同风格。
+/// 返回 Err=会话结束需重连（#173）；Ok=正常完成（一次性模式）。
 fn viewer(
     signal_url: &str,
     room: &str,
@@ -988,9 +1076,9 @@ fn viewer(
     cmd_intent: Option<&cmd_exec::Intent>,
     cmd_json: bool,
     request_file: Option<&str>,
-) {
+) -> Result<(), String> {
     let (mut signal, mut endpoint, socket, _, _audio_mid) =
-        connect(signal_url, room, Role::Viewer, auth, audio);
+        connect(signal_url, room, Role::Viewer, auth, audio)?;
     let mut frames = 0u64;
     let mut bytes = 0u64;
     let mut keyframes = 0u64;
@@ -1032,8 +1120,24 @@ fn viewer(
     let mut decoded_frames: u64 = 0;
     // #73 Opus 音频：libopus 解码（惰性创建；不可用时降级为仅统计）。
     let mut opus_decoder: Option<aerodesk_ffmpeg::audio::OpusDecoder> = None;
+    // #173 媒体静默检测：收到过包后连续无包超过阈值视为会话死亡（str0m is_alive
+    // 在 recvonly 场景下不触发 ICE Failed，需主动探活）。
+    let mut last_rx: Option<Instant> = None;
+    const DEAD_AFTER_NO_MEDIA: Duration = Duration::from_secs(8);
 
     loop {
+        // #173 自动重连：ICE 失效（SFU/网络断开）时退出会话，由主流程重连。
+        if !endpoint.is_alive() {
+            info!("viewer: ICE session ended, exiting session for reconnect");
+            return Err("ICE session ended".into());
+        }
+        // #173 媒体静默检测：收到过媒体后连续无包视为会话死亡（recvonly 下 ICE Failed 不可靠）。
+        if let Some(t) = last_rx
+            && t.elapsed() > DEAD_AFTER_NO_MEDIA
+        {
+            info!("viewer: no media for {DEAD_AFTER_NO_MEDIA:?}, treating session as dead");
+            return Err("no media (ICE dead)".into());
+        }
         // #8 高码率吞吐：每轮尽量排空 socket（最多 512 包），有数据时不再
         // sleep 2ms——否则 4K/大帧流 ~5k pps 时每轮只读 1 包，内核缓冲溢出
         // 丢包，关键帧永远不完整（0 keyframes / 解码 0 帧）。
@@ -1045,6 +1149,7 @@ fn viewer(
             match socket.recv_from(&mut buf) {
                 Ok((n, source)) => {
                     got_any = true;
+                    last_rx = Some(Instant::now());
                     debug!("recv {} bytes from {} type={:#04x}", n, source, buf[0]);
                     let Ok(contents) = buf[..n].try_into() else {
                         continue;
@@ -1263,7 +1368,7 @@ fn viewer(
                 }
                 ClientEvent::Closed => {
                     info!("connection closed");
-                    return;
+                    return Err("connection closed".into());
                 }
                 _ => {}
             }
@@ -1449,7 +1554,7 @@ fn publisher_x264(
     const H: u32 = 360;
 
     let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
-        connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio);
+        connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio).expect("connect");
 
     let make_source = |w: u32, h: u32| {
         if noisy {
@@ -1607,7 +1712,7 @@ fn publisher_vt(
     use str0m::media::Rid;
 
     let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
-        connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio);
+        connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio).expect("connect");
 
     let make_source = |w: u32, h: u32| {
         if noisy {
@@ -1758,7 +1863,7 @@ fn publisher_ffmpeg(
     const FPS: u32 = 30;
 
     let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
-        connect_codec(signal_url, room, Role::Publisher, auth, audio, codec);
+        connect_codec(signal_url, room, Role::Publisher, auth, audio, codec).expect("connect");
     let mut encoder = FfmpegEncoder::new(W, H, FPS, 1_500_000, codec).expect("ffmpeg encoder");
     // #8：--noisy 高熵合成源（码率贴近目标档位，压测/高码率回归用）。
     let mut source = if noisy {
@@ -1886,7 +1991,7 @@ fn publisher_capture_ffmpeg(
     const FPS: u32 = 30;
 
     let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
-        connect_codec(signal_url, room, Role::Publisher, auth, audio, codec);
+        connect_codec(signal_url, room, Role::Publisher, auth, audio, codec).expect("connect");
     let mut capture = match ScreenCapture::start(initial_display, FPS, W, H) {
         Ok(c) => c,
         Err(e) => {
@@ -2027,7 +2132,9 @@ fn publisher_capture(
         simulcast,
         audio,
         auth,
-    );
+    )
+    .expect("connect");
+
     // #75 远程光标：真实光标位置（30Hz）。
     let mut last_cursor = Instant::now();
 
@@ -2221,6 +2328,15 @@ fn publisher_capture(
 
         std::thread::sleep(Duration::from_millis(2));
         let _ = &mut signal;
+    }
+    #[test]
+    fn reconnect_backoff_values() {
+        assert_eq!(reconnect_backoff(0), Duration::from_secs(1));
+        assert_eq!(reconnect_backoff(1), Duration::from_secs(2));
+        assert_eq!(reconnect_backoff(2), Duration::from_secs(4));
+        assert_eq!(reconnect_backoff(3), Duration::from_secs(8));
+        assert_eq!(reconnect_backoff(4), Duration::from_secs(10), "cap at 10s");
+        assert_eq!(reconnect_backoff(99), Duration::from_secs(10));
     }
 }
 
