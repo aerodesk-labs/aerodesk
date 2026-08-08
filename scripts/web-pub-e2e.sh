@@ -44,15 +44,23 @@ cd "$ROOT"
 echo "== 构建"
 cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
 echo "== 启动服务"
+# 前置 e2e 可能残留 SFU/signal 占用 3002/3003 → 先清理，避免 bind 失败。
+pkill -f "aerodesk-sfu|aerodesk-signal" 2>/dev/null || true
+sleep 1
 REC="$(mktemp -d)"
 RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu" >/tmp/webpub-sfu.log 2>&1 &
 SFU=$!
 "$ROOT/target/debug/aerodesk-signal" >/tmp/webpub-sig.log 2>&1 &
 SIG=$!
+OK=0
 for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 3003 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then break; fi
+    if nc -z 127.0.0.1 3003 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then OK=1; break; fi
+    if ! kill -0 "$SFU" 2>/dev/null; then break; fi
     sleep 0.2
 done
+if [ "$OK" != "1" ]; then
+  echo "FAIL: SFU/signal 未就绪；sfu log:"; tail -20 /tmp/webpub-sfu.log; exit 1
+fi
 # CLI viewer 作为观看端：断言能收到 Web 被控端发布的媒体帧。
 "$ROOT/target/debug/aerodesk-cli" --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/webpub-view.log 2>&1 &
 VIEW=$!
