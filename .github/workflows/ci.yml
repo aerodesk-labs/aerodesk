@@ -250,6 +250,9 @@ jobs:
       - name: Install xcodegen
         run: brew install xcodegen
 
+      - name: System deps (x264 for CLI publisher)
+        run: brew install x264 ffmpeg
+
       - name: Select latest Xcode
         run: |
           XCODE=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
