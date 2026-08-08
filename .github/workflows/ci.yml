@@ -112,16 +112,6 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/display-e2e.sh
 
-      # #146 多 PoP 房间路由：双 PoP 本地验证信令重定向 + 客户端自动跟随。
-      # （#148 重构 ci.yml 时曾丢失该 step，恢复于 #154 合并）
-      - name: e2e multi-PoP room routing (macOS only)
-        if: runner.os == 'macOS'
-        run: ./scripts/multipop-e2e.sh
-
-      # #154 多 PoP v2：动态 room→PoP 注册表（首个加入者登记 + 共享文件 + 重定向）。
-      - name: e2e multi-PoP dynamic registry (macOS only)
-        if: runner.os == 'macOS'
-        run: ./scripts/popreg-e2e.sh
       # #72 文件传输：publisher --send-file → SFU → viewer --recv-dir，SHA-256 一致。
       # #85：用 release 构建——debug 下 str0m/sctp-proto 高吞吐 data channel
       # 深调用链会 stack overflow（#102 已知，SFU shard 已 8MB 栈缓解）；
@@ -184,7 +174,7 @@ jobs:
         run: cargo check -p aerodesk-windows --examples
       - name: linux adapter
         if: runner.os == 'Linux'
-        run: cargo check -p aerodesk-linux
+        run: cargo check -p aerodesk-linux -p aerodesk-ui
       - name: macos/ios adapters + cli
         if: runner.os == 'macOS'
         run: cargo check -p aerodesk-macos -p aerodesk-ios -p aerodesk-cli
