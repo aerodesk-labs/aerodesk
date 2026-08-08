@@ -1,0 +1,111 @@
+name: Build & Release
+
+# 打 tag v* 时自动构建 macOS 桌面端，签名/公证后发 GitHub Release；也可手动触发（只出产物）。
+# 参考 ../abb 项目的 release 流水线（.github/workflows/release.yml）。
+# 当前桌面 UI（aerodesk-ui）为 macOS 优先：Windows/Linux 分支仍是占位（见 crates/aerodesk-ui
+# 非 macOS 的 run_viewer 桩），待对应平台 UI 落地后按本文件 macos job 同构补 Windows/Linux。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ─────────────────────────── macOS（Apple Silicon）───────────────────────────
+  macos:
+    runs-on: macos-14 # Apple Silicon（arm64），与本地 aarch64 产物一致
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      # aerodesk-ui(macOS) 依赖 aerodesk-ffmpeg(ffmpeg-next) + x264（与 CI test job 一致）。
+      - name: Install ffmpeg/x264
+        run: brew install x264 ffmpeg
+
+      - name: Build release (aarch64)
+        run: cargo build --release --target aarch64-apple-darwin -p aerodesk-ui
+
+      - name: Import Developer ID certificate (temporary keychain)
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          echo "$APPLE_CERT_P12" | base64 --decode > /tmp/cert.p12
+          security create-keychain -p temp /tmp/temp.keychain
+          security default-keychain -s /tmp/temp.keychain
+          security unlock-keychain -p temp /tmp/temp.keychain
+          security import /tmp/cert.p12 -k /tmp/temp.keychain -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k temp /tmp/temp.keychain
+          IDENTITY=$(security find-identity -v -p codesigning | awk -F'"' '/Developer ID Application/ {print $2; exit}')
+          echo "IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Assemble AeroDesk.app
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          bash scripts/assemble-macos-app.sh "$VERSION" \
+            target/aarch64-apple-darwin/release/aerodesk-ui dist/AeroDesk.app
+
+      - name: Sign app (hardened runtime + timestamp)
+        run: |
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/AeroDesk.app/Contents/MacOS/AeroDesk
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/AeroDesk.app
+          codesign --verify --deep --strict --verbose=2 dist/AeroDesk.app
+
+      - name: Notarize + staple app
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          ditto -c -k --keepParent dist/AeroDesk.app /tmp/AeroDesk-notarize.zip
+          xcrun notarytool submit /tmp/AeroDesk-notarize.zip \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple dist/AeroDesk.app
+          spctl --assess --type execute --verbose=4 dist/AeroDesk.app || true
+
+      - name: Package DMG (drag to Applications) + sign + notarize + staple
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          mkdir -p dmg-staging
+          cp -R dist/AeroDesk.app dmg-staging/
+          ln -s /Applications dmg-staging/Applications
+          hdiutil create -volname "AeroDesk" -srcfolder dmg-staging -ov -format UDZO "dist/AeroDesk-$VERSION.dmg"
+          # DMG 也要签名 + 公证（分发盘片本身要过 Gatekeeper）
+          codesign --force --sign "$IDENTITY" --timestamp "dist/AeroDesk-$VERSION.dmg"
+          xcrun notarytool submit "dist/AeroDesk-$VERSION.dmg" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "dist/AeroDesk-$VERSION.dmg"
+          spctl --assess --type open --context context:primary-signature -v "dist/AeroDesk-$VERSION.dmg" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dist
+          path: dist/AeroDesk-*.dmg
+          if-no-files-found: error
+
+  # ─────────────────────────── 汇总发 Release ───────────────────────────
+  release:
+    needs: [macos]
+    if: startsWith(github.ref, 'refs/tags/v') # 只有打 tag 才发 Release；手动跑只出产物
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
