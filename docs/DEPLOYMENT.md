@@ -30,6 +30,8 @@
 | sfu | `RECORD_ON_DEMAND` | `1` 时只录显式 start() 的房间（配合内部 API 按需录制，#160） |
 | signal | `POP_REGISTRY_FILE` | 动态 room→PoP 注册表文件（可选，#154）：多 PoP 共享同一文件即互见；首个加入者登记房间归属 |
 | signal | `POP_REGISTRY_TTL_SECS` | 注册条目 TTL（默认 3600，过期后可被重新登记） |
+| signal | `MAX_ROOM_CLIENTS` | 每房间人数上限（0=不限，#163）；超限 Join 返回 `Error("room full")` |
+| signal | `MAX_TOTAL_CLIENTS` | 单实例全局连接上限（0=不限，#163）；超限返回 `Error("server full")` |
 
 ## 2. TLS 证书自动化
 

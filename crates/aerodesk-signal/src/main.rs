@@ -16,6 +16,10 @@
 //!   SFU_TOKEN     SFU 内部接口 token（可选）
 //!
 //! 多 PoP（#146）：
+//! 连接配额（#163）：
+//!   MAX_ROOM_CLIENTS  每房间人数上限（0=不限）；超限 Join 返回 Error("room full")
+//!   MAX_TOTAL_CLIENTS 单实例全局连接上限（0=不限）；超限返回 Error("server full")
+//!
 //!   POP_ID        本 PoP 标识（默认 local）
 //!   ROOM_POP_MAP  房间前缀=PoP，逗号分隔（如 eu-=pop-eu,us-=pop-us）；最长前缀优先
 //!   POP_URLS      PoP=客户端信令 URL，逗号分隔（如 pop-eu=wss://eu.example.com:443/ws）
@@ -25,7 +29,7 @@ extern crate tracing;
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -47,6 +51,10 @@ struct Config {
     room_pop_map: Vec<(String, String)>,
     /// 动态注册表（POP_REGISTRY_FILE 开启时存在）：首个加入者登记房间归属（#154）。
     pop_registry: Option<Arc<PopRegistry>>,
+    /// 每房间人数上限（0=不限，#163）。
+    max_room_clients: usize,
+    /// 全局连接上限（0=不限，#163）。
+    max_total_clients: usize,
     /// PoP → 客户端信令 URL（重定向目标）。
     pop_urls: HashMap<String, String>,
     turn: Option<TurnConfig>,
@@ -66,6 +74,24 @@ type Rooms = Arc<Mutex<HashMap<String, Vec<Peer>>>>;
 static RELOAD_TLS: AtomicBool = AtomicBool::new(false);
 static CONFIG: OnceLock<Arc<Config>> = OnceLock::new();
 static ROOMS: OnceLock<Rooms> = OnceLock::new();
+/// 全局在线连接数（#163）。
+static TOTAL_CLIENTS: OnceLock<Arc<AtomicUsize>> = OnceLock::new();
+
+/// 配额检查（纯函数）：房间/全局任一超限返回原因。
+fn quota_ok(
+    room_len: usize,
+    total: usize,
+    room_cap: usize,
+    total_cap: usize,
+) -> Result<(), &'static str> {
+    if room_cap > 0 && room_len >= room_cap {
+        return Err("room full");
+    }
+    if total_cap > 0 && total >= total_cap {
+        return Err("server full");
+    }
+    Ok(())
+}
 
 #[cfg(unix)]
 extern "C" fn on_signal(sig: libc::c_int) {
@@ -171,6 +197,7 @@ fn main() {
     info!("TLS identity source: {}", tls.source);
     let _ = CONFIG.set(config.clone());
     let _ = ROOMS.set(rooms.clone());
+    let _ = TOTAL_CLIENTS.set(Arc::new(AtomicUsize::new(0)));
 
     // 明文 WS（开发用；生产只开 WSS 端口）
     let plain_port: u16 = std::env::var("SIGNAL_PLAIN_PORT")
@@ -271,6 +298,15 @@ fn load_config() -> Config {
         })
         .collect();
 
+    let max_room_clients = std::env::var("MAX_ROOM_CLIENTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let max_total_clients = std::env::var("MAX_TOTAL_CLIENTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
     let pop_registry = std::env::var("POP_REGISTRY_FILE")
         .ok()
         .filter(|s| !s.is_empty())
@@ -291,6 +327,8 @@ fn load_config() -> Config {
         pop_id: std::env::var("POP_ID").unwrap_or_else(|_| "local".into()),
         room_pop_map,
         pop_registry,
+        max_room_clients,
+        max_total_clients,
         pop_urls,
         turn,
         sfu_url: std::env::var("SFU_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into()),
@@ -450,6 +488,34 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                     );
                     break;
                 }
+                // #163 配额：房间/全局上限检查（0=不限）。
+                {
+                    let room_len = rooms
+                        .lock()
+                        .unwrap()
+                        .get(&room)
+                        .map(|peers| peers.len())
+                        .unwrap_or(0);
+                    let total = TOTAL_CLIENTS
+                        .get()
+                        .expect("total initialized")
+                        .load(Ordering::Relaxed);
+                    if let Err(reason) = quota_ok(
+                        room_len,
+                        total,
+                        config.max_room_clients,
+                        config.max_total_clients,
+                    ) {
+                        info!("reject join room={room} role={role:?}: {reason}");
+                        send(
+                            ws.clone(),
+                            SignalMessage::Error {
+                                message: reason.to_string(),
+                            },
+                        );
+                        continue;
+                    }
+                }
                 let peer_id = format!("{}-{}", room, fastrand_id());
                 let peers: Vec<PeerInfo> = rooms
                     .lock()
@@ -475,6 +541,10 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                         role,
                         ws: ws.clone(),
                     });
+                TOTAL_CLIENTS
+                    .get()
+                    .expect("total initialized")
+                    .fetch_add(1, Ordering::Relaxed);
                 info!("peer {peer_id} joined room {room} as {role:?}");
                 send(
                     ws.clone(),
@@ -555,6 +625,10 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
         info!("session closed");
         return;
     };
+    TOTAL_CLIENTS
+        .get()
+        .expect("total initialized")
+        .fetch_sub(1, Ordering::Relaxed);
     info!("peer {peer_id} left room {room}");
     // #66：先快照同房间其它连接、释放 rooms 锁，再尽力广播 PeerLeft。
     // 不能在持有 rooms 锁时去锁其它连接的 ws（锁序反转 → 死锁）。
@@ -652,6 +726,8 @@ mod tests {
             pop_id: "pop-a".into(),
             room_pop_map: vec![],
             pop_registry: None,
+            max_room_clients: 0,
+            max_total_clients: 0,
             pop_urls: HashMap::new(),
             turn: None,
             sfu_url: "http://127.0.0.1:3002".into(),
@@ -710,6 +786,23 @@ mod tests {
 
     /// 回归：peer_id 必须在快速连续 Join 下保持唯一（粗时钟下纳秒时间戳会碰撞，
     /// 碰撞会让 Description 按 id 查角色时命中错误条目，导致 SFU #12 误拒）。
+    #[test]
+    fn quota_ok_boundaries() {
+        // 0 = 不限
+        assert!(quota_ok(5, 100, 0, 0).is_ok());
+        assert!(quota_ok(5, 40, 0, 50).is_ok());
+        assert!(quota_ok(5, 100, 10, 0).is_ok());
+        // 房间满
+        assert_eq!(quota_ok(2, 0, 2, 0), Err("room full"));
+        assert_eq!(quota_ok(2, 0, 3, 0), Ok(()));
+        // 全局满
+        assert_eq!(quota_ok(0, 2, 0, 2), Err("server full"));
+        assert_eq!(quota_ok(0, 2, 0, 3), Ok(()));
+        // 两者取交集
+        assert_eq!(quota_ok(2, 2, 2, 2), Err("room full"));
+        assert_eq!(quota_ok(1, 2, 2, 2), Err("server full"));
+    }
+
     #[test]
     fn peer_ids_unique_across_rapid_calls() {
         let mut seen = std::collections::HashSet::new();
