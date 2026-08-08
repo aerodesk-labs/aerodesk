@@ -58,7 +58,7 @@ const rawRole = params.get('role') || 'viewer';
 // #21：前端校验角色
 const ROLE = (rawRole === 'publisher') ? 'publisher' : 'viewer';
 const ROOM_PREFILL = params.get('room') || 'demo';
-const SIGNAL_OVERRIDE = params.get('signal') || '';
+let SIGNAL_OVERRIDE = params.get('signal') || '';
 const TOKEN_PREFILL = params.get('token') || '';
 
 const byId = (id) => document.getElementById(id);
@@ -69,7 +69,7 @@ $('room').value = ROOM_PREFILL;
 $('token').value = TOKEN_PREFILL;
 
 let rtc = null, ws = null, peerId = null, inputChannel = null, signalChannel = null;
-let pending = [], inputSeq = 0, closed = false, screenStream = null;
+let pending = [], inputSeq = 0, closed = false, redirecting = false, screenStream = null;
 
 // ---------- 信令 ----------
 
@@ -105,6 +105,39 @@ function resetPending(err) {
     for (const p of pending.splice(0)) p.reject(err || new Error('连接已重置'));
 }
 
+// #146 多 PoP：等待 types 中任一类型消息（join 需同时处理 joined/redirect）。
+function nextSignalTypes(types, timeoutMs = 20000) {
+    return new Promise((resolve, reject) => {
+        const item = { type: null, types, resolve, reject };
+        pending.push(item);
+        setTimeout(() => {
+            const i = pending.indexOf(item);
+            if (i >= 0) { pending.splice(i, 1); reject(new Error('信令超时: ' + types.join('/'))); }
+        }, timeoutMs);
+    });
+}
+
+// #146 多 PoP：加入房间，自动跟随信令重定向（最多 maxHops 跳防环）。
+async function joinWithRedirect(token, maxHops = 3) {
+    for (let hop = 0; hop <= maxHops; hop++) {
+        await connectSignal();
+        sendSignal({ type: 'join', room: $('room').value || 'demo', role: ROLE, auth_token: token });
+        const msg = await nextSignalTypes(['joined', 'redirect']);
+        if (msg.type === 'redirect') {
+            log(`多 PoP 重定向（hop ${hop}/${maxHops}）→ ${msg.url}（${msg.pop}）`);
+            setStatus('信令重定向到 ' + msg.pop + '…');
+            redirecting = true;
+            ws.close();
+            redirecting = false;
+            resetPending();
+            SIGNAL_OVERRIDE = msg.url;   // 下一次 connectSignal 使用新地址
+            continue;
+        }
+        return msg; // joined
+    }
+    throw new Error('too many signal redirects');
+}
+
 async function connectSignal() {
     await new Promise((resolve, reject) => {
         ws = new WebSocket(signalURL());
@@ -121,8 +154,9 @@ async function connectSignal() {
             log('signal error: ' + (msg.message || e.data));
             return;
         }
-        // 按类型匹配首个等待项
-        const idx = pending.findIndex((p) => p.type === msg.type);
+        // 按类型匹配首个等待项（支持 nextSignalTypes 的 types 数组）
+        const idx = pending.findIndex((p) =>
+            p.types ? p.types.includes(msg.type) : p.type === msg.type);
         if (idx >= 0) {
             const [item] = pending.splice(idx, 1);
             item.resolve(msg);
@@ -130,7 +164,7 @@ async function connectSignal() {
             log('signal: ' + e.data);
         }
     };
-    ws.onclose = () => { if (!closed) { setStatus('信令断开'); log('signaling closed'); } };
+    ws.onclose = () => { if (!closed && !redirecting) { setStatus('信令断开'); log('signaling closed'); } };
     log('signaling connected: ' + signalURL());
 }
 
@@ -292,9 +326,7 @@ async function connect() {
         }
 
         setStatus('连接信令…');
-        await connectSignal();
-        sendSignal({ type: 'join', room: $('room').value || 'demo', role: ROLE, auth_token: token });
-        const joined = await nextSignal('joined');
+        const joined = await joinWithRedirect(token);
         peerId = joined.peer_id;
         setStatus('已加入房间，peer=' + peerId);
 
