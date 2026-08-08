@@ -54,15 +54,19 @@ class PublisherActivity : AppCompatActivity() {
             status.text = "录屏授权被拒绝"
             return
         }
-        val mp = getSystemService(MediaProjectionManager::class.java)
-        val projection = mp.getMediaProjection(resultCode, data)
         val server = findViewById<EditText>(R.id.server).text.toString()
         val room = findViewById<EditText>(R.id.room).text.toString()
-        capture = PublisherCapture(this, projection, NativeBridge)
-        capture?.start(server, room)
+        // Android 14+：MediaProjection 必须在前台服务（mediaProjection 类型）中创建。
+        val svc = Intent(this, ProjectionService::class.java).apply {
+            putExtra("resultCode", resultCode)
+            putExtra("data", data)
+            putExtra("server", server)
+            putExtra("room", room)
+        }
+        startForegroundService(svc)
         // 输入注入：绑定发布会话指针并启动无障碍服务（需在系统设置开启）。
-        InputInjectionService.pendingPtr = capture?.publisherPtr ?: 0L
-        startService(android.content.Intent(this, InputInjectionService::class.java))
+        InputInjectionService.pendingPtr = 0L
+        startService(Intent(this, InputInjectionService::class.java))
         status.text = "被控端采集编码中…（1280x720 H.264；请到系统设置开启 AeroDesk 无障碍服务）"
     }
 
