@@ -38,7 +38,7 @@ const ROOM = process.argv[2];
 JS
 
 echo "== [2/7] 启动 Xvfb :99"
-Xvfb :99 -screen 0 1280x800x24 >/tmp/linuxui-xvfb.log 2>&1 &
+Xvfb :99 -screen 0 1280x800x24 +extension GLX +render >/tmp/linuxui-xvfb.log 2>&1 &
 XVFB=$!
 sleep 1
 
