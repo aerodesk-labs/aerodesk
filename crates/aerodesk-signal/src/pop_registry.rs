@@ -1,0 +1,186 @@
+//! 动态 room→PoP 注册表（多 PoP v2，#154）。
+//!
+//! 房间归属由首个加入者所在 PoP 登记（`register`），TTL 过期后视为未登记；
+//! 可选 JSON 文件持久化（`POP_REGISTRY_FILE`）——多 PoP 共享同一文件即可互见。
+//! 限制：文件后端为 last-writer-wins，并发登记可能互相覆盖（v2 低变更场景可接受；
+//! 生产多写并发请换 Redis 后端，见 ADR-0004）。
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Entry {
+    pop: String,
+    updated_at: u64,
+}
+
+/// 进程内互斥 + 可选共享文件持久化的注册表。
+pub struct PopRegistry {
+    inner: Mutex<HashMap<String, Entry>>,
+    path: Option<PathBuf>,
+    ttl_secs: u64,
+}
+
+impl PopRegistry {
+    pub fn new(path: Option<PathBuf>, ttl_secs: u64) -> Self {
+        let reg = Self {
+            inner: Mutex::new(HashMap::new()),
+            path,
+            ttl_secs: ttl_secs.max(1),
+        };
+        if reg.path.is_some() {
+            let _ = reg.load();
+        }
+        reg
+    }
+
+    fn now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// 查询房间归属 PoP；过期条目视为不存在并清理。
+    /// 未命中且配置了共享文件时先刷新文件（其它 PoP 的登记），再查一次。
+    pub fn lookup(&self, room: &str) -> Option<String> {
+        let hit = {
+            let m = self.inner.lock().unwrap();
+            let now = Self::now();
+            match m.get(room) {
+                Some(e) if now.saturating_sub(e.updated_at) <= self.ttl_secs => Some(e.pop.clone()),
+                Some(_) => None, // 过期：下面统一清理
+                None => None,
+            }
+        };
+        if hit.is_some() {
+            return hit;
+        }
+        self.merge_file();
+        let mut m = self.inner.lock().unwrap();
+        let now = Self::now();
+        match m.get(room) {
+            Some(e) if now.saturating_sub(e.updated_at) <= self.ttl_secs => Some(e.pop.clone()),
+            Some(_) => {
+                m.remove(room);
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// 登记房间归属（幂等刷新 TTL）并持久化；先 merge 共享文件避免覆盖其它 PoP 条目。
+    pub fn register(&self, room: &str, pop: &str) {
+        self.merge_file();
+        {
+            let mut m = self.inner.lock().unwrap();
+            m.insert(
+                room.to_string(),
+                Entry {
+                    pop: pop.to_string(),
+                    updated_at: Self::now(),
+                },
+            );
+        }
+        let _ = self.save();
+    }
+
+    /// 把共享文件里本进程没有的条目并入内存（本地同房间条目优先）。
+    fn merge_file(&self) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(file_map) = serde_json::from_str::<HashMap<String, Entry>>(&text) else {
+            return;
+        };
+        let mut m = self.inner.lock().unwrap();
+        for (room, entry) in file_map {
+            m.entry(room).or_insert(entry);
+        }
+    }
+
+    /// 当前条目数（测试/观测）。
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap().len()
+    }
+
+    fn load(&self) -> Result<(), String> {
+        let path = self.path.as_ref().ok_or("no registry file path")?;
+        let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let data: HashMap<String, Entry> =
+            serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        *self.inner.lock().unwrap() = data;
+        Ok(())
+    }
+
+    fn save(&self) -> Result<(), String> {
+        let path = self.path.as_ref().ok_or("no registry file path")?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let text = serde_json::to_string_pretty(&*self.inner.lock().unwrap())
+            .map_err(|e| e.to_string())?;
+        std::fs::write(path, text).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn register_lookup_expire() {
+        let reg = PopRegistry::new(None, 3600);
+        assert_eq!(reg.lookup("r"), None);
+        reg.register("r", "pop-a");
+        assert_eq!(reg.lookup("r"), Some("pop-a".into()));
+        // TTL=1：sleep 2s 后过期
+        let reg2 = PopRegistry::new(None, 1);
+        reg2.register("r2", "pop-b");
+        assert_eq!(reg2.lookup("r2"), Some("pop-b".into()));
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        assert_eq!(reg2.lookup("r2"), None, "expired entry must vanish");
+        assert_eq!(reg2.len(), 0, "expired entry must be cleaned");
+    }
+
+    #[test]
+    fn load_save_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("popreg-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("reg.json");
+        {
+            let reg = PopRegistry::new(Some(path.clone()), 3600);
+            reg.register("room-x", "pop-a");
+            reg.register("room-y", "pop-b");
+        }
+        {
+            let reg = PopRegistry::new(Some(path.clone()), 3600);
+            assert_eq!(reg.lookup("room-x"), Some("pop-a".into()));
+            assert_eq!(reg.lookup("room-y"), Some("pop-b".into()));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refresh_picks_up_external_writes() {
+        let dir = std::env::temp_dir().join(format!("popreg-test2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("reg.json");
+        let reg = PopRegistry::new(Some(path.clone()), 3600);
+        // 外部进程写了一条登记（模拟其它 PoP）
+        let external = "{\"room-x\":{\"pop\":\"pop-b\",\"updated_at\":9999999999}}";
+        std::fs::write(&path, external).unwrap();
+        assert_eq!(
+            reg.lookup("room-x"),
+            Some("pop-b".into()),
+            "miss should refresh from file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

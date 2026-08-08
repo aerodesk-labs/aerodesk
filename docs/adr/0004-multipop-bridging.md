@@ -59,3 +59,5 @@
 ## 结论
 
 **当前推荐：v2 = 动态注册表 + 保持同 PoP（不建实时媒体桥接）；v3（SFU 级联 relay）立项后再实施。**
+
+> 更新：v2 动态注册表已实现（#154，`POP_REGISTRY_FILE`/`POP_REGISTRY_TTL_SECS`，文件共享版）。
