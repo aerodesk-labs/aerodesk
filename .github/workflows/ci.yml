@@ -113,7 +113,7 @@ jobs:
         run: ./scripts/display-e2e.sh
 
       # #146 多 PoP 房间路由：双 PoP 本地验证信令重定向 + 客户端自动跟随。
-      # （#148 重构 ci.yml 时曾丢失该 step，恢复于 #154 合并）
+      # （#148/#159 重构 ci.yml 时曾丢失该 step，多次恢复于 #154/#160 合并）
       - name: e2e multi-PoP room routing (macOS only)
         if: runner.os == 'macOS'
         run: ./scripts/multipop-e2e.sh
@@ -189,7 +189,7 @@ jobs:
         run: cargo check -p aerodesk-windows --examples
       - name: linux adapter
         if: runner.os == 'Linux'
-        run: cargo check -p aerodesk-linux
+        run: cargo check -p aerodesk-linux -p aerodesk-ui
       - name: macos/ios adapters + cli
         if: runner.os == 'macOS'
         run: cargo check -p aerodesk-macos -p aerodesk-ios -p aerodesk-cli
