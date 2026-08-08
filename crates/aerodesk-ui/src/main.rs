@@ -1004,19 +1004,44 @@ fn main() -> Result<(), slint::PlatformError> {
     #[cfg(target_os = "macos")]
     aerodesk_macos::dock::install_reopen_handler();
 
-    // 系统托盘（Slint 1.17 SystemTrayIcon）
-    let tray = Tray::new()?;
+    // 系统托盘（Slint 1.17 SystemTrayIcon）：仅 macOS 创建；Linux/Windows 下
+    // Slint 托盘创建失败会 abort（Xvfb/CI 无 StatusNotifier），故非 macOS 不创建。
+    #[cfg(target_os = "macos")]
+    let tray = Tray::new().ok();
+    #[cfg(not(target_os = "macos"))]
+    let tray: Option<Tray> = None;
     let win = ui.as_weak();
-    tray.on_show_window(move || {
-        if let Some(ui) = win.upgrade() {
-            let _ = ui.show();
+    if let Some(tray) = &tray {
+        tray.on_show_window(move || {
+            if let Some(ui) = win.upgrade() {
+                let _ = ui.show();
+            }
+        });
+        tray.on_quit_app(move || {
+            std::process::exit(0);
+        });
+    }
+    // 模拟器/CI 自测：-server/-room/-autoconnect 启动参数（无头/自动化驱动）。
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "-server") {
+        if let Some(v) = args.get(i + 1) {
+            ui.set_server_input(v.clone().into());
         }
-    });
-    tray.on_quit_app(move || {
-        std::process::exit(0);
-    });
+    }
+    if let Some(i) = args.iter().position(|a| a == "-room") {
+        if let Some(v) = args.get(i + 1) {
+            ui.set_room_input(v.clone().into());
+        }
+    }
+    if args.iter().any(|a| a == "-autoconnect") {
+        ui.invoke_connect();
+    }
     ui.show()?;
-    tray.show()?;
+    if let Some(tray) = &tray {
+        if let Err(e) = tray.show() {
+            eprintln!("system tray unavailable: {e:?}");
+        }
+    }
     slint::run_event_loop()
 }
 
