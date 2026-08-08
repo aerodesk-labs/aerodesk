@@ -24,6 +24,7 @@ pub fn run_generic_viewer(
     epoch: Arc<AtomicU64>,
     my_epoch: u64,
 ) {
+    eprintln!("generic viewer: start server={server} room={room}");
     let stale = || epoch.load(Ordering::SeqCst) != my_epoch;
     let auth = token.as_deref().filter(|t| !t.is_empty());
     let mut live = match connect_live_role(&server, &room, Role::Viewer, auth) {
