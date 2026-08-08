@@ -58,6 +58,71 @@ impl LiveSession {
     }
 }
 
+/// 枚举本机 IPv4 接口，选一个可作为 ICE host candidate 的地址：
+/// 排除回环、链路本地（169.254）、未指定地址、隧道接口（utun/tun/gpd，
+/// 含 Clash TUN 假 IP 198.18.0.0/15）——这些地址对端不可达。
+/// 优先私有网段（LAN），否则取第一个非排除的全局地址；都没有则回退 127.0.0.1。
+#[cfg(unix)]
+fn discover_local_ip() -> Option<std::net::IpAddr> {
+    unsafe {
+        let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut ifap) != 0 || ifap.is_null() {
+            return None;
+        }
+        let mut best: Option<std::net::Ipv4Addr> = None;
+        let mut first: Option<std::net::Ipv4Addr> = None;
+        let mut p = ifap;
+        while !p.is_null() {
+            let ifa = &*p;
+            if !ifa.ifa_addr.is_null()
+                && (*ifa.ifa_addr).sa_family == libc::AF_INET as libc::sa_family_t
+            {
+                let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+                let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+                let name = std::ffi::CStr::from_ptr(ifa.ifa_name)
+                    .to_string_lossy()
+                    .into_owned();
+                let oct = ip.octets();
+                let is_tunnel = name.starts_with("utun")
+                    || name.starts_with("tun")
+                    || name.starts_with("gpd")
+                    || name.starts_with("ipsec")
+                    || name.starts_with("ppp");
+                // Clash TUN fake-ip 段（198.18.0.0/15）：macOS 上会劫持全部出站，
+                // 但该地址对端不可达，必须排除。
+                let is_fake_ip = oct[0] == 198 && oct[1] == 18;
+                let is_link_local = oct[0] == 169 && oct[1] == 254;
+                if !ip.is_loopback()
+                    && !ip.is_unspecified()
+                    && !is_link_local
+                    && !is_fake_ip
+                    && !is_tunnel
+                {
+                    if first.is_none() {
+                        first = Some(ip);
+                    }
+                    if ip.is_private() {
+                        best = Some(ip);
+                    }
+                }
+            }
+            p = ifa.ifa_next;
+        }
+        libc::freeifaddrs(ifap);
+        let ip = best.or(first).unwrap_or(std::net::Ipv4Addr::LOCALHOST);
+        Some(std::net::IpAddr::V4(ip))
+    }
+}
+
+/// 非 Unix 平台（Windows 等）：临时 UDP socket connect 到公共地址探测出口 IP；
+/// 失败回退 127.0.0.1。
+#[cfg(not(unix))]
+fn discover_local_ip() -> Option<std::net::IpAddr> {
+    let probe = UdpSocket::bind("0.0.0.0:0").ok()?;
+    probe.connect("8.8.8.8:80").ok()?;
+    probe.local_addr().ok().map(|a| a.ip())
+}
+
 /// 连接并保留活跃会话（观看端）。
 pub fn connect_live(server: &str, room: &str) -> Result<LiveSession, String> {
     connect_live_role(server, room, Role::Viewer, None)
@@ -75,12 +140,33 @@ pub fn connect_live_role(
         .join(room, role, auth)
         .map_err(|e| format!("join: {e}"))?;
 
-    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("udp bind: {e}"))?;
-    let addr = socket.local_addr().map_err(|e| e.to_string())?;
+    // #1：iOS（含模拟器）下通配符绑定 + 0.0.0.0 candidate 会被 str0m 拒绝，且
+    // 模拟器 UDP 收不到发往 LAN IP/0.0.0.0 绑定 socket 的包。当信令地址是
+    // loopback（本地开发/模拟器，媒体 SFU 同机）时直接绑定 127.0.0.1（与 CLI
+    // 完全一致）；远端信令（真机场景）才绑定 0.0.0.0 并通告出口 IP candidate。
+    let loopback_signal =
+        server.contains("127.0.0.1") || server.contains("localhost") || server.contains("::1");
+    let socket = if loopback_signal {
+        UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("udp bind: {e}"))?
+    } else {
+        UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("udp bind: {e}"))?
+    };
+    let bind_addr = socket.local_addr().map_err(|e| e.to_string())?;
+    let mut candidates = vec![bind_addr.ip()];
+    if !loopback_signal
+        && let Some(ip) = discover_local_ip()
+        && !candidates.contains(&ip)
+    {
+        candidates.push(ip);
+    }
     let mut endpoint = crate::Endpoint::new();
-    endpoint
-        .add_local_candidate(addr, Protocol::Udp)
-        .map_err(|e| format!("candidate: {e:?}"))?;
+    for ip in candidates {
+        let addr = std::net::SocketAddr::new(ip, bind_addr.port());
+        tracing::debug!("local candidate {addr}");
+        endpoint
+            .add_local_candidate(addr, Protocol::Udp)
+            .map_err(|e| format!("candidate: {e:?}"))?;
+    }
     // #12：viewer 的 offer 用 recvonly（SFU 拒绝 viewer 发布媒体）。
     if role == Role::Viewer {
         endpoint.add_video_recvonly();
@@ -122,8 +208,16 @@ pub fn connect_live_role(
         }
         let _ = endpoint.handle_timeout(std::time::Instant::now());
         while let Some(output) = endpoint.poll_output() {
-            if let str0m::Output::Transmit(t) = output {
-                let _ = socket.send_to(&t.contents, t.destination);
+            match output {
+                str0m::Output::Transmit(t) => {
+                    let _ = socket.send_to(&t.contents, t.destination);
+                }
+                // 关键：遇到 Timeout 必须退出本轮排空（或回喂 handle_input(Timeout)），
+                // 否则 str0m 会反复返回同一个 Timeout → 100% CPU 死循环，
+                // connect_live_role 永不返回（iOS viewer pump 线程无法启动）。
+                // CLI 主循环同样 break（见 main.rs poll_output）。
+                str0m::Output::Timeout(_) => break,
+                str0m::Output::Event(_) => {}
             }
         }
         while let Some(ev) = endpoint.poll_event() {
