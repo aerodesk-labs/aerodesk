@@ -73,8 +73,13 @@ signal.aerodesk.io {
 
 - **就近接入**：每个 PoP 一组 `signal + sfu + coturn`；客户端经 DNS（GeoDNS/Anycast）
   选最近 PoP，信令返回该 PoP 的 TURN/SFU 地址。
-- **房间跨 PoP**：默认房间内成员落在同一 PoP（分片哈希路由同房间同分片）。
-  跨 PoP 房间需信令层把房间钉到固定 PoP（房间 → PoP 映射表），暂不支持实时跨区媒体桥接。
+- **房间跨 PoP（v1 已支持，#146）**：信令层把房间钉到固定 PoP——每 PoP 设置
+  `POP_ID`，并用 `ROOM_POP_MAP`（`房间前缀=PoP`，逗号分隔，最长前缀优先）声明钉 PoP 的房间，
+  `POP_URLS`（`PoP=客户端信令URL`）给出各 PoP 的信令地址。客户端连错 PoP 时信令返回
+  `Redirect`，原生客户端（aerodesk-core）自动重连到目标 PoP 的 signal/SFU
+  （最多 3 跳防环）；Web 端重定向支持为后续。
+  单机多 PoP 测试可用 `SFU_MEDIA_PORT`/`SFU_SIGNAL_PORT`/`SFU_INTERNAL_PORT` 覆盖 SFU 端口，
+  示例见 `scripts/multipop-e2e.sh`。暂不支持实时跨区媒体桥接（房间内成员必须落在同一 PoP）。
 - **TURN 就近**：每 PoP 部署 coturn，`TURN_URLS` 指向本 PoP；`RELAY 端口段` 开放 UDP 49152-49200。
 - **监控告警**：SFU 暴露 `GET /metrics/prometheus`（Prometheus 文本格式：每分片
   clients/rx·tx packets/bytes + 合计 + `aerodesk_sfu_draining` gauge），可直接被
