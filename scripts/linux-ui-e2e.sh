@@ -68,7 +68,7 @@ DISPLAY=:99 "$ROOT/target/debug/aerodesk-ui" \
   -server 127.0.0.1:3003 -room "$ROOM" -autoconnect >/tmp/linuxui-ui.log 2>&1 &
 UI_PID=$!
 sleep 5
-echo "UI alive: $(kill -0 $UI_PID 2>/dev/null && echo yes || echo no), log lines: $(wc -l < /tmp/linuxui-ui.log 2>/dev/null || echo 0)
+echo "UI alive: $(kill -0 $UI_PID 2>/dev/null && echo yes || echo no), log lines: $(wc -l < /tmp/linuxui-ui.log 2>/dev/null || echo 0)"
 
 echo "== [6/7] 断言解码帧"
 python3 - <<'PY'
