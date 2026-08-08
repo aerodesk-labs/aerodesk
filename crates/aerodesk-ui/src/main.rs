@@ -1034,7 +1034,13 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     }
     if args.iter().any(|a| a == "-autoconnect") {
-        ui.invoke_connect();
+        // 事件循环内触发连接（事件循环启动前 invoke 会因 UI 未就绪失败）。
+        let auto_ui = ui.as_weak();
+        slint::Timer::single_shot(std::time::Duration::from_millis(500), move || {
+            if let Some(ui) = auto_ui.upgrade() {
+                ui.invoke_connect();
+            }
+        });
     }
     ui.show()?;
     if let Some(tray) = &tray {
