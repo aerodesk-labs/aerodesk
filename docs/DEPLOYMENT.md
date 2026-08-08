@@ -22,6 +22,7 @@
 | 组件 | 变量 | 说明 |
 |---|---|---|
 | signal | `JWT_SECRET` | HS256 共享密钥；**生产必设**，开启 JWT 认证 |
+| signal | `JWT_SECRET_OLD` | 旧密钥（轮换宽限期，可选）：新密钥验证失败时回退；轮换完成后移除 |
 | signal | `AUTH_TOKENS` | 静态 token（兼容模式；JWT 开启时忽略） |
 | signal | `TURN_SECRET` / `TURN_URLS` | coturn REST 凭证下发 |
 | signal | `SFU_URL` / `SFU_TOKEN` | SFU 内部接口 + 内部 token |
@@ -65,8 +66,8 @@ signal.aerodesk.io {
 ```
 
 **内部 CA（企业内网）**：用 `step-ca` 或 vault PKI 签发，客户端信任链预置；
-证书轮换走 **SIGHUP 热重载**（SFU 已实现：`kill -HUP <pid>` 重读 `CERT_FILE`/`KEY_FILE`
-并重建 HTTPS server，无需重启进程、旧连接不受影响；signal 侧建议由 Caddy/nginx 反代自动换证）。
+证书轮换走 **SIGHUP 热重载**（signal/SFU 均已实现：`kill -HUP <pid>` 重读
+`CERT_FILE`/`KEY_FILE` 并重建 TLS server，无需重启进程、旧连接不受影响）。
 
 ## 3. 多 PoP 部署
 
@@ -89,8 +90,9 @@ signal.aerodesk.io {
 ## 4. JWT 密钥管理
 
 - `JWT_SECRET` 用强随机值：`openssl rand -base64 48`
-- 每 PoP 独立或共享按需；密钥轮换：旧 secret 保留宽限期（待实现双 secret 支持），
-  再统一切换。
+- 每 PoP 独立或共享按需；密钥轮换（**双 secret 宽限期已支持**）：
+  1. 签发新 token 用新 `JWT_SECRET`；同时设置 `JWT_SECRET_OLD` 保留旧密钥（无需重启）
+  2. 观察宽限期（按旧 token TTL）内认证无异常后，移除 `JWT_SECRET_OLD` 并重启（或滚动）
 - 签发 token（运维/测试）：
 
 ```sh

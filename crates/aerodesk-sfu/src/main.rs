@@ -211,6 +211,33 @@ fn prometheus_body(shared: &Shared, draining: bool) -> String {
 }
 
 /// SIGHUP：重读 TLS 身份并重建公共 HTTPS server（旧连接由各自 TLS 会话继续）。
+/// 带重试的公共 HTTPS server 绑定：旧 listener 释放后端口可能短暂 EADDRINUSE
+/// （macOS 实测，signal 同款修复），重试可自愈；失败返回最后一次错误。
+fn bind_public_with_retry(
+    cert: &[u8],
+    key: &[u8],
+    attempts: usize,
+) -> Result<Server<fn(&Request) -> Response>, String> {
+    let mut last_err = String::new();
+    for i in 0..attempts {
+        match Server::new_ssl(
+            format!("0.0.0.0:{SIGNAL_PORT}"),
+            public_handler as fn(&Request) -> Response,
+            cert.to_vec(),
+            key.to_vec(),
+        ) {
+            Ok(srv) => return Ok(srv),
+            Err(e) => {
+                last_err = e.to_string();
+                if i + 1 < attempts {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
 fn reload_tls(
     public: &mut Option<Server<fn(&Request) -> Response>>,
     tls: &mut aerodesk_protocol::tls::TlsIdentity,
@@ -227,12 +254,7 @@ fn reload_tls(
             info!("SIGHUP: reloading TLS identity from {}", new_tls.source);
             // 同端口不能同时绑定两个 server：先释放旧 listener 再绑定新的。
             public.take();
-            match Server::new_ssl(
-                format!("0.0.0.0:{SIGNAL_PORT}"),
-                public_handler as fn(&Request) -> Response,
-                new_tls.cert.clone(),
-                new_tls.key.clone(),
-            ) {
+            match bind_public_with_retry(&new_tls.cert, &new_tls.key, 20) {
                 Ok(srv) => {
                     *public = Some(srv);
                     *tls = new_tls;
@@ -240,12 +262,7 @@ fn reload_tls(
                 }
                 Err(e) => {
                     error!("TLS reload bind failed: {e}; restoring previous identity");
-                    match Server::new_ssl(
-                        format!("0.0.0.0:{SIGNAL_PORT}"),
-                        public_handler as fn(&Request) -> Response,
-                        tls.cert.clone(),
-                        tls.key.clone(),
-                    ) {
+                    match bind_public_with_retry(&tls.cert, &tls.key, 20) {
                         Ok(srv) => *public = Some(srv),
                         Err(e2) => error!(
                             "restore failed: {e2}; public HTTPS down until next SIGHUP or restart"

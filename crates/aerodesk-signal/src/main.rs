@@ -7,6 +7,9 @@
 //!   SIGNAL_PORT   WSS 端口（默认 3001）
 //!   AUTH_TOKENS   逗号分隔合法 token（JWT_SECRET 未设置时使用；空则不认证）
 //!   JWT_SECRET     HS256 共享密钥；设置后 Join 必须携带合法 JWT（用户/设备/房间/角色授权）
+//!   JWT_SECRET_OLD 旧密钥（轮换宽限期）：新密钥验证失败时回退旧密钥，轮换不中断
+//!
+//! SIGHUP：重读 TLS 证书并重建 WSS server（无需重启进程）。
 //!   TURN_SECRET   coturn REST secret（空则不下发 TURN）
 //!   TURN_URLS     逗号分隔 TURN URL（默认 127.0.0.1:3478）
 //!   SFU_URL       SFU 内部接口（默认 http://127.0.0.1:3002）
@@ -16,9 +19,10 @@
 extern crate tracing;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aerodesk_protocol::signal::{PeerInfo, Role, SignalMessage, TurnConfig};
 use rouille::websocket::{self, Message, Websocket};
@@ -27,6 +31,8 @@ use rouille::{Request, Response};
 struct Config {
     auth_tokens: Vec<String>,
     jwt_secret: Option<String>,
+    /// 旧密钥（轮换宽限期）：`jwt_secret` 验证失败时回退（#143）。
+    jwt_secret_old: Option<String>,
     turn: Option<TurnConfig>,
     sfu_url: String,
     sfu_token: Option<String>,
@@ -39,6 +45,100 @@ struct Peer {
 }
 
 type Rooms = Arc<Mutex<HashMap<String, Vec<Peer>>>>;
+
+/// SIGHUP 触发：重读 TLS 证书并重建 WSS server。
+static RELOAD_TLS: AtomicBool = AtomicBool::new(false);
+static CONFIG: OnceLock<Arc<Config>> = OnceLock::new();
+static ROOMS: OnceLock<Rooms> = OnceLock::new();
+
+#[cfg(unix)]
+extern "C" fn on_signal(sig: libc::c_int) {
+    if sig == libc::SIGHUP {
+        RELOAD_TLS.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(unix)]
+fn install_signal_handlers() {
+    // Safety: 信号处理器只做原子写（async-signal-safe）。
+    unsafe {
+        libc::signal(libc::SIGHUP, on_signal as *const () as libc::sighandler_t);
+    }
+}
+
+/// WSS 处理器（fn 指针，便于 SIGHUP 重建 Server）。
+fn wss_handler(request: &Request) -> Response {
+    let config = CONFIG.get().expect("config initialized").clone();
+    let rooms = ROOMS.get().expect("rooms initialized").clone();
+    handle(request, config, rooms)
+}
+
+/// 带重试的 TLS server 绑定：旧 listener 释放后端口可能短暂 EADDRINUSE（macOS 实测），
+/// 重试可自愈；失败返回最后一次错误。
+fn bind_wss_with_retry(
+    port: u16,
+    cert: &[u8],
+    key: &[u8],
+    attempts: usize,
+) -> Result<rouille::Server<fn(&Request) -> Response>, String> {
+    let mut last_err = String::new();
+    for i in 0..attempts {
+        match rouille::Server::new_ssl(
+            format!("0.0.0.0:{port}"),
+            wss_handler as fn(&Request) -> Response,
+            cert.to_vec(),
+            key.to_vec(),
+        ) {
+            Ok(srv) => return Ok(srv),
+            Err(e) => {
+                last_err = e.to_string();
+                if i + 1 < attempts {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
+/// SIGHUP：重读 TLS 身份并重建 WSS server（旧连接不受影响；同证书 no-op）。
+fn reload_tls(
+    server: &mut Option<rouille::Server<fn(&Request) -> Response>>,
+    tls: &mut aerodesk_protocol::tls::TlsIdentity,
+) {
+    match aerodesk_protocol::tls::TlsIdentity::load() {
+        Ok(new_tls) => {
+            if new_tls.cert == tls.cert && new_tls.key == tls.key {
+                info!(
+                    "SIGHUP: TLS identity unchanged ({}), keep serving",
+                    new_tls.source
+                );
+                return;
+            }
+            let port: u16 = std::env::var("SIGNAL_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(3001);
+            info!("SIGHUP: reloading TLS identity from {}", new_tls.source);
+            server.take();
+            match bind_wss_with_retry(port, &new_tls.cert, &new_tls.key, 20) {
+                Ok(srv) => {
+                    *server = Some(srv);
+                    *tls = new_tls;
+                    info!("TLS reloaded (new connections use updated certificate)");
+                }
+                Err(e) => {
+                    error!("SIGHUP: TLS reload bind failed: {e}; restoring previous identity");
+                    match bind_wss_with_retry(port, &tls.cert, &tls.key, 20) {
+                        Ok(srv) => *server = Some(srv),
+                        Err(e2) => error!("restore failed: {e2}; WSS down until restart"),
+                    }
+                }
+            }
+        }
+        Err(e) => error!("SIGHUP: TLS identity reload failed: {e}"),
+    }
+}
 
 fn main() {
     init_log();
@@ -53,6 +153,8 @@ fn main() {
         std::process::exit(1);
     });
     info!("TLS identity source: {}", tls.source);
+    let _ = CONFIG.set(config.clone());
+    let _ = ROOMS.set(rooms.clone());
 
     // 明文 WS（开发用；生产只开 WSS 端口）
     let plain_port: u16 = std::env::var("SIGNAL_PLAIN_PORT")
@@ -68,15 +170,29 @@ fn main() {
     std::thread::spawn(move || plain.run());
     info!("Signaling (WS plain) listening on :{plain_port}");
 
-    let server = rouille::Server::new_ssl(
-        format!("0.0.0.0:{port}"),
-        move |request| handle(request, config.clone(), rooms.clone()),
-        tls.cert,
-        tls.key,
-    )
-    .expect("start signaling server");
+    #[cfg(unix)]
+    install_signal_handlers();
+
+    let mut tls = tls;
+    let mut server = Some(
+        rouille::Server::new_ssl(
+            format!("0.0.0.0:{port}"),
+            wss_handler as fn(&Request) -> Response,
+            tls.cert.clone(),
+            tls.key.clone(),
+        )
+        .expect("start signaling server"),
+    );
     info!("Signaling (WSS) listening on :{port}");
-    server.run();
+    // 轮询 + SIGHUP 证书热重载（#143，复用 #128 模式）。
+    loop {
+        if let Some(srv) = &server {
+            srv.poll_timeout(Duration::from_millis(10));
+        }
+        if RELOAD_TLS.swap(false, Ordering::Relaxed) {
+            reload_tls(&mut server, &mut tls);
+        }
+    }
 }
 
 fn init_log() {
@@ -123,9 +239,57 @@ fn load_config() -> Config {
     Config {
         auth_tokens,
         jwt_secret: std::env::var("JWT_SECRET").ok().filter(|s| !s.is_empty()),
+        jwt_secret_old: std::env::var("JWT_SECRET_OLD")
+            .ok()
+            .filter(|s| !s.is_empty()),
         turn,
         sfu_url: std::env::var("SFU_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into()),
         sfu_token: std::env::var("SFU_TOKEN").ok(),
+    }
+}
+
+/// 认证：JWT（新密钥优先，失败回退 JWT_SECRET_OLD 宽限期）→ 静态 token → 开发模式放行。
+fn auth_ok(config: &Config, token: Option<&str>, room: &str, role: Role) -> bool {
+    let token = token.unwrap_or_default();
+    if let Some(secret) = &config.jwt_secret {
+        // JWT 认证：校验签名/过期/房间/角色。
+        match aerodesk_protocol::jwt::validate_token(secret, token, room, role) {
+            Ok(claims) => {
+                info!(
+                    "jwt auth ok: user={} dev={:?} room={} role={:?}",
+                    claims.sub, claims.dev, room, role
+                );
+                true
+            }
+            Err(new_err) => {
+                if let Some(old) = &config.jwt_secret_old {
+                    match aerodesk_protocol::jwt::validate_token(old, token, room, role) {
+                        Ok(claims) => {
+                            info!(
+                                "jwt auth ok (legacy secret): user={} dev={:?} room={} role={:?}",
+                                claims.sub, claims.dev, room, role
+                            );
+                            return true;
+                        }
+                        Err(e) => {
+                            warn!("jwt auth failed (new: {new_err}; legacy: {e})");
+                        }
+                    }
+                } else {
+                    warn!("jwt auth failed: {new_err}");
+                }
+                false
+            }
+        }
+    } else if !config.auth_tokens.is_empty() {
+        // 静态 token 认证（兼容模式）。
+        config
+            .auth_tokens
+            .iter()
+            .any(|t| Some(t.as_str()) == token.into())
+    } else {
+        // 开发模式：不认证。
+        true
     }
 }
 
@@ -173,30 +337,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 role,
                 auth_token,
             } => {
-                let auth_ok = if let Some(secret) = &config.jwt_secret {
-                    // JWT 认证：校验签名/过期/房间/角色。
-                    let token = auth_token.as_deref().unwrap_or_default();
-                    aerodesk_protocol::jwt::validate_token(secret, token, &room, role)
-                        .map(|claims| {
-                            info!(
-                                "jwt auth ok: user={} dev={:?} room={} role={:?}",
-                                claims.sub, claims.dev, room, role
-                            );
-                        })
-                        .map_err(|e| {
-                            warn!("jwt auth failed: {e}");
-                        })
-                        .is_ok()
-                } else if !config.auth_tokens.is_empty() {
-                    // 静态 token 认证（兼容模式）。
-                    config
-                        .auth_tokens
-                        .iter()
-                        .any(|t| Some(t.as_str()) == auth_token.as_deref())
-                } else {
-                    // 开发模式：不认证。
-                    true
-                };
+                let auth_ok = auth_ok(&config, auth_token.as_deref(), &room, role);
                 if !auth_ok {
                     send(
                         ws.clone(),
@@ -396,6 +537,67 @@ fn fastrand_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use aerodesk_protocol::jwt::mint_token;
+
+    fn cfg(new: &str, old: Option<&str>) -> Config {
+        Config {
+            auth_tokens: vec![],
+            jwt_secret: Some(new.into()),
+            jwt_secret_old: old.map(|s| s.to_string()),
+            turn: None,
+            sfu_url: "http://127.0.0.1:3002".into(),
+            sfu_token: None,
+        }
+    }
+
+    #[test]
+    fn dual_secret_accepts_new_and_legacy() {
+        let token_new =
+            mint_token("new-secret", "u1", None, Some("r1"), Some(Role::Viewer), 60).unwrap();
+        let token_old =
+            mint_token("old-secret", "u2", None, Some("r1"), Some(Role::Viewer), 60).unwrap();
+        let config = cfg("new-secret", Some("old-secret"));
+        assert!(
+            auth_ok(&config, Some(&token_new), "r1", Role::Viewer),
+            "new secret token must pass"
+        );
+        assert!(
+            auth_ok(&config, Some(&token_old), "r1", Role::Viewer),
+            "legacy secret token must pass during grace"
+        );
+    }
+
+    #[test]
+    fn dual_secret_rejects_wrong_secret_and_wrong_room() {
+        let token_wrong =
+            mint_token("attacker", "u3", None, Some("r1"), Some(Role::Viewer), 60).unwrap();
+        let config = cfg("new-secret", Some("old-secret"));
+        assert!(
+            !auth_ok(&config, Some(&token_wrong), "r1", Role::Viewer),
+            "wrong secret must fail"
+        );
+
+        let token_room =
+            mint_token("new-secret", "u4", None, Some("r2"), Some(Role::Viewer), 60).unwrap();
+        assert!(
+            !auth_ok(&config, Some(&token_room), "r1", Role::Viewer),
+            "room mismatch must fail"
+        );
+    }
+
+    #[test]
+    fn old_secret_only_valid_before_rotation_completes() {
+        // 轮换完成（JWT_SECRET_OLD 移除）后，旧密钥 token 必须拒绝
+        let token_old =
+            mint_token("old-secret", "u5", None, Some("r1"), Some(Role::Viewer), 60).unwrap();
+        let config = cfg("new-secret", None);
+        assert!(
+            !auth_ok(&config, Some(&token_old), "r1", Role::Viewer),
+            "old token must fail after grace ends"
+        );
+    }
+
     use super::*;
 
     /// 回归：peer_id 必须在快速连续 Join 下保持唯一（粗时钟下纳秒时间戳会碰撞，
