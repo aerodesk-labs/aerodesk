@@ -15,9 +15,18 @@ permissions:
 jobs:
   # ─────────────────────────── macOS（Apple Silicon）───────────────────────────
   macos:
-    runs-on: macos-14 # Apple Silicon（arm64），与本地 aarch64 产物一致
+    # macos-15：默认 Xcode/Metal SDK 更新，避免 apple-metal swift-bridge 在
+    # macos-14 旧 SDK 下编译失败（MTLLogState/MTLResidencySet 等新 API 缺失）。
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+
+      # 镜像带多个 Xcode，自动选最新的（Slint/winit 的 Metal bridge 需要新 SDK）。
+      - name: Select latest Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          echo "XCODE=$XCODE"
+          [ -n "$XCODE" ] && sudo xcode-select -s "$XCODE" || true
 
       # workspace 里 aerodesk-sfu 的 dev-dep str0m-netem 是路径依赖（../../../str0m），
       # cargo 解析 workspace 时必须能读到（与 CI test job 同款处理）。
