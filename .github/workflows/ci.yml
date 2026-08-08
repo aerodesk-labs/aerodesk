@@ -112,6 +112,11 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/display-e2e.sh
 
+      # #146 多 PoP 房间路由：双 PoP 本地验证信令重定向 + 客户端自动跟随。
+      - name: e2e multi-PoP room routing (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/multipop-e2e.sh
+
       # #72 文件传输：publisher --send-file → SFU → viewer --recv-dir，SHA-256 一致。
       # #85：用 release 构建——debug 下 str0m/sctp-proto 高吞吐 data channel
       # 深调用链会 stack overflow（#102 已知，SFU shard 已 8MB 栈缓解）；

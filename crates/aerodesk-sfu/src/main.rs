@@ -36,10 +36,19 @@ use aerodesk_protocol::signal::{Role, TurnConfig};
 use shard::{Shard, ShardCommand, Shared};
 
 /// 统一媒体端口（UDP + TCP + SSL-TCP 复用）。生产用 443。
+/// 默认端口；可用环境变量覆盖（支持单机多 PoP 测试，如 multipop-e2e，#146）。
 const MEDIA_PORT: u16 = 3478;
 const SIGNAL_PORT: u16 = 3000;
 /// SFU 内部接口（信令服务代理用，仅本机回环）。
 const INTERNAL_PORT: u16 = 3002;
+
+/// 读环境变量端口（非法/缺失时回退默认）。
+fn env_port(name: &str, default: u16) -> u16 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
 
 fn init_log() {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -221,7 +230,7 @@ fn bind_public_with_retry(
     let mut last_err = String::new();
     for i in 0..attempts {
         match Server::new_ssl(
-            format!("0.0.0.0:{SIGNAL_PORT}"),
+            format!("0.0.0.0:{}", env_port("SFU_SIGNAL_PORT", SIGNAL_PORT)),
             public_handler as fn(&Request) -> Response,
             cert.to_vec(),
             key.to_vec(),
@@ -318,7 +327,8 @@ pub fn main() {
     info!("TLS identity source: {}", tls.source);
 
     let host_addr = util::select_host_address();
-    let media_addr = SocketAddr::new(host_addr, MEDIA_PORT);
+    let media_port = env_port("SFU_MEDIA_PORT", MEDIA_PORT);
+    let media_addr = SocketAddr::new(host_addr, media_port);
     let tcp_listen_addr = media_addr;
 
     // TURN 配置（coturn REST secret；未设置则不下发）
@@ -505,7 +515,7 @@ pub fn main() {
 
     let mut tls = tls;
     let mut public = match Server::new_ssl(
-        format!("0.0.0.0:{SIGNAL_PORT}"),
+        format!("0.0.0.0:{}", env_port("SFU_SIGNAL_PORT", SIGNAL_PORT)),
         public_handler as fn(&Request) -> Response,
         tls.cert.clone(),
         tls.key.clone(),
@@ -524,7 +534,7 @@ pub fn main() {
     };
 
     let internal = match Server::new(
-        format!("127.0.0.1:{INTERNAL_PORT}"),
+        format!("127.0.0.1:{}", env_port("SFU_INTERNAL_PORT", INTERNAL_PORT)),
         internal_handler as fn(&Request) -> Response,
     ) {
         Ok(srv) => {

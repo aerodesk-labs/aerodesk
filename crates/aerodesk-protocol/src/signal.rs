@@ -38,6 +38,12 @@ pub enum SignalMessage {
         peers: Vec<PeerInfo>,
         turn: Option<TurnConfig>,
     },
+    /// 多 PoP：房间钉在其它 PoP，需重连到 `url`（#146）。
+    Redirect {
+        pop: String,
+        url: String,
+        reason: Option<String>,
+    },
     /// WebRTC 会话描述（offer/answer，JSON 字符串）。
     Description {
         from: String,
@@ -76,6 +82,18 @@ mod tests {
             room: "room-1".into(),
             role: Role::Publisher,
             auth_token: Some("token".into()),
+        };
+        let back: SignalMessage =
+            serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+        assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn roundtrip_redirect() {
+        let msg = SignalMessage::Redirect {
+            pop: "pop-eu".into(),
+            url: "wss://eu.example.com:443/ws".into(),
+            reason: Some("room pinned to pop-eu".into()),
         };
         let back: SignalMessage =
             serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
