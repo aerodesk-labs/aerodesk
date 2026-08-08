@@ -104,6 +104,8 @@ pub struct Shared {
     pub room_registry: Arc<RwLock<HashMap<String, HashSet<usize>>>>,
     /// room → 有订阅者（viewer 已接收 track）的分片集合（订阅驱动转发：#132）。
     pub subscribers: Arc<RwLock<HashMap<String, HashSet<usize>>>>,
+    /// (room, client_id) → 所在分片（关键帧请求定向：#136）。
+    pub client_shards: Arc<RwLock<HashMap<(String, u64), usize>>>,
     /// TCP 写句柄（destination → stream），各分片发送时加锁写。
     pub tcp_streams: Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
     /// 每分片指标（索引 = shard id）。
@@ -118,6 +120,7 @@ impl Shared {
             route_table: Arc::new(RwLock::new(HashMap::new())),
             room_registry: Arc::new(RwLock::new(HashMap::new())),
             subscribers: Arc::new(RwLock::new(HashMap::new())),
+            client_shards: Arc::new(RwLock::new(HashMap::new())),
             tcp_streams: Arc::new(Mutex::new(HashMap::new())),
             metrics: Arc::new((0..shard_count).map(|_| ShardMetrics::new()).collect()),
             recorder: None,
@@ -197,6 +200,31 @@ impl Shared {
             .entry(room.to_string())
             .or_default()
             .insert(shard);
+    }
+
+    /// 登记客户端所在分片（关键帧请求定向用）。
+    pub fn register_client(&self, room: &str, client_id: u64, shard: usize) {
+        self.client_shards
+            .write()
+            .unwrap()
+            .insert((room.to_string(), client_id), shard);
+    }
+
+    /// 注销单个客户端（分片清理断线时调用）。
+    pub fn unregister_client(&self, room: &str, client_id: u64, shard: usize) {
+        let mut reg = self.client_shards.write().unwrap();
+        if reg.get(&(room.to_string(), client_id)) == Some(&shard) {
+            reg.remove(&(room.to_string(), client_id));
+        }
+    }
+
+    /// 查询客户端所在分片。
+    pub fn client_shard(&self, room: &str, client_id: u64) -> Option<usize> {
+        self.client_shards
+            .read()
+            .unwrap()
+            .get(&(room.to_string(), client_id))
+            .copied()
     }
 }
 
@@ -350,6 +378,7 @@ fn run_shard(
                     }
                     clients.push(client);
                     addr_cache.clear();
+                    shared.register_client(&room, id.as_u64(), index);
                     info!("shard {index}: client {id:?} joined room {room}");
                 }
                 ShardCommand::Cross(ev) => {
@@ -381,9 +410,17 @@ fn run_shard(
 
         // 2. 清理断线客户端 + 房间计数
         let before = clients.len();
+        let dead: Vec<(String, u64)> = clients
+            .iter()
+            .filter(|c| !c.rtc.is_alive())
+            .map(|c| (c.room.clone(), c.id.as_u64()))
+            .collect();
         clients.retain(|c| c.rtc.is_alive());
         if clients.len() != before {
             addr_cache.clear();
+            for (room, id) in &dead {
+                shared.unregister_client(room, *id, index);
+            }
             let mut counts = std::mem::take(&mut room_counts);
             for c in &clients {
                 *counts.entry(c.room.clone()).or_default() += 1;
@@ -704,7 +741,15 @@ fn propagate_local(
                     client.handle_keyframe_request(req, mid_in);
                 }
             }
-            for t in &room_targets {
+            // #136：关键帧请求只发给发布者所在分片；同分片不跨发；
+            // 注册表缺失（理论不应发生）时回退房间广播。
+            let kfr_targets: Vec<usize> =
+                match shared.client_shard(&origin_room, origin_id.as_u64()) {
+                    Some(t) if t == index => Vec::new(),
+                    Some(t) => vec![t],
+                    None => room_targets.clone(),
+                };
+            for t in &kfr_targets {
                 cross(
                     *t,
                     CrossShardEvent::KeyframeRequest {
@@ -744,6 +789,13 @@ fn poll_until_timeout(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClientId(u64);
+
+impl ClientId {
+    /// 原始 id（用于跨分片注册表键）。
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+}
 
 impl Deref for ClientId {
     type Target = u64;
@@ -1515,6 +1567,57 @@ mod tests {
         for q in &client.pending_channel_out {
             assert!(q.is_empty());
         }
+    }
+
+    #[test]
+    fn client_shards_register_lookup_cleanup() {
+        let shared = Shared::new(4);
+        assert_eq!(shared.client_shard("r", 7), None);
+        shared.register_client("r", 7, 2);
+        assert_eq!(shared.client_shard("r", 7), Some(2));
+        shared.unregister_client("r", 7, 2);
+        assert_eq!(shared.client_shard("r", 7), None);
+        // 其它 shard 的值不被误删
+        shared.register_client("r", 7, 2);
+        shared.unregister_client("r", 7, 3);
+        assert_eq!(shared.client_shard("r", 7), Some(2));
+    }
+
+    #[test]
+    fn keyframe_targets_only_publisher_shard_with_fallback() {
+        let shared = Shared::new(4);
+        shared.join_room("r", 1);
+        shared.join_room("r", 2);
+        let index = 1usize;
+        let room_targets: Vec<usize> = shared
+            .room_shards("r")
+            .into_iter()
+            .filter(|i| *i != index)
+            .collect();
+
+        // 未登记：回退房间广播
+        let targets: Vec<usize> = match shared.client_shard("r", 7) {
+            Some(t) if t != index => vec![t],
+            _ => room_targets.clone(),
+        };
+        assert_eq!(targets, vec![2]);
+
+        // 登记发布者在分片 2：只定向到分片 2
+        shared.register_client("r", 7, 2);
+        let targets: Vec<usize> = match shared.client_shard("r", 7) {
+            Some(t) if t != index => vec![t],
+            _ => room_targets.clone(),
+        };
+        assert_eq!(targets, vec![2]);
+
+        // 发布者在同一分片（index）：不跨分片
+        shared.register_client("r", 8, index);
+        let targets: Vec<usize> = match shared.client_shard("r", 8) {
+            Some(t) if t == index => Vec::new(),
+            Some(t) => vec![t],
+            None => room_targets.clone(),
+        };
+        assert!(targets.is_empty(), "same-shard publisher must not cross");
     }
 
     #[test]
