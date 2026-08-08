@@ -168,6 +168,67 @@ impl Shared {
 }
 
 /// 分片线程。
+/// Demuxer 快路径缓存：(source) → client 索引。
+///
+/// 首个包线性扫描认领后登记，后续同源包 O(1) 命中，避免多参与者下逐包
+/// `clients.iter().position(...)` 的 O(n) 开销（borrow-from-pulsebeam v2 #2）。
+/// 有界：超过容量直接清空（简单、可自愈）；客户端增删时由调用方 clear。
+struct AddrCache {
+    map: HashMap<SocketAddr, usize>,
+    cap: usize,
+}
+
+impl AddrCache {
+    fn new(cap: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            cap,
+        }
+    }
+
+    fn lookup(&self, addr: &SocketAddr) -> Option<usize> {
+        self.map.get(addr).copied()
+    }
+
+    fn insert(&mut self, addr: SocketAddr, idx: usize) {
+        if self.map.len() >= self.cap {
+            self.map.clear();
+        }
+        self.map.insert(addr, idx);
+    }
+
+    fn remove(&mut self, addr: &SocketAddr) {
+        self.map.remove(addr);
+    }
+
+    fn clear(&mut self) {
+        self.map.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+}
+
+/// Demuxer 快路径：命中返回对应 client，未命中线性扫描并登记。
+fn demux_client<'a>(
+    clients: &'a mut [Client],
+    input: &Input<'_>,
+    source: SocketAddr,
+    cache: &mut AddrCache,
+) -> Option<&'a mut Client> {
+    if let Some(idx) = cache.lookup(&source) {
+        if idx < clients.len() && clients[idx].rtc.accepts(input) {
+            return Some(&mut clients[idx]);
+        }
+        // 源地址复用/索引失效：删除并回退线性扫描
+        cache.remove(&source);
+    }
+    let idx = clients.iter().position(|c| c.rtc.accepts(input))?;
+    cache.insert(source, idx);
+    Some(&mut clients[idx])
+}
+
 pub struct Shard;
 
 impl Shard {
@@ -210,6 +271,8 @@ fn run_shard(
     let mut room_counts: HashMap<String, usize> = HashMap::new();
 
     let mut last_heartbeat = Instant::now();
+    // Demuxer 快路径：同源包免线性扫描。
+    let mut addr_cache = AddrCache::new(4096);
     let metrics = &shared.metrics[index];
     let cross = |target: usize, ev: CrossShardEvent| {
         if target != index {
@@ -253,10 +316,19 @@ fn run_shard(
                         }
                     }
                     clients.push(client);
+                    addr_cache.clear();
                     info!("shard {index}: client {id:?} joined room {room}");
                 }
                 ShardCommand::Cross(ev) => {
-                    handle_cross_event(index, ev, &mut clients, &socket, &shared, &cross_tx);
+                    handle_cross_event(
+                        index,
+                        ev,
+                        &mut clients,
+                        &mut addr_cache,
+                        &socket,
+                        &shared,
+                        &cross_tx,
+                    );
                 }
                 ShardCommand::TcpPacket {
                     source,
@@ -265,9 +337,10 @@ fn run_shard(
                 } => {
                     if let Some(input) =
                         build_input(source, proto, socket.local_addr().unwrap(), &data)
-                        && let Some(idx) = clients.iter().position(|c| c.rtc.accepts(&input))
+                        && let Some(client) =
+                            demux_client(&mut clients, &input, source, &mut addr_cache)
                     {
-                        clients[idx].handle_input(input);
+                        client.handle_input(input);
                     }
                 }
             }
@@ -277,6 +350,7 @@ fn run_shard(
         let before = clients.len();
         clients.retain(|c| c.rtc.is_alive());
         if clients.len() != before {
+            addr_cache.clear();
             let mut counts = std::mem::take(&mut room_counts);
             for c in &clients {
                 *counts.entry(c.room.clone()).or_default() += 1;
@@ -319,6 +393,7 @@ fn run_shard(
                 source,
                 data,
                 &mut clients,
+                &mut addr_cache,
                 &shared,
                 &cross_tx,
                 metrics,
@@ -341,6 +416,7 @@ fn route_udp(
     source: SocketAddr,
     data: Vec<u8>,
     clients: &mut [Client],
+    addr_cache: &mut AddrCache,
     shared: &Shared,
     cross_tx: &[mpsc::Sender<ShardCommand>],
     metrics: &ShardMetrics,
@@ -354,10 +430,10 @@ fn route_udp(
         .fetch_add(data.len() as u64, Ordering::Relaxed);
 
     if let Some(input) = build_input(source, proto, socket.local_addr().unwrap(), &data)
-        && let Some(idx) = clients.iter().position(|c| c.rtc.accepts(&input))
+        && let Some(client) = demux_client(clients, &input, source, addr_cache)
     {
         shared.register_route(proto, source, index);
-        clients[idx].handle_input(input);
+        client.handle_input(input);
         return;
     }
 
@@ -408,6 +484,7 @@ fn handle_cross_event(
     index: usize,
     ev: CrossShardEvent,
     clients: &mut [Client],
+    addr_cache: &mut AddrCache,
     socket: &UdpSocket,
     shared: &Shared,
     cross_tx: &[mpsc::Sender<ShardCommand>],
@@ -424,7 +501,7 @@ fn handle_cross_event(
                 debug!("cross packet {}:{} unparseable", proto, source);
                 return;
             };
-            let Some(idx) = clients.iter().position(|c| c.rtc.accepts(&input)) else {
+            let Some(client) = demux_client(clients, &input, source, addr_cache) else {
                 debug!(
                     "cross packet {}:{} no client accepts ({} clients)",
                     proto,
@@ -433,7 +510,7 @@ fn handle_cross_event(
                 );
                 return;
             };
-            clients[idx].handle_input(input);
+            client.handle_input(input);
             shared.register_route(proto, source, index);
             let _ = socket;
             let _ = cross_tx;
@@ -1236,6 +1313,35 @@ pub(crate) fn offer_sends_media(sdp: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn addr_cache_hit_miss_remove() {
+        let mut c = AddrCache::new(4);
+        let a1: SocketAddr = "1.2.3.4:5000".parse().unwrap();
+        let a2: SocketAddr = "1.2.3.5:5000".parse().unwrap();
+        assert_eq!(c.lookup(&a1), None);
+        c.insert(a1, 2);
+        c.insert(a2, 3);
+        assert_eq!(c.lookup(&a1), Some(2));
+        assert_eq!(c.lookup(&a2), Some(3));
+        c.remove(&a1);
+        assert_eq!(c.lookup(&a1), None);
+        assert_eq!(c.len(), 1);
+    }
+
+    #[test]
+    fn addr_cache_evicts_when_full() {
+        let mut c = AddrCache::new(2);
+        for i in 0..3u16 {
+            let a: SocketAddr = format!("10.0.0.{i}:1000").parse().unwrap();
+            c.insert(a, i as usize);
+        }
+        // 超过容量整体清空再登记最新，保证有界且可自愈
+        assert!(c.len() <= 2, "cache must stay bounded");
+        assert_eq!(c.lookup(&"10.0.0.2:1000".parse().unwrap()), Some(2));
+    }
+
     use super::offer_sends_media;
 
     fn sdp(m_lines: &str) -> String {
