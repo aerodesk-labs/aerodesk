@@ -796,6 +796,20 @@ impl TrackOut {
     }
 }
 
+/// 数据通道出站优先级（0 最高）。低延迟通道优先于大文件，避免
+/// file 回传打满对端缓冲时挤掉 input/clipboard（#134）。
+const CHANNEL_PRIORITY_LEVELS: usize = 5;
+
+fn channel_priority(label: &str) -> usize {
+    match label {
+        "input" => 0,     // 观看端输入：延迟最敏感
+        "control" => 1,   // 选层/显示切换
+        "clipboard" => 2, // 剪贴板
+        "cursor" => 3,    // 远程光标
+        _ => 4,           // file 及其它批量通道
+    }
+}
+
 pub struct Client {
     pub id: ClientId,
     pub room: String,
@@ -812,10 +826,10 @@ pub struct Client {
     pub chosen_rid: Option<Rid>,
     /// 可选录制器引用（录制开启时非空）。
     recorder: Option<Arc<Recorder>>,
-    /// #85 出站 data channel 背压队列：对端 SCTP 缓冲满时排队，下一轮重试，
-    /// 不再静默丢包（此前 write 失败即丢，高速传输下丢包 → 发送端背压死锁）。
-    pending_channel_out: VecDeque<(String, Vec<u8>, bool)>,
-    /// 背压队列字节上限（超限丢弃并告警，防内存失控）。
+    /// #85/#134 出站 data channel 背压队列：按优先级分桶（0=最高，见
+    /// `channel_priority`），对端 SCTP 缓冲满时排队，下一轮重试，不再静默丢包。
+    pending_channel_out: [VecDeque<(String, Vec<u8>, bool)>; CHANNEL_PRIORITY_LEVELS],
+    /// 跨桶合计背压字节上限（超限丢弃并告警，防内存失控）。
     pending_channel_out_bytes: usize,
 }
 
@@ -836,7 +850,7 @@ impl Client {
             tracks_out: vec![],
             chosen_rid: None,
             recorder: None,
-            pending_channel_out: VecDeque::new(),
+            pending_channel_out: std::array::from_fn(|_| VecDeque::new()),
             pending_channel_out_bytes: 0,
         }
     }
@@ -1154,37 +1168,53 @@ impl Client {
         if channel.write(data.binary, &data.data).is_ok() {
             return;
         }
+        self.enqueue_pending(label, data.data.clone(), data.binary);
+    }
+
+    /// 入队到优先级分桶（#134）。总量超 64MB 时丢弃并告警（防内存失控）。
+    fn enqueue_pending(&mut self, label: &str, data: Vec<u8>, binary: bool) -> bool {
         const CAP: usize = 64 << 20; // 64MB
-        if self.pending_channel_out_bytes + data.data.len() > CAP {
+        if self.pending_channel_out_bytes + data.len() > CAP {
             warn!(
                 "Client ({}) outbound channel queue overflow (label={label}), dropping {} bytes",
                 *self.id,
-                data.data.len()
+                data.len()
             );
-            return;
+            return false;
         }
-        self.pending_channel_out_bytes += data.data.len();
-        self.pending_channel_out
-            .push_back((label.to_string(), data.data.clone(), data.binary));
+        self.pending_channel_out_bytes += data.len();
+        self.pending_channel_out[channel_priority(label)].push_back((
+            label.to_string(),
+            data,
+            binary,
+        ));
+        true
     }
 
-    /// 逐条重试出站背压队列（保持顺序；对端缓冲恢复后自然排空）。
+    /// 按优先级（0→4）逐桶重试出站背压队列：每桶内保持顺序；
+    /// 某桶对端缓冲满只跳过该桶，不阻塞更高/更低优先级通道（#134）。
     fn drain_pending_out(&mut self) {
-        while let Some((label, data, binary)) = self.pending_channel_out.front() {
-            let Some(cid) = self.channels.get(label).copied() else {
-                self.pending_channel_out.pop_front();
-                continue;
-            };
-            let Some(mut channel) = self.rtc.channel(cid) else {
-                self.pending_channel_out.pop_front();
-                continue;
-            };
-            if channel.write(*binary, data).is_err() {
-                break; // 缓冲仍满，保持顺序等待下一轮
+        for queue in self.pending_channel_out.iter_mut() {
+            while let Some((label, data, binary)) = queue.front() {
+                let Some(cid) = self.channels.get(label).copied() else {
+                    let (_, data, _) = queue.pop_front().unwrap();
+                    self.pending_channel_out_bytes =
+                        self.pending_channel_out_bytes.saturating_sub(data.len());
+                    continue;
+                };
+                let Some(mut channel) = self.rtc.channel(cid) else {
+                    let (_, data, _) = queue.pop_front().unwrap();
+                    self.pending_channel_out_bytes =
+                        self.pending_channel_out_bytes.saturating_sub(data.len());
+                    continue;
+                };
+                if channel.write(*binary, data).is_err() {
+                    break; // 该桶对端缓冲满：保持顺序，下一轮重试
+                }
+                let (_, data, _) = queue.pop_front().unwrap();
+                self.pending_channel_out_bytes =
+                    self.pending_channel_out_bytes.saturating_sub(data.len());
             }
-            let (_, data, _) = self.pending_channel_out.pop_front().unwrap();
-            self.pending_channel_out_bytes =
-                self.pending_channel_out_bytes.saturating_sub(data.len());
         }
     }
 
@@ -1446,6 +1476,45 @@ mod tests {
         // 订阅者离开后媒体不再跨分片
         shared.leave_room("r", 3);
         assert!(shared.subscriber_shards("r").is_empty());
+    }
+
+    #[test]
+    fn channel_priority_ordering() {
+        assert!(channel_priority("input") < channel_priority("control"));
+        assert!(channel_priority("control") < channel_priority("clipboard"));
+        assert!(channel_priority("clipboard") < channel_priority("cursor"));
+        assert!(channel_priority("cursor") < channel_priority("file"));
+        assert_eq!(channel_priority("unknown"), channel_priority("file"));
+        assert!(channel_priority("input") < CHANNEL_PRIORITY_LEVELS);
+    }
+
+    #[test]
+    fn pending_out_queues_by_priority_and_drains_clean() {
+        use str0m::Rtc;
+        let mut client = Client::new(Rtc::builder().build(Instant::now()), Role::Viewer);
+        // 先入 file（低优先级），再入 input（高优先级）
+        assert!(client.enqueue_pending("file", vec![0u8; 100], true));
+        assert!(client.enqueue_pending("input", vec![1u8; 10], false));
+        // 分桶正确：input 在 0 号桶、file 在 4 号桶
+        assert_eq!(
+            client.pending_channel_out[0]
+                .front()
+                .map(|(l, _, _)| l.as_str()),
+            Some("input")
+        );
+        assert_eq!(
+            client.pending_channel_out[4]
+                .front()
+                .map(|(l, _, _)| l.as_str()),
+            Some("file")
+        );
+        assert_eq!(client.pending_channel_out_bytes, 110);
+        // 无 channel 注册：drain 清空全部桶并释放字节计数（不 panic）
+        client.drain_pending_out();
+        assert_eq!(client.pending_channel_out_bytes, 0);
+        for q in &client.pending_channel_out {
+            assert!(q.is_empty());
+        }
     }
 
     #[test]
