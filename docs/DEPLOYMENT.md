@@ -79,7 +79,8 @@ signal.aerodesk.io {
   `Redirect`，原生客户端（aerodesk-core）自动重连到目标 PoP 的 signal/SFU
   （最多 3 跳防环）；Web 端重定向支持为后续。
   单机多 PoP 测试可用 `SFU_MEDIA_PORT`/`SFU_SIGNAL_PORT`/`SFU_INTERNAL_PORT` 覆盖 SFU 端口，
-  示例见 `scripts/multipop-e2e.sh`。暂不支持实时跨区媒体桥接（房间内成员必须落在同一 PoP）。
+  示例见 `scripts/multipop-e2e.sh`。暂不支持实时跨区媒体桥接（房间内成员必须落在同一 PoP）；
+  跨 PoP 桥接/容灾路线见 [ADR-0004](adr/0004-multipop-bridging.md)。
 - **TURN 就近**：每 PoP 部署 coturn，`TURN_URLS` 指向本 PoP；`RELAY 端口段` 开放 UDP 49152-49200。
 - **监控告警**：SFU 暴露 `GET /metrics/prometheus`（Prometheus 文本格式：每分片
   clients/rx·tx packets/bytes + 合计 + `aerodesk_sfu_draining` gauge），可直接被
