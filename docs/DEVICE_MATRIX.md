@@ -24,6 +24,16 @@
 | #8 压测 | 工具链/报告 ✅（#38）、netem ✅ | 干净环境 4K60 基线 + 真机矩阵 |
 | #58 工具栏媒体控制 | 画质选层 ✅、音频链路 ✅（PCMU → SFU → viewer + UI 静音）、显示器切换 ✅（viewer `--display N` → SFU control 转发 → publisher `ScreenCaptureKit` 重建采集，`scripts/display-e2e.sh` 守护控制链路）；三个 e2e 均已接入 macOS CI | 真实系统音频采集（AudioUnit/TCC）+ 多显示器真机切换验收（macOS 先行） |
 
+## 虚拟显示器冒烟（ADR-0001/0002/0003，#140）
+
+> 虚拟屏为被控端独立输出面（AI 远控 #109 的基础）；硬件到位后按平台一条命令冒烟。
+
+| 平台 | 方案 | 冒烟命令 | 状态 |
+|---|---|---|---|
+| Windows | Parsec VDD + `aerodesk-windows` vdd 模块 | `scripts/windows-vdd-smoke.ps1 -Install`（管理员，先 `cargo build -p aerodesk-windows --release --examples`） | 代码 ✅ / 待 Win 真机 |
+| macOS | BetterDisplay CLI | `scripts/macos-vdd-smoke.sh`（需 BetterDisplay 2.2.x+ 运行） | 设计 ✅ / 待 mac 真机/无头 |
+| Linux | VKMS + krfb-virtualmonitor | `scripts/linux-vdd-smoke.sh`（KDE Plasma 6 / Wayland） | 设计 ✅ / 待 Linux 真机 |
+
 ## 自动验证现状
 - CI 三平台（macOS/Ubuntu/Windows）：cargo fmt/clippy/test + macOS e2e smoke ✅
 - CI 移动端构建回归：iOS App 双 slice（模拟器 + 真机，未签名）+ Android APK（Rust .so + Gradle assembleDebug）✅
