@@ -29,11 +29,13 @@ echo "== [3/7] 准备模拟器"
 RUNTIME=$(xcrun simctl list runtimes 2>/dev/null | grep -oE 'com.apple.CoreSimulator.SimRuntime.iOS-[0-9-]+' | sort -V | tail -1)
 [ -n "$RUNTIME" ] || { echo "FAIL: 无 iOS Simulator Runtime"; exit 1; }
 echo "runtime=$RUNTIME"
-DEVICE=$(xcrun simctl list devices available 2>/dev/null | grep -oE 'iPhone [^(]+ \(([0-9A-F-]+)\)' | head -1 | grep -oE '[0-9A-F-]{36}' | head -1)
-if [ -z "$DEVICE" ]; then
-  DT=$(xcrun simctl list devicetypes 2>/dev/null | grep -oE 'com.apple.CoreSimulator.SimDeviceType.iPhone-[0-9]+' | sort -V | tail -1)
-  DEVICE=$(xcrun simctl create "AeroDesk-E2E" "$DT" "$RUNTIME")
-fi
+# 镜像预建设备可能绑定旧 runtime（如 iOS 18.5），App 用最新 SDK 编译会 dyld 崩；
+# 必须用最新 runtime 新建设备，不复用已存在设备。
+DT=$(xcrun simctl list devicetypes 2>/dev/null | grep -oE 'com.apple.CoreSimulator.SimDeviceType.iPhone-[0-9]+' | sort -V | tail -1)
+DEVICE=$(xcrun simctl create "AeroDesk-E2E-$(date +%s)" "$DT" "$RUNTIME")
+echo "device=$DEVICE ($DT / $RUNTIME)"
+xcrun simctl boot "$DEVICE" 2>/dev/null || true
+xcrun simctl bootstatus "$DEVICE" -b >/dev/null 2>&1 || true
 xcrun simctl boot "$DEVICE" 2>/dev/null || true
 xcrun simctl bootstatus "$DEVICE" -b >/dev/null 2>&1 || true
 
