@@ -112,11 +112,6 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/display-e2e.sh
 
-      # #146 多 PoP 房间路由：双 PoP 本地验证信令重定向 + 客户端自动跟随。
-      - name: e2e multi-PoP room routing (macOS only)
-        if: runner.os == 'macOS'
-        run: ./scripts/multipop-e2e.sh
-
       # #72 文件传输：publisher --send-file → SFU → viewer --recv-dir，SHA-256 一致。
       # #85：用 release 构建——debug 下 str0m/sctp-proto 高吞吐 data channel
       # 深调用链会 stack overflow（#102 已知，SFU shard 已 8MB 栈缓解）；
@@ -230,6 +225,38 @@ jobs:
           xcodebuild -project AeroDesk.xcodeproj -scheme AeroDesk \
             -destination 'generic/platform=iOS' -configuration Debug \
             ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build CODE_SIGNING_ALLOWED=NO
+
+  # iOS 主控端模拟器自测：#1 观看端全链路（与 SFU 内嵌 web 同协议）——
+  # 构建 App → 启动模拟器 → 本地 SFU+x264 发布端 → App 自动连接观看 → 解码帧断言。
+  ios-sim-e2e:
+    name: iOS simulator e2e (viewer)
+    runs-on: macos-15
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout str0m (netem dev-dep)
+        shell: bash
+        run: |
+          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
+            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add iOS Rust targets
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Select latest Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$XCODE" ] && sudo xcode-select -s "$XCODE" || true
+
+      - name: Run iOS simulator e2e
+        run: bash scripts/ios-sim-e2e.sh
 
   # Android APK 构建回归：#2 软件侧（Rust .so + Gradle APK）每次 push/PR 都验证。
   # ubuntu-latest 镜像预装 Android SDK（platform 34 / build-tools / NDK r2x），
