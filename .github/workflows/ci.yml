@@ -163,7 +163,8 @@ jobs:
 
       - name: windows adapter
         if: runner.os == 'Windows'
-        run: cargo check -p aerodesk-windows
+        # --examples：编译验证 vdd_smoke（#140，真机验收示例）。
+        run: cargo check -p aerodesk-windows --examples
       - name: linux adapter
         if: runner.os == 'Linux'
         run: cargo check -p aerodesk-linux
