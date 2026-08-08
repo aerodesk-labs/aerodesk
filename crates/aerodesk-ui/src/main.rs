@@ -1004,9 +1004,12 @@ fn main() -> Result<(), slint::PlatformError> {
     #[cfg(target_os = "macos")]
     aerodesk_macos::dock::install_reopen_handler();
 
-    // 系统托盘（Slint 1.17 SystemTrayIcon）：无桌面环境（Xvfb/CI/无
-    // StatusNotifier）创建失败不应致命——降级为无托盘运行。
+    // 系统托盘（Slint 1.17 SystemTrayIcon）：仅 macOS 创建；Linux/Windows 下
+    // Slint 托盘创建失败会 abort（Xvfb/CI 无 StatusNotifier），故非 macOS 不创建。
+    #[cfg(target_os = "macos")]
     let tray = Tray::new().ok();
+    #[cfg(not(target_os = "macos"))]
+    let tray: Option<Tray> = None;
     let win = ui.as_weak();
     if let Some(tray) = &tray {
         tray.on_show_window(move || {
