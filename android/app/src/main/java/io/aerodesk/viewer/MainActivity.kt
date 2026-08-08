@@ -3,6 +3,7 @@ package io.aerodesk.viewer
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.os.Bundle
+import android.util.Log
 import android.view.SurfaceView
 import android.widget.Button
 import android.widget.EditText
@@ -28,27 +29,41 @@ class MainActivity : AppCompatActivity() {
         status.text = "SDK ${NativeBridge.version()}（Rust JNI）"
 
         connect.setOnClickListener {
-            val s = server.text.toString()
-            val r = room.text.toString()
-            status.text = "连接中…"
-            Thread {
-                val v = NativeBridge.viewerCreate(s, r)
-                runOnUiThread {
-                    if (v == 0L) {
-                        status.text = "连接失败"
-                    } else {
-                        viewer = v
-                        status.text = "已连接，收流解码中…"
-                        startDecode()
-                    }
-                }
-            }.start()
+            doConnect(server.text.toString(), room.text.toString(), status)
         }
 
         disconnect.setOnClickListener {
             stopViewer()
             status.text = "已断开"
         }
+
+        // 模拟器/CI 自测：intent extras 驱动（-e server/-e room/-e autoconnect true）
+        val srv = intent.getStringExtra("server")
+        val rm = intent.getStringExtra("room")
+        if (srv != null) server.setText(srv)
+        if (rm != null) room.setText(rm)
+        // 兼容 -e autoconnect true（String）与 --ez autoconnect true（Boolean）
+        val auto = intent.getBooleanExtra("autoconnect", false)
+                || intent.getStringExtra("autoconnect") == "true"
+        if (auto && srv != null && rm != null) {
+            status.postDelayed({ doConnect(srv, rm, status) }, 500)
+        }
+    }
+
+    private fun doConnect(s: String, r: String, status: TextView) {
+        status.text = "连接中…"
+        Thread {
+            val v = NativeBridge.viewerCreate(s, r)
+            runOnUiThread {
+                if (v == 0L) {
+                    status.text = "连接失败"
+                } else {
+                    viewer = v
+                    status.text = "已连接，收流解码中…"
+                    startDecode()
+                }
+            }
+        }.start()
     }
 
     private fun startDecode() {
@@ -61,11 +76,16 @@ class MainActivity : AppCompatActivity() {
         running = true
         pollThread = Thread {
             var pts = 0L
+            var frames = 0L
             while (running) {
                 val frame = NativeBridge.viewerTakeAnnexB(viewer)
                 if (frame.isEmpty()) {
                     Thread.sleep(16)
                     continue
+                }
+                frames += 1
+                if (frames % 60 == 0L) {
+                    Log.i("AeroDeskE2E", "decoded frames=$frames au_bytes=${frame.size}")
                 }
                 val c = codec ?: break
                 val idx = c.dequeueInputBuffer(10_000)

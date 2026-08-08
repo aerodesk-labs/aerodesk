@@ -152,12 +152,21 @@ pub fn connect_live_role(
         UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("udp bind: {e}"))?
     };
     let bind_addr = socket.local_addr().map_err(|e| e.to_string())?;
-    let mut candidates = vec![bind_addr.ip()];
+    // 通配符绑定（0.0.0.0）的 local_addr 不能作为 candidate（str0m 拒绝）。
+    let mut candidates = Vec::new();
+    if bind_addr.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        && bind_addr.ip() != std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+    {
+        candidates.push(bind_addr.ip());
+    }
     if !loopback_signal
         && let Some(ip) = discover_local_ip()
         && !candidates.contains(&ip)
     {
         candidates.push(ip);
+    }
+    if candidates.is_empty() {
+        candidates.push(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     }
     let mut endpoint = crate::Endpoint::new();
     for ip in candidates {
