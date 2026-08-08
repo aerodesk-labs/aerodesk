@@ -19,3 +19,6 @@ ctrlc = "3"
 
 [dev-dependencies]
 str0m-netem = { path = "../../../str0m/crates/netem" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

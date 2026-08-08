@@ -13,9 +13,11 @@
 extern crate tracing;
 
 use std::net::SocketAddr;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rouille::Server;
 use rouille::{Request, Response};
@@ -63,6 +65,224 @@ fn bind_udp_reuseport(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> 
     sock.set_reuse_port(true)?;
     sock.bind(&addr.into())?;
     Ok(std::net::UdpSocket::from(sock))
+}
+
+/// 优雅关闭中（SIGTERM/SIGINT 触发）：拒绝新房间、`/healthz` 返回 503。
+static DRAINING: AtomicBool = AtomicBool::new(false);
+/// SIGHUP 触发：重读 TLS 证书并重建公共 HTTPS server。
+static RELOAD_TLS: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn on_signal(sig: libc::c_int) {
+    match sig {
+        libc::SIGTERM | libc::SIGINT => DRAINING.store(true, Ordering::Relaxed),
+        libc::SIGHUP => RELOAD_TLS.store(true, Ordering::Relaxed),
+        _ => {}
+    }
+}
+
+#[cfg(unix)]
+fn install_unix_signal_handlers() {
+    // Safety: 信号处理器只做原子写（async-signal-safe），不调用分配/锁/日志。
+    unsafe {
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGHUP, on_signal as *const () as libc::sighandler_t);
+    }
+}
+
+fn install_signal_handlers() {
+    #[cfg(unix)]
+    install_unix_signal_handlers();
+    // Windows：Ctrl+C 走 ctrlc crate（SIGTERM/SIGHUP 语义不适用）。
+    #[cfg(not(unix))]
+    {
+        let _ = ctrlc::set_handler(|| DRAINING.store(true, Ordering::Relaxed));
+    }
+}
+
+/// HTTP server 共享的应用状态（public/internal 各持一份）。
+struct AppState {
+    media_addr: SocketAddr,
+    tcp_addr: SocketAddr,
+    shard_txs: Vec<mpsc::Sender<ShardCommand>>,
+    router: Arc<Mutex<router::ShardRouter>>,
+    turn: Option<TurnConfig>,
+    shared: Shared,
+    internal_token: Option<String>,
+}
+
+static PUBLIC_STATE: OnceLock<Arc<AppState>> = OnceLock::new();
+static INTERNAL_STATE: OnceLock<Arc<AppState>> = OnceLock::new();
+
+/// 公共 HTTPS（web + /start + 指标）。fn 指针保证 `Server<fn(&Request)->Response>`
+/// 可被 SIGHUP 重建（无闭包类型命名问题）。
+fn public_handler(request: &Request) -> Response {
+    let state = PUBLIC_STATE.get().expect("public state initialized");
+    web_request(
+        request,
+        state.media_addr,
+        state.tcp_addr,
+        state.shard_txs.clone(),
+        state.router.clone(),
+        state.turn.clone(),
+        state.shared.clone(),
+    )
+}
+
+/// 内部 HTTP（信令代理专用，INTERNAL_TOKEN 保护）。
+fn internal_handler(request: &Request) -> Response {
+    let state = INTERNAL_STATE.get().expect("internal state initialized");
+    if let Some(token) = &state.internal_token
+        && request.header("X-Internal-Token") != Some(token.as_str())
+    {
+        return Response::text("forbidden").with_status_code(403);
+    }
+    web_request(
+        request,
+        state.media_addr,
+        state.tcp_addr,
+        state.shard_txs.clone(),
+        state.router.clone(),
+        state.turn.clone(),
+        state.shared.clone(),
+    )
+}
+
+/// `/healthz` 载荷：draining 时 503，否则 200。
+fn healthz_payload(draining: bool, shard_count: usize, clients: usize) -> (u16, serde_json::Value) {
+    let status = if draining { "draining" } else { "ok" };
+    let code = if draining { 503 } else { 200 };
+    (
+        code,
+        serde_json::json!({
+            "status": status,
+            "shards": shard_count,
+            "clients": clients,
+        }),
+    )
+}
+
+/// `/metrics/prometheus`：Prometheus 文本格式（每分片 + 合计 + draining gauge）。
+/// 保留 `/metrics` JSON 兼容 bench_report.py。
+fn prometheus_body(shared: &Shared, draining: bool) -> String {
+    let mut per_shard = String::new();
+    let mut totals = [0u64; 5];
+    for (i, m) in shared.metrics.iter().enumerate() {
+        let c = m.clients.load(Ordering::Relaxed) as u64;
+        let rxp = m.rx_packets.load(Ordering::Relaxed);
+        let rxb = m.rx_bytes.load(Ordering::Relaxed);
+        let txp = m.tx_packets.load(Ordering::Relaxed);
+        let txb = m.tx_bytes.load(Ordering::Relaxed);
+        totals[0] += c;
+        totals[1] += rxp;
+        totals[2] += rxb;
+        totals[3] += txp;
+        totals[4] += txb;
+        per_shard.push_str(&format!(
+            "aerodesk_sfu_clients{{shard=\"{i}\"}} {c}\n\
+             aerodesk_sfu_rx_packets_total{{shard=\"{i}\"}} {rxp}\n\
+             aerodesk_sfu_rx_bytes_total{{shard=\"{i}\"}} {rxb}\n\
+             aerodesk_sfu_tx_packets_total{{shard=\"{i}\"}} {txp}\n\
+             aerodesk_sfu_tx_bytes_total{{shard=\"{i}\"}} {txb}\n"
+        ));
+    }
+    format!(
+        "# TYPE aerodesk_sfu_clients gauge\n\
+         # TYPE aerodesk_sfu_rx_packets_total counter\n\
+         # TYPE aerodesk_sfu_rx_bytes_total counter\n\
+         # TYPE aerodesk_sfu_tx_packets_total counter\n\
+         # TYPE aerodesk_sfu_tx_bytes_total counter\n\
+         # TYPE aerodesk_sfu_draining gauge\n\
+         {per_shard}\
+         aerodesk_sfu_clients {}\n\
+         aerodesk_sfu_rx_packets_total {}\n\
+         aerodesk_sfu_rx_bytes_total {}\n\
+         aerodesk_sfu_tx_packets_total {}\n\
+         aerodesk_sfu_tx_bytes_total {}\n\
+         aerodesk_sfu_draining {}\n",
+        totals[0],
+        totals[1],
+        totals[2],
+        totals[3],
+        totals[4],
+        if draining { 1 } else { 0 }
+    )
+}
+
+/// SIGHUP：重读 TLS 身份并重建公共 HTTPS server（旧连接由各自 TLS 会话继续）。
+fn reload_tls(
+    public: &mut Option<Server<fn(&Request) -> Response>>,
+    tls: &mut aerodesk_protocol::tls::TlsIdentity,
+) {
+    match aerodesk_protocol::tls::TlsIdentity::load() {
+        Ok(new_tls) => {
+            if new_tls.cert == tls.cert && new_tls.key == tls.key {
+                info!(
+                    "SIGHUP: TLS identity unchanged ({}), keep serving",
+                    new_tls.source
+                );
+                return;
+            }
+            info!("SIGHUP: reloading TLS identity from {}", new_tls.source);
+            // 同端口不能同时绑定两个 server：先释放旧 listener 再绑定新的。
+            public.take();
+            match Server::new_ssl(
+                format!("0.0.0.0:{SIGNAL_PORT}"),
+                public_handler as fn(&Request) -> Response,
+                new_tls.cert.clone(),
+                new_tls.key.clone(),
+            ) {
+                Ok(srv) => {
+                    *public = Some(srv);
+                    *tls = new_tls;
+                    info!("TLS reloaded (new connections use updated certificate)");
+                }
+                Err(e) => {
+                    error!("TLS reload bind failed: {e}; restoring previous identity");
+                    match Server::new_ssl(
+                        format!("0.0.0.0:{SIGNAL_PORT}"),
+                        public_handler as fn(&Request) -> Response,
+                        tls.cert.clone(),
+                        tls.key.clone(),
+                    ) {
+                        Ok(srv) => *public = Some(srv),
+                        Err(e2) => error!(
+                            "restore failed: {e2}; public HTTPS down until next SIGHUP or restart"
+                        ),
+                    }
+                }
+            }
+        }
+        Err(e) => error!("SIGHUP: TLS identity reload failed: {e}"),
+    }
+}
+
+/// SIGTERM/SIGINT 优雅关闭：拒绝新房间（draining 已置位）→ 限时等现有客户端
+/// 自行断开 → finalize 录制 → 退出。录制开启时保证 meta.json 落盘。
+fn drain_and_exit(shared: &Shared, public: &Option<Server<fn(&Request) -> Response>>) -> ! {
+    const DRAIN_GRACE: Duration = Duration::from_secs(3);
+    info!("draining: rejecting new rooms; waiting up to 3s for existing clients");
+    let deadline = Instant::now() + DRAIN_GRACE;
+    while Instant::now() < deadline {
+        if let Some(srv) = public {
+            srv.poll_timeout(Duration::from_millis(50));
+        }
+        let clients: usize = shared
+            .metrics
+            .iter()
+            .map(|m| m.clients.load(Ordering::Relaxed))
+            .sum();
+        if clients == 0 {
+            break;
+        }
+    }
+    if let Some(rec) = &shared.recorder {
+        info!("finalizing recordings");
+        rec.finalize_all();
+    }
+    info!("shutdown complete");
+    std::process::exit(0);
 }
 
 pub fn main() {
@@ -226,57 +446,75 @@ pub fn main() {
             .expect("spawn manager thread");
     }
 
-    // 5. 信令（HTTPS）
-    let shard_txs_web = shard_txs.clone();
-    let shared_web = shared.clone();
-    let router_web = router.clone();
+    // 5. 信令/HTTP：公共 HTTPS（web + /start + 指标）与内部 HTTP（信令代理专用）。
+    //    rouille `poll_timeout` 轮询驱动：SIGHUP 可重建公共 server 热重载证书；
+    //    SIGTERM/SIGINT 进入 drain（拒绝新房间 → 限时等现有客户端 → finalize 录制 → 退出）。
     let internal_token = std::env::var("INTERNAL_TOKEN").ok();
-    let internal_shard_txs = shard_txs_web.clone();
-    let internal_router = router_web.clone();
-    let internal_turn = turn.clone();
+    let state = Arc::new(AppState {
+        media_addr,
+        tcp_addr,
+        shard_txs,
+        router,
+        turn,
+        shared: shared.clone(),
+        internal_token,
+    });
+    let _ = PUBLIC_STATE.set(state.clone());
+    let _ = INTERNAL_STATE.set(state);
 
-    let internal = Server::new(format!("127.0.0.1:{INTERNAL_PORT}"), move |request| {
-        if let Some(token) = &internal_token
-            && request.header("X-Internal-Token") != Some(token.as_str())
-        {
-            return Response::text("forbidden").with_status_code(403);
+    install_signal_handlers();
+
+    let mut tls = tls;
+    let mut public = match Server::new_ssl(
+        format!("0.0.0.0:{SIGNAL_PORT}"),
+        public_handler as fn(&Request) -> Response,
+        tls.cert.clone(),
+        tls.key.clone(),
+    ) {
+        Ok(srv) => {
+            info!(
+                "Connect a browser to https://{host_addr}:{}",
+                srv.server_addr().port()
+            );
+            Some(srv)
         }
-        web_request(
-            request,
-            media_addr,
-            tcp_addr,
-            internal_shard_txs.clone(),
-            internal_router.clone(),
-            internal_turn.clone(),
-            shared.clone(),
-        )
-    })
-    .expect("starting internal server");
-    let internal_port = internal.server_addr().port();
-    info!("SFU internal API (HTTP) on 127.0.0.1:{internal_port}");
+        Err(e) => {
+            eprintln!("fatal: starting public HTTPS server failed: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let internal = match Server::new(
+        format!("127.0.0.1:{INTERNAL_PORT}"),
+        internal_handler as fn(&Request) -> Response,
+    ) {
+        Ok(srv) => {
+            info!(
+                "SFU internal API (HTTP) on 127.0.0.1:{}",
+                srv.server_addr().port()
+            );
+            srv
+        }
+        Err(e) => {
+            eprintln!("fatal: starting internal server failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    // 内部接口不涉及 TLS，无需热重载；独立线程持续服务。
     std::thread::spawn(move || internal.run());
 
-    let server = Server::new_ssl(
-        format!("0.0.0.0:{SIGNAL_PORT}"),
-        move |request| {
-            web_request(
-                request,
-                media_addr,
-                tcp_addr,
-                shard_txs_web.clone(),
-                router_web.clone(),
-                turn.clone(),
-                shared_web.clone(),
-            )
-        },
-        tls.cert,
-        tls.key,
-    )
-    .expect("starting the web server");
-
-    let port = server.server_addr().port();
-    info!("Connect a browser to https://{:?}:{:?}", host_addr, port);
-    server.run();
+    // 主循环：轮询请求 + SIGHUP 证书热重载 + SIGTERM/SIGINT 优雅关闭。
+    loop {
+        if let Some(srv) = &public {
+            srv.poll_timeout(Duration::from_millis(10));
+        }
+        if RELOAD_TLS.swap(false, Ordering::Relaxed) {
+            reload_tls(&mut public, &mut tls);
+        }
+        if DRAINING.load(Ordering::Relaxed) {
+            drain_and_exit(&shared, &public);
+        }
+    }
 }
 
 fn web_request(
@@ -313,6 +551,26 @@ fn web_request(
         );
     }
 
+    if request.method() == "GET" && request.url() == "/healthz" {
+        let draining = DRAINING.load(Ordering::Relaxed);
+        let clients: usize = shared
+            .metrics
+            .iter()
+            .map(|m| m.clients.load(Ordering::Relaxed))
+            .sum();
+        let (code, payload) = healthz_payload(draining, shared.metrics.len(), clients);
+        return Response::from_data("application/json", serde_json::to_vec(&payload).unwrap())
+            .with_status_code(code);
+    }
+
+    if request.method() == "GET" && request.url() == "/metrics/prometheus" {
+        let body = prometheus_body(&shared, DRAINING.load(Ordering::Relaxed));
+        return Response::from_data(
+            "text/plain; version=0.0.4; charset=utf-8",
+            body.into_bytes(),
+        );
+    }
+
     if request.method() == "GET" && request.url() == "/config" {
         let body =
             serde_json::to_vec(&serde_json::json!({ "turn": turn })).expect("serialize config");
@@ -321,6 +579,11 @@ fn web_request(
 
     if request.method() == "GET" {
         return Response::html(include_str!("../../../web/index.html"));
+    }
+
+    // 优雅关闭中：拒绝新房间（503），已有连接继续服务直至 drain 超时。
+    if DRAINING.load(Ordering::Relaxed) {
+        return Response::text("draining").with_status_code(503);
     }
 
     // POST /start?room=xxx&role=xxx
@@ -388,4 +651,107 @@ fn web_request(
 
     let body = serde_json::to_vec(&answer).expect("answer to serialize");
     Response::from_data("application/json", body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shard::Shared;
+    use std::io::Read;
+
+    #[test]
+    fn healthz_ok_vs_draining() {
+        let (code, payload) = healthz_payload(false, 4, 7);
+        assert_eq!(code, 200);
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["shards"], 4);
+        assert_eq!(payload["clients"], 7);
+
+        let (code, payload) = healthz_payload(true, 4, 7);
+        assert_eq!(code, 503);
+        assert_eq!(payload["status"], "draining");
+    }
+
+    #[test]
+    fn prometheus_contains_shards_totals_and_draining() {
+        let shared = Shared::new(2);
+        shared.metrics[0].clients.store(3, Ordering::Relaxed);
+        shared.metrics[1].clients.store(4, Ordering::Relaxed);
+        shared.metrics[0].rx_packets.store(100, Ordering::Relaxed);
+        shared.metrics[1].tx_bytes.store(2048, Ordering::Relaxed);
+
+        let body = prometheus_body(&shared, true);
+        assert!(
+            body.contains("aerodesk_sfu_clients{shard=\"0\"} 3"),
+            "{body}"
+        );
+        assert!(
+            body.contains("aerodesk_sfu_clients{shard=\"1\"} 4"),
+            "{body}"
+        );
+        assert!(body.contains("aerodesk_sfu_clients 7"), "{body}");
+        assert!(body.contains("aerodesk_sfu_rx_packets_total 100"), "{body}");
+        assert!(body.contains("aerodesk_sfu_tx_bytes_total 2048"), "{body}");
+        assert!(body.contains("aerodesk_sfu_draining 1"), "{body}");
+
+        let body = prometheus_body(&shared, false);
+        assert!(body.contains("aerodesk_sfu_draining 0"), "{body}");
+    }
+
+    #[test]
+    fn healthz_endpoint_ok() {
+        let shared = Shared::new(1);
+        let router = Arc::new(Mutex::new(crate::router::ShardRouter::new(1)));
+        let req = Request::fake_http("GET", "/healthz", vec![], Vec::new());
+        let resp = web_request(
+            &req,
+            "127.0.0.1:3478".parse().unwrap(),
+            "127.0.0.1:3478".parse().unwrap(),
+            Vec::new(),
+            router,
+            None,
+            shared,
+        );
+        assert_eq!(resp.status_code, 200);
+    }
+
+    #[test]
+    fn prometheus_endpoint_ok() {
+        let shared = Shared::new(1);
+        let router = Arc::new(Mutex::new(crate::router::ShardRouter::new(1)));
+        let req = Request::fake_http("GET", "/metrics/prometheus", vec![], Vec::new());
+        let resp = web_request(
+            &req,
+            "127.0.0.1:3478".parse().unwrap(),
+            "127.0.0.1:3478".parse().unwrap(),
+            Vec::new(),
+            router,
+            None,
+            shared,
+        );
+        assert_eq!(resp.status_code, 200);
+        let (mut reader, _size) = resp.data.into_reader_and_size();
+        let mut body = String::new();
+        let ok = reader.read_to_string(&mut body).is_ok() && body.contains("aerodesk_sfu_clients");
+        assert!(ok, "prometheus body expected, got: {body:.80}");
+    }
+
+    #[test]
+    fn start_rejected_while_draining() {
+        DRAINING.store(true, Ordering::Relaxed);
+        let shared = Shared::new(1);
+        let router = Arc::new(Mutex::new(crate::router::ShardRouter::new(1)));
+        let req = Request::fake_http("POST", "/start?room=x&role=viewer", vec![], Vec::new());
+        let resp = web_request(
+            &req,
+            "127.0.0.1:3478".parse().unwrap(),
+            "127.0.0.1:3478".parse().unwrap(),
+            Vec::new(),
+            router,
+            None,
+            shared,
+        );
+        DRAINING.store(false, Ordering::Relaxed);
+        assert_eq!(resp.status_code, 503);
+    }
 }
