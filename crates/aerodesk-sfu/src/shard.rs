@@ -102,6 +102,8 @@ pub struct Shared {
     pub route_table: Arc<RwLock<HashMap<(Protocol, SocketAddr), usize>>>,
     /// room → 持有该房间客户端的分片集合（跨分片转发目标）。
     pub room_registry: Arc<RwLock<HashMap<String, HashSet<usize>>>>,
+    /// room → 有订阅者（viewer 已接收 track）的分片集合（订阅驱动转发：#132）。
+    pub subscribers: Arc<RwLock<HashMap<String, HashSet<usize>>>>,
     /// TCP 写句柄（destination → stream），各分片发送时加锁写。
     pub tcp_streams: Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
     /// 每分片指标（索引 = shard id）。
@@ -115,6 +117,7 @@ impl Shared {
         Self {
             route_table: Arc::new(RwLock::new(HashMap::new())),
             room_registry: Arc::new(RwLock::new(HashMap::new())),
+            subscribers: Arc::new(RwLock::new(HashMap::new())),
             tcp_streams: Arc::new(Mutex::new(HashMap::new())),
             metrics: Arc::new((0..shard_count).map(|_| ShardMetrics::new()).collect()),
             recorder: None,
@@ -164,6 +167,36 @@ impl Shared {
                 reg.remove(room);
             }
         }
+        // 订阅者分片同步清理：分片离开房间即不再是媒体转发目标。
+        let mut sub = self.subscribers.write().unwrap();
+        if let Some(set) = sub.get_mut(room) {
+            set.remove(&shard);
+            if set.is_empty() {
+                sub.remove(room);
+            }
+        }
+    }
+
+    /// 有订阅者（viewer）的分片（订阅驱动媒体转发目标）。
+    pub fn subscriber_shards(&self, room: &str) -> Vec<usize> {
+        self.subscribers
+            .read()
+            .unwrap()
+            .get(room)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    }
+
+    /// 登记分片为该房间的订阅者（幂等）。
+    pub fn join_subscriber(&self, room: &str, shard: usize) {
+        self.subscribers
+            .write()
+            .unwrap()
+            .entry(room.to_string())
+            .or_default()
+            .insert(shard);
     }
 }
 
@@ -516,10 +549,16 @@ fn handle_cross_event(
             let _ = cross_tx;
         }
         CrossShardEvent::TrackOpen { room, origin, weak } => {
+            let mut subscribed = false;
             for client in clients.iter_mut() {
                 if client.room == room && client.id != origin {
                     client.handle_track_open(weak.clone());
+                    subscribed = true;
                 }
+            }
+            if subscribed {
+                // 本分片有 viewer 接收该房间轨道 → 登记为订阅者，媒体才转投过来。
+                shared.join_subscriber(&room, index);
             }
         }
         CrossShardEvent::MediaData { room, origin, data } => {
@@ -580,8 +619,16 @@ fn propagate_local(
         _ => return,
     };
 
-    let targets: Vec<usize> = shared
+    // 房间内其它分片（TrackOpen/ChannelData/KeyframeRequest 仍按房间广播，
+    // 让新 viewer 能订阅/输入能回传/关键帧能请求）。
+    let room_targets: Vec<usize> = shared
         .room_shards(&origin_room)
+        .into_iter()
+        .filter(|i| *i != index)
+        .collect();
+    // 订阅驱动：媒体只转发给有订阅者的分片（#132），避免全量广播。
+    let media_targets: Vec<usize> = shared
+        .subscriber_shards(&origin_room)
         .into_iter()
         .filter(|i| *i != index)
         .collect();
@@ -594,7 +641,7 @@ fn propagate_local(
                 }
                 client.handle_track_open(weak.clone());
             }
-            for t in &targets {
+            for t in &room_targets {
                 cross(
                     *t,
                     CrossShardEvent::TrackOpen {
@@ -613,7 +660,11 @@ fn propagate_local(
                 client.handle_media_data_out(origin, &data);
             }
             let arc = Arc::new(data);
-            for t in &targets {
+            if media_targets.is_empty() {
+                // 无订阅者分片：不跨分片转发媒体（本地扇出已完成）。
+                return;
+            }
+            for t in &media_targets {
                 cross(
                     *t,
                     CrossShardEvent::MediaData {
@@ -632,7 +683,7 @@ fn propagate_local(
                 client.handle_channel_data_out(&label, &data);
             }
             let arc = Arc::new(data);
-            for t in &targets {
+            for t in &room_targets {
                 cross(
                     *t,
                     CrossShardEvent::ChannelData {
@@ -653,7 +704,7 @@ fn propagate_local(
                     client.handle_keyframe_request(req, mid_in);
                 }
             }
-            for t in &targets {
+            for t in &room_targets {
                 cross(
                     *t,
                     CrossShardEvent::KeyframeRequest {
@@ -1346,6 +1397,55 @@ mod tests {
 
     fn sdp(m_lines: &str) -> String {
         format!("v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n{m_lines}")
+    }
+
+    #[test]
+    fn subscribers_join_and_cleanup() {
+        let shared = Shared::new(4);
+        assert!(shared.subscriber_shards("r").is_empty());
+        shared.join_subscriber("r", 2);
+        shared.join_subscriber("r", 2); // 幂等
+        assert_eq!(shared.subscriber_shards("r"), vec![2]);
+        shared.join_room("r", 2);
+        shared.leave_room("r", 2);
+        assert!(
+            shared.subscriber_shards("r").is_empty(),
+            "leave_room must clean subscriber"
+        );
+    }
+
+    #[test]
+    fn media_targets_only_subscriber_shards() {
+        let shared = Shared::new(4);
+        shared.join_room("r", 1);
+        shared.join_room("r", 2);
+        shared.join_room("r", 3);
+        shared.join_subscriber("r", 3); // 只有分片 3 有 viewer
+
+        let index = 1usize;
+        let mut room_targets: Vec<usize> = shared
+            .room_shards("r")
+            .into_iter()
+            .filter(|i| *i != index)
+            .collect();
+        room_targets.sort_unstable();
+        assert_eq!(
+            room_targets,
+            vec![2, 3],
+            "track/channel still broadcast by room"
+        );
+
+        let mut media_targets: Vec<usize> = shared
+            .subscriber_shards("r")
+            .into_iter()
+            .filter(|i| *i != index)
+            .collect();
+        media_targets.sort_unstable();
+        assert_eq!(media_targets, vec![3], "media only to subscriber shard");
+
+        // 订阅者离开后媒体不再跨分片
+        shared.leave_room("r", 3);
+        assert!(shared.subscriber_shards("r").is_empty());
     }
 
     #[test]

@@ -64,7 +64,7 @@ Data Plane（每核一个 Shard）：SO_REUSEPORT UDP:443 + TCP:443 复用
 | 2 | ~~Demuxer：addr_map 快路径 + STUN ufrag 解码 + 有界缓存~~ ✅ **已落地（#130）** | 多参与者下 O(1) 路由 + 防伪造内存攻击 | 分片内 (source)→client 有界缓存，命中 O(1)；ufrag 解码兜底留待后续 |
 | 3 | thread-per-core + SO_REUSEPORT | 单核 run loop → N 核线性扩展；p99 抖动目标的前提 | 大重构，v2 主线 |
 | 4 | ~~房间哈希路由（load<0.8 locality + 超载级联）~~ ✅ **已落地（#130 包率感知）** | 远程桌面"房间=1对1"，locality 天然适配 | 控制面组件：负载 = 客户端数 + rx/tx 包率加权 |
-| 5 | 订阅驱动跨分片转发 | 房间跨核时只转发被订阅的流 | 与 3 配套 |
+| 5 | ~~订阅驱动跨分片转发~~ ✅ **已落地（#132）** | 房间跨核时只转发被订阅的流 | subscribers 注册表：媒体只发有 viewer 的分片 |
 | 6 | BitrateController + `set_current_bitrate` | 每端码率分配 = 省带宽成本的核心 | fork 已给接口，自研控制器 |
 | 7 | simulcast rid→层质量映射（q/h/f） | 按端选层，多观看端省出口 | 已有选择点，补映射 |
 | 8 | turmoil 确定性模拟测试 | 延迟/丢包可复现，p99 抖动可证明 | 方法论采纳 |
