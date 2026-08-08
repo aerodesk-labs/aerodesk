@@ -27,6 +27,8 @@
 | signal | `TURN_SECRET` / `TURN_URLS` | coturn REST 凭证下发 |
 | signal | `SFU_URL` / `SFU_TOKEN` | SFU 内部接口 + 内部 token |
 | sfu | `RECORD_DIR` | 录制/审计目录（可选） |
+| signal | `POP_REGISTRY_FILE` | 动态 room→PoP 注册表文件（可选，#154）：多 PoP 共享同一文件即互见；首个加入者登记房间归属 |
+| signal | `POP_REGISTRY_TTL_SECS` | 注册条目 TTL（默认 3600，过期后可被重新登记） |
 
 ## 2. TLS 证书自动化
 
@@ -81,6 +83,10 @@ signal.aerodesk.io {
   单机多 PoP 测试可用 `SFU_MEDIA_PORT`/`SFU_SIGNAL_PORT`/`SFU_INTERNAL_PORT` 覆盖 SFU 端口，
   示例见 `scripts/multipop-e2e.sh`。暂不支持实时跨区媒体桥接（房间内成员必须落在同一 PoP）；
   跨 PoP 桥接/容灾路线见 [ADR-0004](adr/0004-multipop-bridging.md)。
+- **动态注册表（v2，#154）**：不配 `ROOM_POP_MAP` 时，房间归属由**首个加入者所在 PoP 登记**
+  （`POP_REGISTRY_FILE` 共享文件 + `POP_REGISTRY_TTL_SECS` 过期）；其它 PoP 加入同房间时
+  查注册表命中 → 返回 `Redirect`。文件后端为 last-writer-wins（低变更场景可接受）；
+  生产多写并发可换 Redis 后端。示例见 `scripts/popreg-e2e.sh`。
 - **TURN 就近**：每 PoP 部署 coturn，`TURN_URLS` 指向本 PoP；`RELAY 端口段` 开放 UDP 49152-49200。
 - **监控告警**：SFU 暴露 `GET /metrics/prometheus`（Prometheus 文本格式：每分片
   clients/rx·tx packets/bytes + 合计 + `aerodesk_sfu_draining` gauge），可直接被
