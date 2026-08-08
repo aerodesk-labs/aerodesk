@@ -12,6 +12,10 @@ aerodesk-softenc = { path = "../aerodesk-softenc" }
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# ADR-0001：虚拟显示器（Parsec VDD）。其传递依赖 windows 0.62 与下方 0.58 并存，
+# 用 package 重命名 `windows062` 仅在本 crate 的 vdd 模块命名 HANDLE。
+parsec-vdd-rust = "0.0.1"
+windows062 = { package = "windows", version = "0.62", features = ["Win32_Foundation"] }
 windows = { version = "0.58", features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
