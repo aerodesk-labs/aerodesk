@@ -6,6 +6,8 @@ slint::include_modules!();
 mod keymap;
 #[cfg(target_os = "macos")]
 mod macos_media;
+#[cfg(not(target_os = "macos"))]
+mod generic_media;
 use slint::Model;
 
 use serde::{Deserialize, Serialize};
@@ -268,51 +270,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                let auth = if token.is_empty() { None } else { Some(token.as_str()) };
-                let out = aerodesk_core::connect::connect_viewer_auth(&server, &room, auth);
-                let ui = weak2.clone();
-                let Some(ui) = ui.upgrade() else { return };
-                // 连接期间已断开/发起新会话：放弃进入会话视图。
-                let stale = epoch2.load(Ordering::SeqCst) != my_epoch;
-                match out {
-                    Ok(r) if !stale => {
-                        ui.set_status(format!("已连接：peer={} ice={}", r.peer_id, r.ice_connected).into());
-                        ui.set_log(
-                            format!(
-                                "房间: {room}\n服务器: {server}\nSDP 交换: OK\nICE: {}\n\n已建立 WebRTC 会话（真实媒体/输入后续接入）。",
-                                if r.ice_connected { "connected" } else { "pending(5s 超时)" }
-                            )
-                            .into(),
-                        );
-                        add_recent(&ui, &room, &server);
-                        ui.set_conn_state(2);
-                        // #23：进入会话视图 + 启动演示帧源（验证视频渲染管道）
-                        ui.set_in_session(true);
-                        ui.set_session_status("会话中 · 演示帧源（15fps）".into());
-                        let frame_weak = weak2.clone();
-                        std::thread::spawn(move || {
-                            let mut t = 0u32;
-                            while epoch2.load(Ordering::SeqCst) == my_epoch {
-                                let Some(fui) = frame_weak.upgrade() else { break };
-                                let px = demo_frame(t);
-                                let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&px, DEMO_W, DEMO_H);
-                                fui.set_video_frame(slint::Image::from_rgba8(buffer));
-                                fui.set_frame_w(DEMO_W as f32);
-                                fui.set_frame_h(DEMO_H as f32);
-                                t = t.wrapping_add(1);
-                                std::thread::sleep(Duration::from_millis(66));
-                            }
-                        });
-                    }
-                    Ok(_) => { /* 连接完成但已断开：静默放弃，不进入会话 */ }
-                    Err(e) => {
-                        if !stale {
-                            ui.set_conn_state(3);
-                            ui.set_status(format!("连接失败：{e}").into());
-                            ui.set_log(format!("失败原因：{e}").into());
-                        }
-                    }
-                }
+                // Windows/Linux 主控端：真实媒体观看（OpenH264 软解 + Slint 渲染）。
+                crate::generic_media::run_generic_viewer(server, room, Some(token), weak2.clone(), epoch2.clone(), my_epoch);
                 } // cfg(not(target_os = "macos"))
                 if let Some(ui) = weak2.upgrade() {
                     ui.set_connecting(false);
