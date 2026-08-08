@@ -364,3 +364,97 @@ fn preset_loss_models_match() {
         );
     }
 }
+
+/// 驱动 netem 到静默，记录每个输出包的投递时延（相对 start 的虚拟时钟）。
+fn drive_with_times(netem: &mut Netem<Vec<u8>>, start: Instant) -> Vec<(Vec<u8>, Duration)> {
+    let mut out = Vec::new();
+    let mut now = start;
+    loop {
+        match netem.poll_output() {
+            Some(Output::Timeout(t)) => {
+                now = t;
+                netem.handle_input(Input::Timeout(t));
+            }
+            Some(Output::Packet(p)) => out.push((p, now.duration_since(start))),
+            None => break,
+        }
+    }
+    out
+}
+
+/// #8 指标验收（netem sim 部分）：p99 抖动 <2ms——干净链路（固定延迟、无注入
+/// 抖动）下模拟器不得引入额外时延抖动。该前提支撑后续抖动缓冲与端到端指标。
+#[test]
+fn stable_link_p99_jitter_below_2ms() {
+    let config = NetemConfig::new()
+        .latency(Duration::from_millis(30))
+        .seed(42);
+    let mut netem: Netem<Vec<u8>> = Netem::new(config);
+    let base = Instant::now();
+
+    let total = 500;
+    for i in 0..total {
+        netem.handle_input(Input::Packet(base, vec![i as u8; 100]));
+    }
+    let delivered = drive_with_times(&mut netem, base);
+    assert_eq!(delivered.len(), total, "干净链路不应丢包");
+
+    let base_latency = Duration::from_millis(30);
+    let mut deviations: Vec<Duration> = delivered
+        .iter()
+        .map(|(_, t)| t.saturating_sub(base_latency))
+        .collect();
+    deviations.sort();
+    let p99 = deviations[(total as f64 * 0.99).ceil() as usize - 1];
+    let max = deviations[total - 1];
+    println!("stable link: p99 deviation {p99:?}, max {max:?}");
+    assert!(
+        p99 < Duration::from_millis(2),
+        "干净链路 p99 时延抖动 {p99:?} 应 <2ms"
+    );
+    assert!(
+        max < Duration::from_millis(2),
+        "干净链路最大时延抖动 {max:?} 应 <2ms"
+    );
+}
+
+/// #8 指标验收（netem sim 部分）：配置 jitter=1ms（均匀 ±1ms）时实测 p99 抖动
+/// 仍 <2ms——模拟器统计与验收线一致，而非仅配置正确。
+#[test]
+fn jitter_1ms_p99_below_2ms() {
+    let config = NetemConfig::new()
+        .latency(Duration::from_millis(30))
+        .jitter(Duration::from_millis(1))
+        .seed(7);
+    let mut netem: Netem<Vec<u8>> = Netem::new(config);
+    let base = Instant::now();
+
+    let total = 2_000;
+    for i in 0..total {
+        netem.handle_input(Input::Packet(base, vec![i as u8; 100]));
+    }
+    let delivered = drive_with_times(&mut netem, base);
+    assert_eq!(delivered.len(), total, "jitter=1ms 不应丢包");
+
+    let base_latency = Duration::from_millis(30);
+    let mut deviations: Vec<Duration> = delivered
+        .iter()
+        .map(|(_, t)| {
+            if *t >= base_latency {
+                *t - base_latency
+            } else {
+                base_latency - *t
+            }
+        })
+        .collect();
+    deviations.sort();
+    let p99 = deviations[(total as f64 * 0.99).ceil() as usize - 1];
+    let max = deviations[total - 1];
+    let varied = deviations.iter().filter(|d| **d > Duration::ZERO).count();
+    println!("jitter=1ms: p99 deviation {p99:?}, max {max:?}, varied {varied}/{total}");
+    assert!(varied > 0, "jitter=1ms 应产生时延变化");
+    assert!(
+        p99 < Duration::from_millis(2),
+        "jitter=1ms 实测 p99 抖动 {p99:?} 应 <2ms（验收线）"
+    );
+}

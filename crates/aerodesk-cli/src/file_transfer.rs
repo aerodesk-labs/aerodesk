@@ -15,6 +15,25 @@ static FILE_TX: std::sync::Mutex<Option<aerodesk_core::file_transfer::FileTransf
 static CANCEL_SEND_AFTER: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
 static CANCEL_SEND_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// #122：发送是否已确认（viewer --send-file 模式发送完成）。
+pub fn send_confirmed() -> bool {
+    FILE_TX
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|f| f.send_complete())
+        .unwrap_or(false)
+}
+
+/// #122：当前接收落盘目录（viewer --request-file 模式轮询落盘）。
+pub fn recv_dir() -> Option<std::path::PathBuf> {
+    FILE_TX
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|f| f.recv_dir().map(|p| p.to_path_buf()))
+}
+
 /// 初始化进程内状态机（main 入口调用一次）。
 /// `cancel_send_after` 为可选秒数：到达后自动取消当前发送（e2e 回归用）。
 pub fn init(

@@ -35,14 +35,21 @@ PUB_PID=$!
 ./target/debug/aerodesk-cli --role viewer --audio \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/av-view.log 2>&1 &
 VIEW_PID=$!
+# 先等媒体到达（CI 慢启动时固定 sleep 会误判 0 帧；最多 ~30s）
+MEDIA_OK=0
+for _ in $(seq 1 60); do
+    if grep -qE "RECEIVED: [1-9]" /tmp/av-view.log 2>/dev/null; then MEDIA_OK=1; break; fi
+    if ! kill -0 "$VIEW_PID" 2>/dev/null; then break; fi
+    sleep 0.5
+done
 sleep "$OBS"
 kill "$PUB_PID" "$VIEW_PID" "$SFU_PID" "$SIG_PID" 2>/dev/null || true
 wait 2>/dev/null || true
 
 echo "== 断言"
 fail=0
-# 1) 视频与音频都收到
-if grep -qE "RECEIVED: [1-9]" /tmp/av-view.log && grep -qE "AUDIO: [1-9]" /tmp/av-view.log; then
+# 1) 视频与音频都收到（媒体等待轮询保证到达，避免 CI 慢启动误判）
+if [ "$MEDIA_OK" = "1" ] && grep -qE "AUDIO: [1-9]" /tmp/av-view.log; then
     echo "PASS video+audio received"
 else
     echo "FAIL media receive"; tail -3 /tmp/av-view.log; fail=1
