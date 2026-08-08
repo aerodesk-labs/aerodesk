@@ -132,6 +132,11 @@ jobs:
       - name: e2e signal connection quota (macOS only)
         if: runner.os == 'macOS'
         run: ./scripts/quota-e2e.sh
+
+      # #173 客户端自动重连：中途断线恢复 + 启动重试。
+      - name: e2e client auto-reconnect (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/reconnect-e2e.sh
       # #72 文件传输：publisher --send-file → SFU → viewer --recv-dir，SHA-256 一致。
       # #85：用 release 构建——debug 下 str0m/sctp-proto 高吞吐 data channel
       # 深调用链会 stack overflow（#102 已知，SFU shard 已 8MB 栈缓解）；

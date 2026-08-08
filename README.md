@@ -53,6 +53,8 @@ cargo run -p aerodesk-cli -- --role publisher --encoder x264 --simulcast --noisy
 
 # 观看端（--layer q|h|f 显式选层；--audio 接收音频，--mute-audio 静音）
 cargo run -p aerodesk-cli -- --role viewer --layer f --audio
+# #173 自动重连（中途断线/服务重启后指数退避重连，--reconnect-max 默认 5 次）
+cargo run -p aerodesk-cli -- --role viewer --reconnect
 
 # 音频：publisher --audio 发送合成 PCMU（G.711 8kHz）；--audio-opus 用 Opus（48kHz，libopus）
 #       （#73）；真实系统音频采集待真机接入
