@@ -3,6 +3,7 @@
 use std::net::TcpStream;
 
 use aerodesk_protocol::signal::{Role, SignalMessage};
+use tracing::info;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket, connect};
 
@@ -62,25 +63,39 @@ impl WsSignalClient {
     }
 
     /// 加入房间，返回服务器分配的 peer_id 与 TURN 配置。
+    ///
+    /// 多 PoP（#146）：服务器返回 [`SignalMessage::Redirect`] 时自动断开并
+    /// 重连到目标 PoP 的信令地址（最多 `MAX_REDIRECTS` 跳，防环）。
     pub fn join(
         &mut self,
         room: &str,
         role: Role,
         auth_token: Option<&str>,
     ) -> Result<(String, Option<aerodesk_protocol::signal::TurnConfig>), String> {
-        self.send(SignalMessage::Join {
-            room: room.into(),
-            role,
-            auth_token: auth_token.map(|s| s.to_string()),
-        })?;
-        match self.recv()? {
-            SignalMessage::Joined { peer_id, turn, .. } => {
-                self.peer_id = Some(peer_id.clone());
-                Ok((peer_id, turn))
+        const MAX_REDIRECTS: usize = 3;
+        for hop in 0..=MAX_REDIRECTS {
+            self.send(SignalMessage::Join {
+                room: room.into(),
+                role,
+                auth_token: auth_token.map(|s| s.to_string()),
+            })?;
+            match self.recv()? {
+                SignalMessage::Redirect { url, .. } => {
+                    info!("signal redirect (hop {hop}/{MAX_REDIRECTS}): following to {url}");
+                    let (ws, _) = connect(&normalize_signal_url(&url))
+                        .map_err(|e| format!("redirect connect {url}: {e}"))?;
+                    self.ws = ws;
+                    self.peer_id = None;
+                }
+                SignalMessage::Joined { peer_id, turn, .. } => {
+                    self.peer_id = Some(peer_id.clone());
+                    return Ok((peer_id, turn));
+                }
+                SignalMessage::Error { message } => return Err(message),
+                other => return Err(format!("unexpected join response: {other:?}")),
             }
-            SignalMessage::Error { message } => Err(message),
-            other => Err(format!("unexpected join response: {other:?}")),
         }
+        Err("too many signal redirects".into())
     }
 
     /// 发送 SDP offer，等待 SFU answer（阻塞）。

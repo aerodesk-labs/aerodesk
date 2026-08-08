@@ -14,6 +14,11 @@
 //!   TURN_URLS     逗号分隔 TURN URL（默认 127.0.0.1:3478）
 //!   SFU_URL       SFU 内部接口（默认 http://127.0.0.1:3002）
 //!   SFU_TOKEN     SFU 内部接口 token（可选）
+//!
+//! 多 PoP（#146）：
+//!   POP_ID        本 PoP 标识（默认 local）
+//!   ROOM_POP_MAP  房间前缀=PoP，逗号分隔（如 eu-=pop-eu,us-=pop-us）；最长前缀优先
+//!   POP_URLS      PoP=客户端信令 URL，逗号分隔（如 pop-eu=wss://eu.example.com:443/ws）
 
 #[macro_use]
 extern crate tracing;
@@ -33,6 +38,12 @@ struct Config {
     jwt_secret: Option<String>,
     /// 旧密钥（轮换宽限期）：`jwt_secret` 验证失败时回退（#143）。
     jwt_secret_old: Option<String>,
+    /// 本 PoP 标识（默认 local）。
+    pop_id: String,
+    /// 房间前缀 → PoP（最长前缀优先）。
+    room_pop_map: Vec<(String, String)>,
+    /// PoP → 客户端信令 URL（重定向目标）。
+    pop_urls: HashMap<String, String>,
     turn: Option<TurnConfig>,
     sfu_url: String,
     sfu_token: Option<String>,
@@ -236,16 +247,48 @@ fn load_config() -> Config {
         }
     });
 
+    let room_pop_map = std::env::var("ROOM_POP_MAP")
+        .unwrap_or_default()
+        .split(',')
+        .filter(|kv| kv.contains('='))
+        .map(|kv| {
+            let (prefix, pop) = kv.split_once('=').expect("checked contains '='");
+            (prefix.trim().to_string(), pop.trim().to_string())
+        })
+        .collect();
+    let pop_urls = std::env::var("POP_URLS")
+        .unwrap_or_default()
+        .split(',')
+        .filter(|kv| kv.contains('='))
+        .map(|kv| {
+            let (pop, url) = kv.split_once('=').expect("checked contains '='");
+            (pop.trim().to_string(), url.trim().to_string())
+        })
+        .collect();
+
     Config {
         auth_tokens,
         jwt_secret: std::env::var("JWT_SECRET").ok().filter(|s| !s.is_empty()),
         jwt_secret_old: std::env::var("JWT_SECRET_OLD")
             .ok()
             .filter(|s| !s.is_empty()),
+        pop_id: std::env::var("POP_ID").unwrap_or_else(|_| "local".into()),
+        room_pop_map,
+        pop_urls,
         turn,
         sfu_url: std::env::var("SFU_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into()),
         sfu_token: std::env::var("SFU_TOKEN").ok(),
     }
+}
+
+/// 房间命中映射的 PoP（最长前缀优先）；无映射返回 None。
+fn pinned_pop<'a>(config: &'a Config, room: &str) -> Option<&'a str> {
+    config
+        .room_pop_map
+        .iter()
+        .filter(|(prefix, _)| room.starts_with(prefix.as_str()))
+        .max_by_key(|(prefix, _)| prefix.len())
+        .map(|(_, pop)| pop.as_str())
 }
 
 /// 认证：JWT（新密钥优先，失败回退 JWT_SECRET_OLD 宽限期）→ 静态 token → 开发模式放行。
@@ -337,6 +380,30 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 role,
                 auth_token,
             } => {
+                // 多 PoP（#146）：房间钉在其它 PoP → 返回重定向（客户端自动跟随）。
+                if let Some(pop) = pinned_pop(&config, &room) {
+                    if pop != config.pop_id {
+                        if let Some(url) = config.pop_urls.get(pop) {
+                            info!(
+                                "room {room} pinned to pop {pop} (self={self}); redirect to {url}",
+                                self = config.pop_id
+                            );
+                            send(
+                                ws.clone(),
+                                SignalMessage::Redirect {
+                                    pop: pop.to_string(),
+                                    url: url.clone(),
+                                    reason: Some("room pinned to pop".into()),
+                                },
+                            );
+                            continue;
+                        } else {
+                            warn!(
+                                "room {room} pinned to pop {pop} but no POP_URLS entry; ignoring pin"
+                            );
+                        }
+                    }
+                }
                 let auth_ok = auth_ok(&config, auth_token.as_deref(), &room, role);
                 if !auth_ok {
                     send(
@@ -425,7 +492,8 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
             }
             SignalMessage::Joined { .. }
             | SignalMessage::PeerLeft { .. }
-            | SignalMessage::Error { .. } => {}
+            | SignalMessage::Error { .. }
+            | SignalMessage::Redirect { .. } => {}
         }
     }
 
@@ -545,6 +613,9 @@ mod tests {
             auth_tokens: vec![],
             jwt_secret: Some(new.into()),
             jwt_secret_old: old.map(|s| s.to_string()),
+            pop_id: "pop-a".into(),
+            room_pop_map: vec![],
+            pop_urls: HashMap::new(),
             turn: None,
             sfu_url: "http://127.0.0.1:3002".into(),
             sfu_token: None,
