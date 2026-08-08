@@ -161,6 +161,13 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/avsync-e2e.sh
 
+      # 客户端自测：Web 主控端（浏览器观看 + 输入回传，SFU 内嵌 web/index.html）。
+      - name: e2e web viewer (macOS only)
+        if: runner.os == 'macOS'
+        env:
+          BROWSER: chrome
+        run: ./scripts/web-e2e.sh
+
       - name: windows adapter
         if: runner.os == 'Windows'
         # --examples：编译验证 vdd_smoke（#140，真机验收示例）。
