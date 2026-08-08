@@ -64,7 +64,7 @@ sleep 3
 
 echo "== [5/7] 启动 Linux UI（Xvfb，自动连接观看）"
 ls -la "$ROOT/target/debug/aerodesk-ui" || echo "UI BINARY MISSING"
-DISPLAY=:99 "$ROOT/target/debug/aerodesk-ui" \
+RUST_LOG=debug DISPLAY=:99 "$ROOT/target/debug/aerodesk-ui" \
   -server 127.0.0.1:3003 -room "$ROOM" -autoconnect >/tmp/linuxui-ui.log 2>&1 &
 UI_PID=$!
 sleep 5

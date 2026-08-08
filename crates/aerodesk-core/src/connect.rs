@@ -195,6 +195,7 @@ pub fn connect_live_role(
         .accept_answer(pending, answer)
         .map_err(|e| format!("accept: {e:?}"))?;
 
+    tracing::debug!("connect_live_role: SDP exchanged, entering ICE loop");
     let mut ice_connected = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
