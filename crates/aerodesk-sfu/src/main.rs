@@ -392,6 +392,10 @@ pub fn main() {
         thread::Builder::new()
             .name("rd-manager".into())
             .spawn(move || {
+                let shard_count = shared.metrics.len();
+                let mut clients = vec![0usize; shard_count];
+                let mut last_counters = vec![(0u64, 0u64); shard_count];
+                let mut last_sample = Instant::now();
                 loop {
                     for ev in tcp_rx.try_iter() {
                         match ev {
@@ -437,8 +441,26 @@ pub fn main() {
                             }
                         }
                     }
-                    for (shard, clients) in manager_rx.try_iter() {
-                        router.lock().unwrap().set_load(shard, clients);
+                    for (shard, count) in manager_rx.try_iter() {
+                        clients[shard] = count;
+                    }
+                    // 每 500ms 采样每分片 rx/tx 包率，喂给包率感知负载路由（#130）。
+                    let now = Instant::now();
+                    if now.duration_since(last_sample) >= Duration::from_millis(500) {
+                        let dt = now.duration_since(last_sample).as_secs_f64().max(0.001);
+                        for i in 0..shard_count {
+                            let m = &shared.metrics[i];
+                            let rx = m.rx_packets.load(Ordering::Relaxed);
+                            let tx = m.tx_packets.load(Ordering::Relaxed);
+                            let rx_pps = rx.saturating_sub(last_counters[i].0) as f64 / dt;
+                            let tx_pps = tx.saturating_sub(last_counters[i].1) as f64 / dt;
+                            last_counters[i] = (rx, tx);
+                            router
+                                .lock()
+                                .unwrap()
+                                .set_load(i, clients[i], rx_pps, tx_pps);
+                        }
+                        last_sample = now;
                     }
                     thread::sleep(Duration::from_millis(5));
                 }
