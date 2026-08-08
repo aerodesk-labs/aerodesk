@@ -1031,7 +1031,10 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.invoke_connect();
     }
     ui.show()?;
-    tray.show()?;
+    // 无桌面环境（Xvfb/CI/无 StatusNotifier）下托盘创建失败不应致命——仅日志。
+    if let Err(e) = tray.show() {
+        eprintln!("system tray unavailable: {e:?}");
+    }
     slint::run_event_loop()
 }
 
