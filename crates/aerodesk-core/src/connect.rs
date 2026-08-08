@@ -74,7 +74,9 @@ fn discover_local_ip() -> Option<std::net::IpAddr> {
         let mut p = ifap;
         while !p.is_null() {
             let ifa = &*p;
-            if !ifa.ifa_addr.is_null() && (*ifa.ifa_addr).sa_family == libc::AF_INET as u8 {
+            if !ifa.ifa_addr.is_null()
+                && (*ifa.ifa_addr).sa_family == libc::AF_INET as libc::sa_family_t
+            {
                 let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
                 let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
                 let name = std::ffi::CStr::from_ptr(ifa.ifa_name)
