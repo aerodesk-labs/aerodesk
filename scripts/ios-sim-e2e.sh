@@ -24,11 +24,14 @@ APP="$DD/Build/Products/Debug-iphonesimulator/AeroDesk.app"
 [ -d "$APP" ] || { echo "FAIL: app 未生成"; exit 1; }
 
 echo "== [3/7] 准备模拟器"
-RUNTIME=$(xcrun simctl list runtimes 2>/dev/null | grep -oE 'com.apple.CoreSimulator.SimRuntime.iOS-[0-9-]+' | tail -1)
+# 必须选最新 runtime：App 用最新 Xcode SDK 编译，旧 runtime 的 VideoToolbox
+# 缺新符号（如 _VTRegisterSupplementalVideoDecoderIfAvailable）会 dyld 崩溃。
+RUNTIME=$(xcrun simctl list runtimes 2>/dev/null | grep -oE 'com.apple.CoreSimulator.SimRuntime.iOS-[0-9-]+' | sort -V | tail -1)
 [ -n "$RUNTIME" ] || { echo "FAIL: 无 iOS Simulator Runtime"; exit 1; }
+echo "runtime=$RUNTIME"
 DEVICE=$(xcrun simctl list devices available 2>/dev/null | grep -oE 'iPhone [^(]+ \(([0-9A-F-]+)\)' | head -1 | grep -oE '[0-9A-F-]{36}' | head -1)
 if [ -z "$DEVICE" ]; then
-  DT=$(xcrun simctl list devicetypes 2>/dev/null | grep -oE 'com.apple.CoreSimulator.SimDeviceType.iPhone-[0-9]+' | tail -1)
+  DT=$(xcrun simctl list devicetypes 2>/dev/null | grep -oE 'com.apple.CoreSimulator.SimDeviceType.iPhone-[0-9]+' | sort -V | tail -1)
   DEVICE=$(xcrun simctl create "AeroDesk-E2E" "$DT" "$RUNTIME")
 fi
 xcrun simctl boot "$DEVICE" 2>/dev/null || true
