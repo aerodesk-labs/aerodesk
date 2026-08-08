@@ -3,6 +3,11 @@
 //! 通过环境变量 `RECORD_DIR` 开启：将每个房间收到的媒体载荷落盘，
 //! 并输出 JSON 审计日志（会话起止/包数/字节数）。
 //!
+//! 录制模式：
+//! - 自动模式（默认）：任何房间首个媒体包即自动录制；
+//! - 按需模式（`RECORD_ON_DEMAND=1`）：仅 `start(room)` 显式开启的房间录制，
+//!   支持内部 API 按房间 start/stop/status（#160）。
+//!
 //! 文件格式（`ADREC1`）：
 //! ```text
 //! magic "ADREC1\n"
@@ -72,6 +77,8 @@ pub struct Recorder {
     root: PathBuf,
     audit: Mutex<File>,
     recordings: Mutex<HashMap<String, Recording>>,
+    /// 按需模式（RECORD_ON_DEMAND=1）：只录显式 start() 的房间（#160）。
+    on_demand: bool,
 }
 
 fn now_micros() -> u64 {
@@ -100,7 +107,7 @@ fn safe_name(room: &str) -> String {
 
 impl Recorder {
     /// 创建录制器并打开审计日志（追加模式）。目录不存在会自动创建。
-    pub fn new(root: impl AsRef<Path>) -> std::io::Result<Recorder> {
+    pub fn new(root: impl AsRef<Path>, on_demand: bool) -> std::io::Result<Recorder> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)?;
         let audit = OpenOptions::new()
@@ -111,6 +118,7 @@ impl Recorder {
             root,
             audit: Mutex::new(audit),
             recordings: Mutex::new(HashMap::new()),
+            on_demand,
         })
     }
 
@@ -127,6 +135,11 @@ impl Recorder {
     pub fn record(&self, room: &str, payload: &[u8]) {
         let ts = now_micros();
         let mut recs = self.recordings.lock().unwrap_or_else(|e| e.into_inner());
+
+        // 按需模式：未显式 start 的房间不录制。
+        if self.on_demand && !recs.contains_key(room) {
+            return;
+        }
 
         // 首次见到该房间：尝试创建录制文件。
         if !recs.contains_key(room) {
@@ -164,6 +177,84 @@ impl Recorder {
                 let _ = entry.writer.flush();
             }
         }
+    }
+
+    /// 显式开始录制一个房间（幂等）。创建文件失败返回 Err（调用方按 503 处理）。
+    /// 按需模式与自动模式都可用（自动模式下也可提前 start 记录空房间）。
+    pub fn start(&self, room: &str) -> Result<(), String> {
+        let ts = now_micros();
+        let mut recs = self.recordings.lock().unwrap_or_else(|e| e.into_inner());
+        if recs.contains_key(room) {
+            return Ok(()); // 幂等
+        }
+        match Recording::open(&self.root, room, ts) {
+            Ok(rec) => {
+                self.audit(serde_json::json!({
+                    "ts": ts,
+                    "event": "room_start",
+                    "room": room,
+                    "path": rec.path.display().to_string(),
+                }));
+                recs.insert(room.to_string(), rec);
+                Ok(())
+            }
+            Err(e) => {
+                warn!("recorder: room={room} 录制文件创建失败（{e}），标记失败哨兵");
+                recs.insert(room.to_string(), Recording::failed(room, ts));
+                Err(format!("open recording for {room}: {e}"))
+            }
+        }
+    }
+
+    /// 显式停止录制一个房间：立即 finalize（写 meta + 审计）。幂等（未在录返回 false）。
+    pub fn stop(&self, room: &str) -> bool {
+        let now = now_micros();
+        let mut recs = self.recordings.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(mut rec) = recs.remove(room) else {
+            return false;
+        };
+        if rec.failed {
+            return true;
+        }
+        let _ = rec.writer.flush();
+        let meta = serde_json::json!({
+            "room": rec.room,
+            "path": rec.path.display().to_string(),
+            "started_at": rec.started_at,
+            "ended_at": now,
+            "packets": rec.packets,
+            "bytes": rec.bytes,
+        });
+        let meta_path = rec.path.with_extension("meta.json");
+        let _ = fs::write(
+            &meta_path,
+            serde_json::to_string_pretty(&meta).unwrap_or_default(),
+        );
+        self.audit(serde_json::json!({
+            "ts": now,
+            "event": "room_end",
+            "room": rec.room,
+            "packets": rec.packets,
+            "bytes": rec.bytes,
+        }));
+        true
+    }
+
+    /// 当前录制状态（供 GET /record/status）。
+    pub fn status(&self) -> Vec<serde_json::Value> {
+        let recs = self.recordings.lock().unwrap_or_else(|e| e.into_inner());
+        recs.values()
+            .filter(|r| !r.failed)
+            .map(|r| {
+                serde_json::json!({
+                    "room": r.room,
+                    "path": r.path.display().to_string(),
+                    "started_at": r.started_at,
+                    "packets": r.packets,
+                    "bytes": r.bytes,
+                })
+            })
+            .collect()
     }
 
     /// 结束所有录制并写元数据（进程退出/手动调用时）。
@@ -216,9 +307,59 @@ mod tests {
     }
 
     #[test]
+    fn auto_mode_start_is_idempotent_and_stop_finalizes() {
+        let dir = tmpdir("auto");
+        let rec = Recorder::new(&dir, false).unwrap();
+        rec.start("room-a").unwrap(); // 自动模式也可显式 start（空房间）
+        rec.start("room-a").unwrap(); // 幂等
+        rec.record("room-a", b"x");
+        assert!(rec.stop("room-a"));
+        assert_eq!(rec.status().len(), 0);
+        let meta: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("room-a.meta.json")).unwrap())
+                .unwrap();
+        assert_eq!(meta["packets"], 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn on_demand_records_only_started_rooms() {
+        let dir = tmpdir("ondemand");
+        let rec = Recorder::new(&dir, true).unwrap();
+        // 未 start 的房间不录制
+        rec.record("room-x", b"ignored");
+        assert_eq!(rec.status().len(), 0);
+        // start 后开始录制
+        rec.start("room-x").unwrap();
+        rec.record("room-x", b"hello");
+        rec.record("room-x", b"world");
+        let st = rec.status();
+        assert_eq!(st.len(), 1);
+        assert_eq!(st[0]["room"], "room-x");
+        assert_eq!(st[0]["packets"], 2);
+        // stop 后立即出 meta，且不再自动录制
+        assert!(rec.stop("room-x"));
+        assert!(
+            !rec.stop("room-x"),
+            "stop must be idempotent (false when absent)"
+        );
+        rec.record("room-x", b"after-stop");
+        assert_eq!(
+            rec.status().len(),
+            0,
+            "stopped room must not auto-record in on-demand"
+        );
+        let meta: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("room-x.meta.json")).unwrap())
+                .unwrap();
+        assert_eq!(meta["packets"], 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn records_and_finalizes() {
         let dir = tmpdir("t1");
-        let rec = Recorder::new(&dir).unwrap();
+        let rec = Recorder::new(&dir, false).unwrap();
         rec.record("room-a", b"hello world");
         rec.record("room-a", b"hello world");
         rec.finalize_all();
@@ -249,7 +390,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tmpdir("t3");
-        let rec = Recorder::new(&dir).unwrap();
+        let rec = Recorder::new(&dir, false).unwrap();
         rec.record("ok-room", b"first");
 
         // 目录改为只读：新房间创建录制文件必失败。
@@ -285,7 +426,7 @@ mod tests {
     #[test]
     fn unsafe_room_name_sanitized() {
         let dir = tmpdir("t2");
-        let rec = Recorder::new(&dir).unwrap();
+        let rec = Recorder::new(&dir, false).unwrap();
         rec.record("../bad/room", b"x");
         rec.finalize_all();
         // 路径分隔符被替换为 _；点号保留（仍是安全文件名）。

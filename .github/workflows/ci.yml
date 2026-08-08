@@ -122,6 +122,11 @@ jobs:
       - name: e2e multi-PoP dynamic registry (macOS only)
         if: runner.os == 'macOS'
         run: ./scripts/popreg-e2e.sh
+
+      # #160 SFU 按需录制 API：内部接口 start/stop/status + 403 + 产物断言。
+      - name: e2e record API (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/record-api-e2e.sh
       # #72 文件传输：publisher --send-file → SFU → viewer --recv-dir，SHA-256 一致。
       # #85：用 release 构建——debug 下 str0m/sctp-proto 高吞吐 data channel
       # 深调用链会 stack overflow（#102 已知，SFU shard 已 8MB 栈缓解）；
