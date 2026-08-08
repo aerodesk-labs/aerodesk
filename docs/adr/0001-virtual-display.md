@@ -92,6 +92,6 @@ VirtualDisplayManager
 ## 后续（不在本期）
 
 - Windows 采集器切到虚拟屏取帧（DXGI 枚举虚拟屏输出，真机验证）；
-- macOS BetterDisplay CLI 集成设计（ADR-0002 候选）；
-- Linux VKMS 集成设计（ADR-0003 候选）；
+- macOS BetterDisplay CLI 集成设计：**ADR-0002**（已定稿，待实现）；
+- Linux VKMS + krfb-virtualmonitor 集成设计：**ADR-0003**（已定稿，待实现）；
 - Parsec VDD 自定义分辨率注册表路径（>5 组模式时）。
