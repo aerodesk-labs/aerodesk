@@ -35,6 +35,26 @@ struct ContentView: View {
     @State private var hasFrame = false
     @State private var inputSeq: UInt64 = 0
     @State private var displayLayer = AVSampleBufferDisplayLayer()
+    @State private var autoConnect = false
+
+    /// 启动参数驱动（模拟器/CI 冒烟用）：
+    ///   -server <ws://host:port>  覆盖信令地址（默认 127.0.0.1:3003）
+    ///   -room <name>              覆盖房间名（默认 demo）
+    ///   -autoconnect              启动后自动连接，无需点击“连接”按钮
+    init() {
+        let args = CommandLine.arguments
+        var server = "ws://127.0.0.1:3003"
+        var room = "demo"
+        if let i = args.firstIndex(of: "-server"), args.count > i + 1 {
+            server = args[i + 1]
+        }
+        if let i = args.firstIndex(of: "-room"), args.count > i + 1 {
+            room = args[i + 1]
+        }
+        _server = State(initialValue: server)
+        _room = State(initialValue: room)
+        _autoConnect = State(initialValue: args.contains("-autoconnect"))
+    }
 
     var body: some View {
         VStack(spacing: 18) {
@@ -127,6 +147,11 @@ struct ContentView: View {
         .onAppear {
             version = String(cString: ad_version())
             hardware = ad_decoder_hardware() != 0
+            if autoConnect && viewer == nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    startViewer()
+                }
+            }
         }
         .onDisappear { stopViewer() }
     }

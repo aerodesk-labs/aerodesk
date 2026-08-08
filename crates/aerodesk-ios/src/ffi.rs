@@ -144,7 +144,11 @@ pub unsafe extern "C" fn ad_viewer_create(
     };
     match ViewerSession::connect(&server, &room) {
         Ok(s) => Box::into_raw(Box::new(s)),
-        Err(_) => std::ptr::null_mut(),
+        Err(e) => {
+            // 模拟器/CI 冒烟诊断：连接失败原因直接打到 stderr（simctl launch --console 可见）。
+            eprintln!("ad_viewer_create error: {e}");
+            std::ptr::null_mut()
+        }
     }
 }
 
