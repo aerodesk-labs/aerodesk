@@ -19,7 +19,7 @@
 aerodesk/
 ├── crates/
 │   ├── aerodesk-sfu/        # SFU 服务端：8 shard × SO_REUSEPORT + UnifiedSocket(UDP/TCP/SSL-TCP 3478)
-│   │                        #   + BitrateController/simulcast 选层 + /metrics ✅
+│   │                        #   + BitrateController/simulcast 选层 + /healthz + /metrics[/prometheus] ✅
 │   ├── aerodesk-signal/     # 独立信令：WSS:3001 + WS:3003，房间/认证/TURN 凭证，代理 SFU 内部 API ✅
 │   ├── aerodesk-protocol/   # 共享协议：input/signal 消息 + coturn REST 凭证 ✅
 │   ├── aerodesk-core/       # 客户端核心：Endpoint(SDP/ICE/DTLS/数据通道) + 信令客户端 + VP8 解析 ✅
