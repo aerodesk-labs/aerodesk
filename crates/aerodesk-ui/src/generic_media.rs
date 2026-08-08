@@ -4,6 +4,7 @@
 //! aerodesk-softenc::SoftDecoder（OpenH264 全平台），渲染走 Slint set_video_frame。
 //! 音频/文件传输/多会话标签为 macOS 增强项，非 macOS 先收敛到"真实视频观看"。
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
