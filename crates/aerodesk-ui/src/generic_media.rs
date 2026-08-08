@@ -29,6 +29,7 @@ pub fn run_generic_viewer(
     let mut live = match connect_live_role(&server, &room, Role::Viewer, auth) {
         Ok(l) => l,
         Err(e) => {
+            eprintln!("generic viewer connect failed: {e}");
             if !stale() {
                 if let Some(ui) = ui_weak.upgrade() {
                     ui.set_conn_state(3);
@@ -54,6 +55,7 @@ pub fn run_generic_viewer(
     ui.set_conn_state(2);
     ui.set_in_session(true);
     ui.set_session_status("会话中 · OpenH264 软解".into());
+    eprintln!("generic viewer connected peer={} ice={}", live.peer_id, live.ice_connected);
 
     let mut assembler = AccessUnitAssembler::new();
     let mut decoder: Option<SoftDecoder> = None;
