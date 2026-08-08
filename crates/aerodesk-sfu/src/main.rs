@@ -33,6 +33,7 @@ mod tcp;
 mod util;
 
 use aerodesk_protocol::signal::{Role, TurnConfig};
+use recorder::Recorder;
 use shard::{Shard, ShardCommand, Shared};
 
 /// 统一媒体端口（UDP + TCP + SSL-TCP 复用）。生产用 443。
@@ -136,6 +137,7 @@ fn public_handler(request: &Request) -> Response {
         state.router.clone(),
         state.turn.clone(),
         state.shared.clone(),
+        false,
     )
 }
 
@@ -155,6 +157,7 @@ fn internal_handler(request: &Request) -> Response {
         state.router.clone(),
         state.turn.clone(),
         state.shared.clone(),
+        true,
     )
 }
 
@@ -370,7 +373,11 @@ pub fn main() {
     // 3. 分片通道（先建 channel，后启线程）
     let mut shared = Shared::new(shard_count);
     if let Ok(dir) = std::env::var("RECORD_DIR") {
-        match recorder::Recorder::new(&dir) {
+        // #160：RECORD_ON_DEMAND=1 时只录显式 start() 的房间（按需录制 API）。
+        let on_demand = std::env::var("RECORD_ON_DEMAND")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        match recorder::Recorder::new(&dir, on_demand) {
             Ok(rec) => {
                 let rec = Arc::new(rec);
                 // SIGINT（Ctrl+C）时先 finalize 录制再退出，保证 meta.json 落盘。
@@ -566,6 +573,66 @@ pub fn main() {
     }
 }
 
+/// 查询参数（首个匹配）。
+fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query
+        .split('&')
+        .find(|kv| kv.starts_with(&format!("{key}=")))
+        .map(|kv| &kv[key.len() + 1..])
+}
+
+fn recorder_or_503(shared: &Shared) -> Result<&Recorder, Response> {
+    shared.recorder.as_deref().ok_or_else(|| {
+        Response::text("recording disabled (RECORD_DIR not set)").with_status_code(503)
+    })
+}
+
+/// POST /record/start?room=xxx（内部接口，#160）。
+fn record_start(shared: &Shared, room: Option<&str>) -> Response {
+    let Some(room) = room.filter(|r| !r.is_empty()) else {
+        return Response::text("room required").with_status_code(400);
+    };
+    let rec = match recorder_or_503(shared) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    match rec.start(room) {
+        Ok(()) => Response::from_data(
+            "application/json",
+            serde_json::to_vec(&serde_json::json!({ "room": room, "started": true })).unwrap(),
+        ),
+        Err(e) => Response::text(format!("start failed: {e}")).with_status_code(500),
+    }
+}
+
+/// POST /record/stop?room=xxx（内部接口，#160）。
+fn record_stop(shared: &Shared, room: Option<&str>) -> Response {
+    let Some(room) = room.filter(|r| !r.is_empty()) else {
+        return Response::text("room required").with_status_code(400);
+    };
+    let rec = match recorder_or_503(shared) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let stopped = rec.stop(room);
+    Response::from_data(
+        "application/json",
+        serde_json::to_vec(&serde_json::json!({ "room": room, "stopped": stopped })).unwrap(),
+    )
+}
+
+/// GET /record/status（内部接口，#160）。
+fn record_status(shared: &Shared) -> Response {
+    let rec = match recorder_or_503(shared) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    Response::from_data(
+        "application/json",
+        serde_json::to_vec(&serde_json::json!({ "recordings": rec.status() })).unwrap(),
+    )
+}
+
 fn web_request(
     request: &Request,
     udp_addr: SocketAddr,
@@ -574,7 +641,26 @@ fn web_request(
     router: Arc<Mutex<router::ShardRouter>>,
     turn: Option<TurnConfig>,
     shared: Shared,
+    internal: bool,
 ) -> Response {
+    // 按需录制 API（#160）：仅内部接口（INTERNAL_TOKEN 保护）暴露。
+    if internal {
+        let record = match (request.method(), request.url().as_str()) {
+            ("POST", "/record/start") => Some(record_start(
+                &shared,
+                query_param(request.raw_query_string(), "room"),
+            )),
+            ("POST", "/record/stop") => Some(record_stop(
+                &shared,
+                query_param(request.raw_query_string(), "room"),
+            )),
+            ("GET", "/record/status") => Some(record_status(&shared)),
+            _ => None,
+        };
+        if let Some(resp) = record {
+            return resp;
+        }
+    }
     if request.method() == "GET" && request.url() == "/metrics" {
         let metrics = shared.metrics.clone();
         let shards: Vec<serde_json::Value> = metrics
@@ -764,6 +850,7 @@ mod tests {
             router,
             None,
             shared,
+            false,
         );
         assert_eq!(resp.status_code, 200);
     }
@@ -781,6 +868,7 @@ mod tests {
             router,
             None,
             shared,
+            false,
         );
         assert_eq!(resp.status_code, 200);
         let (mut reader, _size) = resp.data.into_reader_and_size();
@@ -804,6 +892,7 @@ mod tests {
             router,
             None,
             shared,
+            false,
         );
         DRAINING.store(false, Ordering::Relaxed);
         assert_eq!(resp.status_code, 503);

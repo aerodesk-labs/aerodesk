@@ -27,6 +27,7 @@
 | signal | `TURN_SECRET` / `TURN_URLS` | coturn REST 凭证下发 |
 | signal | `SFU_URL` / `SFU_TOKEN` | SFU 内部接口 + 内部 token |
 | sfu | `RECORD_DIR` | 录制/审计目录（可选） |
+| sfu | `RECORD_ON_DEMAND` | `1` 时只录显式 start() 的房间（配合内部 API 按需录制，#160） |
 | signal | `POP_REGISTRY_FILE` | 动态 room→PoP 注册表文件（可选，#154）：多 PoP 共享同一文件即互见；首个加入者登记房间归属 |
 | signal | `POP_REGISTRY_TTL_SECS` | 注册条目 TTL（默认 3600，过期后可被重新登记） |
 
@@ -98,6 +99,16 @@ signal.aerodesk.io {
   现有客户端 → finalize 录制 → 退出；systemd `KillSignal=SIGTERM` 可安全停服。
 - **录制审计**：`RECORD_DIR` 落在独立数据盘（只读权限仅运维），
   `audit.log` 按天轮转，接入 SIEM/对象存储归档。
+- **按需录制 API（#160）**：`RECORD_ON_DEMAND=1` 时通过内部接口（127.0.0.1:3002，
+  `X-Internal-Token` 保护）按房间 start/stop/查询：
+  ```sh
+  curl -X POST -H "X-Internal-Token: $SFU_TOKEN" \
+    'http://127.0.0.1:3002/record/start?room=demo'
+  curl -H "X-Internal-Token: $SFU_TOKEN" 'http://127.0.0.1:3002/record/status'
+  curl -X POST -H "X-Internal-Token: $SFU_TOKEN" \
+    'http://127.0.0.1:3002/record/stop?room=demo'   # 立即 finalize + meta.json
+  ```
+  未设置 `RECORD_DIR` 时返回 503；无 token 返回 403；`stop` 幂等。
 
 ## 4. JWT 密钥管理
 
