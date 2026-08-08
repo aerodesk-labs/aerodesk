@@ -45,7 +45,11 @@ RECORD_DIR="$REC" ./target/debug/aerodesk-sfu >/tmp/iossim-sfu.log 2>&1 &
 SFU=$!
 ./target/debug/aerodesk-signal >/tmp/iossim-sig.log 2>&1 &
 SIG=$!
-sleep 1.5
+# 等 SFU/signal 就绪再起 publisher（此前固定 sleep 1.5，CI 负载下 SFU /start 会超时）
+for _ in $(seq 1 50); do
+    if nc -z 127.0.0.1 3002 2>/dev/null && nc -z 127.0.0.1 3003 2>/dev/null; then break; fi
+    sleep 0.2
+done
 ./target/debug/aerodesk-cli --role publisher --signal ws://127.0.0.1:3003 --room "$ROOM" --encoder x264 >/tmp/iossim-pub.log 2>&1 &
 PUB=$!
 sleep 2
