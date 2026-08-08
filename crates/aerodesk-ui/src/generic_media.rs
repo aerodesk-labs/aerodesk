@@ -81,6 +81,8 @@ pub fn run_generic_viewer(
     let mut assembler = AccessUnitAssembler::new();
     let mut decoder: Option<SoftDecoder> = None;
     let mut frames: u64 = 0;
+    let mut pkts: u64 = 0;
+    let mut media_evts: u64 = 0;
     let mut last_stat = Instant::now();
     while !stale() {
         live.socket
@@ -88,6 +90,10 @@ pub fn run_generic_viewer(
             .ok();
         let mut buf = [0u8; 4096];
         if let Ok((n, source)) = live.socket.recv_from(&mut buf) {
+            pkts += 1;
+            if pkts % 200 == 0 {
+                eprintln!("generic viewer: udp={pkts} media={media_evts} frames={frames}");
+            }
             if let Ok(contents) = buf[..n].try_into() {
                 let _ = live.endpoint.handle_input(str0m::Input::Receive(
                     std::time::Instant::now(),
@@ -113,6 +119,7 @@ pub fn run_generic_viewer(
         }
         while let Some(ev) = live.endpoint.poll_event() {
             if let ClientEvent::Media(data) = ev {
+                media_evts += 1;
                 // SFU 转发用本地 mid（非协商 mid），iOS/CLI 同款：不过滤直接组装。
                 if let Some(au) = assembler.push(
                     data.data.as_ref(),
