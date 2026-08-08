@@ -13,9 +13,18 @@ fn main() {
         use aerodesk_windows::vdd::VirtualDisplayManager;
         use std::time::Duration;
 
-        let width: u32 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(3840);
-        let height: u32 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(2160);
-        let hz: u32 = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(60);
+        let width: u32 = std::env::args()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3840);
+        let height: u32 = std::env::args()
+            .nth(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2160);
+        let hz: u32 = std::env::args()
+            .nth(3)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60);
 
         println!("vdd smoke: driver check + add {width}x{height}@{hz}");
         let mut vdd = match VirtualDisplayManager::new() {
@@ -29,7 +38,10 @@ fn main() {
             }
         };
         match vdd.add_display(width, height, hz) {
-            Ok(idx) => println!("OK added virtual display index={idx} (count={})", vdd.display_count()),
+            Ok(idx) => println!(
+                "OK added virtual display index={idx} (count={})",
+                vdd.display_count()
+            ),
             Err(e) => {
                 eprintln!("FATAL: add failed: {e}");
                 std::process::exit(1);
