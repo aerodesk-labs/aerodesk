@@ -659,6 +659,9 @@ mod tests {
     use shard::Shared;
     use std::io::Read;
 
+    /// 串行化依赖全局 `DRAINING` 的端点测试（cargo test 默认并行线程）。
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn healthz_ok_vs_draining() {
         let (code, payload) = healthz_payload(false, 4, 7);
@@ -700,6 +703,7 @@ mod tests {
 
     #[test]
     fn healthz_endpoint_ok() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let shared = Shared::new(1);
         let router = Arc::new(Mutex::new(crate::router::ShardRouter::new(1)));
         let req = Request::fake_http("GET", "/healthz", vec![], Vec::new());
@@ -738,6 +742,7 @@ mod tests {
 
     #[test]
     fn start_rejected_while_draining() {
+        let _guard = TEST_LOCK.lock().unwrap();
         DRAINING.store(true, Ordering::Relaxed);
         let shared = Shared::new(1);
         let router = Arc::new(Mutex::new(crate::router::ShardRouter::new(1)));
