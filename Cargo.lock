@@ -299,6 +299,7 @@ name = "aerodesk-signal"
 version = "0.1.0"
 dependencies = [
  "aerodesk-protocol",
+ "libc",
  "rouille",
  "serde",
  "serde_json",
