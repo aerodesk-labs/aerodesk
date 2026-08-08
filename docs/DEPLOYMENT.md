@@ -65,7 +65,8 @@ signal.aerodesk.io {
 ```
 
 **内部 CA（企业内网）**：用 `step-ca` 或 vault PKI 签发，客户端信任链预置；
-证书轮换走 SIGHUP 重载（待实现：signal/SFU 监听 SIGHUP 重读证书）。
+证书轮换走 **SIGHUP 热重载**（SFU 已实现：`kill -HUP <pid>` 重读 `CERT_FILE`/`KEY_FILE`
+并重建 HTTPS server，无需重启进程、旧连接不受影响；signal 侧建议由 Caddy/nginx 反代自动换证）。
 
 ## 3. 多 PoP 部署
 
@@ -74,9 +75,14 @@ signal.aerodesk.io {
 - **房间跨 PoP**：默认房间内成员落在同一 PoP（分片哈希路由同房间同分片）。
   跨 PoP 房间需信令层把房间钉到固定 PoP（房间 → PoP 映射表），暂不支持实时跨区媒体桥接。
 - **TURN 就近**：每 PoP 部署 coturn，`TURN_URLS` 指向本 PoP；`RELAY 端口段` 开放 UDP 49152-49200。
-- **监控告警**：SFU 暴露 `GET /metrics`（每分片 client/包数等 JSON），
-  接入 Prometheus（用 `prometheus_exporter` 或 textfile collector）+ Alertmanager：
+- **监控告警**：SFU 暴露 `GET /metrics/prometheus`（Prometheus 文本格式：每分片
+  clients/rx·tx packets/bytes + 合计 + `aerodesk_sfu_draining` gauge），可直接被
+  Prometheus 抓取；`GET /metrics`（JSON）保留兼容 bench 工具。+ Alertmanager：
   - 告警项：客户端掉线率、分片 CPU 突增、UDP 端口占用、录制目录磁盘水位 >80%
+- **健康检查**：`GET /healthz` 返回 JSON（`status: ok|draining` + shards/clients）；
+  正常 200，**draining 中 503**，供 LB/探活与滚动发布判断。
+- **优雅关闭**：`SIGTERM`/`SIGINT` → 拒绝新房间（`/start` 503）→ 限时 3s drain
+  现有客户端 → finalize 录制 → 退出；systemd `KillSignal=SIGTERM` 可安全停服。
 - **录制审计**：`RECORD_DIR` 落在独立数据盘（只读权限仅运维），
   `audit.log` 按天轮转，接入 SIEM/对象存储归档。
 
@@ -107,7 +113,7 @@ export JWT_SECRET=$(openssl rand -base64 48)
 export RECORD_DIR=/tmp/aerodesk-rec
 export TURN_SECRET=<coturn-secret>
 
-cargo run -p aerodesk-sfu &        # 媒体 3478 + HTTPS 信令 3000 + /metrics
+cargo run -p aerodesk-sfu &        # 媒体 3478 + HTTPS 3000 + /healthz + /metrics[/prometheus]
 cargo run -p aerodesk-signal &     # WSS 3001 / 明文 3003（开发）
 ```
 
