@@ -3,11 +3,11 @@
 //! 5 个原生平台（Win/macOS/Linux/Android/iOS）一套 UI；Web 走浏览器原生 WebRTC。
 
 slint::include_modules!();
+#[cfg(not(target_os = "macos"))]
+mod generic_media;
 mod keymap;
 #[cfg(target_os = "macos")]
 mod macos_media;
-#[cfg(not(target_os = "macos"))]
-mod generic_media;
 use slint::Model;
 
 use serde::{Deserialize, Serialize};
@@ -266,12 +266,32 @@ fn main() -> Result<(), slint::PlatformError> {
                     *INPUT_TX.lock().unwrap() = Some(input_tx);
                     let (file_cmd_tx, file_cmd_rx) = std::sync::mpsc::channel();
                     *FILE_CMD.lock().unwrap() = Some(file_cmd_tx);
-                    crate::macos_media::run_viewer(server, room, Some(token), weak2.clone(), epoch2.clone(), my_epoch, control_rx, input_rx, file_cmd_rx, &AUDIO_MUTED, &AUDIO_VOLUME, session_idx);
+                    crate::macos_media::run_viewer(
+                        server,
+                        room,
+                        Some(token),
+                        weak2.clone(),
+                        epoch2.clone(),
+                        my_epoch,
+                        control_rx,
+                        input_rx,
+                        file_cmd_rx,
+                        &AUDIO_MUTED,
+                        &AUDIO_VOLUME,
+                        session_idx,
+                    );
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                // Windows/Linux 主控端：真实媒体观看（OpenH264 软解 + Slint 渲染）。
-                crate::generic_media::run_generic_viewer(server, room, Some(token), weak2.clone(), epoch2.clone(), my_epoch);
+                    // Windows/Linux 主控端：真实媒体观看（OpenH264 软解 + Slint 渲染）。
+                    crate::generic_media::run_generic_viewer(
+                        server,
+                        room,
+                        Some(token),
+                        weak2.clone(),
+                        epoch2.clone(),
+                        my_epoch,
+                    );
                 } // cfg(not(target_os = "macos"))
                 if let Some(ui) = weak2.upgrade() {
                     ui.set_connecting(false);
