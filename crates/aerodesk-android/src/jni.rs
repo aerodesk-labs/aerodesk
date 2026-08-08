@@ -61,7 +61,15 @@ pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerCreate<'local>
     let room: String = env.get_string(&room).map(|s| s.into()).unwrap_or_default();
     match ViewerSession::connect(&server, &room) {
         Ok(v) => Box::into_raw(Box::new(v)) as jlong,
-        Err(_) => 0,
+        Err(e) => {
+            // 模拟器/CI 自测诊断：连接失败原因写 app 私有文件（run-as 可读）。
+            eprintln!("ad_viewer_create error: {e}");
+            if let Ok(mut f) = std::fs::File::create("/data/data/io.aerodesk.viewer/err.txt") {
+                use std::io::Write;
+                let _ = f.write_all(format!("ad_viewer_create error: {e}").as_bytes());
+            }
+            0
+        }
     }
 }
 
