@@ -30,8 +30,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aerodesk_protocol::signal::{PeerInfo, Role, SignalMessage, TurnConfig};
+use pop_registry::PopRegistry;
 use rouille::websocket::{self, Message, Websocket};
 use rouille::{Request, Response};
+
+mod pop_registry;
 
 struct Config {
     auth_tokens: Vec<String>,
@@ -40,8 +43,10 @@ struct Config {
     jwt_secret_old: Option<String>,
     /// 本 PoP 标识（默认 local）。
     pop_id: String,
-    /// 房间前缀 → PoP（最长前缀优先）。
+    /// 房间前缀 → PoP（最长前缀优先，静态钉住）。
     room_pop_map: Vec<(String, String)>,
+    /// 动态注册表（POP_REGISTRY_FILE 开启时存在）：首个加入者登记房间归属（#154）。
+    pop_registry: Option<Arc<PopRegistry>>,
     /// PoP → 客户端信令 URL（重定向目标）。
     pop_urls: HashMap<String, String>,
     turn: Option<TurnConfig>,
@@ -266,6 +271,17 @@ fn load_config() -> Config {
         })
         .collect();
 
+    let pop_registry = std::env::var("POP_REGISTRY_FILE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|path| {
+            let ttl = std::env::var("POP_REGISTRY_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3600);
+            Arc::new(PopRegistry::new(Some(path.into()), ttl))
+        });
+
     Config {
         auth_tokens,
         jwt_secret: std::env::var("JWT_SECRET").ok().filter(|s| !s.is_empty()),
@@ -274,6 +290,7 @@ fn load_config() -> Config {
             .filter(|s| !s.is_empty()),
         pop_id: std::env::var("POP_ID").unwrap_or_else(|_| "local".into()),
         room_pop_map,
+        pop_registry,
         pop_urls,
         turn,
         sfu_url: std::env::var("SFU_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into()),
@@ -380,27 +397,46 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 role,
                 auth_token,
             } => {
-                // 多 PoP（#146）：房间钉在其它 PoP → 返回重定向（客户端自动跟随）。
-                if let Some(pop) = pinned_pop(&config, &room) {
-                    if pop != config.pop_id {
+                // 多 PoP（#146/#154）：先静态钉住，再查动态注册表；其它 PoP → 重定向。
+                let mut target_pop = pinned_pop(&config, &room).map(|s| s.to_string());
+                if target_pop.is_none()
+                    && let Some(reg) = &config.pop_registry
+                {
+                    target_pop = reg.lookup(&room);
+                }
+                match &target_pop {
+                    Some(pop) if pop != &config.pop_id => {
                         if let Some(url) = config.pop_urls.get(pop) {
                             info!(
-                                "room {room} pinned to pop {pop} (self={self}); redirect to {url}",
+                                "room {room} -> pop {pop} (self={self}); redirect to {url}",
                                 self = config.pop_id
                             );
                             send(
                                 ws.clone(),
                                 SignalMessage::Redirect {
-                                    pop: pop.to_string(),
+                                    pop: pop.clone(),
                                     url: url.clone(),
                                     reason: Some("room pinned to pop".into()),
                                 },
                             );
                             continue;
-                        } else {
-                            warn!(
-                                "room {room} pinned to pop {pop} but no POP_URLS entry; ignoring pin"
+                        }
+                        warn!("room {room} -> pop {pop} but no POP_URLS entry; ignoring pin");
+                    }
+                    Some(_) => {
+                        // 本 PoP：静态钉住或动态命中本 PoP——刷新动态条目 TTL（若开启）。
+                        if let Some(reg) = &config.pop_registry {
+                            reg.register(&room, &config.pop_id);
+                        }
+                    }
+                    None => {
+                        // 未登记：本 PoP 成为房间归属（首个加入者），并持久化。
+                        if let Some(reg) = &config.pop_registry {
+                            info!(
+                                "room {room} registered to pop {} (first joiner)",
+                                config.pop_id
                             );
+                            reg.register(&room, &config.pop_id);
                         }
                     }
                 }
@@ -615,6 +651,7 @@ mod tests {
             jwt_secret_old: old.map(|s| s.to_string()),
             pop_id: "pop-a".into(),
             room_pop_map: vec![],
+            pop_registry: None,
             pop_urls: HashMap::new(),
             turn: None,
             sfu_url: "http://127.0.0.1:3002".into(),

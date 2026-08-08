@@ -117,6 +117,11 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/multipop-e2e.sh
 
+      # #154 多 PoP v2：动态 room→PoP 注册表（首个加入者登记 + 共享文件 + 重定向）。
+      - name: e2e multi-PoP dynamic registry (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/popreg-e2e.sh
+
       # #72 文件传输：publisher --send-file → SFU → viewer --recv-dir，SHA-256 一致。
       # #85：用 release 构建——debug 下 str0m/sctp-proto 高吞吐 data channel
       # 深调用链会 stack overflow（#102 已知，SFU shard 已 8MB 栈缓解）；
