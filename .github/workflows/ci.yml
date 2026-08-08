@@ -292,6 +292,30 @@ jobs:
         # #166：瞬时 flake（App 无输出/未解码）限 3 次重试；根因归 iOS 侧作者修复。
         run: bash scripts/ci-retry.sh 3 bash scripts/ios-sim-e2e.sh
 
+  # Linux 主控端运行态自测：#4 观看端真实媒体（Xvfb 无头跑 Slint UI → 本地 SFU → 解码帧断言）。
+  linux-ui-e2e:
+    name: Linux UI e2e (viewer)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout str0m (netem dev-dep)
+        shell: bash
+        run: |
+          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
+            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: System deps
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libx264-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev libswresample-dev libpostproc-dev libavdevice-dev xvfb x11-apps imagemagick
+
+      - name: Run Linux UI e2e
+        run: bash scripts/linux-ui-e2e.sh
+
   # Android APK 构建回归：#2 软件侧（Rust .so + Gradle APK）每次 push/PR 都验证。
   # ubuntu-latest 镜像预装 Android SDK（platform 34 / build-tools / NDK r2x），
   # 动态挑选最新 NDK，避免镜像版本漂移导致脚本 fallback 路径失效。
