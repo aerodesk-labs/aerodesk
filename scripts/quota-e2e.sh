@@ -92,6 +92,23 @@ if grep -q "server full" /tmp/quota-b-p2.log; then
 else
     echo "FAIL B: 第 3 个未被拒"; tail -5 /tmp/quota-b-p2.log; fail=1
 fi
+echo "== Phase C：JWT per-user 配额（max_conns=1）"
+SIGNAL_PORT=14701 SIGNAL_PLAIN_PORT=14703 JWT_SECRET=uq-secret \
+  SFU_URL=http://127.0.0.1:14502 SFU_TOKEN="$SFU_TOKEN" \
+  ./target/debug/aerodesk-signal >/tmp/quota-sig-c.log 2>&1 &
+SIGC=$!
+for _ in $(seq 1 50); do nc -z 127.0.0.1 14703 2>/dev/null && break; sleep 0.2; done
+RC="uc-$(date +%s)"
+TOK=$(JWT_SECRET=uq-secret ./target/debug/aerodesk-cli --issue-token --user u1 --room '*' --role '*' --ttl 600 --max-conns 1)
+./target/debug/aerodesk-cli --role viewer --token "$TOK" --signal ws://127.0.0.1:14703 --room "$RC" >/tmp/quota-c-v1.log 2>&1 &
+C1=$!
+wait_joined /tmp/quota-c-v1.log "$RC" || { echo "FAIL C: client1 未加入"; tail -3 /tmp/quota-c-v1.log; fail=1; }
+./target/debug/aerodesk-cli --role viewer --token "$TOK" --signal ws://127.0.0.1:14703 --room "$RC" >/tmp/quota-c-v2.log 2>&1 || true
+C2=$!
+wait_rejected /tmp/quota-c-v2.log "user quota exceeded" || { echo "FAIL C: 同用户第 2 连接未被拒"; tail -5 /tmp/quota-c-v2.log; fail=1; }
+kill $C1 $C2 $SIGC 2>/dev/null || true
+echo "PASS C: 同用户第 2 连接被拒（user quota exceeded）"
+
 kill $SIGB $SFU 2>/dev/null || true
 wait 2>/dev/null || true
 exit $fail
