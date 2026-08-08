@@ -13,6 +13,9 @@
 | Linux | 桌面真机（Wayland/X11） | PipeWire/VAAPI 采集编码 | #4 |
 | HarmonyOS | DevEco + 鸿蒙真机（API 12+） | NAPI 桥、AVScreenCapture、OH_VideoDecoder | #6 |
 | 服务器 | 多核 + 公网（含 TURN 端口段） | 4K60×N 压测、多 PoP | #5/#8 |
+| Windows 虚拟屏 | Win10/11 真机 + Parsec VDD 驱动 | `scripts/windows-vdd-smoke.ps1 -Install`（vdd 模块冒烟） | #3/#140 |
+| macOS 虚拟屏 | macOS 真机/无头 + BetterDisplay | `scripts/macos-vdd-smoke.sh` | #3/#140 |
+| Linux 虚拟屏 | KDE Plasma 6 / Wayland 真机 | `scripts/linux-vdd-smoke.sh` | #4/#140 |
 
 ## 真机冒烟矩阵
 
