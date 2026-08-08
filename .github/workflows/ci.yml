@@ -183,6 +183,13 @@ jobs:
           BROWSER: chrome
         run: ./scripts/web-e2e.sh
 
+      # 客户端自测：Web 被控端（headless Chrome 屏幕共享发布 → SFU → CLI viewer 收流）。
+      - name: e2e web publisher (macOS only)
+        if: runner.os == 'macOS'
+        env:
+          BROWSER: chrome
+        run: ./scripts/web-pub-e2e.sh
+
       - name: windows adapter
         if: runner.os == 'Windows'
         # --examples：编译验证 vdd_smoke（#140，真机验收示例）。

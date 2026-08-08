@@ -240,6 +240,16 @@ function setupRtc(iceServers) {
     };
     rtc.onicecandidate = () => { /* v1 非 trickle：candidate 内嵌 SDP */ };
 
+    // #20 修复：publisher 屏幕共享 track 必须在初始 offer 前加入（SFU 信令模型
+    // 只处理 WS 信令的 SDP 交换，data channel 重协商不生效 → 媒体发不出去）。
+    if (ROLE === 'publisher' && screenStream) {
+        const track = screenStream.getVideoTracks()[0];
+        if (track) {
+            rtc.addTransceiver(track, { direction: 'sendonly', streams: [screenStream] });
+            log('屏幕共享已加入连接（初始 offer）');
+        }
+    }
+
     signalChannel = rtc.createDataChannel('offer/answer');
     signalChannel.onmessage = (event) => {
         const json = JSON.parse(event.data);
@@ -253,15 +263,7 @@ function setupRtc(iceServers) {
         inputChannel = rtc.createDataChannel('input');
         inputChannel.onopen = () => log('input channel open');
         inputChannel.onmessage = (e) => log('input event: ' + e.data);
-        // #20：屏幕共享流已在点击时授权，这里直接加入连接
-        if (ROLE === 'publisher' && screenStream) {
-            const track = screenStream.getVideoTracks()[0];
-            if (track) {
-                rtc.addTransceiver(track, { direction: 'sendonly', streams: [screenStream] });
-                negotiate();
-                log('屏幕共享已加入连接');
-            }
-        } else if (ROLE === 'viewer') {
+        if (ROLE === 'viewer') {
             log('viewer ready — 在视频上移动/点击发送输入');
         }
     };
