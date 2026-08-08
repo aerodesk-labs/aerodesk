@@ -1004,17 +1004,20 @@ fn main() -> Result<(), slint::PlatformError> {
     #[cfg(target_os = "macos")]
     aerodesk_macos::dock::install_reopen_handler();
 
-    // 系统托盘（Slint 1.17 SystemTrayIcon）
-    let tray = Tray::new()?;
+    // 系统托盘（Slint 1.17 SystemTrayIcon）：无桌面环境（Xvfb/CI/无
+    // StatusNotifier）创建失败不应致命——降级为无托盘运行。
+    let tray = Tray::new().ok();
     let win = ui.as_weak();
-    tray.on_show_window(move || {
-        if let Some(ui) = win.upgrade() {
-            let _ = ui.show();
-        }
-    });
-    tray.on_quit_app(move || {
-        std::process::exit(0);
-    });
+    if let Some(tray) = &tray {
+        tray.on_show_window(move || {
+            if let Some(ui) = win.upgrade() {
+                let _ = ui.show();
+            }
+        });
+        tray.on_quit_app(move || {
+            std::process::exit(0);
+        });
+    }
     // 模拟器/CI 自测：-server/-room/-autoconnect 启动参数（无头/自动化驱动）。
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "-server") {
@@ -1031,9 +1034,10 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.invoke_connect();
     }
     ui.show()?;
-    // 无桌面环境（Xvfb/CI/无 StatusNotifier）下托盘创建失败不应致命——仅日志。
-    if let Err(e) = tray.show() {
-        eprintln!("system tray unavailable: {e:?}");
+    if let Some(tray) = &tray {
+        if let Err(e) = tray.show() {
+            eprintln!("system tray unavailable: {e:?}");
+        }
     }
     slint::run_event_loop()
 }
