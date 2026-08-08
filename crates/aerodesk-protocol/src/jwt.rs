@@ -25,6 +25,9 @@ pub struct Claims {
     /// 允许的角色（`publisher` / `viewer`）；`*` 表示任意角色。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// 该用户最大并发连接数（#171，可选；缺省不限）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_conns: Option<u32>,
     /// 签发时间（Unix 秒）。
     pub iat: usize,
     /// 过期时间（Unix 秒）。
@@ -39,6 +42,7 @@ pub fn mint_token(
     room: Option<&str>,
     role: Option<Role>,
     ttl_secs: u64,
+    max_conns: Option<u32>,
 ) -> Result<String, String> {
     if secret.is_empty() {
         return Err("JWT_SECRET 不能为空".into());
@@ -52,6 +56,7 @@ pub fn mint_token(
         dev: device.map(|d| d.to_string()),
         room: room.map(|r| r.to_string()),
         role: role.map(|r| role_name(r).to_string()),
+        max_conns,
         iat: now,
         exp: now.saturating_add(ttl_secs as usize).max(now + 1),
     };
@@ -113,7 +118,7 @@ mod tests {
     const SECRET: &str = "test-secret-0123456789";
 
     fn token(ttl: u64, room: Option<&str>, role: Option<Role>) -> String {
-        mint_token(SECRET, "user-1", Some("dev-1"), room, role, ttl).unwrap()
+        mint_token(SECRET, "user-1", Some("dev-1"), room, role, ttl, None).unwrap()
     }
 
     #[test]

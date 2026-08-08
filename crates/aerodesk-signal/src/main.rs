@@ -33,6 +33,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use aerodesk_protocol::jwt::Claims;
 use aerodesk_protocol::signal::{PeerInfo, Role, SignalMessage, TurnConfig};
 use pop_registry::PopRegistry;
 use rouille::websocket::{self, Message, Websocket};
@@ -66,6 +67,8 @@ struct Peer {
     id: String,
     role: Role,
     ws: Arc<Mutex<Websocket>>,
+    /// JWT sub（#171 per-user 配额计数用；静态/开发模式为 None）。
+    user: Option<String>,
 }
 
 type Rooms = Arc<Mutex<HashMap<String, Vec<Peer>>>>;
@@ -76,6 +79,35 @@ static CONFIG: OnceLock<Arc<Config>> = OnceLock::new();
 static ROOMS: OnceLock<Rooms> = OnceLock::new();
 /// 全局在线连接数（#163）。
 static TOTAL_CLIENTS: OnceLock<Arc<AtomicUsize>> = OnceLock::new();
+/// 按用户（JWT sub）在线连接数（#171）。
+static USER_CONNS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+/// 用户配额检查（纯函数）：max=0 不限；已达上限拒绝；通过则计数 +1。
+fn user_quota_take(
+    conns: &mut HashMap<String, usize>,
+    user: &str,
+    max_conns: u32,
+) -> Result<(), &'static str> {
+    if max_conns == 0 {
+        return Ok(());
+    }
+    let n = conns.get(user).copied().unwrap_or(0);
+    if n as u32 >= max_conns {
+        return Err("user quota exceeded");
+    }
+    conns.insert(user.to_string(), n + 1);
+    Ok(())
+}
+
+/// 用户连接释放（断开时 -1）。
+fn user_quota_release(conns: &mut HashMap<String, usize>, user: &str) {
+    if let Some(n) = conns.get_mut(user) {
+        *n = n.saturating_sub(1);
+        if *n == 0 {
+            conns.remove(user);
+        }
+    }
+}
 
 /// 配额检查（纯函数）：房间/全局任一超限返回原因。
 fn quota_ok(
@@ -198,6 +230,7 @@ fn main() {
     let _ = CONFIG.set(config.clone());
     let _ = ROOMS.set(rooms.clone());
     let _ = TOTAL_CLIENTS.set(Arc::new(AtomicUsize::new(0)));
+    let _ = USER_CONNS.set(Mutex::new(HashMap::new()));
 
     // 明文 WS（开发用；生产只开 WSS 端口）
     let plain_port: u16 = std::env::var("SIGNAL_PLAIN_PORT")
@@ -347,7 +380,8 @@ fn pinned_pop<'a>(config: &'a Config, room: &str) -> Option<&'a str> {
 }
 
 /// 认证：JWT（新密钥优先，失败回退 JWT_SECRET_OLD 宽限期）→ 静态 token → 开发模式放行。
-fn auth_ok(config: &Config, token: Option<&str>, room: &str, role: Role) -> bool {
+/// 返回认证通过的 Claims（#171 用户配额用）；开发模式返回 None（视为通过但无用户维度）。
+fn auth_result(config: &Config, token: Option<&str>, room: &str, role: Role) -> Option<Claims> {
     let token = token.unwrap_or_default();
     if let Some(secret) = &config.jwt_secret {
         // JWT 认证：校验签名/过期/房间/角色。
@@ -357,7 +391,7 @@ fn auth_ok(config: &Config, token: Option<&str>, room: &str, role: Role) -> bool
                     "jwt auth ok: user={} dev={:?} room={} role={:?}",
                     claims.sub, claims.dev, room, role
                 );
-                true
+                Some(claims)
             }
             Err(new_err) => {
                 if let Some(old) = &config.jwt_secret_old {
@@ -367,7 +401,7 @@ fn auth_ok(config: &Config, token: Option<&str>, room: &str, role: Role) -> bool
                                 "jwt auth ok (legacy secret): user={} dev={:?} room={} role={:?}",
                                 claims.sub, claims.dev, room, role
                             );
-                            return true;
+                            return Some(claims);
                         }
                         Err(e) => {
                             warn!("jwt auth failed (new: {new_err}; legacy: {e})");
@@ -376,18 +410,31 @@ fn auth_ok(config: &Config, token: Option<&str>, room: &str, role: Role) -> bool
                 } else {
                     warn!("jwt auth failed: {new_err}");
                 }
-                false
+                None
             }
         }
     } else if !config.auth_tokens.is_empty() {
-        // 静态 token 认证（兼容模式）。
-        config
+        // 静态 token 认证（兼容模式）：以 token 本身作为用户键。
+        if config
             .auth_tokens
             .iter()
             .any(|t| Some(t.as_str()) == token.into())
+        {
+            Some(Claims {
+                sub: token.to_string(),
+                dev: None,
+                room: None,
+                role: None,
+                max_conns: None,
+                iat: 0,
+                exp: 0,
+            })
+        } else {
+            None
+        }
     } else {
-        // 开发模式：不认证。
-        true
+        // 开发模式：不认证（无用户维度）。
+        None
     }
 }
 
@@ -478,7 +525,12 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                         }
                     }
                 }
-                let auth_ok = auth_ok(&config, auth_token.as_deref(), &room, role);
+                let claims = auth_result(&config, auth_token.as_deref(), &room, role);
+                let auth_ok = if config.jwt_secret.is_some() || !config.auth_tokens.is_empty() {
+                    claims.is_some()
+                } else {
+                    true
+                };
                 if !auth_ok {
                     send(
                         ws.clone(),
@@ -516,6 +568,29 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                         continue;
                     }
                 }
+                // #171 用户配额：JWT max_conns（0=不限）。
+                let user = claims.as_ref().map(|c| c.sub.clone());
+                if let Some(sub) = &user {
+                    let max_conns = claims
+                        .as_ref()
+                        .map(|c| c.max_conns.unwrap_or(0))
+                        .unwrap_or(0);
+                    let mut uc = USER_CONNS
+                        .get()
+                        .expect("user conns initialized")
+                        .lock()
+                        .unwrap();
+                    if let Err(reason) = user_quota_take(&mut uc, sub, max_conns) {
+                        info!("reject join user={sub}: {reason}");
+                        send(
+                            ws.clone(),
+                            SignalMessage::Error {
+                                message: reason.to_string(),
+                            },
+                        );
+                        continue;
+                    }
+                }
                 let peer_id = format!("{}-{}", room, fastrand_id());
                 let peers: Vec<PeerInfo> = rooms
                     .lock()
@@ -540,6 +615,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                         id: peer_id.clone(),
                         role,
                         ws: ws.clone(),
+                        user,
                     });
                 TOTAL_CLIENTS
                     .get()
@@ -609,19 +685,19 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
         let mut found = None;
         for (room, peers) in rooms.iter_mut() {
             if let Some(idx) = peers.iter().position(|p| Arc::ptr_eq(&p.ws, &ws)) {
-                found = Some((room.clone(), peers[idx].id.clone()));
+                found = Some((room.clone(), peers[idx].id.clone(), peers[idx].user.clone()));
                 peers.remove(idx);
                 break;
             }
         }
-        if let Some((room, _)) = &found
+        if let Some((room, _, _)) = &found
             && rooms.get(room).map(|p| p.is_empty()).unwrap_or(true)
         {
             rooms.remove(room);
         }
         found
     };
-    let Some((room, peer_id)) = found else {
+    let Some((room, peer_id, user)) = found else {
         info!("session closed");
         return;
     };
@@ -629,6 +705,14 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
         .get()
         .expect("total initialized")
         .fetch_sub(1, Ordering::Relaxed);
+    if let Some(sub) = &user {
+        let mut uc = USER_CONNS
+            .get()
+            .expect("user conns initialized")
+            .lock()
+            .unwrap();
+        user_quota_release(&mut uc, sub);
+    }
     info!("peer {peer_id} left room {room}");
     // #66：先快照同房间其它连接、释放 rooms 锁，再尽力广播 PeerLeft。
     // 不能在持有 rooms 锁时去锁其它连接的 ws（锁序反转 → 死锁）。
@@ -737,35 +821,67 @@ mod tests {
 
     #[test]
     fn dual_secret_accepts_new_and_legacy() {
-        let token_new =
-            mint_token("new-secret", "u1", None, Some("r1"), Some(Role::Viewer), 60).unwrap();
-        let token_old =
-            mint_token("old-secret", "u2", None, Some("r1"), Some(Role::Viewer), 60).unwrap();
+        let token_new = mint_token(
+            "new-secret",
+            "u1",
+            None,
+            Some("r1"),
+            Some(Role::Viewer),
+            60,
+            None,
+        )
+        .unwrap();
+        let token_old = mint_token(
+            "old-secret",
+            "u2",
+            None,
+            Some("r1"),
+            Some(Role::Viewer),
+            60,
+            None,
+        )
+        .unwrap();
         let config = cfg("new-secret", Some("old-secret"));
         assert!(
-            auth_ok(&config, Some(&token_new), "r1", Role::Viewer),
+            auth_result(&config, Some(&token_new), "r1", Role::Viewer).is_some(),
             "new secret token must pass"
         );
         assert!(
-            auth_ok(&config, Some(&token_old), "r1", Role::Viewer),
+            auth_result(&config, Some(&token_old), "r1", Role::Viewer).is_some(),
             "legacy secret token must pass during grace"
         );
     }
 
     #[test]
     fn dual_secret_rejects_wrong_secret_and_wrong_room() {
-        let token_wrong =
-            mint_token("attacker", "u3", None, Some("r1"), Some(Role::Viewer), 60).unwrap();
+        let token_wrong = mint_token(
+            "attacker",
+            "u3",
+            None,
+            Some("r1"),
+            Some(Role::Viewer),
+            60,
+            None,
+        )
+        .unwrap();
         let config = cfg("new-secret", Some("old-secret"));
         assert!(
-            !auth_ok(&config, Some(&token_wrong), "r1", Role::Viewer),
+            !auth_result(&config, Some(&token_wrong), "r1", Role::Viewer).is_some(),
             "wrong secret must fail"
         );
 
-        let token_room =
-            mint_token("new-secret", "u4", None, Some("r2"), Some(Role::Viewer), 60).unwrap();
+        let token_room = mint_token(
+            "new-secret",
+            "u4",
+            None,
+            Some("r2"),
+            Some(Role::Viewer),
+            60,
+            None,
+        )
+        .unwrap();
         assert!(
-            !auth_ok(&config, Some(&token_room), "r1", Role::Viewer),
+            !auth_result(&config, Some(&token_room), "r1", Role::Viewer).is_some(),
             "room mismatch must fail"
         );
     }
@@ -773,11 +889,19 @@ mod tests {
     #[test]
     fn old_secret_only_valid_before_rotation_completes() {
         // 轮换完成（JWT_SECRET_OLD 移除）后，旧密钥 token 必须拒绝
-        let token_old =
-            mint_token("old-secret", "u5", None, Some("r1"), Some(Role::Viewer), 60).unwrap();
+        let token_old = mint_token(
+            "old-secret",
+            "u5",
+            None,
+            Some("r1"),
+            Some(Role::Viewer),
+            60,
+            None,
+        )
+        .unwrap();
         let config = cfg("new-secret", None);
         assert!(
-            !auth_ok(&config, Some(&token_old), "r1", Role::Viewer),
+            !auth_result(&config, Some(&token_old), "r1", Role::Viewer).is_some(),
             "old token must fail after grace ends"
         );
     }
@@ -786,6 +910,26 @@ mod tests {
 
     /// 回归：peer_id 必须在快速连续 Join 下保持唯一（粗时钟下纳秒时间戳会碰撞，
     /// 碰撞会让 Description 按 id 查角色时命中错误条目，导致 SFU #12 误拒）。
+    #[test]
+    fn user_quota_take_and_release() {
+        let mut conns = HashMap::new();
+        // max=0 不限
+        assert!(user_quota_take(&mut conns, "u1", 0).is_ok());
+        assert!(user_quota_take(&mut conns, "u1", 0).is_ok());
+        // 上限 1：第一次 ok，第二次拒绝
+        let mut conns2 = HashMap::new();
+        assert!(user_quota_take(&mut conns2, "u2", 1).is_ok());
+        assert_eq!(
+            user_quota_take(&mut conns2, "u2", 1),
+            Err("user quota exceeded")
+        );
+        // 不同用户互不影响
+        assert!(user_quota_take(&mut conns2, "u3", 1).is_ok());
+        // 释放后可再进
+        user_quota_release(&mut conns2, "u2");
+        assert!(user_quota_take(&mut conns2, "u2", 1).is_ok());
+    }
+
     #[test]
     fn quota_ok_boundaries() {
         // 0 = 不限

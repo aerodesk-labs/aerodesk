@@ -226,7 +226,7 @@ fn run() {
 ///
 /// 用法：
 ///   JWT_SECRET=<secret> aerodesk-cli --issue-token --user u1 --device mac-1 --room demo --role publisher --ttl 3600
-///   JWT_SECRET=<secret> aerodesk-cli --issue-token --user u1 --room demo --role "*" --ttl 86400
+///   JWT_SECRET=<secret> aerodesk-cli --issue-token --user u1 --room demo --role "*" --ttl 86400 [--max-conns 4]
 fn issue_token(args: &[String]) {
     let secret = match std::env::var("JWT_SECRET") {
         Ok(s) if !s.is_empty() => s,
@@ -253,6 +253,7 @@ fn issue_token(args: &[String]) {
     let ttl: u64 = arg(args, "--ttl")
         .and_then(|t| t.parse().ok())
         .unwrap_or(3600);
+    let max_conns: Option<u32> = arg(args, "--max-conns").and_then(|m| m.parse().ok());
 
     match aerodesk_protocol::jwt::mint_token(
         &secret,
@@ -261,6 +262,7 @@ fn issue_token(args: &[String]) {
         room.as_deref(),
         role,
         ttl,
+        max_conns,
     ) {
         Ok(token) => println!("{token}"),
         Err(e) => {

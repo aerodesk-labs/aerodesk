@@ -118,6 +118,9 @@ signal.aerodesk.io {
 - 每 PoP 独立或共享按需；密钥轮换（**双 secret 宽限期已支持**）：
   1. 签发新 token 用新 `JWT_SECRET`；同时设置 `JWT_SECRET_OLD` 保留旧密钥（无需重启）
   2. 观察宽限期（按旧 token TTL）内认证无异常后，移除 `JWT_SECRET_OLD` 并重启（或滚动）
+- **按用户连接配额（#171）**：JWT claims 支持可选 `max_conns`（该用户最大并发连接数，
+  0/缺省=不限）；信令按 `sub` 计数，超限返回 `Error("user quota exceeded")`。
+  签发示例：`JWT_SECRET=... aerodesk-cli --issue-token --user u1 --room demo --role viewer --max-conns 4`
 - 签发 token（运维/测试）：
 
 ```sh
