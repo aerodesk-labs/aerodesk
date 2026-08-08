@@ -50,7 +50,7 @@ wait 2>/dev/null || true
 echo "== 断言"
 fail=0
 # 1) signal-a 返回了重定向（房间 eu-* 钉到 pop-b）
-if grep -q "pinned to pop pop-b" /tmp/mpop-sig-a.log; then
+if grep -qE "room .* -> pop pop-b" /tmp/mpop-sig-a.log; then
     echo "PASS signal-a redirect eu-* -> pop-b"
 else
     echo "FAIL no redirect in signal-a"; tail -5 /tmp/mpop-sig-a.log; fail=1
