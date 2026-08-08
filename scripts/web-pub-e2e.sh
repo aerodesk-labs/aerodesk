@@ -49,7 +49,10 @@ RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu" >/tmp/webpub-sfu.log 2>&1 &
 SFU=$!
 "$ROOT/target/debug/aerodesk-signal" >/tmp/webpub-sig.log 2>&1 &
 SIG=$!
-sleep 1.5
+for _ in $(seq 1 50); do
+    if nc -z 127.0.0.1 3003 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then break; fi
+    sleep 0.2
+done
 # CLI viewer 作为观看端：断言能收到 Web 被控端发布的媒体帧。
 "$ROOT/target/debug/aerodesk-cli" --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/webpub-view.log 2>&1 &
 VIEW=$!
