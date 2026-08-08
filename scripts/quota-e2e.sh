@@ -9,7 +9,16 @@ cd "$(dirname "$0")/.."
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
-cargo build -q -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+
+# 独立 SFU：让已加入客户端保持连接（无 SFU 时 SDP 失败会立即断开释放名额，导致第 3 个被误接受）
+SFU_TOKEN="quota-token"
+REC="$(mktemp -d)"
+INTERNAL_TOKEN="$SFU_TOKEN" RECORD_DIR="$REC" \
+  SFU_MEDIA_PORT=14578 SFU_SIGNAL_PORT=14500 SFU_INTERNAL_PORT=14502 \
+  ./target/debug/aerodesk-sfu >/tmp/quota-sfu.log 2>&1 &
+SFU=$!
+for _ in $(seq 1 50); do nc -z 127.0.0.1 14502 2>/dev/null && break; sleep 0.2; done
 
 # 轮询等待（CI 负载下 CLI 启动/加入可能较慢，固定 sleep 会误判）
 wait_joined() {
@@ -32,11 +41,11 @@ wait_rejected() {
 fail=0
 
 echo "== Phase A：房间上限 2"
-SIGNAL_PORT=14301 SIGNAL_PLAIN_PORT=14303 MAX_ROOM_CLIENTS=2 ./target/debug/aerodesk-signal >/tmp/quota-sig-a.log 2>&1 &
+SIGNAL_PORT=14301 SIGNAL_PLAIN_PORT=14303 MAX_ROOM_CLIENTS=2 SFU_URL=http://127.0.0.1:14502 SFU_TOKEN="$SFU_TOKEN" ./target/debug/aerodesk-signal >/tmp/quota-sig-a.log 2>&1 &
 SIGA=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 14303 2>/dev/null && break; sleep 0.2; done
 ROOM_A="quota-a-$(date +%s)"
-./target/debug/aerodesk-cli --role publisher --signal ws://127.0.0.1:14303 --room "$ROOM_A" >/tmp/quota-a-pub.log 2>&1 &
+./target/debug/aerodesk-cli --role publisher --encoder x264 --noisy --signal ws://127.0.0.1:14303 --room "$ROOM_A" >/tmp/quota-a-pub.log 2>&1 &
 PUB_A=$!
 wait_joined /tmp/quota-a-pub.log "$ROOM_A" || { echo "FAIL A: publisher 未加入"; tail -3 /tmp/quota-a-pub.log; fail=1; }
 ./target/debug/aerodesk-cli --role viewer --signal ws://127.0.0.1:14303 --room "$ROOM_A" >/tmp/quota-a-v1.log 2>&1 &
@@ -59,17 +68,17 @@ fi
 kill $SIGA 2>/dev/null || true
 
 echo "== Phase B：全局上限 2"
-SIGNAL_PORT=14401 SIGNAL_PLAIN_PORT=14403 MAX_TOTAL_CLIENTS=2 ./target/debug/aerodesk-signal >/tmp/quota-sig-b.log 2>&1 &
+SIGNAL_PORT=14401 SIGNAL_PLAIN_PORT=14403 MAX_TOTAL_CLIENTS=2 SFU_URL=http://127.0.0.1:14502 SFU_TOKEN="$SFU_TOKEN" ./target/debug/aerodesk-signal >/tmp/quota-sig-b.log 2>&1 &
 SIGB=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 14403 2>/dev/null && break; sleep 0.2; done
 RB1="quota-b1-$(date +%s)"; RB2="quota-b2-$(date +%s)"; RB3="quota-b3-$(date +%s)"
-./target/debug/aerodesk-cli --role publisher --signal ws://127.0.0.1:14403 --room "$RB1" >/tmp/quota-b-p1.log 2>&1 &
+./target/debug/aerodesk-cli --role publisher --encoder x264 --noisy --signal ws://127.0.0.1:14403 --room "$RB1" >/tmp/quota-b-p1.log 2>&1 &
 P1=$!
 wait_joined /tmp/quota-b-p1.log "$RB1" || { echo "FAIL B: p1 未加入"; tail -3 /tmp/quota-b-p1.log; fail=1; }
 ./target/debug/aerodesk-cli --role viewer --signal ws://127.0.0.1:14403 --room "$RB2" >/tmp/quota-b-v.log 2>&1 &
 V=$!
 wait_joined /tmp/quota-b-v.log "$RB2" || { echo "FAIL B: viewer 未加入"; tail -3 /tmp/quota-b-v.log; fail=1; }
-./target/debug/aerodesk-cli --role publisher --signal ws://127.0.0.1:14403 --room "$RB3" >/tmp/quota-b-p2.log 2>&1 || true
+./target/debug/aerodesk-cli --role publisher --encoder x264 --noisy --signal ws://127.0.0.1:14403 --room "$RB3" >/tmp/quota-b-p2.log 2>&1 || true
 P2=$!
 wait_rejected /tmp/quota-b-p2.log "server full" || { echo "FAIL B: 第 3 个未被拒"; tail -5 /tmp/quota-b-p2.log; fail=1; }
 kill $P1 $V $P2 2>/dev/null || true
@@ -83,6 +92,6 @@ if grep -q "server full" /tmp/quota-b-p2.log; then
 else
     echo "FAIL B: 第 3 个未被拒"; tail -5 /tmp/quota-b-p2.log; fail=1
 fi
-kill $SIGB 2>/dev/null || true
+kill $SIGB $SFU 2>/dev/null || true
 wait 2>/dev/null || true
 exit $fail
