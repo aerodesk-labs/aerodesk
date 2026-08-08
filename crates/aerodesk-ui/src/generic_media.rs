@@ -76,7 +76,10 @@ pub fn run_generic_viewer(
     ui.set_conn_state(2);
     ui.set_in_session(true);
     ui.set_session_status("会话中 · OpenH264 软解".into());
-    eprintln!("generic viewer connected peer={} ice={}", live.peer_id, live.ice_connected);
+    eprintln!(
+        "generic viewer connected peer={} ice={}",
+        live.peer_id, live.ice_connected
+    );
 
     let mut assembler = AccessUnitAssembler::new();
     let mut decoder: Option<SoftDecoder> = None;
