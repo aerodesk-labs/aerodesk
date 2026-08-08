@@ -11,6 +11,24 @@ export RUST_LOG="${RUST_LOG:-info}"
 echo "== 构建"
 cargo build -q -p aerodesk-signal -p aerodesk-cli
 
+# 轮询等待（CI 负载下 CLI 启动/加入可能较慢，固定 sleep 会误判）
+wait_joined() {
+    local log="$1" room="$2"
+    for _ in $(seq 1 100); do
+        grep -q "joined room $room" "$log" 2>/dev/null && return 0
+        sleep 0.2
+    done
+    return 1
+}
+wait_rejected() {
+    local log="$1" pat="$2"
+    for _ in $(seq 1 100); do
+        grep -qE "$pat" "$log" 2>/dev/null && return 0
+        sleep 0.2
+    done
+    return 1
+}
+
 fail=0
 
 echo "== Phase A：房间上限 2"
@@ -20,13 +38,13 @@ for _ in $(seq 1 50); do nc -z 127.0.0.1 14303 2>/dev/null && break; sleep 0.2; 
 ROOM_A="quota-a-$(date +%s)"
 ./target/debug/aerodesk-cli --role publisher --signal ws://127.0.0.1:14303 --room "$ROOM_A" >/tmp/quota-a-pub.log 2>&1 &
 PUB_A=$!
-sleep 1
+wait_joined /tmp/quota-a-pub.log "$ROOM_A" || { echo "FAIL A: publisher 未加入"; tail -3 /tmp/quota-a-pub.log; fail=1; }
 ./target/debug/aerodesk-cli --role viewer --signal ws://127.0.0.1:14303 --room "$ROOM_A" >/tmp/quota-a-v1.log 2>&1 &
 V1=$!
-sleep 1
+wait_joined /tmp/quota-a-v1.log "$ROOM_A" || { echo "FAIL A: viewer1 未加入"; tail -3 /tmp/quota-a-v1.log; fail=1; }
 ./target/debug/aerodesk-cli --role viewer --signal ws://127.0.0.1:14303 --room "$ROOM_A" >/tmp/quota-a-v2.log 2>&1 || true
 V2=$!
-sleep 2
+wait_rejected /tmp/quota-a-v2.log "room full" || { echo "FAIL A: 第 3 个未被拒"; tail -5 /tmp/quota-a-v2.log; fail=1; }
 kill $PUB_A $V1 $V2 2>/dev/null || true
 if grep -q "joined room $ROOM_A" /tmp/quota-a-pub.log && grep -q "joined room $ROOM_A" /tmp/quota-a-v1.log; then
     echo "PASS A: 前 2 个连接加入成功"
@@ -47,13 +65,13 @@ for _ in $(seq 1 50); do nc -z 127.0.0.1 14403 2>/dev/null && break; sleep 0.2; 
 RB1="quota-b1-$(date +%s)"; RB2="quota-b2-$(date +%s)"; RB3="quota-b3-$(date +%s)"
 ./target/debug/aerodesk-cli --role publisher --signal ws://127.0.0.1:14403 --room "$RB1" >/tmp/quota-b-p1.log 2>&1 &
 P1=$!
-sleep 1
+wait_joined /tmp/quota-b-p1.log "$RB1" || { echo "FAIL B: p1 未加入"; tail -3 /tmp/quota-b-p1.log; fail=1; }
 ./target/debug/aerodesk-cli --role viewer --signal ws://127.0.0.1:14403 --room "$RB2" >/tmp/quota-b-v.log 2>&1 &
 V=$!
-sleep 1
+wait_joined /tmp/quota-b-v.log "$RB2" || { echo "FAIL B: viewer 未加入"; tail -3 /tmp/quota-b-v.log; fail=1; }
 ./target/debug/aerodesk-cli --role publisher --signal ws://127.0.0.1:14403 --room "$RB3" >/tmp/quota-b-p2.log 2>&1 || true
 P2=$!
-sleep 2
+wait_rejected /tmp/quota-b-p2.log "server full" || { echo "FAIL B: 第 3 个未被拒"; tail -5 /tmp/quota-b-p2.log; fail=1; }
 kill $P1 $V $P2 2>/dev/null || true
 if grep -q "joined room $RB1" /tmp/quota-b-p1.log && grep -q "joined room $RB2" /tmp/quota-b-v.log; then
     echo "PASS B: 前 2 个连接（不同房间）加入成功"
