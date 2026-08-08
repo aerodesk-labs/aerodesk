@@ -85,6 +85,12 @@ class PublisherCapture(
 
         val ir = ImageReader.newInstance(W, H, PixelFormat.RGBA_8888, 2)
         imageReader = ir
+        // Android 13+：createVirtualDisplay 前必须注册 callback（否则 IllegalStateException）。
+        projection.registerCallback(object : MediaProjection.Callback() {
+            override fun onStop() {
+                stop()
+            }
+        }, handler)
         display = projection.createVirtualDisplay(
             "AeroDeskCapture", W, H, 1,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, ir.surface, null, handler,
