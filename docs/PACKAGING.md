@@ -32,13 +32,33 @@ cargo deb -p aerodesk-ui --target x86_64-unknown-linux-gnu
 - Android：`cd android && ./gradlew assembleDebug`（或 `bundleRelease` 出 aab）
 - iOS：`xcodebuild -project ios/AeroDesk.xcodeproj -scheme AeroDesk archive`
 
+## 发布流水线（2026-08 接入）
+
+`.github/workflows/release.yml`（参考 ../abb 项目的 Build & Release 流水线）：
+
+- **触发**：打 `v*` tag 自动构建并发布 GitHub Release；`workflow_dispatch` 手动触发只出产物
+- **macOS（当前桌面 UI 唯一可用平台）**：`cargo build --release --target aarch64-apple-darwin -p aerodesk-ui`
+  → `scripts/assemble-macos-app.sh` 组装 `.app`（版本号取自 Cargo.toml、图标 `app-assets/AppIcon.icns`）
+  → Developer ID 签名（临时 keychain，secrets：`APPLE_CERT_P12`/`APPLE_CERT_PASSWORD`/`APPLE_TEAM_ID`）
+  → notarytool 公证 + stapler 装订 → DMG（拖拽安装）→ DMG 签名/公证/装订 → 上传 Release
+- **所需 secrets**：`APPLE_CERT_P12`（Developer ID Application 证书 base64）、`APPLE_CERT_PASSWORD`、
+  `APPLE_TEAM_ID`、`APPLE_ID`、`APPLE_APP_PASSWORD`
+- **Windows/Linux**：aerodesk-ui 非 macOS 分支仍是占位（观看/发布桩），待 UI 落地后按 macos job 同构补
+  Windows Inno Setup + Linux deb/AppImage job
+
+本地打包（不签名/公证，自测用）：
+
+```sh
+scripts/package-macos.sh           # dist/AeroDesk.app
+scripts/package-macos.sh --dmg    # 额外产出 dist/AeroDesk-<版本>.dmg
+```
+
 ## 待接入
 
 - [ ] Web：完善 `web/index.html`（浏览器原生 WebRTC；观看/发布/输入与原生端互通）
-- [ ] Windows：MF/NVENC 编码 + WiX/MSIX 打包脚本
-- [ ] Linux：cargo-deb/rpm 脚本 + VAAPI 编码
+- [ ] Windows：MF/NVENC 编码 + WiX/MSIX 打包脚本 + release job
+- [ ] Linux：cargo-deb/rpm 脚本 + VAAPI 编码 + release job
 - [ ] HarmonyOS：DevEco 打包（SDK 到位后）
-- [ ] CI：发布流水线（tag 触发 + 各平台签名上传）
 
 ## 本地构建验证（2026-08-04）
 ### iOS（模拟器 + 真机 slice）
