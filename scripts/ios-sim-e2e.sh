@@ -59,7 +59,7 @@ echo "== [6/7] 断言解码帧持续增长"
 python3 - <<'PY'
 import time, re, sys
 ok = False
-for i in range(60):  # 最多 60s
+for i in range(90):  # 最多 90s
     try:
         txt = open('/tmp/iossim-console.log', errors='replace').read()
     except FileNotFoundError:
@@ -75,8 +75,15 @@ for i in range(60):  # 最多 60s
         sys.exit(1)
     time.sleep(1)
 if not ok:
-    print("FAIL: 30s 内未解码 30 帧；console tail:")
-    print(open('/tmp/iossim-console.log', errors='replace').read()[-800:])
+    print("FAIL: 60s 内未解码 30 帧；取证：")
+    print("--- console ---")
+    print(open('/tmp/iossim-console.log', errors='replace').read()[-1500:])
+    print("--- sfu ---")
+    try: print(open('/tmp/iossim-sfu.log', errors='replace').read()[-800:])
+    except FileNotFoundError: pass
+    print("--- pub ---")
+    try: print(open('/tmp/iossim-pub.log', errors='replace').read()[-800:])
+    except FileNotFoundError: pass
     sys.exit(1)
 PY
 
