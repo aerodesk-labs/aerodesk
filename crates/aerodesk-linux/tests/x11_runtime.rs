@@ -13,11 +13,7 @@ fn x11_capture_produces_rgba_frame() {
     let (w, h) = cap.size();
     assert!(w > 0 && h > 0, "root 窗口尺寸应 > 0: {w}x{h}");
     let frame = cap.next_frame().expect("采集到帧");
-    assert_eq!(
-        frame.rgba.len() as u32,
-        w * h * 4,
-        "RGBA 帧字节数 = w*h*4"
-    );
+    assert_eq!(frame.rgba.len() as u32, w * h * 4, "RGBA 帧字节数 = w*h*4");
     assert_eq!(frame.width, w);
     assert_eq!(frame.height, h);
     eprintln!("capture OK: {w}x{h} pts={}", frame.pts_us);
@@ -46,9 +42,15 @@ fn xtest_injects_mouse_key_wheel() {
     inj.inject(&InputEvent::Wheel { dx: 0.0, dy: 3.0 })
         .expect("wheel");
     // Key：FakeInput 用 X11 keysym→keycode 映射（A 键）
-    inj.inject(&InputEvent::Key { code: 0x61, down: true })
-        .expect("key down");
-    inj.inject(&InputEvent::Key { code: 0x61, down: false })
-        .expect("key up");
+    inj.inject(&InputEvent::Key {
+        code: 0x61,
+        down: true,
+    })
+    .expect("key down");
+    inj.inject(&InputEvent::Key {
+        code: 0x61,
+        down: false,
+    })
+    .expect("key up");
     eprintln!("xtest inject OK");
 }
