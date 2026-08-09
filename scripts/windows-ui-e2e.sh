@@ -74,13 +74,14 @@ fi
 echo "UI alive: yes, log lines: $(wc -l < /tmp/winui-ui.log 2>/dev/null || echo 0)"
 
 echo "== [5/6] 断言连接链路（ICE Completed = Windows 主控端成功接入 SFU）"
+export WINUI_LOG="$(cygpath -w /tmp/winui-ui.log)"
 python3 - <<'PY'
-import time, sys
+import time, sys, os
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 ok = False
 for i in range(60):
     try:
-        txt = open('/tmp/winui-ui.log', errors='replace').read()
+        txt = open(os.environ['WINUI_LOG'], errors='replace').read()
     except FileNotFoundError:
         txt = ''
     if 'IceConnectionStateChange(Completed)' in txt or 'ICE remote address' in txt:
@@ -92,7 +93,7 @@ for i in range(60):
     time.sleep(1)
 if not ok:
     print("FAIL: 60s 内 ICE 未 Completed；UI 日志尾：")
-    print(open('/tmp/winui-ui.log', errors='replace').read()[-1500:])
+    print(open(os.environ['WINUI_LOG'], errors='replace').read()[-1500:])
     sys.exit(1)
 PY
 
