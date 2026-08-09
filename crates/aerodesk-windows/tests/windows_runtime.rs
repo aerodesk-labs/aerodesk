@@ -22,7 +22,7 @@ fn dxgi_capture_produces_frame() {
     let frame = cap.next_frame();
     match frame {
         Some(f) => {
-            assert_eq!(f.rgba.len() as u32, w * h * 4, "RGBA 帧字节数 = w*h*4");
+            assert_eq!(f.bgra.len() as u32, w * h * 4, "BGRA 帧字节数 = w*h*4");
             eprintln!("dxgi capture OK: {w}x{h}");
         }
         None => eprintln!("SKIP: DXGI 首帧未就绪（虚拟桌面无内容更新）"),
