@@ -20,6 +20,9 @@
   0=不限）超限返回 486；`TURN_DENIED_PEER_CIDRS`（逗号分隔 CIDR）内 peer 的
   CreatePermission/ChannelBind 返回 403、Send 丢弃（防开放中继）；`SFU_TURN_IPV6=1`
   启用 IPv6 双栈（控制面/relay [::]，回退 v4）。
+- **生命周期（#222）**：`TURN_LIFETIME_SEC`（默认 600，min 60）——allocation 过期秒数；
+  客户端异常退出（SIGKILL，无 Refresh 0）时依赖该时长 + 30s 清扫回收，
+  短租期部署可收紧（配合 `aerodesk_sfu_turn_allocations` 指标观测泄漏）。
 - **凭证**：coturn REST 规范（`username=<expiry>:<userid>`，
   `credential=base64(HMAC-SHA1(secret, username))`），1 小时有效；SFU 与内嵌 server
   共享 `TURN_SECRET`，signals 服务照常通过 `TURN_SECRET`/`TURN_URLS` 下发。

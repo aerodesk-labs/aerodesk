@@ -1,4 +1,4 @@
-# SFU 容量压测基准（#215/#218/#220，#8 方法论）
+# SFU 容量压测基准（#215/#218/#220/#222，#8 方法论）
 
 ## 方法
 `scripts/sfu-capacity-bench.sh`：起 SFU+signal（独立端口）→ `loadtest.sh` 施压
@@ -65,6 +65,26 @@ N×M 对持续施压 → 每 30s 采样 `/metrics/prometheus`（clients/rx·tx/t
 - `aerodesk_sfu_turn_allocations_total` counter：累计创建数（观测 churn/重连）
 - `scripts/turn-e2e.sh` 3d 断言连接后活跃数 >= 3（回归防护）
 
+## 重连韧性（#222）
+
+`scripts/sfu-reconnect.sh [cycles] [rooms] [pairs] [turn_relay] [settle_s]`：
+每轮起 N×M 对 → 等 ICE connected → 断言 clients（5s 心跳指标，轮询 ≤10s）与
+`turn_allocations`（TURN 模式）达预期 → SIGKILL 全部客户端（模拟闪断）→
+断言 clients → 0、TURN allocation → 0（TURN 变体 `TURN_LIFETIME_SEC=60` 加速
+过期回收，默认等 120s）→ 下一轮；全部轮次后断言累计 allocation == 轮次×客户端
+（零泄漏/零异常 churn）、无 panic。
+
+### 结果（macOS M4，debug 混合，2026-08-10）
+
+| 模式 | 轮次 | 每轮 allocation | 累计 allocation | 清理 | 错误 |
+|---|---|---|---|---|---|
+| 直连 1×1 | 3 | 不适用 | 不适用 | clients 归零 | 0 |
+| TURN 中继 1×1（force-relay，lifetime=60s） | 3 | 2（=客户端数） | 2/4/6（精确） | clients + allocation 均归零 | 0 |
+
+- SIGKILL（无 Refresh 0）后 UDP allocation 依赖 lifetime 过期 + 30s 清扫回收，
+  `TURN_LIFETIME_SEC` 可调（默认 600，min 60）；生产短租期部署可收紧
+- SFU 会话清理：信号 WS 断开 → shard 移除，clients 指标 5s 心跳后归零
+
 ## 复现
 ```sh
 scripts/sfu-capacity-bench.sh 1 2 15 1280 720 30 2000000        # 单档（直连）
@@ -73,10 +93,14 @@ scripts/sfu-capacity-bench.sh 1 2 15 1280 720 30 2000000 1      # TURN 中继单
 scripts/sfu-capacity-bench.sh 2 2 20 1920 1080 30 4000000 1     # TURN 中继 1080p
 scripts/sfu-longrun.sh 1 1 420 1280 720 30 2000000              # 直连长稳 7 分钟
 scripts/sfu-longrun.sh 1 1 660 1280 720 30 2000000 1            # TURN 中继长稳 11 分钟（越过 lifetime）
+scripts/sfu-reconnect.sh 3 1 1 0 120                            # 直连重连韧性 3 轮
+scripts/sfu-reconnect.sh 3 1 1 1 120                            # TURN 中继重连韧性 3 轮（lifetime=60s）
 ```
 
 ## 结论
 - SFU 转发路径（直连 + TURN 中继）在 8 并发/20Mbps 级无瓶颈
 - 长稳（#220）：直连 420s 与 TURN 中继 664s（越过 allocation lifetime）均 PASS，
   TURN allocation 零泄漏零 churn，Refresh 正常
+- 重连韧性（#222）：直连/TURN 各 3 轮 SIGKILL 循环后 clients 与 allocation 全部
+  归零、累计精确、无 panic；TURN allocation 过期回收依赖 lifetime+30s 清扫
 - 后续 #8 验收按此方法论扩展到真机与 4K60

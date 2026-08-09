@@ -102,6 +102,8 @@ struct Shared {
     max_allocs_per_ip: usize,
     /// 全局最大并发 allocation（0=不限）。
     max_allocs_total: usize,
+    /// allocation 默认 lifetime 秒（TURN_LIFETIME_SEC，默认 600；测试/短租期可调）。
+    default_lifetime: u32,
     /// 拒绝中继的 peer CIDR（TURN_DENIED_PEER_CIDRS）。
     denied_peers: Vec<ipnet::IpNet>,
 }
@@ -158,6 +160,11 @@ pub fn spawn(
         // #204：配额默认 16/IP、256 全局（0=不限）；CIDR 列表默认空=不限制。
         max_allocs_per_ip: env_usize("MAX_TURN_ALLOCS_PER_IP", 16),
         max_allocs_total: env_usize("MAX_TURN_ALLOCS_TOTAL", 256),
+        default_lifetime: std::env::var("TURN_LIFETIME_SEC")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .map(|v| v.max(60))
+            .unwrap_or(DEFAULT_LIFETIME),
         denied_peers: std::env::var("TURN_DENIED_PEER_CIDRS")
             .map(|v| {
                 v.split(',')
@@ -695,7 +702,7 @@ fn handle_allocate(
         return;
     };
     let relayed = SocketAddr::new(shared.host, relay_port);
-    let expires = Arc::new(AtomicU64::new(unix_now() + DEFAULT_LIFETIME as u64));
+    let expires = Arc::new(AtomicU64::new(unix_now() + shared.default_lifetime as u64));
     let stop = Arc::new(AtomicBool::new(false));
     let state = Arc::new(Mutex::new(AllocState {
         channels: HashMap::new(),
@@ -730,7 +737,10 @@ fn handle_allocate(
     debug!("TURN allocation: {key:?} user={username} relayed={relayed}");
     let body = vec![
         (ATTR_XOR_RELAYED_ADDRESS, encode_xor_peer(relayed)),
-        (ATTR_LIFETIME, DEFAULT_LIFETIME.to_be_bytes().to_vec()),
+        (
+            ATTR_LIFETIME,
+            shared.default_lifetime.to_be_bytes().to_vec(),
+        ),
     ];
     let resp = build_stun(MSG_SUCCESS_BASE | MSG_ALLOCATE, &body, txid, None).unwrap_or_default();
     let _ = sink.send(server, &resp);
@@ -839,8 +849,8 @@ fn handle_refresh(
     }
     let requested = find_attr(pkt, ATTR_LIFETIME)
         .map(|v| u32::from_be_bytes(v[..4].try_into().unwrap_or([0; 4])))
-        .unwrap_or(DEFAULT_LIFETIME);
-    let lifetime = requested.clamp(60, DEFAULT_LIFETIME);
+        .unwrap_or(shared.default_lifetime);
+    let lifetime = requested.clamp(60, shared.default_lifetime);
     alloc
         .expires
         .store(unix_now() + lifetime as u64, Ordering::SeqCst);
@@ -1411,6 +1421,54 @@ mod tests {
         );
         unsafe {
             std::env::remove_var("MAX_TURN_ALLOCS_PER_IP");
+        }
+    }
+
+    /// #222：TURN_LIFETIME_SEC 缩短 allocation lifetime（响应 ATTR_LIFETIME 生效）。
+    #[test]
+    fn lifetime_env_shortens_allocation() {
+        let _g = TESTS_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TURN_LIFETIME_SEC", "60");
+        }
+        let (server_addr, _srv) = spawn_udp("testsecret");
+        let (u, p) = creds("testsecret");
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let txid = [9u8; 12];
+        let req = build_stun(
+            MSG_ALLOCATE,
+            &[(ATTR_REQUESTED_TRANSPORT, vec![17, 0, 0, 0])],
+            txid,
+            None,
+        )
+        .unwrap();
+        client.send_to(&req, server_addr).unwrap();
+        let mut buf = [0u8; 4096];
+        let (n, _) = client.recv_from(&mut buf).unwrap();
+        let (realm, nonce, err) = parse_common(&buf[..n]).unwrap();
+        assert_eq!(err, Some(401));
+        let txid2 = [10u8; 12];
+        let req2 = build_stun(
+            MSG_ALLOCATE,
+            &[(ATTR_REQUESTED_TRANSPORT, vec![17, 0, 0, 0])],
+            txid2,
+            Some((&u, &p, &realm.unwrap(), &nonce.unwrap())),
+        )
+        .unwrap();
+        client.send_to(&req2, server_addr).unwrap();
+        let (n, _) = client.recv_from(&mut buf).unwrap();
+        let lifetime = find_attr(&buf[..n], ATTR_LIFETIME)
+            .map(|v| u32::from_be_bytes([v[0], v[1], v[2], v[3]]));
+        assert_eq!(
+            lifetime,
+            Some(60),
+            "ATTR_LIFETIME 应取 TURN_LIFETIME_SEC=60"
+        );
+        unsafe {
+            std::env::remove_var("TURN_LIFETIME_SEC");
         }
     }
 
