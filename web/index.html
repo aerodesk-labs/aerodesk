@@ -48,6 +48,12 @@
         <video id="video" autoplay playsinline muted></video>
         <div id="placeholder" class="placeholder">等待媒体流…（观看端在视频上移动/点击即发送输入）</div>
     </div>
+    <div class="wrap">
+        <input id="file" type="file" disabled>
+        <button id="sendfile" disabled>发送文件到被控端</button>
+        <span id="fileinfo"></span>
+        <span id="clipboard"></span>
+    </div>
     <div id="log"></div>
 
 <script>
@@ -293,8 +299,34 @@ function setupRtc(iceServers) {
         inputChannel = rtc.createDataChannel('input');
         inputChannel.onopen = () => log('input channel open');
         inputChannel.onmessage = (e) => log('input event: ' + e.data);
+        // #72/#192（ADR-0007）：file 通道 in-band DCEP 创建（连接后由 SCTP 直通，
+        // 无需 SDP 重协商；勿设 negotiated:true——SFU 感知不到 label 会丢弃）。
+        fileChannel = rtc.createDataChannel('file');
+        fileChannel.onopen = () => {
+            $('file').disabled = false;
+            $('sendfile').disabled = false;
+            log('file channel open');
+        };
+        fileChannel.onmessage = (e) => {
+            if (typeof e.data === 'object') return;
+            try {
+                const ctrl = JSON.parse(e.data);
+                // #72 FileControl：serde tag="type" snake_case（{"type":"nack"|"done"|"clipboard"}）
+                if (ctrl.type === 'nack' && pendingMeta && ctrl.id === pendingMeta.id && !pendingDone) {
+                    for (const idx of ctrl.missing) {
+                        const d = pendingChunks.get(idx);
+                        if (d) fileChannel.send(encodeChunk(pendingMeta.id, idx, d));
+                    }
+                    log(`file resend ${ctrl.missing.length} chunks`);
+                } else if (ctrl.type === 'done' && ctrl.id === (pendingMeta && pendingMeta.id)) {
+                    log(`file confirmed by receiver: ok=${ctrl.ok}`);
+                } else if (ctrl.type === 'clipboard') {
+                    $('clipboard').innerText = '剪贴板: ' + ctrl.text;
+                }
+            } catch (_) {}
+        };
         if (ROLE === 'viewer') {
-            log('viewer ready — 在视频上移动/点击发送输入');
+            log('viewer ready — 在视频上移动/点击发送输入；可选择文件发送到被控端');
         }
     };
 
@@ -399,6 +431,66 @@ function stopScreen() {
     }
 }
 
+// ---------- 文件传输（#72 协议：file data channel + 8KB 分片 + Nack 重传） ----------
+let fileChannel = null;
+let pendingChunks = new Map(); // chunk index -> Uint8Array（Nack 重传用）
+let pendingMeta = null;
+let pendingDone = false;
+
+function encodeChunk(id, index, data) {
+    const idBytes = new TextEncoder().encode(id);
+    const out = new Uint8Array(1 + 4 + idBytes.length + 8 + data.length);
+    out[0] = 0x01; // CHUNK_MAGIC
+    const dv = new DataView(out.buffer);
+    dv.setUint32(1, idBytes.length, true);
+    out.set(idBytes, 5);
+    dv.setBigUint64(5 + idBytes.length, BigInt(index), true);
+    out.set(data, 5 + idBytes.length + 8);
+    return out;
+}
+
+async function sha256Hex(buf) {
+    const d = await crypto.subtle.digest('SHA-256', buf);
+    return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function sendFile(file) {
+    if (!fileChannel || fileChannel.readyState !== 'open') {
+        log('文件通道未就绪');
+        return;
+    }
+    const id = 'web-' + Date.now();
+    const chunks = Math.ceil(file.size / 8192);
+    const buf = await file.arrayBuffer();
+    const hash = await sha256Hex(buf);
+    pendingMeta = { id, name: file.name, size: file.size, chunks, hash };
+    pendingChunks.clear();
+    pendingDone = false;
+    $('fileinfo').innerText = `发送 ${file.name} (${file.size} B, ${chunks} 分片)…`;
+    log(`file send start: ${file.name} ${file.size}B chunks=${chunks}`);
+    // Meta（#72 FileControl：{"type":"meta", id,name,size,chunks,hash}）
+    fileChannel.send(JSON.stringify({ type: 'meta', ...pendingMeta }));
+    // 分片（批量发送，避免阻塞）
+    for (let i = 0; i < chunks; i++) {
+        const data = new Uint8Array(buf.slice(i * 8192, Math.min((i + 1) * 8192, file.size)));
+        pendingChunks.set(i, data);
+        fileChannel.send(encodeChunk(id, i, data));
+        if (i % 64 === 63) await new Promise(r => setTimeout(r, 0)); // 让出事件循环
+    }
+    // Done
+    fileChannel.send(JSON.stringify({ type: 'done', id, ok: true }));
+    pendingDone = true;
+    $('fileinfo').innerText = `已发送完成 ${file.name}`;
+    log(`file send done: ${file.name}`);
+}
+
+function bindFile() {
+    $('sendfile').addEventListener('click', () => {
+        const f = $('file').files[0];
+        if (f) sendFile(f);
+    });
+}
+
 function disconnect() {
     closed = true;
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
@@ -406,11 +498,14 @@ function disconnect() {
     resetPending();
     dcAnswerResolve = null;
     if (inputChannel) { try { inputChannel.close(); } catch (_) {} }
+    if (fileChannel) { try { fileChannel.close(); } catch (_) {} }
     if (signalChannel) { try { signalChannel.close(); } catch (_) {} }
     if (rtc) rtc.close();
     if (ws) ws.close();
     stopScreen();
-    rtc = null; ws = null; peerId = null; inputChannel = null; signalChannel = null;
+    rtc = null; ws = null; peerId = null; inputChannel = null; signalChannel = null; fileChannel = null;
+    pendingChunks.clear(); pendingMeta = null; pendingDone = false;
+    $('file').disabled = true; $('sendfile').disabled = true; $('fileinfo').innerText = '';
     $('video').srcObject = null;
     $('placeholder').style.display = 'flex';
     setStatus('已断开');
@@ -420,6 +515,7 @@ function disconnect() {
 }
 
 $('connect').addEventListener('click', connect);
+bindFile();
 $('disconnect').addEventListener('click', disconnect);
 bindInput($('video'));
 </script>
