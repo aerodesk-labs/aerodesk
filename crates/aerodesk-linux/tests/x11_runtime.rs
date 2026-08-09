@@ -9,6 +9,11 @@ use aerodesk_linux::inject::{InputEvent, InputInjector, XTestInjector};
 
 #[test]
 fn x11_capture_produces_rgba_frame() {
+    // 无 DISPLAY（如普通 cargo test / CI test job）时跳过；Xvfb 场景（linux-ui-e2e）真正跑。
+    if std::env::var("DISPLAY").is_err() {
+        eprintln!("SKIP: no DISPLAY");
+        return;
+    }
     let mut cap = X11Capturer::new().expect("X11 连接（DISPLAY 需可用）");
     let (w, h) = cap.size();
     assert!(w > 0 && h > 0, "root 窗口尺寸应 > 0: {w}x{h}");
@@ -21,6 +26,10 @@ fn x11_capture_produces_rgba_frame() {
 
 #[test]
 fn xtest_injects_mouse_key_wheel() {
+    if std::env::var("DISPLAY").is_err() {
+        eprintln!("SKIP: no DISPLAY");
+        return;
+    }
     let mut inj = XTestInjector::new().expect("XTest 扩展（Xvfb 默认支持）");
     // 坐标 0..1 归一化 → 注入器内部换算
     inj.inject(&InputEvent::MouseMove { x: 0.5, y: 0.5 })
