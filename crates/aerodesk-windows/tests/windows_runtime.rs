@@ -1,4 +1,5 @@
 //! Windows 被控端核心能力运行级自测（CI windows runner 交互会话）。
+#![cfg(windows)]
 //!
 //! 验证：DXGI Desktop Duplication 采集与 SendInput 输入注入可用。
 //! 容错：runner 无活动显示器/输出时 DXGI 不可用 → 跳过（真机验证），
