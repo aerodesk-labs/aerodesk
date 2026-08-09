@@ -39,7 +39,9 @@ cargo run -p aerodesk-signal
 
 - 开放 UDP/TCP 3479（TURN）、TCP 5349（TURN TLS）与 UDP 49152-49200（relay 端口段）
 - 生产建议媒体走 `SFU_MEDIA_PORT=443`（TCP/SSL-TCP 443），TURN 保持 3479
-- 浏览器端 iceServers 填上述 URLs 即可走 TCP/TLS（企业网 UDP 受限场景）；native 客户端当前走 UDP
+- 浏览器端 iceServers 填上述 URLs 即可走 TCP/TLS；**native 客户端（aerodesk-core，#199）
+  也支持 `?transport=tcp` 与 `turns:`**——信令 URLs 里优先尝试 udp，失败自动落到 tcp/turns；
+  TLS 校验用系统根（webpki-roots），自签/私有 CA 可用 `TURN_TLS_CA=<ca.pem>` 追加
 
 ### 1.2 外部 coturn（可选，向后兼容）
 
