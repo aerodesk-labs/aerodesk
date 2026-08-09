@@ -32,14 +32,14 @@ fn xtest_injects_mouse_key_wheel() {
     inj.inject(&InputEvent::MouseButton {
         x: 0.5,
         y: 0.5,
-        button: 1,
+        button: 0, // 协议 left=0
         down: true,
     })
     .expect("mouse down");
     inj.inject(&InputEvent::MouseButton {
         x: 0.5,
         y: 0.5,
-        button: 1,
+        button: 0,
         down: false,
     })
     .expect("mouse up");
