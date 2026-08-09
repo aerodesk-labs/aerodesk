@@ -136,17 +136,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     // #2 主控端触摸输入：SurfaceView 触摸 → InputFrame JSON → input 通道 → 被控端。
+    // 注意：必须发完整 InputFrame（version/seq/timestamp_ms/event 包装，见
+    // aerodesk-protocol/src/input.rs）——只发裸 InputEvent JSON 时被控端
+    // serde 解析失败会静默丢弃（实测 Android 触摸从未生效的根因）。
+    private var inputSeq = 0L
     private fun sendTouch(surface: SurfaceView, rawX: Float, rawY: Float, type: String) {
+        Log.i("AeroDeskE2E", "touch $type $rawX,$rawY viewer=$viewer")
         if (viewer == 0L) return
         val r = android.graphics.Rect()
         surface.getHitRect(r)
         val x = if (r.width() > 0) ((rawX - r.left).coerceIn(0f, r.width().toFloat()) / r.width()).toDouble() else 0.5
         val y = if (r.height() > 0) ((rawY - r.top).coerceIn(0f, r.height().toFloat()) / r.height()).toDouble() else 0.5
-        val json = when (type) {
+        val eventJson = when (type) {
             "move" -> """{"type":"mouse_move","x":$x,"y":$y}"""
             "down" -> """{"type":"mouse_button","button":"left","state":"pressed","x":$x,"y":$y}"""
             else -> """{"type":"mouse_button","button":"left","state":"released","x":$x,"y":$y}"""
         }
+        val json = """{"version":1,"seq":${++inputSeq},"timestamp_ms":${System.currentTimeMillis()},"event":$eventJson}"""
         NativeBridge.viewerSendInput(viewer, json)
     }
 
