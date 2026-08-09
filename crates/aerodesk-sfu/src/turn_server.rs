@@ -91,6 +91,8 @@ struct Allocation {
 /// 控制面共享状态（UDP 线程与各 TCP/TLS 连接线程共用）。
 struct Shared {
     allocations: Mutex<HashMap<ClientKey, Allocation>>,
+    /// 累计成功创建的 allocation 数（含已过期/断开；#220 观测 churn）。
+    created_total: AtomicU64,
     secret: String,
     realm: String,
     nonce: String,
@@ -110,6 +112,19 @@ pub struct TurnServer {
     pub tcp_addr: Option<SocketAddr>,
     pub tls_addr: Option<SocketAddr>,
     _handles: Vec<std::thread::JoinHandle<()>>,
+    shared: Arc<Shared>,
+}
+
+impl TurnServer {
+    /// 当前活跃 allocation 数（#220：长稳/泄漏观测）。
+    pub fn active_allocations(&self) -> usize {
+        self.shared.allocations.lock().unwrap().len()
+    }
+
+    /// 累计创建 allocation 数（#220：churn 观测；Refresh 失败重连会增长）。
+    pub fn allocations_total(&self) -> u64 {
+        self.shared.created_total.load(Ordering::Relaxed)
+    }
 }
 
 /// 启动内嵌 TURN+STUN server（UDP + TCP，可选 TLS）。
@@ -128,6 +143,7 @@ pub fn spawn(
         .unwrap_or(false);
     let shared = Arc::new(Shared {
         allocations: Mutex::new(HashMap::new()),
+        created_total: AtomicU64::new(0),
         secret: secret.to_string(),
         realm: std::env::var("TURN_REALM").unwrap_or_else(|_| DEFAULT_REALM.to_string()),
         nonce: format!(
@@ -206,6 +222,7 @@ pub fn spawn(
                     tcp_addr: Some(tcp_addr),
                     tls_addr: None,
                     _handles: handles,
+                    shared,
                 });
             }
         };
@@ -221,6 +238,7 @@ pub fn spawn(
                             tcp_addr: Some(tcp_addr),
                             tls_addr: None,
                             _handles: handles,
+                            shared,
                         });
                     }
                 };
@@ -244,6 +262,7 @@ pub fn spawn(
         tcp_addr: Some(tcp_addr),
         tls_addr,
         _handles: handles,
+        shared,
     })
 }
 
@@ -696,6 +715,7 @@ fn handle_allocate(
         stop.clone(),
         state.clone(),
     );
+    shared.created_total.fetch_add(1, Ordering::Relaxed);
     shared.allocations.lock().unwrap().insert(
         key,
         Allocation {
@@ -1064,6 +1084,9 @@ mod tests {
         let (relayed, realm, nonce) =
             udp_allocate(&client, server_addr, &creds.username, &creds.credential)
                 .expect("allocate");
+        // #220：allocation 指标——创建后 active=1 / total=1。
+        assert_eq!(_srv.active_allocations(), 1);
+        assert_eq!(_srv.allocations_total(), 1);
 
         let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
         let peer_addr = peer.local_addr().unwrap();
@@ -1121,6 +1144,8 @@ mod tests {
         let rchan = u16::from_be_bytes([buf2[0], buf2[1]]);
         assert_eq!(rchan, chan);
         assert_eq!(&buf2[4..n2], b"reply-via-embedded-turn");
+        // #220：活跃数保持不变（无重复 allocation / 无泄漏）。
+        assert_eq!(_srv.active_allocations(), 1);
     }
 
     #[test]
