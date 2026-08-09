@@ -91,7 +91,8 @@ pub fn run_generic_viewer(
     while !stale() {
         // 输入事件：UI 键鼠 → input data channel → SFU → 被控端（与 macOS/Android 同款）。
         while let Ok(json) = input_rx.try_recv() {
-            live.endpoint.send_channel_data("input", false, json.as_bytes());
+            live.endpoint
+                .send_channel_data("input", false, json.as_bytes());
         }
         live.socket
             .set_read_timeout(Some(Duration::from_millis(10)))
