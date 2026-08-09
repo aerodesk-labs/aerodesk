@@ -32,7 +32,7 @@ fn dxgi_capture_produces_frame() {
 #[test]
 fn sendinput_injects_mouse_key() {
     // SendInputInjector 是 unit struct（无需初始化，SendInput 系统调用）。
-    let inj = SendInputInjector;
+    let mut inj = SendInputInjector;
     inj.inject(&InputEvent::MouseMove { x: 0.5, y: 0.5 })
         .expect("mouse move");
     inj.inject(&InputEvent::MouseButton {
