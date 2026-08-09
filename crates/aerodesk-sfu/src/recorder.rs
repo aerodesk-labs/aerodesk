@@ -34,18 +34,38 @@ struct Recording {
     started_at: u64,
     packets: u64,
     bytes: u64,
+    /// #180 轮转：当前段编号（0 = `{room}.adrec`，N>0 = `{room}.adrec.{N}`）。
+    segment: u32,
+    segment_bytes: u64,
+    segment_started_at: u64,
+    /// 已关闭段（path, packets, bytes）。
+    segments: Vec<(String, u64, u64)>,
     /// #15：创建/写入失败后标记为失败，本次会话跳过该房间录制（不 panic）。
     failed: bool,
 }
 
 impl Recording {
-    /// 打开录制文件并写入 magic。失败返回 Err（调用方决定降级策略）。
-    fn open(root: &Path, room: &str, ts: u64) -> std::io::Result<Recording> {
+    /// 打开指定段录制文件并写入 magic（#180 轮转：segment 0 = `{room}.adrec`）。
+    fn open_segment_writer(
+        root: &Path,
+        room: &str,
+        segment: u32,
+    ) -> std::io::Result<(PathBuf, BufWriter<Box<dyn Write + Send>>)> {
         let safe = safe_name(room);
-        let path = root.join(format!("{safe}.adrec"));
+        let path = if segment == 0 {
+            root.join(format!("{safe}.adrec"))
+        } else {
+            root.join(format!("{safe}.adrec.{segment}"))
+        };
         let file = File::create(&path)?;
         let mut writer: BufWriter<Box<dyn Write + Send>> = BufWriter::new(Box::new(file));
         writer.write_all(MAGIC)?;
+        Ok((path, writer))
+    }
+
+    /// 打开首个录制文件并写入 magic。失败返回 Err（调用方决定降级策略）。
+    fn open(root: &Path, room: &str, ts: u64) -> std::io::Result<Recording> {
+        let (path, writer) = Recording::open_segment_writer(root, room, 0)?;
         Ok(Recording {
             room: room.to_string(),
             path,
@@ -53,6 +73,10 @@ impl Recording {
             started_at: ts,
             packets: 0,
             bytes: 0,
+            segment: 0,
+            segment_bytes: 0,
+            segment_started_at: ts,
+            segments: Vec::new(),
             failed: false,
         })
     }
@@ -67,6 +91,10 @@ impl Recording {
             started_at: ts,
             packets: 0,
             bytes: 0,
+            segment: 0,
+            segment_bytes: 0,
+            segment_started_at: ts,
+            segments: Vec::new(),
             failed: true,
         }
     }
@@ -79,6 +107,10 @@ pub struct Recorder {
     recordings: Mutex<HashMap<String, Recording>>,
     /// 按需模式（RECORD_ON_DEMAND=1）：只录显式 start() 的房间（#160）。
     on_demand: bool,
+    /// 单段字节上限（0=不限，#180 轮转）。
+    max_bytes: u64,
+    /// 单段时间上限（微秒，0=不限，#180 轮转）。
+    max_secs: u64,
 }
 
 fn now_micros() -> u64 {
@@ -107,7 +139,12 @@ fn safe_name(room: &str) -> String {
 
 impl Recorder {
     /// 创建录制器并打开审计日志（追加模式）。目录不存在会自动创建。
-    pub fn new(root: impl AsRef<Path>, on_demand: bool) -> std::io::Result<Recorder> {
+    pub fn new(
+        root: impl AsRef<Path>,
+        on_demand: bool,
+        max_bytes: u64,
+        max_secs: u64,
+    ) -> std::io::Result<Recorder> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)?;
         let audit = OpenOptions::new()
@@ -119,7 +156,71 @@ impl Recorder {
             audit: Mutex::new(audit),
             recordings: Mutex::new(HashMap::new()),
             on_demand,
+            max_bytes,
+            max_secs,
         })
+    }
+
+    /// #180 轮转检查：段超限则关段、开新段（保留总计数与 segments 历史）。
+    fn maybe_rotate(&self, entry: &mut Recording, ts: u64) {
+        let over_bytes = self.max_bytes > 0 && entry.segment_bytes >= self.max_bytes;
+        let over_time =
+            self.max_secs > 0 && ts.saturating_sub(entry.segment_started_at) >= self.max_secs;
+        if !over_bytes && !over_time {
+            return;
+        }
+        let _ = entry.writer.flush();
+        entry
+            .segments
+            .push((entry.path.display().to_string(), entry.packets, entry.bytes));
+        let next = entry.segment + 1;
+        match Recording::open_segment_writer(&self.root, &entry.room, next) {
+            Ok((path, writer)) => {
+                entry.path = path;
+                entry.writer = writer;
+                entry.segment = next;
+                entry.segment_bytes = 0;
+                entry.segment_started_at = ts;
+                debug!("recorder: room={} rotated to segment {next}", entry.room);
+            }
+            Err(e) => {
+                warn!(
+                    "recorder: room={} 轮转打开段 {next} 失败（{e}），保持当前段",
+                    entry.room
+                );
+            }
+        }
+    }
+
+    /// 关段 + 写 meta（stop/finalize 共用；segments 汇总每段 path/packets/bytes）。
+    fn finalize_recording(&self, rec: &mut Recording, now: u64) {
+        let _ = rec.writer.flush();
+        rec.segments
+            .push((rec.path.display().to_string(), rec.packets, rec.bytes));
+        let meta = serde_json::json!({
+            "room": rec.room,
+            "started_at": rec.started_at,
+            "ended_at": now,
+            "packets": rec.packets,
+            "bytes": rec.bytes,
+            "segments": rec
+                .segments
+                .iter()
+                .map(|(path, packets, bytes)| serde_json::json!({
+                    "path": path,
+                    "packets": packets,
+                    "bytes": bytes,
+                }))
+                .collect::<Vec<_>>(),
+        });
+        // meta 始终写房间基名 `{room}.meta.json`（轮转后 rec.path 是段文件，不能用 with_extension）。
+        let meta_path = self
+            .root
+            .join(format!("{}.meta.json", safe_name(&rec.room)));
+        let _ = fs::write(
+            &meta_path,
+            serde_json::to_string_pretty(&meta).unwrap_or_default(),
+        );
     }
 
     fn audit(&self, line: serde_json::Value) {
@@ -172,10 +273,12 @@ impl Recorder {
         if entry.writer.write_all(&header).is_ok() && entry.writer.write_all(payload).is_ok() {
             entry.packets += 1;
             entry.bytes += len as u64;
+            entry.segment_bytes += len as u64;
             // 周期性落盘，避免崩溃丢太多。
             if entry.packets & 127 == 0 {
                 let _ = entry.writer.flush();
             }
+            self.maybe_rotate(entry, ts);
         }
     }
 
@@ -216,26 +319,14 @@ impl Recorder {
         if rec.failed {
             return true;
         }
-        let _ = rec.writer.flush();
-        let meta = serde_json::json!({
-            "room": rec.room,
-            "path": rec.path.display().to_string(),
-            "started_at": rec.started_at,
-            "ended_at": now,
-            "packets": rec.packets,
-            "bytes": rec.bytes,
-        });
-        let meta_path = rec.path.with_extension("meta.json");
-        let _ = fs::write(
-            &meta_path,
-            serde_json::to_string_pretty(&meta).unwrap_or_default(),
-        );
+        self.finalize_recording(&mut rec, now);
         self.audit(serde_json::json!({
             "ts": now,
             "event": "room_end",
             "room": rec.room,
             "packets": rec.packets,
             "bytes": rec.bytes,
+            "segments": rec.segments.len(),
         }));
         true
     }
@@ -265,26 +356,14 @@ impl Recorder {
             if rec.failed {
                 continue;
             }
-            let _ = rec.writer.flush();
-            let meta = serde_json::json!({
-                "room": rec.room,
-                "path": rec.path.display().to_string(),
-                "started_at": rec.started_at,
-                "ended_at": now,
-                "packets": rec.packets,
-                "bytes": rec.bytes,
-            });
-            let meta_path = rec.path.with_extension("meta.json");
-            let _ = fs::write(
-                &meta_path,
-                serde_json::to_string_pretty(&meta).unwrap_or_default(),
-            );
+            self.finalize_recording(&mut rec, now);
             self.audit(serde_json::json!({
                 "ts": now,
                 "event": "room_end",
                 "room": rec.room,
                 "packets": rec.packets,
                 "bytes": rec.bytes,
+                "segments": rec.segments.len(),
             }));
         }
     }
@@ -309,7 +388,7 @@ mod tests {
     #[test]
     fn auto_mode_start_is_idempotent_and_stop_finalizes() {
         let dir = tmpdir("auto");
-        let rec = Recorder::new(&dir, false).unwrap();
+        let rec = Recorder::new(&dir, false, 0, 0).unwrap();
         rec.start("room-a").unwrap(); // 自动模式也可显式 start（空房间）
         rec.start("room-a").unwrap(); // 幂等
         rec.record("room-a", b"x");
@@ -325,7 +404,7 @@ mod tests {
     #[test]
     fn on_demand_records_only_started_rooms() {
         let dir = tmpdir("ondemand");
-        let rec = Recorder::new(&dir, true).unwrap();
+        let rec = Recorder::new(&dir, true, 0, 0).unwrap();
         // 未 start 的房间不录制
         rec.record("room-x", b"ignored");
         assert_eq!(rec.status().len(), 0);
@@ -359,7 +438,7 @@ mod tests {
     #[test]
     fn records_and_finalizes() {
         let dir = tmpdir("t1");
-        let rec = Recorder::new(&dir, false).unwrap();
+        let rec = Recorder::new(&dir, false, 0, 0).unwrap();
         rec.record("room-a", b"hello world");
         rec.record("room-a", b"hello world");
         rec.finalize_all();
@@ -390,7 +469,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tmpdir("t3");
-        let rec = Recorder::new(&dir, false).unwrap();
+        let rec = Recorder::new(&dir, false, 0, 0).unwrap();
         rec.record("ok-room", b"first");
 
         // 目录改为只读：新房间创建录制文件必失败。
@@ -421,17 +500,56 @@ mod tests {
         assert!(rec.writer.flush().is_ok());
         rec.packets += 1;
         assert_eq!(rec.packets, 1);
+
+        #[test]
+        fn unsafe_room_name_sanitized() {
+            let dir = tmpdir("t2");
+            let rec = Recorder::new(&dir, false, 0, 0).unwrap();
+            rec.record("../bad/room", b"x");
+            rec.finalize_all();
+            // 路径分隔符被替换为 _；点号保留（仍是安全文件名）。
+            assert!(dir.join(".._bad_room.adrec").exists());
+            assert!(!dir.join("bad").join("room.adrec").exists());
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+    #[test]
+    fn rotates_by_bytes() {
+        let dir = tmpdir("rotate-bytes");
+        let rec = Recorder::new(&dir, false, 40, 0).unwrap();
+        rec.record("room-r", b"12345678901234567890");
+        rec.record("room-r", b"12345678901234567890");
+        rec.record("room-r", b"12345678901234567890");
+        rec.stop("room-r");
+
+        let files: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|f| f.file_name().to_string_lossy().into_owned()))
+            .filter(|n| n.ends_with(".adrec") || n.contains(".adrec."))
+            .collect();
+        assert!(files.iter().any(|n| n == "room-r.adrec"), "{files:?}");
+        assert!(files.iter().any(|n| n == "room-r.adrec.1"), "{files:?}");
+
+        let meta: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("room-r.meta.json")).unwrap())
+                .unwrap();
+        assert_eq!(meta["packets"], 3);
+        assert_eq!(meta["segments"].as_array().map(|a| a.len()), Some(2));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn unsafe_room_name_sanitized() {
-        let dir = tmpdir("t2");
-        let rec = Recorder::new(&dir, false).unwrap();
-        rec.record("../bad/room", b"x");
-        rec.finalize_all();
-        // 路径分隔符被替换为 _；点号保留（仍是安全文件名）。
-        assert!(dir.join(".._bad_room.adrec").exists());
-        assert!(!dir.join("bad").join("room.adrec").exists());
+    fn rotates_by_time() {
+        let dir = tmpdir("rotate-time");
+        let rec = Recorder::new(&dir, false, 0, 1_000_000).unwrap(); // 1s 段
+        rec.record("room-t", b"x");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        rec.record("room-t", b"y");
+        rec.stop("room-t");
+        let meta: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("room-t.meta.json")).unwrap())
+                .unwrap();
+        assert_eq!(meta["segments"].as_array().map(|a| a.len()), Some(2));
         let _ = fs::remove_dir_all(&dir);
     }
 }

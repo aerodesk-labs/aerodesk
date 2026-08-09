@@ -144,6 +144,11 @@ jobs:
         env:
           BROWSER: chrome
         run: ./scripts/web-reconnect-e2e.sh
+
+      # #180 SFU /start 准入配额：MAX_ROOM_CLIENTS=1 时第 2 个连接被 503。
+      - name: e2e SFU start quota (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/sfu-quota-e2e.sh
       # #72 文件传输：publisher --send-file → SFU → viewer --recv-dir，SHA-256 一致。
       # #85：用 release 构建——debug 下 str0m/sctp-proto 高吞吐 data channel
       # 深调用链会 stack overflow（#102 已知，SFU shard 已 8MB 栈缓解）；
