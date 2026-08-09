@@ -11,6 +11,8 @@ use crate::turn_client::setup_turn;
 use aerodesk_protocol::signal::Role;
 use str0m::net::Protocol;
 
+use crate::media_pipeline::Codec;
+
 /// 连接结果摘要。
 #[derive(Debug, Clone)]
 pub struct ConnectResult {
@@ -146,7 +148,7 @@ pub fn connect_live_role(
     role: Role,
     auth: Option<&str>,
 ) -> Result<LiveSession, String> {
-    connect_live_role_impl(server, room, role, auth, force_relay_env())
+    connect_live_role_impl(server, room, role, auth, force_relay_env(), None)
 }
 
 /// force-relay（#201）：ICE 只通告 relayed 候选、跳过 host 候选。
@@ -159,7 +161,14 @@ pub fn connect_live_role_forced(
     auth: Option<&str>,
     force_relay: bool,
 ) -> Result<LiveSession, String> {
-    connect_live_role_impl(server, room, role, auth, force_relay || force_relay_env())
+    connect_live_role_impl(
+        server,
+        room,
+        role,
+        auth,
+        force_relay || force_relay_env(),
+        None,
+    )
 }
 
 /// force-relay（#201/#218）：`AERODESK_FORCE_RELAY=1|true` 时 ICE 只通告
@@ -170,12 +179,25 @@ pub fn force_relay_env() -> bool {
         .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
+/// 连接并保留活跃会话（指定视频 codec；#216 桥接客户端复用）。
+/// `codec=None` 用默认（与 `connect_live_role` 一致）。
+pub fn connect_live_role_codec(
+    server: &str,
+    room: &str,
+    role: Role,
+    auth: Option<&str>,
+    codec: Option<Codec>,
+) -> Result<LiveSession, String> {
+    connect_live_role_impl(server, room, role, auth, force_relay_env(), codec)
+}
+
 fn connect_live_role_impl(
     server: &str,
     room: &str,
     role: Role,
     auth: Option<&str>,
     force_relay: bool,
+    codec: Option<Codec>,
 ) -> Result<LiveSession, String> {
     let mut signal = WsSignalClient::connect(server).map_err(|e| format!("signal connect: {e}"))?;
     let (peer_id, turn) = signal
@@ -213,7 +235,11 @@ fn connect_live_role_impl(
         candidates.push(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     }
     let mut socket = MediaSocket::new(direct, turn_transport);
-    let mut endpoint = crate::Endpoint::new();
+    let mut endpoint = match codec {
+        None => crate::Endpoint::new(),
+        Some(Codec::H264) => crate::Endpoint::new_h264(),
+        Some(c) => crate::Endpoint::new_with_codec(c),
+    };
     for ip in &candidates {
         if force_relay {
             continue; // #201：只通告 relayed 候选，避免直连路径在 NAT/模拟器下丢媒体
