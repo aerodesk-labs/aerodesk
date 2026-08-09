@@ -5,7 +5,7 @@
 //! （与 iOS 的差异：iOS 用 VideoToolbox 在 Rust 侧硬解，Android 走 MediaCodec）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -18,6 +18,8 @@ use str0m::net::Protocol;
 pub struct ViewerSession {
     /// 最新 AnnexB 帧（拷贝）。
     latest: Arc<Mutex<Option<Vec<u8>>>>,
+    /// 输入事件发送通道（viewer → 被控端，经 input 数据通道）。
+    input_tx: mpsc::Sender<Vec<u8>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -28,13 +30,15 @@ impl ViewerSession {
         let live = aerodesk_core::connect::connect_live(server, room)?;
         let latest = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
+        let (input_tx, input_rx) = mpsc::channel();
         let pump = {
             let latest = latest.clone();
             let stop = stop.clone();
-            thread::spawn(move || pump_media(live, latest, stop))
+            thread::spawn(move || pump_media(live, latest, stop, input_rx))
         };
         Ok(ViewerSession {
             latest,
+            input_tx,
             stop,
             thread: Some(pump),
         })
@@ -43,6 +47,11 @@ impl ViewerSession {
     /// 取走最新完整视频帧（AnnexB 访问单元；None 表示暂无新帧）。
     pub fn take_frame(&self) -> Option<Vec<u8>> {
         self.latest.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    /// 发送输入事件（JSON InputFrame）。失败返回 false（通道已断开）。
+    pub fn send_input(&self, json: &[u8]) -> bool {
+        self.input_tx.send(json.to_vec()).is_ok()
     }
 }
 
@@ -56,10 +65,19 @@ impl Drop for ViewerSession {
 }
 
 /// 后台收流循环：UDP → endpoint → Media 事件 → 访问单元组装 → 最新帧槽。
-fn pump_media(mut live: LiveSession, latest: Arc<Mutex<Option<Vec<u8>>>>, stop: Arc<AtomicBool>) {
+fn pump_media(
+    mut live: LiveSession,
+    latest: Arc<Mutex<Option<Vec<u8>>>>,
+    stop: Arc<AtomicBool>,
+    input_rx: mpsc::Receiver<Vec<u8>>,
+) {
     // 把 str0m 输出的 NAL 事件按 RTP 时间戳聚合成完整访问单元。
     let mut assembler = AccessUnitAssembler::new();
     while !stop.load(Ordering::SeqCst) {
+        // 输入事件：观看端触摸/按键 → input 数据通道 → SFU → 被控端。
+        while let Ok(json) = input_rx.try_recv() {
+            live.endpoint.send_channel_data("input", false, &json);
+        }
         live.socket
             .set_read_timeout(Some(Duration::from_millis(10)))
             .ok();
