@@ -16,6 +16,10 @@
   默认下发 `turn:…?transport=udp,turn:…?transport=tcp,turns:…?transport=tcp`。
   TLS 证书加载失败时降级为 udp+tcp（不阻断启动）。
 - **兼容**：显式 `TURN_URLS`（逗号分隔）时走外部 coturn（老部署不变）。
+- **加固（#204）**：`MAX_TURN_ALLOCS_PER_IP`（默认 16）/`MAX_TURN_ALLOCS_TOTAL`（默认 256，
+  0=不限）超限返回 486；`TURN_DENIED_PEER_CIDRS`（逗号分隔 CIDR）内 peer 的
+  CreatePermission/ChannelBind 返回 403、Send 丢弃（防开放中继）；`SFU_TURN_IPV6=1`
+  启用 IPv6 双栈（控制面/relay [::]，回退 v4）。
 - **凭证**：coturn REST 规范（`username=<expiry>:<userid>`，
   `credential=base64(HMAC-SHA1(secret, username))`），1 小时有效；SFU 与内嵌 server
   共享 `TURN_SECRET`，signals 服务照常通过 `TURN_SECRET`/`TURN_URLS` 下发。
