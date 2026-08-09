@@ -130,12 +130,50 @@ pub fn connect_live(server: &str, room: &str) -> Result<LiveSession, String> {
     connect_live_role(server, room, Role::Viewer, None)
 }
 
+/// 观看端 + force-relay（#201）：ICE 只通告 relayed 候选。
+pub fn connect_live_forced(
+    server: &str,
+    room: &str,
+    force_relay: bool,
+) -> Result<LiveSession, String> {
+    connect_live_role_forced(server, room, Role::Viewer, None, force_relay)
+}
+
 /// 连接并保留活跃会话（任意角色）。`auth` 为 JWT/静态 token（可选）。
 pub fn connect_live_role(
     server: &str,
     room: &str,
     role: Role,
     auth: Option<&str>,
+) -> Result<LiveSession, String> {
+    connect_live_role_impl(server, room, role, auth, force_relay_env())
+}
+
+/// force-relay（#201）：ICE 只通告 relayed 候选、跳过 host 候选。
+/// 适用于：NAT 下直连候选"假通"（连通性检查能过但媒体入站被丢，如 qemu
+/// slirp 模拟器），或要求媒体必须走 TURN 的部署。
+pub fn connect_live_role_forced(
+    server: &str,
+    room: &str,
+    role: Role,
+    auth: Option<&str>,
+    force_relay: bool,
+) -> Result<LiveSession, String> {
+    connect_live_role_impl(server, room, role, auth, force_relay || force_relay_env())
+}
+
+fn force_relay_env() -> bool {
+    std::env::var("AERODESK_FORCE_RELAY")
+        .ok()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+fn connect_live_role_impl(
+    server: &str,
+    room: &str,
+    role: Role,
+    auth: Option<&str>,
+    force_relay: bool,
 ) -> Result<LiveSession, String> {
     let mut signal = WsSignalClient::connect(server).map_err(|e| format!("signal connect: {e}"))?;
     let (peer_id, turn) = signal
@@ -175,6 +213,9 @@ pub fn connect_live_role(
     let mut socket = MediaSocket::new(direct, turn_transport);
     let mut endpoint = crate::Endpoint::new();
     for ip in &candidates {
+        if force_relay {
+            continue; // #201：只通告 relayed 候选，避免直连路径在 NAT/模拟器下丢媒体
+        }
         let addr = std::net::SocketAddr::new(*ip, bind_addr.port());
         tracing::debug!("local candidate {addr}");
         endpoint
@@ -190,7 +231,7 @@ pub fn connect_live_role(
                 .copied()
                 .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
             let local = std::net::SocketAddr::new(local_ip, la.port());
-            tracing::info!("relayed candidate {relayed} (local {local})");
+            tracing::info!("relayed candidate {relayed} (local {local}) force_relay={force_relay}");
             if let Err(e) = endpoint.add_relay_candidate(relayed, local) {
                 tracing::warn!("relay candidate rejected (TURN disabled): {e:?}");
             }

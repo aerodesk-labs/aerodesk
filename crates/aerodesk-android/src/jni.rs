@@ -52,13 +52,14 @@ pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerCreate<'local>
     _class: JClass<'local>,
     server: JString<'local>,
     room: JString<'local>,
+    force_relay: jboolean,
 ) -> jlong {
     let server: String = env
         .get_string(&server)
         .map(|s| s.into())
         .unwrap_or_default();
     let room: String = env.get_string(&room).map(|s| s.into()).unwrap_or_default();
-    match ViewerSession::connect(&server, &room) {
+    match ViewerSession::connect(&server, &room, force_relay == JNI_TRUE) {
         Ok(v) => Box::into_raw(Box::new(v)) as jlong,
         Err(e) => {
             // 模拟器/CI 自测诊断：连接失败原因写 app 私有文件（run-as 可读）。

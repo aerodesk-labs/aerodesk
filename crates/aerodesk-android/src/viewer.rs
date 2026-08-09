@@ -25,9 +25,14 @@ pub struct ViewerSession {
 }
 
 impl ViewerSession {
-    /// 连接信令并启动收流线程。
-    pub fn connect(server: &str, room: &str) -> Result<ViewerSession, String> {
-        let live = aerodesk_core::connect::connect_live(server, room)?;
+    /// 连接信令并启动收流线程。`force_relay` 为 true 时 ICE 只通告 relayed
+    /// 候选（#201：规避 NAT/模拟器下直连候选假通导致媒体入站被丢）。
+    pub fn connect(server: &str, room: &str, force_relay: bool) -> Result<ViewerSession, String> {
+        let live = if force_relay {
+            aerodesk_core::connect::connect_live_forced(server, room, true)?
+        } else {
+            aerodesk_core::connect::connect_live(server, room)?
+        };
         let latest = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let (input_tx, input_rx) = mpsc::channel();
@@ -111,16 +116,16 @@ fn pump_media(
         while let Some(ev) = live.endpoint.poll_event() {
             match ev {
                 ClientEvent::Media(data) => {
-                    if let Some(mid) = live.video_mid
-                        && data.mid == mid
-                    {
-                        if let Some(frame) = assembler.push(
-                            data.data.as_ref(),
-                            data.time.as_micros(),
-                            data.is_keyframe(),
-                        ) {
-                            *latest.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame.data);
-                        }
+                    // 不能按 video_mid 过滤——SFU 转发时 RTP mid 扩展用 SFU
+                    // 本地 mid（与 viewer 协商的 mid 不同，CLI/iOS 同款处理，
+                    // 见 main.rs #58/#73 注释）。Android 观看端仅订阅视频，
+                    // 直接喂组装器（与 iOS viewer 一致）。
+                    if let Some(frame) = assembler.push(
+                        data.data.as_ref(),
+                        data.time.as_micros(),
+                        data.is_keyframe(),
+                    ) {
+                        *latest.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame.data);
                     }
                 }
                 ClientEvent::Closed => {
