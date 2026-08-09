@@ -31,13 +31,8 @@ fn dxgi_capture_produces_frame() {
 
 #[test]
 fn sendinput_injects_mouse_key() {
-    let inj = match SendInputInjector::new() {
-        Ok(i) => i,
-        Err(e) => {
-            eprintln!("SKIP: SendInput init failed: {e}");
-            return;
-        }
-    };
+    // SendInputInjector 是 unit struct（无需初始化，SendInput 系统调用）。
+    let inj = SendInputInjector;
     inj.inject(&InputEvent::MouseMove { x: 0.5, y: 0.5 })
         .expect("mouse move");
     inj.inject(&InputEvent::MouseButton {
