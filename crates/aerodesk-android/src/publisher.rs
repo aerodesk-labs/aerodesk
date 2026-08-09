@@ -51,8 +51,13 @@ impl PublisherSession {
     fn pump(&self, live: &mut LiveSession) {
         let _ = live.endpoint.handle_timeout(Instant::now());
         while let Some(output) = live.endpoint.poll_output() {
-            if let str0m::Output::Transmit(t) = output {
-                let _ = live.socket.send_to(&t.contents, t.destination);
+            match output {
+                str0m::Output::Transmit(t) => {
+                    let _ = live.socket.send_to(&t.contents, t.destination);
+                }
+                // 同 viewer：Timeout 必须 break，否则死循环卡死发布会话。
+                str0m::Output::Timeout(_) => break,
+                str0m::Output::Event(_) => {}
             }
         }
         while let Some(ev) = live.endpoint.poll_event() {
