@@ -1552,6 +1552,40 @@ fn viewer(
 /// x264 发布端：合成帧 → H.264 编码 → SFU。
 /// `--simulcast` 时编码 q/h/f 三层（640x360 / 1280x720 / 1920x1080），
 /// SFU 选层请求（画质档位）才能真正切换分辨率/码率。
+
+/// #211：网络泵排空式读取——单包读取在软编/高负载下饿死 SCTP ACK（input 送达率塌陷）。
+/// 与 pcap publisher（#8 高码率吞吐）一致：每轮尽量排空 socket（最多 `max_packets` 包）。
+fn drain_udp_input(socket: &mut MediaSocket, endpoint: &mut Endpoint, max_packets: usize) {
+    let mut buf = [0u8; 2000];
+    for _ in 0..max_packets {
+        match socket.recv_from(&mut buf) {
+            Ok((n, source)) => {
+                let Ok(contents) = buf[..n].try_into() else {
+                    continue;
+                };
+                let input = str0m::Input::Receive(
+                    Instant::now(),
+                    str0m::net::Receive {
+                        proto: Protocol::Udp,
+                        source,
+                        destination: socket.local_addr().unwrap(),
+                        contents,
+                    },
+                );
+                let _ = endpoint.handle_input(input);
+            }
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::WouldBlock
+                    && e.kind() != std::io::ErrorKind::TimedOut
+                {
+                    debug!("recv error: {e:?}");
+                }
+                break;
+            }
+        }
+    }
+}
+
 fn publisher_x264(
     signal_url: &str,
     room: &str,
@@ -1606,23 +1640,10 @@ fn publisher_x264(
     let mut pts = 0i64;
 
     loop {
+        // #211：排空式读取（软编/高负载下保证 SCTP ACK 及时消费，input 送达率不塌陷）。
         let wait = Duration::from_millis(5);
         socket.set_read_timeout(Some(wait)).ok();
-        let mut buf = [0u8; 2000];
-        if let Ok((n, source)) = socket.recv_from(&mut buf)
-            && let Ok(contents) = buf[..n].try_into()
-        {
-            let input = Input::Receive(
-                Instant::now(),
-                Receive {
-                    proto: Protocol::Udp,
-                    source,
-                    destination: socket.local_addr().unwrap(),
-                    contents,
-                },
-            );
-            let _ = endpoint.handle_input(input);
-        }
+        drain_udp_input(&mut socket, &mut endpoint, 512);
         let _ = endpoint.handle_timeout(Instant::now());
 
         let mut deadline = Instant::now() + Duration::from_secs(1);
@@ -1697,6 +1718,7 @@ fn publisher_x264(
             send_frame_layers(&mut endpoint, video_mid, rtp_time, &frames);
             // simulcast：每层一帧都需一次 do_payload，多排空避免 WriteWithoutPoll 背压。
             drain_payload_queue(&mut endpoint, layers.len());
+
             pts += 1;
         }
 
@@ -1771,23 +1793,10 @@ fn publisher_vt(
     let mut last_cursor = Instant::now();
 
     loop {
+        // #211：排空式读取（软编/高负载下保证 SCTP ACK 及时消费，input 送达率不塌陷）。
         let wait = Duration::from_millis(5);
         socket.set_read_timeout(Some(wait)).ok();
-        let mut buf = [0u8; 2000];
-        if let Ok((n, source)) = socket.recv_from(&mut buf)
-            && let Ok(contents) = buf[..n].try_into()
-        {
-            let input = Input::Receive(
-                Instant::now(),
-                Receive {
-                    proto: Protocol::Udp,
-                    source,
-                    destination: socket.local_addr().unwrap(),
-                    contents,
-                },
-            );
-            let _ = endpoint.handle_input(input);
-        }
+        drain_udp_input(&mut socket, &mut endpoint, 512);
         let _ = endpoint.handle_timeout(Instant::now());
 
         let mut deadline = Instant::now() + Duration::from_secs(1);
@@ -1896,23 +1905,10 @@ fn publisher_ffmpeg(
     let mut last_cursor = Instant::now();
 
     loop {
+        // #211：排空式读取（软编/高负载下保证 SCTP ACK 及时消费，input 送达率不塌陷）。
         let wait = Duration::from_millis(5);
         socket.set_read_timeout(Some(wait)).ok();
-        let mut buf = [0u8; 2000];
-        if let Ok((n, source)) = socket.recv_from(&mut buf)
-            && let Ok(contents) = buf[..n].try_into()
-        {
-            let input = Input::Receive(
-                Instant::now(),
-                Receive {
-                    proto: Protocol::Udp,
-                    source,
-                    destination: socket.local_addr().unwrap(),
-                    contents,
-                },
-            );
-            let _ = endpoint.handle_input(input);
-        }
+        drain_udp_input(&mut socket, &mut endpoint, 512);
         let _ = endpoint.handle_timeout(Instant::now());
 
         let mut deadline = Instant::now() + Duration::from_secs(1);
@@ -2026,23 +2022,10 @@ fn publisher_capture_ffmpeg(
     let mut last_cursor = Instant::now();
 
     loop {
+        // #211：排空式读取（软编/高负载下保证 SCTP ACK 及时消费，input 送达率不塌陷）。
         let wait = Duration::from_millis(5);
         socket.set_read_timeout(Some(wait)).ok();
-        let mut buf = [0u8; 2000];
-        if let Ok((n, source)) = socket.recv_from(&mut buf)
-            && let Ok(contents) = buf[..n].try_into()
-        {
-            let input = Input::Receive(
-                Instant::now(),
-                Receive {
-                    proto: Protocol::Udp,
-                    source,
-                    destination: socket.local_addr().unwrap(),
-                    contents,
-                },
-            );
-            let _ = endpoint.handle_input(input);
-        }
+        drain_udp_input(&mut socket, &mut endpoint, 512);
         let _ = endpoint.handle_timeout(Instant::now());
 
         let mut deadline = Instant::now() + Duration::from_secs(1);
@@ -2232,23 +2215,10 @@ fn publisher_capture(
     let pts_inc = 90_000 / FPS as i64;
 
     loop {
+        // #211：排空式读取（软编/高负载下保证 SCTP ACK 及时消费，input 送达率不塌陷）。
         let wait = Duration::from_millis(5);
         socket.set_read_timeout(Some(wait)).ok();
-        let mut buf = [0u8; 2000];
-        if let Ok((n, source)) = socket.recv_from(&mut buf)
-            && let Ok(contents) = buf[..n].try_into()
-        {
-            let input = Input::Receive(
-                Instant::now(),
-                Receive {
-                    proto: Protocol::Udp,
-                    source,
-                    destination: socket.local_addr().unwrap(),
-                    contents,
-                },
-            );
-            let _ = endpoint.handle_input(input);
-        }
+        drain_udp_input(&mut socket, &mut endpoint, 512);
         let _ = endpoint.handle_timeout(Instant::now());
 
         let mut deadline = Instant::now() + Duration::from_secs(1);
