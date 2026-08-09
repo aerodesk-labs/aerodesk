@@ -16,6 +16,8 @@
    │        └────────────▶ coturn（ICE 中继兜底）
    └── 录制目录 RECORD_DIR（可选）
 ```
+> 端口组合：#185——SFU 默认媒体端口 3478 与 coturn 默认 3478 同机冲突；
+> 生产建议 SFU 用 `SFU_MEDIA_PORT=443`（coturn 保持 3478/5349），详见 docs/TURN.md §1.5。
 
 ## 1. 环境变量总览
 
