@@ -97,8 +97,15 @@ fn pump_media(
         }
         let _ = live.endpoint.handle_timeout(std::time::Instant::now());
         while let Some(output) = live.endpoint.poll_output() {
-            if let str0m::Output::Transmit(t) = output {
-                let _ = live.socket.send_to(&t.contents, t.destination);
+            match output {
+                str0m::Output::Transmit(t) => {
+                    let _ = live.socket.send_to(&t.contents, t.destination);
+                }
+                // 关键：遇到 Timeout 必须退出本轮排空，否则 str0m 反复返回
+                // 同一个 Timeout → 100% CPU 死循环，媒体永远不处理
+                // （同 connect.rs / CLI / iOS 的既有修复，Android 侧漏了）。
+                str0m::Output::Timeout(_) => break,
+                str0m::Output::Event(_) => {}
             }
         }
         while let Some(ev) = live.endpoint.poll_event() {

@@ -42,9 +42,14 @@ class MainActivity : AppCompatActivity() {
         val rm = intent.getStringExtra("room")
         if (srv != null) server.setText(srv)
         if (rm != null) room.setText(rm)
-        // 兼容 -e autoconnect true（String）与 --ez autoconnect true（Boolean）
-        val auto = intent.getBooleanExtra("autoconnect", false)
-                || intent.getStringExtra("autoconnect") == "true"
+        // 兼容 -e autoconnect true（String）与 --ez autoconnect true（Boolean）。
+        // 注意：不能用 getBooleanExtra 兜底——extra 为 String 时会抛
+        // ClassCastException（模拟器/CI 自测用 -e 传参必现）。
+        val auto = when (val v = intent.extras?.get("autoconnect")) {
+            is Boolean -> v
+            is String -> v == "true"
+            else -> false
+        }
         if (auto && srv != null && rm != null) {
             status.postDelayed({ doConnect(srv, rm, status) }, 500)
         }
