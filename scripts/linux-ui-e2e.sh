@@ -43,6 +43,7 @@ XVFB=$!
 sleep 1
 
 echo "== [2.5/7] Linux 被控端运行级自测（X11 采集 + XTest 注入）"
+cd "$ROOT"
 DISPLAY=:99 cargo test -p aerodesk-linux --test x11_runtime 2>&1 | tail -12
 
 echo "== [3/7] 启动 SFU/signal"
