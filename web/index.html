@@ -312,7 +312,7 @@ function setupRtc(iceServers) {
             try {
                 const ctrl = JSON.parse(e.data);
                 // #72 FileControl：serde tag="type" snake_case（{"type":"nack"|"done"|"clipboard"}）
-                if (ctrl.type === 'nack' && pendingMeta && ctrl.id === pendingMeta.id && !pendingDone) {
+                if (ctrl.type === 'nack' && pendingMeta && ctrl.id === pendingMeta.id) {
                     for (const idx of ctrl.missing) {
                         const d = pendingChunks.get(idx);
                         if (d) fileChannel.send(encodeChunk(pendingMeta.id, idx, d));
@@ -435,7 +435,6 @@ function stopScreen() {
 let fileChannel = null;
 let pendingChunks = new Map(); // chunk index -> Uint8Array（Nack 重传用）
 let pendingMeta = null;
-let pendingDone = false;
 
 function encodeChunk(id, index, data) {
     const idBytes = new TextEncoder().encode(id);
@@ -465,7 +464,6 @@ async function sendFile(file) {
     const hash = await sha256Hex(buf);
     pendingMeta = { id, name: file.name, size: file.size, chunks, hash };
     pendingChunks.clear();
-    pendingDone = false;
     $('fileinfo').innerText = `发送 ${file.name} (${file.size} B, ${chunks} 分片)…`;
     log(`file send start: ${file.name} ${file.size}B chunks=${chunks}`);
     // Meta（#72 FileControl：{"type":"meta", id,name,size,chunks,hash}）
@@ -477,9 +475,8 @@ async function sendFile(file) {
         fileChannel.send(encodeChunk(id, i, data));
         if (i % 64 === 63) await new Promise(r => setTimeout(r, 0)); // 让出事件循环
     }
-    // Done
+    // Done（接收端补包确认前仍响应 Nack 重传）
     fileChannel.send(JSON.stringify({ type: 'done', id, ok: true }));
-    pendingDone = true;
     $('fileinfo').innerText = `已发送完成 ${file.name}`;
     log(`file send done: ${file.name}`);
 }
@@ -504,7 +501,7 @@ function disconnect() {
     if (ws) ws.close();
     stopScreen();
     rtc = null; ws = null; peerId = null; inputChannel = null; signalChannel = null; fileChannel = null;
-    pendingChunks.clear(); pendingMeta = null; pendingDone = false;
+    pendingChunks.clear(); pendingMeta = null;
     $('file').disabled = true; $('sendfile').disabled = true; $('fileinfo').innerText = '';
     $('video').srcObject = null;
     $('placeholder').style.display = 'flex';
