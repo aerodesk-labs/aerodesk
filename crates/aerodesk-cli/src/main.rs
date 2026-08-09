@@ -451,24 +451,34 @@ fn connect_inner(
     let turn_transport = turn.as_ref().and_then(|tc| setup_turn(tc, true));
     let socket = MediaSocket::new(direct, turn_transport);
 
+    // #218：force-relay（AERODESK_FORCE_RELAY=1|true，与 core 一致）——ICE 只通告
+    // relayed 候选、跳过 host 候选，强制媒体走 TURN 中继（NAT/弱网压测中继路径）。
+    let force_relay = aerodesk_core::connect::force_relay_env();
+
     let mut endpoint = match codec {
         None => Endpoint::new(),
         Some(Codec::H264) => Endpoint::new_h264(),
         Some(c) => Endpoint::new_with_codec(c),
     };
-    endpoint
-        .add_local_candidate(addr, Protocol::Udp)
-        .map_err(|e| format!("candidate: {e}"))?;
+    if force_relay {
+        info!("force-relay: skip host candidate {addr}");
+    } else {
+        endpoint
+            .add_local_candidate(addr, Protocol::Udp)
+            .map_err(|e| format!("candidate: {e}"))?;
+    }
     // #157 M2：relayed 候选加入 offer（`typ relay`），ICE 按优先级直连优先、TURN 兜底。
     if let Some(tt) = socket.turn() {
         let relayed = tt.relayed_addr();
         if let Ok(la) = tt.local_addr() {
             let local = std::net::SocketAddr::new(addr.ip(), la.port());
-            info!("relayed candidate {relayed} (local {local})");
+            info!("relayed candidate {relayed} (local {local}) force_relay={force_relay}");
             if let Err(e) = endpoint.add_relay_candidate(relayed, local) {
                 warn!("relay candidate rejected (TURN disabled): {e:?}");
             }
         }
+    } else if force_relay {
+        warn!("force-relay requested but no TURN transport (signal didn't issue TurnConfig)");
     }
 
     // #12：viewer 的 offer 用 recvonly（SFU 拒绝 viewer 发布媒体）。
