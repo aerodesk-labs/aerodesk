@@ -99,10 +99,7 @@ pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerSendInput<'loc
     if viewer.is_null() {
         return JNI_FALSE;
     }
-    let json: String = env
-        .get_string(&json)
-        .map(|s| s.into())
-        .unwrap_or_default();
+    let json: String = env.get_string(&json).map(|s| s.into()).unwrap_or_default();
     unsafe {
         if (*viewer).send_input(json.as_bytes()) {
             JNI_TRUE
@@ -136,7 +133,7 @@ pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerTakeAnnexB<'lo
 }
 
 use crate::publisher::PublisherSession;
-use jni::sys::{JNI_FALSE, JNI_TRUE, jbyteArray, jboolean, jlong};
+use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jbyteArray, jlong};
 
 /// 创建发布会话（被控端）。返回指针（jlong），失败为 0。
 #[unsafe(no_mangle)]
