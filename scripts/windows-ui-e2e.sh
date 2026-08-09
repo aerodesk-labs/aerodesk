@@ -37,6 +37,7 @@ const ROOM = process.argv[2];
 JS
 
 echo "== [1.5/6] Windows 被控端运行级自测（DXGI 采集 + SendInput 注入）"
+cd "$ROOT"
 cargo test -p aerodesk-windows --test windows_runtime 2>&1 | tail -12
 
 echo "== [2/6] 启动 SFU/signal（Windows）"
