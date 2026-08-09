@@ -231,9 +231,7 @@ fn connect_live_role_impl(
                 .copied()
                 .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
             let local = std::net::SocketAddr::new(local_ip, la.port());
-            tracing::info!(
-                "relayed candidate {relayed} (local {local}) force_relay={force_relay}"
-            );
+            tracing::info!("relayed candidate {relayed} (local {local}) force_relay={force_relay}");
             if let Err(e) = endpoint.add_relay_candidate(relayed, local) {
                 tracing::warn!("relay candidate rejected (TURN disabled): {e:?}");
             }
