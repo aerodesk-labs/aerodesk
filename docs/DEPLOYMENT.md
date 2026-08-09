@@ -31,6 +31,10 @@
 | sfu | `TURN_SECRET` | 启用 TURN：未设 `TURN_URLS` 时启动内嵌 TURN server（#191） |
 | sfu | `SFU_TURN_PORT` | 内嵌 TURN UDP+TCP 端口（默认 3479，#196） |
 | sfu | `SFU_TURN_TLS_PORT` | 内嵌 TURN TLS 端口（默认 5349；证书加载失败降级） |
+| sfu | `MAX_TURN_ALLOCS_PER_IP` | TURN allocation 每 IP 配额（默认 16，0=不限，#204） |
+| sfu | `MAX_TURN_ALLOCS_TOTAL` | TURN allocation 全局配额（默认 256，0=不限，#204） |
+| sfu | `TURN_DENIED_PEER_CIDRS` | 拒绝中继的 peer CIDR 列表（逗号分隔，默认空，#204） |
+| sfu | `SFU_TURN_IPV6` | `1` 时 TURN 双栈绑定（IPv6 中继，#204） |
 | sfu | `TURN_URLS` | 显式设置时走外部 coturn（向后兼容），空/未设走内嵌 |
 | signal | `SFU_URL` / `SFU_TOKEN` | SFU 内部接口 + 内部 token |
 | sfu | `RECORD_DIR` | 录制/审计目录（可选） |

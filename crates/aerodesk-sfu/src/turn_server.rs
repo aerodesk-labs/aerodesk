@@ -18,6 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -47,7 +48,7 @@ type ConnBox = Box<dyn ConnIo>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ClientKey {
     Udp(SocketAddr),
-    Tcp(u64),
+    Tcp { conn: u64, ip: IpAddr },
 }
 
 /// 客户端出口（响应 / 中继入站统一出口；TCP/TLS 加 2 字节长度前缀）。
@@ -81,6 +82,7 @@ struct AllocState {
 struct Allocation {
     relay: Arc<UdpSocket>,
     relayed: SocketAddr,
+    client_ip: IpAddr,
     expires: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     state: Arc<Mutex<AllocState>>,
@@ -94,6 +96,12 @@ struct Shared {
     nonce: String,
     host: IpAddr,
     next_conn: AtomicU64,
+    /// 每 IP 最大并发 allocation（0=不限）。
+    max_allocs_per_ip: usize,
+    /// 全局最大并发 allocation（0=不限）。
+    max_allocs_total: usize,
+    /// 拒绝中继的 peer CIDR（TURN_DENIED_PEER_CIDRS）。
+    denied_peers: Vec<ipnet::IpNet>,
 }
 
 /// 内嵌 TURN server 句柄（地址可用；线程自管理生命周期）。
@@ -115,6 +123,9 @@ pub fn spawn(
     // rustls 0.23 需要进程级 CryptoProvider；显式安装 aws-lc-rs 提供器，
     // 避免跨 crate feature 探测歧义（#196 TLS）。
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let ipv6 = std::env::var("SFU_TURN_IPV6")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     let shared = Arc::new(Shared {
         allocations: Mutex::new(HashMap::new()),
         secret: secret.to_string(),
@@ -128,10 +139,24 @@ pub fn spawn(
         ),
         host: host_addr,
         next_conn: AtomicU64::new(1),
+        // #204：配额默认 16/IP、256 全局（0=不限）；CIDR 列表默认空=不限制。
+        max_allocs_per_ip: env_usize("MAX_TURN_ALLOCS_PER_IP", 16),
+        max_allocs_total: env_usize("MAX_TURN_ALLOCS_TOTAL", 256),
+        denied_peers: std::env::var("TURN_DENIED_PEER_CIDRS")
+            .map(|v| {
+                v.split(',')
+                    .filter_map(|c| ipnet::IpNet::from_str(c.trim()).ok())
+                    .collect()
+            })
+            .unwrap_or_default(),
     });
 
-    // UDP：绑定 0.0.0.0（loopback + 所有接口可达）；对外地址用 host_addr 上报。
-    let udp_socket = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, udp_port))?;
+    // UDP：默认 0.0.0.0；SFU_TURN_IPV6=1 时双栈 [::]（V6ONLY=0，不可用回退 v4）。
+    let udp_socket = if ipv6 {
+        bind_udp_dual(udp_port)?
+    } else {
+        UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, udp_port))?
+    };
     udp_socket.set_read_timeout(Some(POLL_TIMEOUT))?;
     let bound = udp_socket.local_addr()?;
     let udp_addr = SocketAddr::new(host_addr, bound.port());
@@ -150,7 +175,11 @@ pub fn spawn(
 
     // TCP：与 UDP 同端口（不同协议可共存）。
     let tcp_addr = SocketAddr::new(host_addr, bound.port());
-    let tcp_listener = TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, bound.port()))?;
+    let tcp_listener = if ipv6 {
+        bind_tcp_dual(bound.port())?
+    } else {
+        TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, bound.port()))?
+    };
     tcp_listener.set_nonblocking(true)?;
     info!("embedded TURN+STUN server TCP on {tcp_addr}");
     {
@@ -164,7 +193,11 @@ pub fn spawn(
     // TLS：SFU_TURN_TLS_PORT；证书加载失败降级跳过。
     let mut tls_addr = None;
     if let Some(port) = tls_port {
-        let tls_listener = match TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)) {
+        let tls_listener = match if ipv6 {
+            bind_tcp_dual(port)
+        } else {
+            TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port))
+        } {
             Ok(l) => l,
             Err(e) => {
                 warn!("TURN TLS listener bind :{port} failed ({e}); turns: 不可用");
@@ -212,6 +245,45 @@ pub fn spawn(
         tls_addr,
         _handles: handles,
     })
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+fn peer_denied(shared: &Shared, peer: IpAddr) -> bool {
+    shared.denied_peers.iter().any(|n| n.contains(&peer))
+}
+
+/// IPv6 双栈 UDP socket（V6ONLY=0；不可用时回退 IPv4 0.0.0.0）。
+fn bind_udp_dual(port: u16) -> io::Result<UdpSocket> {
+    if let Ok(sock) = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::DGRAM, None) {
+        let _ = sock.set_only_v6(false);
+        let _ = sock.set_reuse_address(true);
+        let addr: std::net::SocketAddr =
+            std::net::SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), port);
+        if sock.bind(&addr.into()).is_ok() {
+            return Ok(sock.into());
+        }
+    }
+    UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port))
+}
+
+/// IPv6 双栈 TCP listener（同上）。
+fn bind_tcp_dual(port: u16) -> io::Result<TcpListener> {
+    if let Ok(sock) = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::STREAM, None) {
+        let _ = sock.set_only_v6(false);
+        let _ = sock.set_reuse_address(true);
+        let addr: std::net::SocketAddr =
+            std::net::SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), port);
+        if sock.bind(&addr.into()).is_ok() {
+            return Ok(sock.into());
+        }
+    }
+    TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port))
 }
 
 fn unix_now() -> u64 {
@@ -358,6 +430,10 @@ fn tcp_conn_loop(
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(TCP_READ_TIMEOUT))?;
     stream.set_nodelay(true).ok();
+    let peer_ip = stream
+        .peer_addr()
+        .map(|a| a.ip())
+        .unwrap_or_else(|_| IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
     let conn: ConnBox = match acceptor {
         None => Box::new(stream),
         Some(cfg) => {
@@ -368,7 +444,10 @@ fn tcp_conn_loop(
     };
     let conn = Arc::new(Mutex::new(conn));
     let sink = ClientSink::Tcp(conn.clone());
-    let key = ClientKey::Tcp(conn_id);
+    let key = ClientKey::Tcp {
+        conn: conn_id,
+        ip: peer_ip,
+    };
     let mut fr = FrameReader::new();
     let mut tmp = [0u8; 65535];
     loop {
@@ -558,10 +637,40 @@ fn handle_allocate(
             return;
         }
     };
-    let Ok(relay) = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)) else {
-        warn!("TURN relay bind failed");
-        send_error(server, sink, txid, MSG_ALLOCATE, 500, false, shared);
-        return;
+    // #204：配额（486 Allocation Quota Reached）。计数直接来自 allocations 表。
+    let client_ip = match key {
+        ClientKey::Udp(a) => a.ip(),
+        ClientKey::Tcp { ip, .. } => ip,
+    };
+    {
+        let allocs = shared.allocations.lock().unwrap();
+        if shared.max_allocs_total > 0 && allocs.len() >= shared.max_allocs_total {
+            send_error(server, sink, txid, MSG_ALLOCATE, 486, false, shared);
+            return;
+        }
+        if shared.max_allocs_per_ip > 0
+            && allocs.values().filter(|a| a.client_ip == client_ip).count()
+                >= shared.max_allocs_per_ip
+        {
+            send_error(server, sink, txid, MSG_ALLOCATE, 486, false, shared);
+            return;
+        }
+    }
+    let ipv6 = std::env::var("SFU_TURN_IPV6")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let relay = if ipv6 {
+        bind_udp_dual(0)
+    } else {
+        UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0))
+    };
+    let relay = match relay {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("TURN relay bind failed: {e}");
+            send_error(server, sink, txid, MSG_ALLOCATE, 500, false, shared);
+            return;
+        }
     };
     let Ok(relay_port) = relay.local_addr().map(|a| a.port()) else {
         return;
@@ -592,6 +701,7 @@ fn handle_allocate(
         Allocation {
             relay: relay_arc,
             relayed,
+            client_ip,
             expires,
             stop,
             state,
@@ -632,6 +742,11 @@ fn handle_permission(
         send_error(server, sink, txid, method, 400, false, shared);
         return;
     };
+    // #204：拒绝段内 peer → 403 Forbidden（防开放中继）。
+    if peer_denied(shared, peer.ip()) {
+        send_error(server, sink, txid, method, 403, false, shared);
+        return;
+    }
     let allocs = shared.allocations.lock().unwrap();
     let Some(alloc) = allocs.get(&key) else {
         return;
@@ -670,6 +785,10 @@ fn handle_send(shared: &Shared, pkt: &[u8], key: ClientKey) {
     let Some(data) = find_attr(pkt, ATTR_DATA) else {
         return;
     };
+    // #204：拒绝段内 peer 静默丢弃（Send 是指示，无响应）。
+    if peer_denied(shared, peer_val.ip()) {
+        return;
+    }
     let allocs = shared.allocations.lock().unwrap();
     let Some(alloc) = allocs.get(&key) else {
         return;
@@ -753,7 +872,11 @@ fn spawn_relay(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, TcpStream, UdpSocket};
+    use std::net::{Ipv4Addr, Ipv6Addr, TcpStream, UdpSocket};
+    use std::sync::Mutex;
+
+    // env 是进程全局的：设置 env 的测试（配额/deny/IPv6）串行化，避免并行互踩。
+    static TESTS_LOCK: Mutex<()> = Mutex::new(());
 
     // ---------- 公共测试工具 ----------
 
@@ -909,6 +1032,7 @@ mod tests {
 
     #[test]
     fn binding_returns_xor_mapped() {
+        let _g = TESTS_LOCK.lock().unwrap();
         let (server_addr, _srv) = spawn_udp("testsecret");
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
         client
@@ -928,6 +1052,7 @@ mod tests {
 
     #[test]
     fn allocate_relay_roundtrip_with_rest_credentials() {
+        let _g = TESTS_LOCK.lock().unwrap();
         let secret = "testsecret";
         let (server_addr, _srv) = spawn_udp(secret);
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1000,6 +1125,7 @@ mod tests {
 
     #[test]
     fn allocate_rejects_bad_credentials() {
+        let _g = TESTS_LOCK.lock().unwrap();
         let secret = "testsecret";
         let (server_addr, _srv) = spawn_udp(secret);
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1094,6 +1220,7 @@ mod tests {
 
     #[test]
     fn tcp_allocate_relay_roundtrip() {
+        let _g = TESTS_LOCK.lock().unwrap();
         let secret = "testsecret";
         let (tcp_addr, _tls, _srv) = setup_tcp(secret, false);
         let mut stream = TcpStream::connect(tcp_addr).expect("tcp connect");
@@ -1146,6 +1273,7 @@ mod tests {
 
     #[test]
     fn tls_allocate_relay_roundtrip() {
+        let _g = TESTS_LOCK.lock().unwrap();
         let secret = "testsecret";
         let (_tcp, tls_addr, _srv) = setup_tcp(secret, true);
         let cfg = rustls::ClientConfig::builder()
@@ -1191,5 +1319,208 @@ mod tests {
         let method = stun_method(&body);
         assert_eq!(method, MSG_SUCCESS_BASE | MSG_BINDING, "TLS Binding 应答");
         // 完整 allocate + relay 回环在 e2e 用 turnutils -S 覆盖（rustls 客户端分块读复杂）
+    }
+    /// 执行 401→带凭证 Allocate，返回最终响应错误码（Ok=成功）。
+    fn udp_allocate_code(
+        client: &UdpSocket,
+        server_addr: SocketAddr,
+        username: &str,
+        credential: &str,
+    ) -> Result<(), u16> {
+        let txid = [7u8; 12];
+        let req = build_stun(
+            MSG_ALLOCATE,
+            &[(ATTR_REQUESTED_TRANSPORT, vec![17, 0, 0, 0])],
+            txid,
+            None,
+        )
+        .unwrap();
+        client.send_to(&req, server_addr).unwrap();
+        let mut buf = [0u8; 4096];
+        let (n, _) = client.recv_from(&mut buf).unwrap();
+        let (realm, nonce, err) = parse_common(&buf[..n]).unwrap();
+        assert_eq!(err, Some(401));
+        let realm = realm.unwrap();
+        let nonce = nonce.unwrap();
+        let txid2 = [8u8; 12];
+        let attrs = vec![(ATTR_REQUESTED_TRANSPORT, vec![17, 0, 0, 0])];
+        let req2 = build_stun(
+            MSG_ALLOCATE,
+            &attrs,
+            txid2,
+            Some((username, credential, &realm, &nonce)),
+        )
+        .unwrap();
+        client.send_to(&req2, server_addr).unwrap();
+        let (n, _) = client.recv_from(&mut buf).unwrap();
+        let (_, _, err) = parse_common(&buf[..n]).unwrap();
+        match err {
+            None => Ok(()),
+            Some(c) => Err(c),
+        }
+    }
+
+    fn creds(secret: &str) -> (String, String) {
+        let c = aerodesk_protocol::turn::generate_turn_credentials(secret, "e2e", 3600, unix_now());
+        (c.username, c.credential)
+    }
+
+    /// #204：per-IP 配额超限 → 486。
+    #[test]
+    fn quota_per_ip_rejects_second_allocation() {
+        let _g = TESTS_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("MAX_TURN_ALLOCS_PER_IP", "1");
+        }
+        let (server_addr, _srv) = spawn_udp("testsecret");
+        let (u, p) = creds("testsecret");
+        let c1 = UdpSocket::bind("127.0.0.1:0").unwrap();
+        c1.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert!(udp_allocate_code(&c1, server_addr, &u, &p).is_ok());
+        let c2 = UdpSocket::bind("127.0.0.1:0").unwrap();
+        c2.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert_eq!(
+            udp_allocate_code(&c2, server_addr, &u, &p),
+            Err(486),
+            "同一 IP 第二个 allocation 应 486"
+        );
+        unsafe {
+            std::env::remove_var("MAX_TURN_ALLOCS_PER_IP");
+        }
+    }
+
+    /// #204：全局配额超限 → 486（per-IP 放开）。
+    #[test]
+    fn quota_total_rejects_when_full() {
+        let _g = TESTS_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("MAX_TURN_ALLOCS_TOTAL", "1");
+            std::env::set_var("MAX_TURN_ALLOCS_PER_IP", "0");
+        }
+        let (server_addr, _srv) = spawn_udp("testsecret");
+        let (u, p) = creds("testsecret");
+        let c1 = UdpSocket::bind("127.0.0.1:0").unwrap();
+        c1.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert!(udp_allocate_code(&c1, server_addr, &u, &p).is_ok());
+        let c2 = UdpSocket::bind("127.0.0.1:0").unwrap();
+        c2.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert_eq!(udp_allocate_code(&c2, server_addr, &u, &p), Err(486));
+        unsafe {
+            std::env::remove_var("MAX_TURN_ALLOCS_TOTAL");
+            std::env::remove_var("MAX_TURN_ALLOCS_PER_IP");
+        }
+    }
+
+    /// #204：TURN_DENIED_PEER_CIDRS 内 peer → CreatePermission 403。
+    #[test]
+    fn denied_peer_returns_403() {
+        let _g = TESTS_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TURN_DENIED_PEER_CIDRS", "192.0.2.0/24");
+        }
+        let (server_addr, _srv) = spawn_udp("testsecret");
+        let (u, p) = creds("testsecret");
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (_, realm, nonce) = udp_allocate(&client, server_addr, &u, &p).expect("allocate");
+
+        let denied: SocketAddr = "192.0.2.10:4000".parse().unwrap();
+        let req = auth_request(
+            MSG_CREATE_PERMISSION,
+            &[(ATTR_XOR_PEER_ADDRESS, encode_xor_peer(denied))],
+            &u,
+            &p,
+            &realm,
+            &nonce,
+        )
+        .unwrap();
+        client.send_to(&req, server_addr).unwrap();
+        let (m, attrs) = recv_response(&client);
+        assert_eq!(m, MSG_ERROR_BASE | MSG_CREATE_PERMISSION, "应 403 错误");
+        let code = attrs
+            .iter()
+            .find(|(t, _)| *t == ATTR_ERROR_CODE)
+            .map(|(_, v)| ((v[2] & 7) as u16) * 100 + v[3] as u16);
+        assert_eq!(code, Some(403));
+        unsafe {
+            std::env::remove_var("TURN_DENIED_PEER_CIDRS");
+        }
+    }
+
+    /// #204：IPv6（::1）allocate + relay 回环。
+    #[test]
+    fn ipv6_allocate_relay_roundtrip() {
+        let _g = TESTS_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("SFU_TURN_IPV6", "1");
+        }
+        let secret = "testsecret";
+        let srv = spawn(secret, Ipv6Addr::LOCALHOST.into(), 0, None).unwrap();
+        let server_addr = srv.udp_addr;
+        let client = UdpSocket::bind("[::1]:0").unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let (u, p) = creds(secret);
+        let (relayed, realm, nonce) =
+            udp_allocate(&client, server_addr, &u, &p).expect("v6 allocate");
+        assert!(relayed.is_ipv6(), "relayed 应为 IPv6: {relayed}");
+
+        let peer = UdpSocket::bind("[::1]:0").unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+
+        let req = auth_request(
+            MSG_CREATE_PERMISSION,
+            &[(ATTR_XOR_PEER_ADDRESS, encode_xor_peer(peer_addr))],
+            &u,
+            &p,
+            &realm,
+            &nonce,
+        )
+        .unwrap();
+        client.send_to(&req, server_addr).unwrap();
+        let (m, _) = recv_response(&client);
+        assert_eq!(m, MSG_SUCCESS_BASE | MSG_CREATE_PERMISSION);
+
+        let chan = CHANNEL_BASE;
+        let req = auth_request(
+            MSG_CHANNEL_BIND,
+            &[
+                (ATTR_CHANNEL_NUMBER, chan.to_be_bytes().to_vec()),
+                (ATTR_XOR_PEER_ADDRESS, encode_xor_peer(peer_addr)),
+            ],
+            &u,
+            &p,
+            &realm,
+            &nonce,
+        )
+        .unwrap();
+        client.send_to(&req, server_addr).unwrap();
+        let (m, _) = recv_response(&client);
+        assert_eq!(m, MSG_SUCCESS_BASE | MSG_CHANNEL_BIND);
+
+        let payload = b"hello-v6-turn";
+        let mut cd = Vec::with_capacity(4 + payload.len());
+        cd.extend_from_slice(&chan.to_be_bytes());
+        cd.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        cd.extend_from_slice(payload);
+        client.send_to(&cd, server_addr).unwrap();
+        let mut buf = [0u8; 64];
+        let (n, src) = peer.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..n], payload);
+        assert_eq!(src.port(), relayed.port());
+
+        peer.send_to(b"reply-v6-turn", relayed).unwrap();
+        let mut buf2 = [0u8; 128];
+        let (n2, _) = client.recv_from(&mut buf2).unwrap();
+        let rchan = u16::from_be_bytes([buf2[0], buf2[1]]);
+        assert_eq!(rchan, chan);
+        assert_eq!(&buf2[4..n2], b"reply-v6-turn");
+        unsafe {
+            std::env::remove_var("SFU_TURN_IPV6");
+        }
     }
 }
