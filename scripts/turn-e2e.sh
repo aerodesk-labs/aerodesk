@@ -205,7 +205,7 @@ VIEW_FR_PID=$!
 ok=1
 for _ in $(seq 1 90); do
     if grep -q 'relayed candidate' /tmp/turn-e2e-view-fr.log 2>/dev/null \
-       && ! grep -qE 'local candidate ' /tmp/turn-e2e-view-fr.log 2>/dev/null \
+       && grep -q 'force-relay: skip host candidate' /tmp/turn-e2e-view-fr.log 2>/dev/null \
        && grep -q 'RECEIVED: [1-9]' /tmp/turn-e2e-view-fr.log 2>/dev/null; then ok=0; break; fi
     sleep 0.3
 done

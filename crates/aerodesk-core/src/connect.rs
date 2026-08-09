@@ -162,7 +162,9 @@ pub fn connect_live_role_forced(
     connect_live_role_impl(server, room, role, auth, force_relay || force_relay_env())
 }
 
-fn force_relay_env() -> bool {
+/// force-relay（#201/#218）：`AERODESK_FORCE_RELAY=1|true` 时 ICE 只通告
+/// relayed 候选、跳过 host 候选；供 CLI 与 core 连接路径共用。
+pub fn force_relay_env() -> bool {
     std::env::var("AERODESK_FORCE_RELAY")
         .ok()
         .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
