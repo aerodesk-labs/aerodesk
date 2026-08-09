@@ -1261,9 +1261,24 @@ impl Client {
 
     fn handle_channel_data_out(&mut self, label: &str, data: &ChannelData) {
         let Some(cid) = self.channels.get(label).copied() else {
+            // #208：目标通道未注册（ChannelOpen 未到/未开）——入背压队列待通道
+            // 打开后重试，不再丢弃（队列 64MB 有界，客户端断开随 Client 释放）。
+            debug!(
+                "Client ({}) 转发 {label}：通道未注册，入背压队列 {} 字节",
+                *self.id,
+                data.data.len()
+            );
+            self.enqueue_pending(label, data.data.clone(), data.binary);
             return;
         };
         let Some(mut channel) = self.rtc.channel(cid) else {
+            // #208：label 已注册但 rtc 通道暂不可用——同样保留重试。
+            debug!(
+                "Client ({}) 转发 {label}：rtc 通道暂不可用，入背压队列 {} 字节",
+                *self.id,
+                data.data.len()
+            );
+            self.enqueue_pending(label, data.data.clone(), data.binary);
             return;
         };
         // 先尝试直接写；缓冲满则入背压队列（下一轮重试），不丢包。
@@ -1299,16 +1314,17 @@ impl Client {
         for queue in self.pending_channel_out.iter_mut() {
             while let Some((label, data, binary)) = queue.front() {
                 let Some(cid) = self.channels.get(label).copied() else {
-                    let (_, data, _) = queue.pop_front().unwrap();
-                    self.pending_channel_out_bytes =
-                        self.pending_channel_out_bytes.saturating_sub(data.len());
-                    continue;
+                    // #208：目标 label 未注册时保留队列（待通道打开后重试），不再丢弃。
+                    warn!(
+                        "Client ({}) 背压队列 {label} 通道未注册，暂留 {} 字节",
+                        *self.id,
+                        data.len()
+                    );
+                    break;
                 };
                 let Some(mut channel) = self.rtc.channel(cid) else {
-                    let (_, data, _) = queue.pop_front().unwrap();
-                    self.pending_channel_out_bytes =
-                        self.pending_channel_out_bytes.saturating_sub(data.len());
-                    continue;
+                    // #208：通道尚不可用 → 保持队列顺序，下一轮重试（不丢弃）。
+                    break;
                 };
                 if channel.write(*binary, data).is_err() {
                     break; // 该桶对端缓冲满：保持顺序，下一轮重试
@@ -1591,7 +1607,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_out_queues_by_priority_and_drains_clean() {
+    fn pending_out_queues_by_priority_and_retains_when_unregistered() {
         use str0m::Rtc;
         let mut client = Client::new(Rtc::builder().build(Instant::now()), Role::Viewer);
         // 先入 file（低优先级），再入 input（高优先级）
@@ -1611,12 +1627,17 @@ mod tests {
             Some("file")
         );
         assert_eq!(client.pending_channel_out_bytes, 110);
-        // 无 channel 注册：drain 清空全部桶并释放字节计数（不 panic）
+        // #208：无 channel 注册时 drain 保留队列（待通道打开后重试），不丢弃。
         client.drain_pending_out();
-        assert_eq!(client.pending_channel_out_bytes, 0);
-        for q in &client.pending_channel_out {
-            assert!(q.is_empty());
-        }
+        assert_eq!(client.pending_channel_out_bytes, 110);
+        assert!(
+            client.pending_channel_out[0].front().is_some(),
+            "input 桶应保留"
+        );
+        assert!(
+            client.pending_channel_out[4].front().is_some(),
+            "file 桶应保留"
+        );
     }
 
     #[test]
@@ -1756,4 +1777,44 @@ mod tests {
         shared.release("r2");
         assert_eq!(shared.total_clients.load(Ordering::Relaxed), 0);
     }
+}
+
+/// #208：目标通道未注册时，转发数据入背压队列保留（不丢弃）；通道打开后重试。
+#[test]
+fn pending_out_retains_when_channel_missing() {
+    let now = std::time::Instant::now();
+    let mut rtc = str0m::Rtc::new(now);
+    let cid = rtc.sdp_api().add_channel("input".into());
+    let mut client = Client::new(rtc, crate::shard::Role::Publisher);
+    assert!(client.channels.is_empty());
+
+    let data = ChannelData {
+        id: cid,
+        binary: false,
+        data: b"input-event".to_vec(),
+    };
+    // 未注册 label：handle_channel_data_out 应入队而非丢弃
+    client.handle_channel_data_out("input", &data);
+    assert_eq!(
+        client.pending_channel_out_bytes,
+        data.data.len(),
+        "未注册通道数据应入背压队列保留"
+    );
+
+    // 通道仍缺失：drain 应保留队列（不 pop 丢弃）
+    client.drain_pending_out();
+    assert_eq!(
+        client.pending_channel_out_bytes,
+        data.data.len(),
+        "drain 不应丢弃未注册通道数据"
+    );
+
+    // 注册 label 但 rtc 通道不可用（未连接）：仍保留
+    client.channels.insert("input".into(), data.id);
+    client.drain_pending_out();
+    assert_eq!(
+        client.pending_channel_out_bytes,
+        data.data.len(),
+        "rtc 通道不可用时也应保留"
+    );
 }
