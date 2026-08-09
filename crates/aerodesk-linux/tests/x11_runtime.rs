@@ -5,7 +5,7 @@
 //! 依赖：DISPLAY 指向可用 X server（CI 用 Xvfb）。
 
 use aerodesk_linux::capture::X11Capturer;
-use aerodesk_linux::inject::{InputEvent, XTestInjector};
+use aerodesk_linux::inject::{InputEvent, InputInjector, XTestInjector};
 
 #[test]
 fn x11_capture_produces_rgba_frame() {
