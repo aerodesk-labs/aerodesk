@@ -1222,6 +1222,12 @@ impl Client {
             .find(|(_, v)| **v == d.id)
             .map(|(l, _)| l.clone())
         else {
+            // #192：无标签通道（如对端 negotiated 通道未发 DCEP，或通道未注册）——
+            // SFU 无法按 label 转发，静默丢弃会掩盖问题，记一条告警便于排查。
+            warn!(
+                "Client ({}) 收到未注册 data channel cid={:?}（可能是 negotiated 通道未配置）；丢弃",
+                *self.id, d.id
+            );
             return Propagated::Noop;
         };
         if label == "offer/answer" {
