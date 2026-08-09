@@ -110,6 +110,14 @@ pub struct Shared {
     pub tcp_streams: Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
     /// 每分片指标（索引 = shard id）。
     pub metrics: Arc<Vec<ShardMetrics>>,
+    /// 房间在线人数（#180 /start 准入配额）。
+    pub room_clients: Arc<Mutex<HashMap<String, usize>>>,
+    /// 全局在线人数（#180）。
+    pub total_clients: Arc<AtomicUsize>,
+    /// 每房间人数上限（0=不限，#180）。
+    pub max_room_clients: usize,
+    /// 全局连接上限（0=不限，#180）。
+    pub max_total_clients: usize,
     /// 可选录制器（RECORD_DIR 开启时存在）。
     pub recorder: Option<Arc<Recorder>>,
 }
@@ -124,7 +132,42 @@ impl Shared {
             tcp_streams: Arc::new(Mutex::new(HashMap::new())),
             metrics: Arc::new((0..shard_count).map(|_| ShardMetrics::new()).collect()),
             recorder: None,
+            room_clients: Arc::new(Mutex::new(HashMap::new())),
+            total_clients: Arc::new(AtomicUsize::new(0)),
+            max_room_clients: 0,
+            max_total_clients: 0,
         }
+    }
+
+    /// /start 准入预留（#180）：房间/全局任一超限拒绝；通过则计数 +1（AddClient 失败时由调用方 release 回滚）。
+    pub fn try_reserve(
+        &self,
+        room: &str,
+        room_cap: usize,
+        total_cap: usize,
+    ) -> Result<(), &'static str> {
+        let mut m = self.room_clients.lock().unwrap();
+        if room_cap > 0 && m.get(room).copied().unwrap_or(0) >= room_cap {
+            return Err("room full");
+        }
+        if total_cap > 0 && self.total_clients.load(Ordering::Relaxed) >= total_cap {
+            return Err("server full");
+        }
+        *m.entry(room.to_string()).or_default() += 1;
+        self.total_clients.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// 释放一个连接（断线/AddClient 失败回滚，#180）。
+    pub fn release(&self, room: &str) {
+        let mut m = self.room_clients.lock().unwrap();
+        if let Some(n) = m.get_mut(room) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                m.remove(room);
+            }
+        }
+        self.total_clients.fetch_sub(1, Ordering::Relaxed);
     }
 
     pub fn register_route(&self, proto: Protocol, source: SocketAddr, shard: usize) {
@@ -420,6 +463,7 @@ fn run_shard(
             addr_cache.clear();
             for (room, id) in &dead {
                 shared.unregister_client(room, *id, index);
+                shared.release(room); // #180 配额计数释放
             }
             let mut counts = std::mem::take(&mut room_counts);
             for c in &clients {
@@ -1687,5 +1731,23 @@ mod tests {
     #[test]
     fn empty_sdp_not_detected() {
         assert!(!offer_sends_media(""));
+    }
+
+    #[test]
+    fn try_reserve_release_room_and_total() {
+        let shared = Shared::new(2);
+        // 房间上限 1
+        assert!(shared.try_reserve("r1", 1, 0).is_ok());
+        assert_eq!(shared.try_reserve("r1", 1, 0), Err("room full"));
+        // 不同房间不受影响
+        assert!(shared.try_reserve("r2", 1, 0).is_ok());
+        // 全局上限 2
+        assert_eq!(shared.try_reserve("r3", 0, 2), Err("server full"));
+        // 释放后可再进
+        shared.release("r1");
+        assert!(shared.try_reserve("r1", 1, 2).is_ok());
+        shared.release("r1");
+        shared.release("r2");
+        assert_eq!(shared.total_clients.load(Ordering::Relaxed), 0);
     }
 }

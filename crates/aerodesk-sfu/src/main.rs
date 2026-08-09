@@ -372,12 +372,31 @@ pub fn main() {
 
     // 3. 分片通道（先建 channel，后启线程）
     let mut shared = Shared::new(shard_count);
+    // #180 /start 准入配额（0=不限；信令层 #163/#171 之外的纵深防御）。
+    shared.max_room_clients = std::env::var("MAX_ROOM_CLIENTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    shared.max_total_clients = std::env::var("MAX_TOTAL_CLIENTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     if let Ok(dir) = std::env::var("RECORD_DIR") {
         // #160：RECORD_ON_DEMAND=1 时只录显式 start() 的房间（按需录制 API）。
         let on_demand = std::env::var("RECORD_ON_DEMAND")
             .map(|v| v == "1")
             .unwrap_or(false);
-        match recorder::Recorder::new(&dir, on_demand) {
+        // #180 录制轮转（RECORD_MAX_BYTES / RECORD_MAX_SECS，0=不限）。
+        let max_bytes: u64 = std::env::var("RECORD_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let max_secs: u64 = std::env::var("RECORD_MAX_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+            * 1_000_000; // env 为秒，内部微秒
+        match recorder::Recorder::new(&dir, on_demand, max_bytes, max_secs) {
             Ok(rec) => {
                 let rec = Arc::new(rec);
                 // SIGINT（Ctrl+C）时先 finalize 录制再退出，保证 meta.json 落盘。
@@ -776,12 +795,22 @@ fn web_request(
         .accept_offer(offer)
         .expect("offer to be accepted");
 
+    // #180 /start 准入配额（0=不限）：预留计数，AddClient 失败回滚。
+    if let Err(reason) =
+        shared.try_reserve(&room, shared.max_room_clients, shared.max_total_clients)
+    {
+        info!("reject /start room={room}: {reason}");
+        return Response::text(reason).with_status_code(503);
+    }
+
     // 房间 → 分片路由（哈希 locality + 负载级联）
     let shard = router.lock().unwrap().choose(&room);
     info!("POST /start room={room} -> shard {shard}");
+    let room_for_release = room.clone();
     let res = shard_txs[shard].send(ShardCommand::AddClient { rtc, room, role });
     if res.is_err() {
         warn!("Failed to deliver client to shard {shard}");
+        shared.release(&room_for_release);
     }
 
     let body = serde_json::to_vec(&answer).expect("answer to serialize");
