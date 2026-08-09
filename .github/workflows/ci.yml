@@ -149,6 +149,11 @@ jobs:
       - name: e2e SFU start quota (macOS only)
         if: runner.os == 'macOS'
         run: ./scripts/sfu-quota-e2e.sh
+
+      # #191/#201 TURN relay：内嵌 TURN 分配/互操作 + force-relay 观看端媒体经 relay 到达。
+      - name: e2e TURN relay + force-relay media (macOS only)
+        if: runner.os == 'macOS'
+        run: bash scripts/turn-e2e.sh
       # #72 文件传输：publisher --send-file → SFU → viewer --recv-dir，SHA-256 一致。
       # #85：用 release 构建——debug 下 str0m/sctp-proto 高吞吐 data channel
       # 深调用链会 stack overflow（#102 已知，SFU shard 已 8MB 栈缓解）；
