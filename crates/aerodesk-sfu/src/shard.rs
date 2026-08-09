@@ -819,6 +819,8 @@ fn poll_until_timeout(
         if !client.rtc.is_alive() {
             return Instant::now();
         }
+        // #211：SCTP input 发送缓冲堆积监控（每 500ms 检查）。
+        client.monitor_sctp_backlog(Instant::now());
         // #85 出站背压队列：每轮先尝试排空（对端缓冲恢复后继续转发）。
         client.drain_pending_out();
         let propagated = client.poll_output(socket, tcp_streams, metrics);
@@ -927,6 +929,9 @@ pub struct Client {
     pending_channel_out: [VecDeque<(String, Vec<u8>, bool)>; CHANNEL_PRIORITY_LEVELS],
     /// 跨桶合计背压字节上限（超限丢弃并告警，防内存失控）。
     pending_channel_out_bytes: usize,
+    /// #211：SCTP input 发送缓冲堆积监控（对端 ACK 延迟/CPU 饥饿时告警）。
+    last_sctp_monitor: Instant,
+    sctp_input_high_since: Option<Instant>,
 }
 
 impl Client {
@@ -948,6 +953,8 @@ impl Client {
             recorder: None,
             pending_channel_out: std::array::from_fn(|_| VecDeque::new()),
             pending_channel_out_bytes: 0,
+            last_sctp_monitor: Instant::now(),
+            sctp_input_high_since: None,
         }
     }
 
@@ -1310,6 +1317,37 @@ impl Client {
 
     /// 按优先级（0→4）逐桶重试出站背压队列：每桶内保持顺序；
     /// 某桶对端缓冲满只跳过该桶，不阻塞更高/更低优先级通道（#134）。
+    /// #211：SCTP input 发送缓冲堆积监控。`channel.write` Ok 但数据长期滞留
+    /// str0m SCTP 发送缓冲（对端 ACK 延迟/CPU 饥饿）→ 告警便于定位。
+    fn monitor_sctp_backlog(&mut self, now: Instant) {
+        if now.duration_since(self.last_sctp_monitor) < Duration::from_millis(500) {
+            return;
+        }
+        self.last_sctp_monitor = now;
+        const HIGH_WATER: usize = 128 << 10;
+        let Some(cid) = self.channels.get("input").copied() else {
+            self.sctp_input_high_since = None;
+            return;
+        };
+        let backlog = self
+            .rtc
+            .channel(cid)
+            .map(|mut c| c.buffered_amount())
+            .unwrap_or(0);
+        if backlog > HIGH_WATER {
+            let since = *self.sctp_input_high_since.get_or_insert(now);
+            if now.duration_since(since) >= Duration::from_secs(2) {
+                warn!(
+                    "Client ({}) SCTP input 发送缓冲堆积 {backlog} 字节 ≥2s（对端 ACK 延迟/CPU 饥饿，#211）",
+                    *self.id
+                );
+                self.sctp_input_high_since = None; // 持续积压会再次触发
+            }
+        } else {
+            self.sctp_input_high_since = None;
+        }
+    }
+
     fn drain_pending_out(&mut self) {
         for queue in self.pending_channel_out.iter_mut() {
             while let Some((label, data, binary)) = queue.front() {
