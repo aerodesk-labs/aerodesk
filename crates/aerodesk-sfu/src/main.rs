@@ -343,11 +343,20 @@ pub fn main() {
             // 空字符串视为未设置（#191：走内嵌 server）。
             Ok(u) if !u.is_empty() => u.split(',').map(|s| s.to_string()).collect(),
             _ => {
+                // #196：UDP + TCP 同端口（SFU_TURN_PORT），TLS 用 SFU_TURN_TLS_PORT（默认 5349）。
                 let turn_port = env_port("SFU_TURN_PORT", 3479);
-                match turn_server::spawn(secret, host_addr, turn_port) {
-                    Ok((addr, _)) => {
-                        info!("embedded TURN server on {addr}");
-                        vec![format!("turn:{addr}?transport=udp")]
+                let turn_tls_port = env_port("SFU_TURN_TLS_PORT", 5349);
+                match turn_server::spawn(secret, host_addr, turn_port, Some(turn_tls_port)) {
+                    Ok(srv) => {
+                        let mut urls = vec![format!("turn:{}?transport=udp", srv.udp_addr)];
+                        if let Some(tcp) = srv.tcp_addr {
+                            urls.push(format!("turn:{tcp}?transport=tcp"));
+                        }
+                        if let Some(tls) = srv.tls_addr {
+                            urls.push(format!("turns:{tls}?transport=tcp"));
+                        }
+                        info!("embedded TURN server: {}", urls.join(","));
+                        urls
                     }
                     Err(e) => {
                         warn!("embedded TURN server failed ({e}); no TURN relay issued");
