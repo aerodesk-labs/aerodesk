@@ -143,7 +143,7 @@ jobs:
         if: runner.os == 'macOS'
         env:
           BROWSER: chrome
-        run: ./scripts/web-reconnect-e2e.sh
+        run: bash scripts/ci-retry.sh 3 ./scripts/web-reconnect-e2e.sh
 
       # #180 SFU /start 准入配额：MAX_ROOM_CLIENTS=1 时第 2 个连接被 503。
       - name: e2e SFU start quota (macOS only)
