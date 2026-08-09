@@ -305,6 +305,28 @@ jobs:
         # #166：瞬时 flake（App 无输出/未解码）限 3 次重试；根因归 iOS 侧作者修复。
         run: bash scripts/ci-retry.sh 3 bash scripts/ios-sim-e2e.sh
 
+  # Windows 主控端运行态自测：#3 观看端建链（Git Bash + headless Edge 发布 + Windows UI ICE 断言）。
+  windows-ui-e2e:
+    name: Windows UI e2e (viewer)
+    runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout str0m (netem dev-dep)
+        shell: bash
+        run: |
+          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
+            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Windows UI e2e
+        shell: bash
+        run: bash scripts/windows-ui-e2e.sh
+
   # Linux 主控端运行态自测：#4 观看端真实媒体（Xvfb 无头跑 Slint UI → 本地 SFU → 解码帧断言）。
   linux-ui-e2e:
     name: Linux UI e2e (viewer)

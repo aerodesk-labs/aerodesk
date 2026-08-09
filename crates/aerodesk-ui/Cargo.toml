@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-slint = { version = "1", features = ["system-tray", "renderer-software"] }
+slint = { version = "1", default-features = false, features = ["std", "backend-winit", "renderer-software", "system-tray", "compat-1-2"] }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
