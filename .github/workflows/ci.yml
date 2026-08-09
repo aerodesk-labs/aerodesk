@@ -215,6 +215,13 @@ jobs:
           BROWSER: chrome
         run: bash scripts/ci-retry.sh 3 ./scripts/web-pub-e2e.sh
 
+      # 客户端自测：Web 主控端文件上传（file 通道 → 被控端落盘 sha256 校验）。
+      - name: e2e web file transfer (macOS only)
+        if: runner.os == 'macOS'
+        env:
+          BROWSER: chrome
+        run: bash scripts/ci-retry.sh 3 ./scripts/web-file-e2e.sh
+
       - name: windows adapter
         if: runner.os == 'Windows'
         # --examples：编译验证 vdd_smoke（#140，真机验收示例）。
