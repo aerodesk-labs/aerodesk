@@ -44,7 +44,6 @@ pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_connect<'local>(
 
 use crate::viewer::ViewerSession;
 use jni::objects::JByteArray;
-use jni::sys::{jbyteArray, jlong};
 
 /// 创建观看会话（连接 + 后台收流）。返回指针（jlong），失败为 0。
 #[unsafe(no_mangle)]
@@ -88,6 +87,31 @@ pub unsafe extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerDestroy
     }
 }
 
+/// 发送输入事件（JSON InputFrame，如 {"type":"mouse_move","x":0.5,"y":0.5}）。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerSendInput<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    ptr: jlong,
+    json: JString<'local>,
+) -> jboolean {
+    let viewer = ptr as *mut crate::viewer::ViewerSession;
+    if viewer.is_null() {
+        return JNI_FALSE;
+    }
+    let json: String = env
+        .get_string(&json)
+        .map(|s| s.into())
+        .unwrap_or_default();
+    unsafe {
+        if (*viewer).send_input(json.as_bytes()) {
+            JNI_TRUE
+        } else {
+            JNI_FALSE
+        }
+    }
+}
+
 /// 取最新 AnnexB H.264 帧（空数组表示暂无）。
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerTakeAnnexB<'local>(
@@ -112,7 +136,7 @@ pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerTakeAnnexB<'lo
 }
 
 use crate::publisher::PublisherSession;
-use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean};
+use jni::sys::{JNI_FALSE, JNI_TRUE, jbyteArray, jboolean, jlong};
 
 /// 创建发布会话（被控端）。返回指针（jlong），失败为 0。
 #[unsafe(no_mangle)]

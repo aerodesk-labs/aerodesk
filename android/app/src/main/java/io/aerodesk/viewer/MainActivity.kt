@@ -67,7 +67,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startDecode() {
-        val surface = findViewById<SurfaceView>(R.id.surface).holder.surface
+        val sv = findViewById<SurfaceView>(R.id.surface)
+        val surface = sv.holder.surface
+        sv.setOnTouchListener { _, e ->
+            when (e.action) {
+                android.view.MotionEvent.ACTION_DOWN -> sendTouch(sv, e.x, e.y, "down")
+                android.view.MotionEvent.ACTION_MOVE -> sendTouch(sv, e.x, e.y, "move")
+                android.view.MotionEvent.ACTION_UP -> sendTouch(sv, e.x, e.y, "up")
+            }
+            true
+        }
         val fmt = MediaFormat.createVideoFormat("video/avc", 1280, 720)
         codec = MediaCodec.createDecoderByType("video/avc").apply {
             configure(fmt, surface, null, 0)
@@ -113,6 +122,21 @@ class MainActivity : AppCompatActivity() {
             ) return true
         }
         return false
+    }
+
+    // #2 主控端触摸输入：SurfaceView 触摸 → InputFrame JSON → input 通道 → 被控端。
+    private fun sendTouch(surface: SurfaceView, rawX: Float, rawY: Float, type: String) {
+        if (viewer == 0L) return
+        val r = android.graphics.Rect()
+        surface.getHitRect(r)
+        val x = if (r.width() > 0) ((rawX - r.left).coerceIn(0f, r.width().toFloat()) / r.width()).toDouble() else 0.5
+        val y = if (r.height() > 0) ((rawY - r.top).coerceIn(0f, r.height().toFloat()) / r.height()).toDouble() else 0.5
+        val json = when (type) {
+            "move" -> """{"type":"mouse_move","x":$x,"y":$y}"""
+            "down" -> """{"type":"mouse_button","button":"left","state":"pressed","x":$x,"y":$y}"""
+            else -> """{"type":"mouse_button","button":"left","state":"released","x":$x,"y":$y}"""
+        }
+        NativeBridge.viewerSendInput(viewer, json)
     }
 
     private fun stopViewer() {
