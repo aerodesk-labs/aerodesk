@@ -10,39 +10,8 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
-use md5::Md5;
-use sha1::{Digest, Sha1};
+use aerodesk_protocol::turn::codec::*;
 
-const STUN_MAGIC: u32 = 0x2112_a442;
-// TURN 方法（RFC 5766）。
-const MSG_ALLOCATE: u16 = 0x0003;
-const MSG_REFRESH: u16 = 0x0004;
-const MSG_CREATE_PERMISSION: u16 = 0x0008;
-const MSG_CHANNEL_BIND: u16 = 0x0009;
-const MSG_DATA_INDICATION: u16 = 0x0017;
-// 成功/错误响应方法 = 请求方法 | 0x0100。
-const MSG_SUCCESS_BASE: u16 = 0x0100;
-#[cfg(test)]
-const MSG_ERROR_BASE: u16 = 0x0110;
-
-// STUN 属性。
-const ATTR_USERNAME: u16 = 0x0006;
-const ATTR_MESSAGE_INTEGRITY: u16 = 0x0008;
-const ATTR_ERROR_CODE: u16 = 0x0009;
-const ATTR_CHANNEL_NUMBER: u16 = 0x000c;
-const ATTR_LIFETIME: u16 = 0x000d;
-const ATTR_XOR_PEER_ADDRESS: u16 = 0x0012;
-const ATTR_DATA: u16 = 0x0013;
-const ATTR_REALM: u16 = 0x0014;
-const ATTR_NONCE: u16 = 0x0015;
-const ATTR_REQUESTED_TRANSPORT: u16 = 0x0019;
-/// XOR-RELAYED-ADDRESS（RFC 5766 §14.5）。注意 0x0022 是 RESERVATION-TOKEN，
-/// 不是 XOR-RELAYED-ADDRESS（coturn/pion/stun 均按 0x0016 实现）。
-const ATTR_XOR_RELAYED_ADDRESS: u16 = 0x0016;
-const ATTR_SOFTWARE: u16 = 0x8022;
-
-const CHANNEL_BASE: u16 = 0x4000;
-const CHANNEL_MAX: u16 = 0x7fff;
 /// Refresh 间隔（allocation 默认 lifetime 600s，按 RFC 建议在到期前刷新）。
 const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
 /// 关键请求（permission/channel bind）超时。
@@ -379,109 +348,6 @@ fn expect_success(resp: &[u8], method: u16) -> Result<(), String> {
     Ok(())
 }
 
-fn stun_method(pkt: &[u8]) -> u16 {
-    if pkt.len() < 2 {
-        return 0;
-    }
-    u16::from_be_bytes([pkt[0], pkt[1]]) & 0x3fff
-}
-
-// ---------- STUN 编解码 ----------
-
-fn random_txid() -> [u8; 12] {
-    let mut t = [0u8; 12];
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let addr = &t as *const _ as usize as u64;
-    t[..8].copy_from_slice(&(now as u64).to_le_bytes());
-    t[8..].copy_from_slice(&addr.to_le_bytes()[..4]);
-    t
-}
-
-fn encode_header(msg_type: u16, txid: [u8; 12], body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(20 + body.len());
-    out.extend_from_slice(&msg_type.to_be_bytes());
-    out.extend_from_slice(&(body.len() as u16).to_be_bytes());
-    out.extend_from_slice(&STUN_MAGIC.to_be_bytes());
-    out.extend_from_slice(&txid);
-    out.extend_from_slice(body);
-    out
-}
-
-fn encode_attr(ty: u16, val: &[u8]) -> Vec<u8> {
-    let pad = (4 - (val.len() % 4)) % 4;
-    let mut out = Vec::with_capacity(4 + val.len() + pad);
-    out.extend_from_slice(&ty.to_be_bytes());
-    out.extend_from_slice(&(val.len() as u16).to_be_bytes());
-    out.extend_from_slice(val);
-    out.extend(std::iter::repeat_n(0, pad));
-    out
-}
-
-/// 构造 STUN 请求。`auth` 为 (username, password, realm, nonce)：
-/// 追加 USERNAME/REALM/NONCE + MESSAGE-INTEGRITY（HMAC-SHA1，key=MD5(user:realm:pass)）。
-fn build_stun(
-    msg_type: u16,
-    attrs: &[(u16, Vec<u8>)],
-    txid: [u8; 12],
-    auth: Option<(&str, &str, &str, &str)>,
-) -> Result<Vec<u8>, String> {
-    let mut body = Vec::new();
-    for (ty, val) in attrs {
-        body.extend_from_slice(&encode_attr(*ty, val));
-    }
-    if let Some((username, password, realm, nonce)) = auth {
-        body.extend_from_slice(&encode_attr(ATTR_USERNAME, username.as_bytes()));
-        body.extend_from_slice(&encode_attr(ATTR_REALM, realm.as_bytes()));
-        body.extend_from_slice(&encode_attr(ATTR_NONCE, nonce.as_bytes()));
-        let key = md5_key(username, realm, password);
-        body.extend_from_slice(&ATTR_MESSAGE_INTEGRITY.to_be_bytes());
-        body.extend_from_slice(&20u16.to_be_bytes());
-        let mi_start = body.len();
-        body.extend(std::iter::repeat_n(0, 20));
-        let msg = encode_header(msg_type, txid, &body);
-        // RFC 5389 §15.4：HMAC 输入为"含调整后 length 的报文、但不含 MESSAGE-INTEGRITY
-        // 属性本身（属性头 + 值）"：即 header + 全部 attrs = msg 去掉末尾 24 字节
-        // （MI 属性头 4 + 值 20）。header 的 length 字段已包含 MI TLV（encode_header
-        // 用含 MI 的 body 长度），与接收方校验一致。
-        let mac = hmac_sha1(&key, &msg[..msg.len() - 24]);
-        body[mi_start..mi_start + 20].copy_from_slice(&mac);
-    }
-    Ok(encode_header(msg_type, txid, &body))
-}
-
-fn md5_key(username: &str, realm: &str, password: &str) -> Vec<u8> {
-    Md5::digest(format!("{username}:{realm}:{password}").as_bytes()).to_vec()
-}
-
-fn hmac_sha1(key: &[u8], msg: &[u8]) -> [u8; 20] {
-    const BLOCK: usize = 64;
-    let mut key = key.to_vec();
-    if key.len() > BLOCK {
-        key = Sha1::digest(&key).to_vec();
-    }
-    key.resize(BLOCK, 0);
-    let mut ipad = [0x36u8; BLOCK];
-    let mut opad = [0x5cu8; BLOCK];
-    for i in 0..BLOCK {
-        ipad[i] ^= key[i];
-        opad[i] ^= key[i];
-    }
-    let mut inner_input = Vec::with_capacity(BLOCK + msg.len());
-    inner_input.extend_from_slice(&ipad);
-    inner_input.extend_from_slice(msg);
-    let inner = Sha1::digest(&inner_input);
-    let mut outer_input = Vec::with_capacity(BLOCK + 20);
-    outer_input.extend_from_slice(&opad);
-    outer_input.extend_from_slice(&inner);
-    let out = Sha1::digest(&outer_input);
-    let mut mac = [0u8; 20];
-    mac.copy_from_slice(&out);
-    mac
-}
-
 /// 接收与 txid 匹配的 STUN 响应；跳过无关包（Data indication 等），最多 `max_skip` 个。
 fn recv_stun_matching(
     socket: &UdpSocket,
@@ -508,101 +374,16 @@ fn recv_stun_matching(
     Err("STUN response timeout (no matching txid)".into())
 }
 
-fn parse_attrs(pkt: &[u8]) -> Vec<(u16, Vec<u8>)> {
-    let mut out = Vec::new();
-    let mut i = 20usize;
-    while i + 4 <= pkt.len() {
-        let ty = u16::from_be_bytes([pkt[i], pkt[i + 1]]);
-        let len = u16::from_be_bytes([pkt[i + 2], pkt[i + 3]]) as usize;
-        let end = (i + 4 + len).min(pkt.len());
-        out.push((ty, pkt[i + 4..end].to_vec()));
-        i = (i + 4 + len + 3) & !3;
-    }
-    out
-}
-
-fn find_attr(pkt: &[u8], ty: u16) -> Option<Vec<u8>> {
-    parse_attrs(pkt)
-        .into_iter()
-        .find(|(t, _)| *t == ty)
-        .map(|(_, v)| v)
-}
-
-/// 401/200 公共属性：realm、nonce、error_code。
-type CommonAttrs = (Option<String>, Option<String>, Option<u16>);
-
-/// 解析 401/200 公共属性：返回 (realm, nonce, error_code)。
-fn parse_common(pkt: &[u8]) -> Result<CommonAttrs, String> {
-    let mut realm = None;
-    let mut nonce = None;
-    let mut err = None;
-    for (ty, v) in parse_attrs(pkt) {
-        match ty {
-            ATTR_REALM => realm = Some(String::from_utf8_lossy(&v).to_string()),
-            ATTR_NONCE => nonce = Some(String::from_utf8_lossy(&v).to_string()),
-            ATTR_ERROR_CODE if v.len() >= 4 => {
-                let class = (v[2] & 0x07) as u16;
-                let number = v[3] as u16;
-                err = Some(class * 100 + number);
-            }
-            _ => {}
-        }
-    }
-    Ok((realm, nonce, err))
-}
-
-/// 解析 XOR-MAPPED / XOR-PEER / XOR-RELAYED 地址（IPv4/IPv6）。
-fn parse_xor_addr(v: &[u8]) -> Option<SocketAddr> {
-    if v.len() < 8 {
-        return None;
-    }
-    // RFC 5389 §15.1：byte0 = 0（保留），byte1 = Family。
-    let family = v[1];
-    let port = u16::from_be_bytes([v[2], v[3]]) ^ ((STUN_MAGIC >> 16) as u16);
-    let magic = STUN_MAGIC.to_be_bytes();
-    match family {
-        0x01 => {
-            let mut a = [0u8; 4];
-            a.copy_from_slice(&v[4..8]);
-            for i in 0..4 {
-                a[i] ^= magic[i];
-            }
-            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::from(a)), port))
-        }
-        0x02 if v.len() >= 20 => {
-            let mut a = [0u8; 16];
-            a.copy_from_slice(&v[4..20]);
-            for i in 0..16 {
-                a[i] ^= magic[i % 4];
-            }
-            Some(SocketAddr::new(IpAddr::V6(a.into()), port))
-        }
-        _ => None,
-    }
-}
-
-fn encode_xor_peer(addr: SocketAddr) -> Vec<u8> {
-    let mut v = Vec::with_capacity(20);
-    let magic = STUN_MAGIC.to_be_bytes();
-    match addr {
-        SocketAddr::V4(a) => {
-            v.push(0x00);
-            v.push(0x01);
-            v.extend_from_slice(&(a.port() ^ ((STUN_MAGIC >> 16) as u16)).to_be_bytes());
-            for (i, b) in a.ip().octets().iter().enumerate() {
-                v.push(b ^ magic[i]);
-            }
-        }
-        SocketAddr::V6(a) => {
-            v.push(0x00);
-            v.push(0x02);
-            v.extend_from_slice(&(a.port() ^ ((STUN_MAGIC >> 16) as u16)).to_be_bytes());
-            for (i, b) in a.ip().octets().iter().enumerate() {
-                v.push(b ^ magic[i % 4]);
-            }
-        }
-    }
-    v
+fn random_txid() -> [u8; 12] {
+    let mut t = [0u8; 12];
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let addr = &t as *const _ as usize as u64;
+    t[..8].copy_from_slice(&(now as u64).to_le_bytes());
+    t[8..].copy_from_slice(&addr.to_le_bytes()[..4]);
+    t
 }
 
 #[cfg(test)]
@@ -863,8 +644,12 @@ mod tests {
         let mut buf = [0u8; 64];
         let (n, from) = peer.recv_from(&mut buf).expect("peer recv");
         assert_eq!(&buf[..n], b"hello-via-turn");
-        // 对端从 relayed 地址收到（TURN 服务器中继）
-        assert_eq!(from, tt.relayed_addr());
+        // 对端从 TURN 服务器中继收到（源端口 = relayed 端口；源 IP 取决于 server 绑定方式）
+        assert_eq!(from.port(), tt.relayed_addr().port());
+        assert!(
+            from.ip().is_loopback() || from.ip().is_unspecified(),
+            "relay source {from}"
+        );
 
         // 对端 → relayed 地址 → TURN → 客户端
         peer.send_to(b"reply-via-turn", tt.relayed_addr())

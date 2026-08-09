@@ -30,6 +30,7 @@ mod recorder;
 mod router;
 mod shard;
 mod tcp;
+mod turn_server;
 mod util;
 
 use aerodesk_protocol::signal::{Role, TurnConfig};
@@ -334,27 +335,41 @@ pub fn main() {
     let media_addr = SocketAddr::new(host_addr, media_port);
     let tcp_listen_addr = media_addr;
 
-    // TURN 配置（coturn REST secret；未设置则不下发）
-    let turn = std::env::var("TURN_SECRET").ok().map(|secret| {
-        let urls = std::env::var("TURN_URLS").unwrap_or_else(|_| {
-            format!(
-                "turn:{host_addr}:3478?transport=udp,turn:{host_addr}:3478?transport=tcp,turns:{host_addr}:5349?transport=tcp"
-            )
-        });
-        let urls = urls.split(',').map(|u| u.to_string()).collect();
+    // TURN 配置（#191：TURN_SECRET 未设置则不下发；显式 TURN_URLS 走外部 coturn；
+    // 否则启动内嵌 TURN+STUN server（SFU_TURN_PORT，默认 3479，与媒体 3478 不冲突）。
+    let turn_secret = std::env::var("TURN_SECRET").ok();
+    let turn = turn_secret.as_ref().and_then(|secret| {
+        let urls: Vec<String> = match std::env::var("TURN_URLS") {
+            // 空字符串视为未设置（#191：走内嵌 server）。
+            Ok(u) if !u.is_empty() => u.split(',').map(|s| s.to_string()).collect(),
+            _ => {
+                let turn_port = env_port("SFU_TURN_PORT", 3479);
+                match turn_server::spawn(secret, host_addr, turn_port) {
+                    Ok((addr, _)) => {
+                        info!("embedded TURN server on {addr}");
+                        vec![format!("turn:{addr}?transport=udp")]
+                    }
+                    Err(e) => {
+                        warn!("embedded TURN server failed ({e}); no TURN relay issued");
+                        return None;
+                    }
+                }
+            }
+        };
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time")
             .as_secs();
-        let creds = aerodesk_protocol::turn::generate_turn_credentials(&secret, "aerodesk", 3600, now);
-        TurnConfig {
+        let creds =
+            aerodesk_protocol::turn::generate_turn_credentials(secret, "aerodesk", 3600, now);
+        Some(TurnConfig {
             urls,
             username: creds.username,
             credential: creds.credential,
-        }
+        })
     });
     if turn.is_some() {
-        info!("TURN relay configured (coturn REST credentials)");
+        info!("TURN relay configured (embedded server or coturn REST credentials)");
     } else {
         warn!("TURN_SECRET not set: no TURN relay config will be issued");
     }
