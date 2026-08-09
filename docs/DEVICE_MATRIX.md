@@ -1,26 +1,28 @@
 # 真机冒烟矩阵与硬件验收状态（#1/#2/#3/#4/#6/#8）
 
-> 软件侧交付已全部合入 main（PR #37–#43）；下表为**真机/干净环境验收**的当前状态。
+> 软件侧（主控端 + 被控端）已全部合入 main 并经 CI 自测（截至 #195，main 全绿）；
+> 下表为**真机/干净环境验收**的当前状态。
 > 未打勾单元格 = 需要对应硬件，代码已就绪（或明确为后续实现）。
 
 ## 矩阵
 
 | 被控端 \\ 观看端 | Web | macOS | iOS | Android | Windows | Linux | HarmonyOS |
 |---|---|---|---|---|---|---|---|
-| macOS | ✅（web-e2e） | ✅（smoke） | ⬜ 待 iPhone | ⬜ 待 Android | ⬜ 待 Win | ⬜ 待 Linux | ⬜ 待鸿蒙 |
-| Windows | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
-| Linux | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
-| Android | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
+| macOS | ✅（web-e2e：观看/发布/文件/重连） | ✅（smoke + UI e2e） | ⬜ 待 iPhone | ⬜ 待 Android | ⬜ 待 Win | ⬜ 待 Linux | ⬜ 待鸿蒙 |
+| Windows | ⬜（DXGI 采集 + SendInput 注入代码就绪，CI 编译/e2e 守护） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
+| Linux | ⬜（X11 采集 + XTest 注入代码就绪，CI 编译/e2e 守护） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
+| Android | ⬜（MediaProjection + MediaCodec + 无障碍注入代码就绪；模拟器已建链，媒体需 TURN/真机） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 
 ## 各 issue 验收门槛
 
-| Issue | 软件侧 | 硬件/环境门槛 |
+| Issue | 软件侧（已合入 main） | 硬件/环境门槛 |
 |---|---|---|
-| #1 iOS 壳层 | 解码链路 ✅（#31/#32/#39） | iPhone 真机（A12+）：观看 macOS 流 |
-| #2 Android 真机 | 收流/完整帧 ✅（#31） | Android 真机（API 26+）：MediaCodec 渲染 + 被控端 |
-| #3 Windows | 采集/注入 ✅、软编（x264 待 Windows 系统库） | Win10/11 真机：MF 编码、DXVA2 解码、端到端 |
-| #4 Linux | 采集/注入/软编 ✅ | Linux 真机：VAAPI 解码、Wayland/X11 端到端 |
-| #6 HarmonyOS | NAPI 规约 ✅（文档） | DevEco + OHOS NDK + 鸿蒙真机（ring 交叉编译） |
+| #1 iOS 壳层 | 壳 + H.264 硬解 + 模拟器 e2e（#31/#32/#39/#189） | iPhone 真机（A12+）：观看 macOS 流 |
+| #2 Android 真机 | 观看端 MediaCodec 渲染 + 被控端 MediaProjection/硬编/无障碍注入 + Android 14 前台服务（#156/#165/#187）；APK CI 守护 | Android 真机（API 26+）：端到端画面 + 输入 |
+| #3 Windows | DXGI 采集 + SendInput 注入 + OpenH264 软编/软解 + VDD（#159/#188）；Windows UI e2e CI 守护 | Win10/11 真机：端到端 + 真机编解码器记录 |
+| #4 Linux | X11 采集 + XTest 注入 + x264 软编 + OpenH264 软解 + 运行级自测（#179/#188/#190）；Linux UI e2e CI 守护 | Linux 真机：X11 端到端（Wayland/PipeWire、VAAPI 为后续） |
+| #6 HarmonyOS | NAPI 规约 ✅（docs/HARMONYOS.md，tmp/ohos-check） | DevEco + OHOS NDK + 鸿蒙真机（ring 交叉编译） |
+| #75 鼠标控制 | 远程光标渲染 ✅（#86）、输入全事件 e2e ✅（#95）、高 DPI/多显示器坐标映射 ✅（#105） | 多显示器真机高 DPI 验证 + Windows/Linux/Android 注入真机验收 |
 | #8 压测 | 工具链/报告 ✅（#38）、netem ✅ | 干净环境 4K60 基线 + 真机矩阵 |
 | #58 工具栏媒体控制 | 画质选层 ✅、音频链路 ✅（PCMU → SFU → viewer + UI 静音）、显示器切换 ✅（viewer `--display N` → SFU control 转发 → publisher `ScreenCaptureKit` 重建采集，`scripts/display-e2e.sh` 守护控制链路）；三个 e2e 均已接入 macOS CI | 真实系统音频采集（AudioUnit/TCC）+ 多显示器真机切换验收（macOS 先行） |
 
@@ -34,10 +36,12 @@
 | macOS | BetterDisplay CLI | `scripts/macos-vdd-smoke.sh`（需 BetterDisplay 2.2.x+ 运行） | 设计 ✅ / 待 mac 真机/无头 |
 | Linux | VKMS + krfb-virtualmonitor | `scripts/linux-vdd-smoke.sh`（KDE Plasma 6 / Wayland） | 设计 ✅ / 待 Linux 真机 |
 
-## 自动验证现状
-- CI 三平台（macOS/Ubuntu/Windows）：cargo fmt/clippy/test + macOS e2e smoke ✅
-- CI 移动端构建回归：iOS App 双 slice（模拟器 + 真机，未签名）+ Android APK（Rust .so + Gradle assembleDebug）✅
-- 本机（共享开发机，负载 8/10）：smoke/loadtest/web-e2e/选层 e2e 均跑通
+## 自动验证现状（2026-08-09，main @ #195 全绿）
+- CI 三平台（macOS/Ubuntu/Windows）：cargo fmt/clippy/test 全绿 ✅
+- macOS e2e：web 观看/发布/文件上传/自动重连、SFU 准入配额、audio/simulcast/display、cursor、record、multipop/popreg ✅
+- Windows/Linux UI e2e（viewer 真实媒体 + 输入）✅；iOS 模拟器 e2e（viewer 解码）✅；Android APK 构建 ✅
+- Web 主控端文件上传 e2e（#195）：1MB 随机文件 → CLI 被控端落盘 → sha256 一致 ✅
+- 本机（共享开发机）：smoke/web-file/web-reconnect 多次全 PASS ✅
 
 ## 硬件就绪后的验收 runbook
 
@@ -80,13 +84,13 @@ RECORD_DIR=/tmp/aerodesk-acceptance ./target/debug/aerodesk-sfu   # 分片服务
 ### 4. Windows 真机（#3，Win10/11）
 1. 构建：`cargo build -p aerodesk-cli --release`（Windows 工具链；OpenH264 软编/软解已接入）
 2. 被控：`aerodesk-cli.exe --role publisher --signal ws://<host>:3003 --room accept`（DXGI 采集 + SendInput 注入）
-3. 观看：`aerodesk-cli.exe --role viewer --signal ws://<host>:3003 --room accept`（DXVA2 硬解）
+3. 观看：`aerodesk-cli.exe --role viewer --signal ws://<host>:3003 --room accept`（OpenH264 软解，DXVA2 为后续）
 4. 验收：双向画面 + 输入回传；记录编码/解码器与帧率
 5. 证据：截图 + 日志 → 关 #3
 
 ### 5. Linux 真机（#4）
 1. 构建：`cargo build -p aerodesk-cli --release`（依赖 libx11/xkbcommon/x264-dev，见 CI 系统依赖）
-2. 被控：publisher（X11 采集 + XTest 注入）/ 观看：viewer（VAAPI 解码）
+2. 被控：publisher（X11 采集 + XTest 注入）/ 观看：viewer（OpenH264 软解，VAAPI 为后续）
 3. Wayland 会话：PipeWire 采集未实现，先以 X11/XWayland 会话验收；uinput 注入需 root/udev 规则（当前用 XTest）
 4. 证据：截图 + 日志 → 关 #4
 
