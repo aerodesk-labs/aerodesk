@@ -70,6 +70,29 @@ $('token').value = TOKEN_PREFILL;
 
 let rtc = null, ws = null, peerId = null, inputChannel = null, signalChannel = null;
 let pending = [], inputSeq = 0, closed = false, redirecting = false, screenStream = null;
+// #175 自动重连：WS 断开/ICE 失败 → 指数退避重连（≤RECONNECT_MAX，成功重置；手动断开不重连）。
+let reconnectAttempts = 0;
+let reconnectTimer = null;
+let connecting = false;
+const RECONNECT_MAX = 5;
+
+function reconnectDelay() {
+    // 1s、2s、4s、8s，之后封顶 10s
+    return Math.min(10, Math.pow(2, reconnectAttempts - 1)) * 1000;
+}
+function scheduleReconnect(reason) {
+    if (closed || reconnectTimer) return;
+    if (reconnectAttempts >= RECONNECT_MAX) {
+        setStatus('重连失败（已达上限）: ' + reason);
+        log('重连已达上限，请手动连接');
+        return;
+    }
+    reconnectAttempts += 1;
+    const delay = reconnectDelay();
+    log(`重连 ${reconnectAttempts}/${RECONNECT_MAX}：${reason}，${delay / 1000}s 后重试`);
+    setStatus(`重连中 ${reconnectAttempts}/${RECONNECT_MAX}…`);
+    reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, delay);
+}
 
 // ---------- 信令 ----------
 
@@ -164,7 +187,13 @@ async function connectSignal() {
             log('signal: ' + e.data);
         }
     };
-    ws.onclose = () => { if (!closed && !redirecting) { setStatus('信令断开'); log('signaling closed'); } };
+    ws.onclose = () => {
+        if (!closed && !redirecting) {
+            setStatus('信令断开');
+            log('signaling closed');
+            scheduleReconnect('信令断开');
+        }
+    };
     log('signaling connected: ' + signalURL());
 }
 
@@ -236,6 +265,7 @@ function setupRtc(iceServers) {
         setIce(rtc.iceConnectionState);
         if (rtc.iceConnectionState === 'failed' || rtc.iceConnectionState === 'disconnected') {
             setStatus('连接中断（ICE: ' + rtc.iceConnectionState + '）');
+            scheduleReconnect('ICE: ' + rtc.iceConnectionState);
         }
     };
     rtc.onicecandidate = () => { /* v1 非 trickle：candidate 内嵌 SDP */ };
@@ -313,7 +343,10 @@ async function acquireScreen() {
 
 // ---------- 连接 ----------
 async function connect() {
+    if (connecting) return;
+    connecting = true;
     closed = false;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     $('connect').disabled = true;
     $('disconnect').disabled = false;
     setStatus('连接中…');
@@ -321,8 +354,8 @@ async function connect() {
         // #18：token 从输入框读取（URL 仅预填）
         const token = byId('token').value || null;
 
-        // #20：发布端在用户点击手势内先请求屏幕共享
-        if (ROLE === 'publisher') {
+        // #20：发布端在用户点击手势内先请求屏幕共享（重连时复用已有流，不再弹授权）
+        if (ROLE === 'publisher' && !screenStream) {
             setStatus('请求屏幕共享授权…');
             await acquireScreen();
         }
@@ -347,11 +380,14 @@ async function connect() {
         await rtc.setRemoteDescription(JSON.parse(resp.description));
         setStatus('已连接');
         log('SDP 交换完成，等待媒体…');
+        reconnectAttempts = 0;   // 成功即重置重连计数
     } catch (e) {
         setStatus('连接失败: ' + e.message);
         log('error: ' + e);
         stopScreen();
+        if (!closed) scheduleReconnect(e.message);
     } finally {
+        connecting = false;
         $('connect').disabled = false;
     }
 }
@@ -365,6 +401,8 @@ function stopScreen() {
 
 function disconnect() {
     closed = true;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    reconnectAttempts = 0;
     resetPending();
     dcAnswerResolve = null;
     if (inputChannel) { try { inputChannel.close(); } catch (_) {} }
