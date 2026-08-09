@@ -42,6 +42,12 @@ class MainActivity : AppCompatActivity() {
         val rm = intent.getStringExtra("room")
         if (srv != null) server.setText(srv)
         if (rm != null) room.setText(rm)
+        // #201：-e force_relay true → ICE 只通告 relayed 候选（模拟器/NAT 兜底）
+        val forceRelay = when (val v = intent.extras?.get("force_relay")) {
+            is Boolean -> v
+            is String -> v == "true"
+            else -> false
+        }
         // 兼容 -e autoconnect true（String）与 --ez autoconnect true（Boolean）。
         // 注意：不能用 getBooleanExtra 兜底——extra 为 String 时会抛
         // ClassCastException（模拟器/CI 自测用 -e 传参必现）。
@@ -51,14 +57,14 @@ class MainActivity : AppCompatActivity() {
             else -> false
         }
         if (auto && srv != null && rm != null) {
-            status.postDelayed({ doConnect(srv, rm, status) }, 500)
+            status.postDelayed({ doConnect(srv, rm, status, forceRelay) }, 500)
         }
     }
 
-    private fun doConnect(s: String, r: String, status: TextView) {
+    private fun doConnect(s: String, r: String, status: TextView, forceRelay: Boolean = false) {
         status.text = "连接中…"
         Thread {
-            val v = NativeBridge.viewerCreate(s, r)
+            val v = NativeBridge.viewerCreate(s, r, forceRelay)
             runOnUiThread {
                 if (v == 0L) {
                     status.text = "连接失败"

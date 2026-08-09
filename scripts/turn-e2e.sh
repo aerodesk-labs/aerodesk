@@ -167,6 +167,28 @@ else
     echo "PASS 观看端 TURN 接入 + ICE 连通"
 fi
 
+echo "== 3c) force-relay 观看端：只走 relayed 候选 + 媒体到达（#201）"
+AERODESK_FORCE_RELAY=1 "$TARGET_DIR"/aerodesk-cli --role viewer \
+  --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/turn-e2e-view-fr.log 2>&1 &
+VIEW_FR_PID=$!
+ok=1
+for _ in $(seq 1 90); do
+    if grep -q 'relayed candidate' /tmp/turn-e2e-view-fr.log 2>/dev/null \
+       && ! grep -qE 'local candidate ' /tmp/turn-e2e-view-fr.log 2>/dev/null \
+       && grep -q 'RECEIVED: [1-9]' /tmp/turn-e2e-view-fr.log 2>/dev/null; then ok=0; break; fi
+    sleep 0.3
+done
+kill "$VIEW_FR_PID" 2>/dev/null || true
+if [ "$ok" -eq 0 ]; then
+    echo "PASS force-relay 观看端媒体经 relay 到达"; grep -m1 'RECEIVED:' /tmp/turn-e2e-view-fr.log
+else
+    echo "FAIL force-relay 观看端媒体未到达"; tail -8 /tmp/turn-e2e-view-fr.log
+    kill "$PUB_PID" 2>/dev/null || true
+    kill "$(cat /tmp/turn-e2e-sfu.pid)" "$(cat /tmp/turn-e2e-sig.pid)" 2>/dev/null || true
+    [ -n "$TURN_PID" ] && kill "$TURN_PID" 2>/dev/null || true
+    exit 1
+fi
+
 kill "$PUB_PID" "$VIEW_PID" 2>/dev/null || true
 kill "$(cat /tmp/turn-e2e-sfu.pid)" "$(cat /tmp/turn-e2e-sig.pid)" 2>/dev/null || true
 [ -n "$TURN_PID" ] && kill "$TURN_PID" 2>/dev/null || true
