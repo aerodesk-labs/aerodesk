@@ -114,10 +114,23 @@ echo "  PoP-A clients=${CA}（预期 2: publisher+bridge-view） PoP-B clients=$
 [ "${CA:-0}" -ge 2 ] || fail "PoP-A clients=${CA}"
 [ "${CB:-0}" -ge 2 ] || fail "PoP-B clients=${CB}"
 
+echo "== M2：data channel 桥（input 至少）"
+# PoP-B viewer 默认周期性发合成输入 → SFU-B → bridge → SFU-A → PoP-A publisher
+ok=0
+for _ in $(seq 1 60); do
+  if grep -q "inject:" /tmp/bridge-pub-a.log 2>/dev/null; then ok=1; break; fi
+  sleep 0.5
+done
+[ "$ok" = "1" ] || fail "PoP-A publisher 未收到跨 PoP input（data channel 桥未通）"
+echo "  PoP-A publisher 收到 input: $(grep -m1 'inject:' /tmp/bridge-pub-a.log | sed 's/.*inject:/inject:/')"
+DF=$(grep -oE "data_forwarded=[0-9]+" /tmp/bridge.log | tail -1 | cut -d= -f2)
+echo "  bridge data_forwarded=${DF}"
+[ "${DF:-0}" -gt 0 ] || fail "bridge 未转发 data channel"
+
 # 无 panic/abort
 grep -qiE "panic|abort" /tmp/bridge.log /tmp/bridge-sfu-a.log /tmp/bridge-sfu-b.log \
   /tmp/bridge-pub-a.log /tmp/bridge-view-b.log && fail "发现 panic/abort"
 
 kill "$VIEW_B" "$BRIDGE" "$PUB_A" 2>/dev/null || true
 sleep 1
-echo "== 跨 PoP 桥接 M1 PASS（viewer 在 PoP-B 不经 Redirect 收到 PoP-A 媒体；bridge 原样转发 keyframe=${KF}）=="
+echo "== 跨 PoP 桥接 M1+M2 PASS（viewer 在 PoP-B 不经 Redirect 收到 PoP-A 媒体；bridge 原样转发 keyframe=${KF}；input 经 data channel 桥到达 PoP-A publisher，data_forwarded=${DF}）=="

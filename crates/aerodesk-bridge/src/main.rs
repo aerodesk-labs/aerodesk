@@ -1,4 +1,4 @@
-//! #216 M1：跨 PoP 媒体桥接客户端。
+//! #216 跨 PoP 媒体桥接客户端（M1 媒体 + M2 data channel）。
 //!
 //! 以 **Viewer** 身份连主 PoP（远端 `--remote-signal`）收媒体，以 **Publisher**
 //! 身份连本 PoP（`--local-signal`）转发——`ClientEvent::Media` 拿到的是 str0m
@@ -7,6 +7,10 @@
 //!
 //! 关键帧：本 PoP viewer 的 KeyframeRequest 回传到主 PoP publisher（viewer leg
 //! `Writer::request_keyframe`），保证跨 PoP 加入后能拿到 IDR 解码。
+//!
+//! M2（data channel 桥）：按 label 白名单（input/file/cursor/cmd，跳过
+//! offer/answer 与 control）双向转发 ChannelData——本 PoP viewer 的输入/文件
+//! 经 bridge 到主 PoP publisher，主 PoP 的剪贴板/文件/光标反向到本 PoP viewer。
 //!
 //! 用法：
 //! ```sh
@@ -24,6 +28,11 @@ use aerodesk_protocol::signal::Role;
 use str0m::media::{KeyframeRequestKind, MediaData};
 use str0m::net::{Protocol, Receive};
 use str0m::{Input, Output};
+
+/// M2 转发白名单：跳过 offer/answer（信令 SDP）与 control（viewer→SFU 选层）。
+fn is_forwardable_label(label: &str) -> bool {
+    matches!(label, "input" | "file" | "cursor" | "cmd")
+}
 
 fn arg(args: &[String], key: &str) -> Option<String> {
     args.iter()
@@ -93,6 +102,8 @@ fn run_viewer(
     media_tx: mpsc::Sender<MediaData>,
     cmd_rx: mpsc::Receiver<KeyframeRequestKind>,
     stats_tx: mpsc::Sender<(u64, u64)>,
+    data_to_local: mpsc::Sender<(String, bool, Vec<u8>)>,
+    data_from_local: mpsc::Receiver<(String, bool, Vec<u8>)>,
 ) {
     let mut media = 0u64;
     let mut kf = 0u64;
@@ -111,11 +122,30 @@ fn run_viewer(
                         return;
                     }
                 }
+                // M2：主 PoP publisher → 本 PoP viewer（剪贴板/文件/光标等）。
+                ClientEvent::ChannelData(cid, binary, data) => {
+                    if let Some(label) = view.endpoint.channel_label(cid) {
+                        if is_forwardable_label(&label)
+                            && data_to_local.send((label, binary, data)).is_err()
+                        {
+                            tracing::warn!("viewer: data channel closed, exiting");
+                            return;
+                        }
+                    }
+                }
                 ClientEvent::Closed => {
                     tracing::warn!("viewer: remote session closed, exiting");
                     return;
                 }
                 _ => {}
+            }
+        }
+        // M2：本 PoP viewer → 主 PoP publisher（input 等）。
+        while let Ok((label, binary, data)) = data_from_local.try_recv() {
+            if !view.endpoint.send_channel_data(&label, binary, &data) {
+                tracing::debug!("viewer: send {label} dropped (channel not open)");
+            } else if label == "input" {
+                tracing::info!("viewer: forwarded input {} bytes to remote", data.len());
             }
         }
         if let Ok(kind) = cmd_rx.try_recv() {
@@ -178,10 +208,23 @@ fn main() {
     let (media_tx, media_rx) = mpsc::channel::<MediaData>();
     let (cmd_tx, cmd_rx) = mpsc::channel::<KeyframeRequestKind>();
     let (stats_tx, stats_rx) = mpsc::channel::<(u64, u64)>();
-    std::thread::spawn(move || run_viewer(view, media_tx, cmd_rx, stats_tx));
+    let (data_to_local_tx, data_to_local_rx) = mpsc::channel::<(String, bool, Vec<u8>)>();
+    let (data_to_remote_tx, data_to_remote_rx) = mpsc::channel::<(String, bool, Vec<u8>)>();
+    std::thread::spawn(move || {
+        run_viewer(
+            view,
+            media_tx,
+            cmd_rx,
+            stats_tx,
+            data_to_local_tx,
+            data_to_remote_rx,
+        )
+    });
 
     let mut forwarded = 0u64;
     let mut forwarded_kf = 0u64;
+    let mut data_forwarded = 0u64;
+    let mut data_forwarded_bytes = 0u64;
     let mut last_stats = Instant::now();
     // 初次加入可能错过首帧 IDR：向主 PoP publisher 连发 3 次 PLI（立即/1s/2s），
     // 保证远端 viewer 能拿到关键帧起流。
@@ -190,6 +233,39 @@ fn main() {
     loop {
         // 泵本 PoP 会话（发送 + 收 RTCP/输入）
         pump_once(&mut local);
+
+        // M2：本 PoP viewer → 主 PoP publisher（input 等）——在 pub 侧接收并回发
+        while let Some(ev) = local.endpoint.poll_event() {
+            match ev {
+                ClientEvent::ChannelData(cid, binary, data) => {
+                    if let Some(label) = local.endpoint.channel_label(cid) {
+                        if is_forwardable_label(&label) {
+                            data_forwarded += 1;
+                            data_forwarded_bytes += data.len() as u64;
+                            if data_to_remote_tx.send((label, binary, data)).is_err() {
+                                tracing::warn!("publisher: data channel closed, exiting");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+                ClientEvent::KeyframeRequest(kr) => {
+                    tracing::info!("publisher: keyframe request from local viewer {kr:?}");
+                    let _ = cmd_tx.send(kr.kind);
+                }
+                ClientEvent::Closed => {
+                    tracing::warn!("publisher: local session closed, exiting");
+                    std::process::exit(1);
+                }
+                _ => {}
+            }
+        }
+        // M2：主 PoP publisher → 本 PoP viewer（剪贴板/文件/光标等）
+        while let Ok((label, binary, data)) = data_to_local_rx.try_recv() {
+            if !local.endpoint.send_channel_data(&label, binary, &data) {
+                tracing::debug!("publisher: send {label} dropped (channel not open)");
+            }
+        }
 
         // 初始关键帧请求（加入补偿）
         if let Some(t) = next_kf_at
@@ -203,21 +279,6 @@ fn main() {
                 kf_requests
             );
             next_kf_at = Some(Instant::now() + Duration::from_secs(1));
-        }
-
-        // 本 PoP viewer 的关键帧请求 → 回传主 PoP publisher
-        while let Some(ev) = local.endpoint.poll_event() {
-            match ev {
-                ClientEvent::KeyframeRequest(kr) => {
-                    tracing::info!("publisher: keyframe request from local viewer {kr:?}");
-                    let _ = cmd_tx.send(kr.kind);
-                }
-                ClientEvent::Closed => {
-                    tracing::warn!("publisher: local session closed, exiting");
-                    std::process::exit(1);
-                }
-                _ => {}
-            }
         }
 
         // 转发媒体：原样重打包（不重编码）
@@ -242,7 +303,7 @@ fn main() {
         if last_stats.elapsed() >= Duration::from_secs(5) {
             let (vm, vk) = stats_rx.try_recv().unwrap_or((0, 0));
             tracing::info!(
-                "bridge stats: viewer_media={vm} viewer_kf={vk} forwarded={forwarded} forwarded_kf={forwarded_kf}"
+                "bridge stats: viewer_media={vm} viewer_kf={vk} forwarded={forwarded} forwarded_kf={forwarded_kf} data_forwarded={data_forwarded} data_bytes={data_forwarded_bytes}"
             );
             last_stats = Instant::now();
         }
