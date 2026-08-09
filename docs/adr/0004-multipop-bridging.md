@@ -1,6 +1,6 @@
 # ADR-0004：跨 PoP 实时媒体桥接设计决策
 
-- 状态：已采纳（设计稿，2026-08-08；实现需真实多 PoP 部署）
+- 状态：已采纳（设计稿，2026-08-08；**M1 媒体中继已在本机双 SFU 验证**（#216，aerodesk-bridge），M2 data channel 桥与 M3 真实多 PoP 待实施）
 - 关联 Issue：#146/#150（多 PoP v1：房间→PoP 映射 + 重定向）、#5（服务端收口）
 - 上游决策：ADR-0001 系列；DEPLOYMENT.md 多 PoP 章节
 
@@ -61,3 +61,4 @@
 **当前推荐：v2 = 动态注册表 + 保持同 PoP（不建实时媒体桥接）；v3（SFU 级联 relay）立项后再实施。**
 
 > 更新：v2 动态注册表已实现（#154，`POP_REGISTRY_FILE`/`POP_REGISTRY_TTL_SECS`，文件共享版）。
+> 更新：v3 M1 已实现（#216，`crates/aerodesk-bridge` + `scripts/bridge-e2e.sh`，本地双 SFU 端到端媒体互通，载荷直通不重编码；见 docs/BRIDGE.md）。

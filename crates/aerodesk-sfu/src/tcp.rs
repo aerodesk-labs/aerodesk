@@ -58,13 +58,45 @@ pub enum TcpEvent {
     Close { source: SocketAddr },
 }
 
+/// 绑定 TCP 监听（SO_REUSEADDR + 短重试；#216 双 SFU 快速复跑时避免 TIME_WAIT
+/// 端口占用导致 Address already in use——与 HTTPS bind_public_with_retry 同类问题）。
 pub fn spawn_tcp_listener(bind: SocketAddr) -> (SocketAddr, Receiver<TcpEvent>) {
-    let listener = TcpListener::bind(bind).expect("binding TCP listener");
-    let _ = listener.set_nonblocking(true);
-    let addr = listener.local_addr().expect("TCP local addr");
-    let (tx, rx) = mpsc::channel::<TcpEvent>();
-    thread::spawn(move || accept_loop(listener, tx));
-    (addr, rx)
+    let mut last_err = None;
+    for _ in 0..5 {
+        let sock = match socket2::Socket::new(
+            socket2::Domain::for_address(bind),
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+        };
+        let _ = sock.set_reuse_address(true);
+        match sock.bind(&bind.into()).and_then(|_| sock.listen(1024)) {
+            Ok(()) => {
+                let listener: TcpListener = sock.into();
+                let _ = listener.set_nonblocking(true);
+                let addr = listener.local_addr().expect("TCP local addr");
+                let (tx, rx) = mpsc::channel::<TcpEvent>();
+                thread::spawn(move || accept_loop(listener, tx));
+                return (addr, rx);
+            }
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+    panic!(
+        "binding TCP listener {bind}: {}",
+        last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "unknown".into())
+    );
 }
 
 fn accept_loop(listener: TcpListener, tx: Sender<TcpEvent>) {

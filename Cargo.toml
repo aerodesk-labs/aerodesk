@@ -15,6 +15,7 @@ members = [
     "crates/aerodesk-ohos",
     "crates/aerodesk-ui",
     "crates/aerodesk-ffmpeg",
+    "crates/aerodesk-bridge",
     "crates/aerodesk-mcp",
 ]
 

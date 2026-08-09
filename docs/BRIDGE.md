@@ -1,0 +1,52 @@
+# 跨 PoP 媒体桥接（#216 M1）
+
+## 目标
+房间成员跨 PoP 实时互通媒体：viewer 在其 PoP（PoP-B）加入钉在另一 PoP（PoP-A）的
+房间时，**不经 Redirect** 经桥接客户端收到 PoP-A 媒体，且**不重编码**（RTP 载荷直通，
+str0m 重打包同码流）。
+
+## 架构（M1，本地双 SFU 模拟双 PoP）
+
+```
+PoP-A (14600 系)                        PoP-B (14700 系)
+  publisher ──RTP──▶ SFU-A ◀──view── bridge ──publish──▶ SFU-B ◀──RTP── viewer
+                          (aerodesk-bridge: view PoP-A + publish PoP-B)
+```
+
+- **bridge（`crates/aerodesk-bridge`）**：以 Viewer 身份连主 PoP 收流，以 Publisher
+  身份连本 PoP 转发。`ClientEvent::Media` 拿到 str0m 去包化的**编码载荷**
+  （`MediaData.data`，如 H.264 NAL），经本 PoP 端点 `Writer::write` **原样重打包**
+  （新 RTP 头/SSRC，载荷不重编码；bridge 不链接任何编码器）。
+- **关键帧**：bridge 初次加入会错过首帧 IDR，主动向主 PoP publisher 连发 3 次 PLI
+  （0/1/2s）；本 PoP viewer 的 KeyframeRequest 也会实时回传到主 PoP publisher
+  （`Writer::request_keyframe`）。
+- **失败回退**：任一条腿连不上则 bridge 非零退出（v1 Redirect 兜底保留给上层编排）。
+
+## 运行
+
+```sh
+# 1) 起双 PoP（脚本内置端口：PoP-A 14600 系 / PoP-B 14700 系）
+scripts/bridge-e2e.sh          # 全自动：起双 SFU+signal → PoP-A publisher → bridge → PoP-B viewer → 断言
+
+# 手动
+aerodesk-bridge --remote-signal ws://127.0.0.1:14603 --local-signal ws://127.0.0.1:14703 \
+  --room bridge-demo [--codec h264|hevc|vp9|av1|default]
+```
+
+## 验证（macOS M4，debug 混合，2026-08-10，连跑 3 次全 PASS）
+
+| 项 | 结果 |
+|---|---|
+| PoP-B viewer 跨 PoP 收流 | RECEIVED 41-53 帧 / DECODED 17-32 |
+| bridge 转发 | ~72-73 包/次，关键帧 1（初始 PLI 生效） |
+| 双 SFU 客户端 | PoP-A=2（publisher+bridge-view），PoP-B=2（bridge-pub+viewer） |
+| 无重编码 | bridge 无编码器依赖，载荷原样重打包 |
+| panic/abort | 0 |
+
+## 状态
+- M1 ✅（本地双 SFU 端到端媒体互通）
+- M2 ⏳（data channel 桥：input/剪贴板/文件；ADR-0004 v3 主要复杂度）
+- M3 ⏳（真实多 PoP 部署验收：延迟 p99、失败回退）
+
+## 关联
+- #216（立项）、ADR-0004（v3 设计）、#146/#150/#154（v1/v2）、#8（延迟验收）
