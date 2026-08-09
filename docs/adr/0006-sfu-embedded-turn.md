@@ -43,5 +43,6 @@ CreatePermission/ChannelBind/Send/Data/Refresh），默认替代 coturn**：
 ## 影响
 
 - 部署：每 PoP 从 `signal + sfu + coturn` 简化为 `signal + sfu`（#185 解决）。
-- 端口：开放 UDP 3479（TURN）+ 49152-49200（relay 段）+ 原媒体端口。
-- 后续：TURN over TCP/TLS（turns:）、多 allocation 配额/防滥用、IPv6。
+- 端口：开放 UDP/TCP 3479（TURN）+ TCP 5349（TURN TLS，#196）+ 49152-49200（relay 段）+ 原媒体端口。
+- 更新（#196）：TURN over TCP/TLS 已实现（`?transport=tcp` 与 `turns:`，浏览器原生可用）；
+  剩余：多 allocation 配额/防滥用、IPv6、native 客户端 TCP/TLS 传输。

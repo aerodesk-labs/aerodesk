@@ -13,6 +13,7 @@ export RUST_LOG="${RUST_LOG:-info}"
 
 TURN_MODE="${TURN_MODE:-embedded}"
 TURN_PORT="${TURN_PORT:-14789}"
+TURN_TLS_PORT="${TURN_TLS_PORT:-15349}"
 TURN_SECRET="${TURN_SECRET:-testsecret}"
 ROOM="turn-$(date +%s)"
 
@@ -45,11 +46,13 @@ echo "== 启动 SFU + signal"
 REC="$(mktemp -d)"
 RECORD_DIR="$REC" TURN_SECRET="$TURN_SECRET" \
   TURN_URLS="$TURN_URLS_OVERRIDE" SFU_TURN_PORT="$TURN_PORT" \
+  SFU_TURN_TLS_PORT="$TURN_TLS_PORT" \
   SFU_MEDIA_PORT=14578 SFU_SIGNAL_PORT=14500 SFU_INTERNAL_PORT=14502 \
   "$TARGET_DIR"/aerodesk-sfu >/tmp/turn-e2e-sfu.log 2>&1 &
 echo $! > /tmp/turn-e2e-sfu.pid
 SIGNAL_PORT=14501 SIGNAL_PLAIN_PORT=14503 SFU_URL=http://127.0.0.1:14502 \
-  TURN_SECRET="$TURN_SECRET" TURN_URLS="turn:127.0.0.1:$TURN_PORT?transport=udp" \
+  TURN_SECRET="$TURN_SECRET" \
+  TURN_URLS="turn:127.0.0.1:$TURN_PORT?transport=udp,turn:127.0.0.1:$TURN_PORT?transport=tcp,turns:127.0.0.1:$TURN_TLS_PORT?transport=tcp" \
   "$TARGET_DIR"/aerodesk-signal >/tmp/turn-e2e-sig.log 2>&1 &
 echo $! > /tmp/turn-e2e-sig.pid
 for _ in $(seq 1 50); do
@@ -58,8 +61,10 @@ for _ in $(seq 1 50); do
 done
 sleep 0.3
 if [ "$TURN_MODE" = "embedded" ]; then
-    grep -q 'embedded TURN+STUN server listening' /tmp/turn-e2e-sfu.log || { echo "FAIL 内嵌 TURN 未启动"; tail -5 /tmp/turn-e2e-sfu.log; exit 1; }
-    echo "PASS SFU 内嵌 TURN server 已启动"
+    grep -q 'TURN+STUN server UDP on' /tmp/turn-e2e-sfu.log || { echo "FAIL 内嵌 TURN(UDP) 未启动"; tail -5 /tmp/turn-e2e-sfu.log; exit 1; }
+    grep -q 'TURN+STUN server TCP on' /tmp/turn-e2e-sfu.log || { echo "FAIL 内嵌 TURN(TCP) 未启动"; tail -5 /tmp/turn-e2e-sfu.log; exit 1; }
+    grep -q 'TURN+STUN server TLS on' /tmp/turn-e2e-sfu.log || { echo "FAIL 内嵌 TURN(TLS) 未启动"; tail -5 /tmp/turn-e2e-sfu.log; exit 1; }
+    echo "PASS SFU 内嵌 TURN server 已启动（UDP+TCP+TLS）"
 else
     grep -q 'TURN relay configured' /tmp/turn-e2e-sfu.log || { echo "FAIL SFU 未下发 TURN 配置"; tail -5 /tmp/turn-e2e-sfu.log; exit 1; }
 fi
@@ -101,6 +106,26 @@ print(f'{u}={p}')
     fi
 else
     echo "SKIP webrtc-rs（coturn 模式不要求）"
+fi
+
+echo "== 2b) TCP/TLS 互操作（Python 独立探针）"
+if [ "$TURN_MODE" = "embedded" ]; then
+    if python3 scripts/turn_tcp_probe.py 127.0.0.1 "$TURN_PORT" "$TURN_SECRET" >/tmp/turn-e2e-probe-tcp.log 2>&1        && grep -q 'RESULT: OK' /tmp/turn-e2e-probe-tcp.log; then
+        echo "PASS TCP 互操作（allocate + relay 回环）"
+    else
+        echo "FAIL TCP 互操作"; tail -8 /tmp/turn-e2e-probe-tcp.log
+        kill "$(cat /tmp/turn-e2e-sfu.pid)" "$(cat /tmp/turn-e2e-sig.pid)" 2>/dev/null || true
+        exit 1
+    fi
+    if python3 scripts/turn_tcp_probe.py 127.0.0.1 "$TURN_TLS_PORT" "$TURN_SECRET" --tls --tls-cert certs/cer.pem >/tmp/turn-e2e-probe-tls.log 2>&1        && grep -q 'RESULT: OK' /tmp/turn-e2e-probe-tls.log; then
+        echo "PASS TLS 互操作（TLSv1.3 allocate + relay 回环）"
+    else
+        echo "FAIL TLS 互操作"; tail -8 /tmp/turn-e2e-probe-tls.log
+        kill "$(cat /tmp/turn-e2e-sfu.pid)" "$(cat /tmp/turn-e2e-sig.pid)" 2>/dev/null || true
+        exit 1
+    fi
+else
+    echo "SKIP TCP/TLS 探针（coturn 模式不要求）"
 fi
 
 echo "== 3a) 发布端：allocate + relayed 候选 + ICE"

@@ -11,7 +11,10 @@
 
 - **默认**：`TURN_SECRET` 设置且未显式 `TURN_URLS` 时，SFU 启动**内嵌 TURN+STUN server**
   （RFC 5389 Binding + RFC 5766 Allocate/CreatePermission/ChannelBind/Send/Data/Refresh，
-  单进程，无 coturn 侧车），监听 `SFU_TURN_PORT`（默认 **3479**，与媒体 3478 不冲突，#185）。
+  单进程，无 coturn 侧车），**UDP+TCP 同端口** `SFU_TURN_PORT`（默认 **3479**，与媒体 3478
+  不冲突，#185）**+ TLS** `SFU_TURN_TLS_PORT`（默认 **5349**，复用 SFU 证书，#196）。
+  默认下发 `turn:…?transport=udp,turn:…?transport=tcp,turns:…?transport=tcp`。
+  TLS 证书加载失败时降级为 udp+tcp（不阻断启动）。
 - **兼容**：显式 `TURN_URLS`（逗号分隔）时走外部 coturn（老部署不变）。
 - **凭证**：coturn REST 规范（`username=<expiry>:<userid>`，
   `credential=base64(HMAC-SHA1(secret, username))`），1 小时有效；SFU 与内嵌 server
@@ -24,17 +27,19 @@
 ```sh
 # SFU
 TURN_SECRET=<secret> \
-SFU_TURN_PORT=3479 \          # 默认 3479
+SFU_TURN_PORT=3479 \          # UDP+TCP，默认 3479
+SFU_TURN_TLS_PORT=5349 \      # TLS（turns:），默认 5349；无证书自动降级
 cargo run -p aerodesk-sfu
 
-# signal（照常下发）
+# signal（照常下发；未设 TURN_URLS 时由部署方配置与 SFU 一致的地址）
 TURN_SECRET=<secret> \
-TURN_URLS="turn:sfu.example.com:3479?transport=udp" \
+TURN_URLS="turn:sfu.example.com:3479?transport=udp,turn:sfu.example.com:3479?transport=tcp,turns:sfu.example.com:5349?transport=tcp" \
 cargo run -p aerodesk-signal
 ```
 
-- 开放 UDP 3479（TURN）与 UDP 49152-49200（relay 端口段）
+- 开放 UDP/TCP 3479（TURN）、TCP 5349（TURN TLS）与 UDP 49152-49200（relay 端口段）
 - 生产建议媒体走 `SFU_MEDIA_PORT=443`（TCP/SSL-TCP 443），TURN 保持 3479
+- 浏览器端 iceServers 填上述 URLs 即可走 TCP/TLS（企业网 UDP 受限场景）；native 客户端当前走 UDP
 
 ### 1.2 外部 coturn（可选，向后兼容）
 

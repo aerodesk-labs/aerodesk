@@ -29,7 +29,8 @@
 | signal | `AUTH_TOKENS` | 静态 token（兼容模式；JWT 开启时忽略） |
 | signal | `TURN_SECRET` / `TURN_URLS` | TURN REST 凭证下发（内嵌或 coturn） |
 | sfu | `TURN_SECRET` | 启用 TURN：未设 `TURN_URLS` 时启动内嵌 TURN server（#191） |
-| sfu | `SFU_TURN_PORT` | 内嵌 TURN 端口（默认 3479） |
+| sfu | `SFU_TURN_PORT` | 内嵌 TURN UDP+TCP 端口（默认 3479，#196） |
+| sfu | `SFU_TURN_TLS_PORT` | 内嵌 TURN TLS 端口（默认 5349；证书加载失败降级） |
 | sfu | `TURN_URLS` | 显式设置时走外部 coturn（向后兼容），空/未设走内嵌 |
 | signal | `SFU_URL` / `SFU_TOKEN` | SFU 内部接口 + 内部 token |
 | sfu | `RECORD_DIR` | 录制/审计目录（可选） |
@@ -98,9 +99,9 @@ signal.aerodesk.io {
   （`POP_REGISTRY_FILE` 共享文件 + `POP_REGISTRY_TTL_SECS` 过期）；其它 PoP 加入同房间时
   查注册表命中 → 返回 `Redirect`。文件后端为 last-writer-wins（低变更场景可接受）；
   生产多写并发可换 Redis 后端。示例见 `scripts/popreg-e2e.sh`。
-- **TURN 就近**：默认每 PoP 由 SFU 内嵌 TURN server 提供中继（`SFU_TURN_PORT=3479`）；
-  外部 coturn 部署可设 `TURN_URLS` 指向本 PoP（向后兼容）。开放 UDP 3479 与
-  `RELAY 端口段` 49152-49200。
+- **TURN 就近**：默认每 PoP 由 SFU 内嵌 TURN server 提供中继（`SFU_TURN_PORT=3479`
+  UDP+TCP，`SFU_TURN_TLS_PORT=5349` TLS，#196）；外部 coturn 部署可设 `TURN_URLS`
+  指向本 PoP（向后兼容）。开放 UDP/TCP 3479、TCP 5349 与 `RELAY 端口段` 49152-49200。
 - **监控告警**：SFU 暴露 `GET /metrics/prometheus`（Prometheus 文本格式：每分片
   clients/rx·tx packets/bytes + 合计 + `aerodesk_sfu_draining` gauge），可直接被
   Prometheus 抓取；`GET /metrics`（JSON）保留兼容 bench 工具。+ Alertmanager：

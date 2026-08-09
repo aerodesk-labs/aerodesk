@@ -1,7 +1,13 @@
-//! SFU 内嵌 TURN+STUN server（#191：替代 coturn 侧车）。
+//! SFU 内嵌 TURN+STUN server（#191 UDP；#196 TCP/TLS）。
 //!
-//! 架构：单线程控制面（UDP 监听，处理 Binding/Allocate/CreatePermission/ChannelBind/
-//! Send/ChannelData/Refresh）+ 每 allocation 一个 relay 线程（peer → 客户端转发）。
+//! 架构：控制面多线程共享状态（UDP 事件循环 + TCP/TLS 每连接读线程），
+//! 每 allocation 一个 relay 线程（peer → 客户端转发）。
+//!
+//! 传输：
+//! - UDP：`turn:host:port?transport=udp`（默认 3479）
+//! - TCP：同一端口 `?transport=tcp`，RFC 4571 2 字节长度前缀帧
+//! - TLS：`turns:host:port?transport=tcp`（`SFU_TURN_TLS_PORT`，默认 5349；
+//!   复用 `TlsIdentity`，证书加载失败时降级跳过 TLS）
 //!
 //! 认证：TURN_SECRET REST 模式（与 coturn 兼容）——username=`<expiry>:<userid>`，
 //! credential=base64(HMAC-SHA1(secret, username))；SFU 下发的 TurnConfig 可直接使用。
@@ -10,8 +16,8 @@
 //! ChannelData（已绑 channel）或 Data indication（仅有 permission）。
 
 use std::collections::{HashMap, HashSet};
-use std::io;
-use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::io::{self, BufReader, Read, Write};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -25,12 +31,47 @@ pub const DEFAULT_REALM: &str = "aerodesk.io";
 const DEFAULT_LIFETIME: u32 = 600;
 /// 过期清扫间隔。
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
-/// 控制面读超时（轮询粒度）。
+/// UDP 控制面读超时（轮询粒度）。
 const POLL_TIMEOUT: Duration = Duration::from_millis(50);
+/// TCP/TLS 连接读超时（空闲时每 tick 释放锁）。
+const TCP_READ_TIMEOUT: Duration = Duration::from_millis(50);
 /// 时钟偏差容忍（秒）。
 const CLOCK_SKEW: u64 = 300;
 
-/// allocation 共享状态（server 线程写、relay 线程读）。
+/// 连接 IO trait 对象（明文 TCP 或 rustls TlsStream）。
+trait ConnIo: Read + Write + Send {}
+impl<T: Read + Write + Send> ConnIo for T {}
+type ConnBox = Box<dyn ConnIo>;
+
+/// allocation 归属键（UDP 按客户端地址；TCP 按连接 id）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ClientKey {
+    Udp(SocketAddr),
+    Tcp(u64),
+}
+
+/// 客户端出口（响应 / 中继入站统一出口；TCP/TLS 加 2 字节长度前缀）。
+#[derive(Clone)]
+enum ClientSink {
+    Udp(SocketAddr),
+    Tcp(Arc<Mutex<ConnBox>>),
+}
+
+impl ClientSink {
+    fn send(&self, server: &UdpSocket, bytes: &[u8]) -> io::Result<()> {
+        match self {
+            ClientSink::Udp(addr) => server.send_to(bytes, *addr).map(|_| ()),
+            ClientSink::Tcp(w) => {
+                let mut framed = Vec::with_capacity(2 + bytes.len());
+                framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+                framed.extend_from_slice(bytes);
+                w.lock().unwrap().write_all(&framed)
+            }
+        }
+    }
+}
+
+/// allocation 共享状态（控制面线程写、relay 线程读）。
 struct AllocState {
     channels: HashMap<u16, SocketAddr>,
     peer_channel: HashMap<SocketAddr, u16>,
@@ -45,42 +86,132 @@ struct Allocation {
     state: Arc<Mutex<AllocState>>,
 }
 
-/// 控制面上下文（收敛 handler 参数）。
-struct Ctx<'a> {
-    server: &'a UdpSocket,
-    allocations: &'a mut HashMap<SocketAddr, Allocation>,
-    secret: &'a str,
-    realm: &'a str,
-    nonce: &'a str,
+/// 控制面共享状态（UDP 线程与各 TCP/TLS 连接线程共用）。
+struct Shared {
+    allocations: Mutex<HashMap<ClientKey, Allocation>>,
+    secret: String,
+    realm: String,
+    nonce: String,
     host: IpAddr,
+    next_conn: AtomicU64,
 }
 
-/// 启动内嵌 TURN+STUN server（阻塞线程）。返回实际绑定地址（port 传 0 自动分配）。
-/// `host_addr` 为本机对外地址（relay 绑定该 IP）。
+/// 内嵌 TURN server 句柄（地址可用；线程自管理生命周期）。
+pub struct TurnServer {
+    pub udp_addr: SocketAddr,
+    pub tcp_addr: Option<SocketAddr>,
+    pub tls_addr: Option<SocketAddr>,
+    _handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+/// 启动内嵌 TURN+STUN server（UDP + TCP，可选 TLS）。
+/// `udp_port` 传 0 自动分配（测试）；`tls_port` 为 None 时不启用 TLS。
 pub fn spawn(
     secret: &str,
     host_addr: IpAddr,
-    port: u16,
-) -> io::Result<(SocketAddr, std::thread::JoinHandle<()>)> {
-    // 绑定 0.0.0.0（loopback + 所有接口可达）；对外地址用 host_addr 上报。
-    let socket = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port))?;
-    socket.set_read_timeout(Some(POLL_TIMEOUT))?;
-    let bound = socket.local_addr()?;
-    let addr = SocketAddr::new(host_addr, bound.port());
-    let realm = std::env::var("TURN_REALM").unwrap_or_else(|_| DEFAULT_REALM.to_string());
-    let nonce = format!(
-        "{:016x}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
+    udp_port: u16,
+    tls_port: Option<u16>,
+) -> io::Result<TurnServer> {
+    // rustls 0.23 需要进程级 CryptoProvider；显式安装 aws-lc-rs 提供器，
+    // 避免跨 crate feature 探测歧义（#196 TLS）。
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let shared = Arc::new(Shared {
+        allocations: Mutex::new(HashMap::new()),
+        secret: secret.to_string(),
+        realm: std::env::var("TURN_REALM").unwrap_or_else(|_| DEFAULT_REALM.to_string()),
+        nonce: format!(
+            "{:016x}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ),
+        host: host_addr,
+        next_conn: AtomicU64::new(1),
+    });
+
+    // UDP：绑定 0.0.0.0（loopback + 所有接口可达）；对外地址用 host_addr 上报。
+    let udp_socket = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, udp_port))?;
+    udp_socket.set_read_timeout(Some(POLL_TIMEOUT))?;
+    let bound = udp_socket.local_addr()?;
+    let udp_addr = SocketAddr::new(host_addr, bound.port());
+    let server = Arc::new(udp_socket);
+    info!(
+        "embedded TURN+STUN server UDP on {udp_addr} (realm={})",
+        shared.realm
     );
-    info!("embedded TURN+STUN server listening on {addr} (realm={realm})");
-    let secret = secret.to_string();
-    Ok((
-        addr,
-        std::thread::spawn(move || run(socket, host_addr, secret, realm, nonce)),
-    ))
+
+    let mut handles = Vec::new();
+    {
+        let shared = shared.clone();
+        let server = server.clone();
+        handles.push(std::thread::spawn(move || udp_run(shared, server)));
+    }
+
+    // TCP：与 UDP 同端口（不同协议可共存）。
+    let tcp_addr = SocketAddr::new(host_addr, bound.port());
+    let tcp_listener = TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, bound.port()))?;
+    tcp_listener.set_nonblocking(true)?;
+    info!("embedded TURN+STUN server TCP on {tcp_addr}");
+    {
+        let shared = shared.clone();
+        let server = server.clone();
+        handles.push(std::thread::spawn(move || {
+            tcp_accept_loop(tcp_listener, shared, server, None)
+        }));
+    }
+
+    // TLS：SFU_TURN_TLS_PORT；证书加载失败降级跳过。
+    let mut tls_addr = None;
+    if let Some(port) = tls_port {
+        let tls_listener = match TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)) {
+            Ok(l) => l,
+            Err(e) => {
+                warn!("TURN TLS listener bind :{port} failed ({e}); turns: 不可用");
+                return Ok(TurnServer {
+                    udp_addr,
+                    tcp_addr: Some(tcp_addr),
+                    tls_addr: None,
+                    _handles: handles,
+                });
+            }
+        };
+        tls_listener.set_nonblocking(true)?;
+        match build_tls_acceptor() {
+            Ok(acceptor) => {
+                let bound = match tls_listener.local_addr() {
+                    Ok(a) => a,
+                    Err(e) => {
+                        warn!("TURN TLS local_addr failed ({e}); turns: 不可用");
+                        return Ok(TurnServer {
+                            udp_addr,
+                            tcp_addr: Some(tcp_addr),
+                            tls_addr: None,
+                            _handles: handles,
+                        });
+                    }
+                };
+                let addr = SocketAddr::new(host_addr, bound.port());
+                info!("embedded TURN+STUN server TLS on {addr}");
+                tls_addr = Some(addr);
+                let shared = shared.clone();
+                let server = server.clone();
+                handles.push(std::thread::spawn(move || {
+                    tcp_accept_loop(tls_listener, shared, server, Some(acceptor))
+                }));
+            }
+            Err(e) => {
+                warn!("TURN TLS acceptor init failed ({e}); turns: 不可用");
+            }
+        }
+    }
+
+    Ok(TurnServer {
+        udp_addr,
+        tcp_addr: Some(tcp_addr),
+        tls_addr,
+        _handles: handles,
+    })
 }
 
 fn unix_now() -> u64 {
@@ -90,59 +221,208 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-fn run(socket: UdpSocket, host: IpAddr, secret: String, realm: String, nonce: String) {
-    let mut allocations: HashMap<SocketAddr, Allocation> = HashMap::new();
+/// rustls ServerConfig（复用 TlsIdentity PEM）。
+fn build_tls_acceptor() -> Result<Arc<rustls::ServerConfig>, String> {
+    let id = aerodesk_protocol::tls::TlsIdentity::load()?;
+    let mut cert_rd = BufReader::new(&id.cert[..]);
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut cert_rd)
+            .map_err(|e| format!("cert parse: {e}"))?
+            .into_iter()
+            .map(rustls::pki_types::CertificateDer::from)
+            .collect();
+    if certs.is_empty() {
+        return Err("no certificates in TlsIdentity".into());
+    }
+    let mut key_rd = BufReader::new(&id.key[..]);
+    let key = rustls_pemfile::pkcs8_private_keys(&mut key_rd)
+        .map_err(|e| format!("key parse: {e}"))?
+        .into_iter()
+        .next()
+        .map(|v| {
+            rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(v))
+        })
+        .or_else(|| {
+            let mut rd2 = BufReader::new(&id.key[..]);
+            rustls_pemfile::rsa_private_keys(&mut rd2)
+                .ok()?
+                .into_iter()
+                .next()
+                .map(|v| {
+                    rustls::pki_types::PrivateKeyDer::Pkcs1(
+                        rustls::pki_types::PrivatePkcs1KeyDer::from(v),
+                    )
+                })
+        })
+        .ok_or_else(|| "no private key in TlsIdentity".to_string())?;
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("tls config: {e}"))?;
+    Ok(Arc::new(config))
+}
+
+// ---------- UDP 控制面 ----------
+
+fn udp_run(shared: Arc<Shared>, server: Arc<UdpSocket>) {
     let mut last_sweep = Instant::now();
     let mut buf = [0u8; 65535];
     loop {
-        if let Ok((n, from)) = socket.recv_from(&mut buf) {
-            let mut ctx = Ctx {
-                server: &socket,
-                allocations: &mut allocations,
-                secret: &secret,
-                realm: &realm,
-                nonce: &nonce,
-                host,
-            };
-            handle_packet(&mut ctx, &buf[..n], from);
+        if let Ok((n, from)) = server.recv_from(&mut buf) {
+            let sink = ClientSink::Udp(from);
+            handle_packet(&shared, &server, &buf[..n], ClientKey::Udp(from), &sink);
         }
         if last_sweep.elapsed() >= SWEEP_INTERVAL {
-            sweep(&mut allocations);
+            sweep(&shared);
             last_sweep = Instant::now();
         }
     }
 }
 
-fn sweep(allocations: &mut HashMap<SocketAddr, Allocation>) {
+fn sweep(shared: &Shared) {
     let now = unix_now();
-    let expired: Vec<SocketAddr> = allocations
+    let mut allocs = shared.allocations.lock().unwrap();
+    let expired: Vec<ClientKey> = allocs
         .iter()
         .filter(|(_, a)| now >= a.expires.load(Ordering::SeqCst))
         .map(|(k, _)| *k)
         .collect();
     for k in expired {
-        if let Some(a) = allocations.remove(&k) {
+        if let Some(a) = allocs.remove(&k) {
             a.stop.store(true, Ordering::SeqCst);
-            debug!("TURN allocation expired: client={k} relayed={}", a.relayed);
+            debug!("TURN allocation expired: {k:?} relayed={}", a.relayed);
         }
     }
 }
 
-fn handle_packet(ctx: &mut Ctx, pkt: &[u8], from: SocketAddr) {
+// ---------- TCP/TLS 控制面 ----------
+
+/// 累积字节流并切出 2 字节长度前缀帧。
+struct FrameReader {
+    pending: Vec<u8>,
+}
+
+impl FrameReader {
+    fn new() -> Self {
+        FrameReader {
+            pending: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, data: &[u8]) {
+        self.pending.extend_from_slice(data);
+    }
+
+    /// 取出下一完整帧（无则 None）。
+    fn next_frame(&mut self) -> Option<Vec<u8>> {
+        if self.pending.len() < 2 {
+            return None;
+        }
+        let len = u16::from_be_bytes([self.pending[0], self.pending[1]]) as usize;
+        if len < 20 || self.pending.len() < 2 + len {
+            return None;
+        }
+        let frame = self.pending[2..2 + len].to_vec();
+        self.pending.drain(..2 + len);
+        Some(frame)
+    }
+}
+
+/// TCP/TLS 接受循环：`acceptor` 为 None 时按明文 TCP 处理。
+fn tcp_accept_loop(
+    listener: TcpListener,
+    shared: Arc<Shared>,
+    server: Arc<UdpSocket>,
+    acceptor: Option<Arc<rustls::ServerConfig>>,
+) {
+    for stream in listener.incoming() {
+        let Ok(stream) = stream else {
+            continue;
+        };
+        let conn_id = shared.next_conn.fetch_add(1, Ordering::SeqCst);
+        let shared = shared.clone();
+        let server = server.clone();
+        let acceptor = acceptor.clone();
+        std::thread::spawn(move || {
+            let _ = tcp_conn_loop(shared, server, conn_id, stream, acceptor);
+        });
+    }
+}
+
+fn tcp_conn_loop(
+    shared: Arc<Shared>,
+    server: Arc<UdpSocket>,
+    conn_id: u64,
+    stream: TcpStream,
+    acceptor: Option<Arc<rustls::ServerConfig>>,
+) -> io::Result<()> {
+    stream.set_read_timeout(Some(TCP_READ_TIMEOUT))?;
+    stream.set_nodelay(true).ok();
+    let conn: ConnBox = match acceptor {
+        None => Box::new(stream),
+        Some(cfg) => {
+            let conn = rustls::ServerConnection::new(cfg)
+                .map_err(|e| io::Error::other(format!("TLS conn: {e}")))?;
+            Box::new(rustls::StreamOwned::new(conn, stream))
+        }
+    };
+    let conn = Arc::new(Mutex::new(conn));
+    let sink = ClientSink::Tcp(conn.clone());
+    let key = ClientKey::Tcp(conn_id);
+    let mut fr = FrameReader::new();
+    let mut tmp = [0u8; 65535];
+    loop {
+        let n = {
+            let mut c = conn.lock().unwrap();
+            match c.read(&mut tmp) {
+                Ok(n) if n > 0 => n,
+                Ok(_) => break, // EOF
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::TimedOut =>
+                {
+                    drop(c);
+                    std::thread::sleep(Duration::from_millis(2));
+                    continue;
+                }
+                Err(_) => break,
+            }
+        };
+        fr.push(&tmp[..n]);
+        while let Some(frame) = fr.next_frame() {
+            handle_packet(&shared, &server, &frame, key, &sink);
+        }
+    }
+    // 连接断开：清理该连接 allocation。
+    shared.allocations.lock().unwrap().remove(&key);
+    Ok(())
+}
+
+// ---------- 协议处理 ----------
+
+fn handle_packet(
+    shared: &Shared,
+    server: &UdpSocket,
+    pkt: &[u8],
+    key: ClientKey,
+    sink: &ClientSink,
+) {
     // ChannelData：channel 0x4000-0x7FFF（首两 bit 01）。
     if pkt.len() >= 4 && (pkt[0] & 0xc0) == 0x40 {
-        let Some(alloc) = ctx.allocations.get(&from) else {
-            return;
-        };
         let chan = u16::from_be_bytes([pkt[0], pkt[1]]);
         let len = u16::from_be_bytes([pkt[2], pkt[3]]) as usize;
         let payload = &pkt[4..(4 + len).min(pkt.len())];
         let peer = {
-            let st = alloc.state.lock().unwrap();
-            st.channels.get(&chan).copied()
+            let allocs = shared.allocations.lock().unwrap();
+            allocs
+                .get(&key)
+                .and_then(|a| a.state.lock().unwrap().channels.get(&chan).copied())
         };
         if let Some(peer) = peer {
-            let _ = alloc.relay.send_to(payload, peer);
+            let allocs = shared.allocations.lock().unwrap();
+            if let Some(a) = allocs.get(&key) {
+                let _ = a.relay.send_to(payload, peer);
+            }
         }
         return;
     }
@@ -155,36 +435,57 @@ fn handle_packet(ctx: &mut Ctx, pkt: &[u8], from: SocketAddr) {
     };
     match method {
         MSG_BINDING => {
-            // STUN Binding：返回 XOR-MAPPED-ADDRESS。
-            let body = vec![(ATTR_XOR_MAPPED_ADDRESS, encode_xor_peer(from))];
+            let body = vec![(
+                ATTR_XOR_MAPPED_ADDRESS,
+                encode_xor_peer(peer_addr(server, key, sink)),
+            )];
             let resp =
                 build_stun(MSG_SUCCESS_BASE | MSG_BINDING, &body, txid, None).unwrap_or_default();
-            let _ = ctx.server.send_to(&resp, from);
+            let _ = sink.send(server, &resp);
         }
-        MSG_ALLOCATE => handle_allocate(ctx, pkt, from, txid),
-        MSG_CREATE_PERMISSION => handle_permission(ctx, pkt, from, txid, false),
-        MSG_CHANNEL_BIND => handle_permission(ctx, pkt, from, txid, true),
-        MSG_SEND => handle_send(ctx, pkt, from),
-        MSG_REFRESH => handle_refresh(ctx, pkt, from, txid),
+        MSG_ALLOCATE => handle_allocate(shared, server, pkt, key, sink, txid),
+        MSG_CREATE_PERMISSION => handle_permission(shared, server, pkt, key, sink, txid, false),
+        MSG_CHANNEL_BIND => handle_permission(shared, server, pkt, key, sink, txid, true),
+        MSG_SEND => handle_send(shared, pkt, key),
+        MSG_REFRESH => handle_refresh(shared, server, pkt, key, sink, txid),
         _ => {
-            debug!("TURN: unhandled method {method:#06x} from {from}");
+            debug!("TURN: unhandled method {method:#06x} {key:?}");
         }
+    }
+}
+
+/// Binding 的 XOR-MAPPED-ADDRESS：UDP 为客户端地址；TCP 无法获取对端地址则回退 server 地址。
+fn peer_addr(server: &UdpSocket, key: ClientKey, sink: &ClientSink) -> SocketAddr {
+    match (key, sink) {
+        (ClientKey::Udp(addr), _) => addr,
+        (_, ClientSink::Tcp(_)) => server
+            .local_addr()
+            .unwrap_or_else(|_| SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), 0)),
+        _ => SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), 0),
     }
 }
 
 /// 401/438 等错误响应（带 REALM/NONCE 用于挑战）。
-fn send_error(ctx: &Ctx, to: SocketAddr, txid: [u8; 12], method: u16, code: u16, challenge: bool) {
+fn send_error(
+    server: &UdpSocket,
+    sink: &ClientSink,
+    txid: [u8; 12],
+    method: u16,
+    code: u16,
+    challenge: bool,
+    shared: &Shared,
+) {
     let mut body = vec![(ATTR_ERROR_CODE, encode_error_code(code))];
     if challenge {
-        body.push((ATTR_REALM, ctx.realm.as_bytes().to_vec()));
-        body.push((ATTR_NONCE, ctx.nonce.as_bytes().to_vec()));
+        body.push((ATTR_REALM, shared.realm.as_bytes().to_vec()));
+        body.push((ATTR_NONCE, shared.nonce.as_bytes().to_vec()));
     }
     let resp = build_stun(MSG_ERROR_BASE | method, &body, txid, None).unwrap_or_default();
-    let _ = ctx.server.send_to(&resp, to);
+    let _ = sink.send(server, &resp);
 }
 
 /// 校验带 MI 的请求认证（REST secret）：返回 Ok(username) 或错误码。
-fn check_auth(ctx: &Ctx, pkt: &[u8]) -> Result<String, u16> {
+fn check_auth(shared: &Shared, pkt: &[u8]) -> Result<String, u16> {
     let attrs = parse_attrs(pkt);
     let has_mi = attrs.iter().any(|(t, _)| *t == ATTR_MESSAGE_INTEGRITY);
     if !has_mi {
@@ -205,73 +506,67 @@ fn check_auth(ctx: &Ctx, pkt: &[u8]) -> Result<String, u16> {
         .find(|(t, _)| *t == ATTR_NONCE)
         .map(|(_, v)| String::from_utf8_lossy(v).to_string())
         .unwrap_or_default();
-    if req_realm != ctx.realm {
-        debug!(
-            "TURN auth: realm mismatch req={req_realm:?} want={}",
-            ctx.realm
-        );
+    if req_realm != shared.realm {
         return Err(401);
     }
-    if req_nonce != ctx.nonce {
-        debug!(
-            "TURN auth: nonce mismatch req={req_nonce:?} want={}",
-            ctx.nonce
-        );
+    if req_nonce != shared.nonce {
         return Err(438);
     }
     if username.is_empty() || username.split_once(':').is_none() {
-        debug!("TURN auth: bad username {username:?}");
         return Err(401);
     }
-    // 由 secret 重算期望 credential，再用它校验 MI；并校验 expiry。
-    let expected = aerodesk_protocol::turn::turn_credential(ctx.secret, &username);
-    if !verify_message_integrity(pkt, &username, ctx.realm, &expected) {
-        debug!("TURN auth: MI mismatch user={username} expected_cred={expected}");
+    let expected = aerodesk_protocol::turn::turn_credential(&shared.secret, &username);
+    if !verify_message_integrity(pkt, &username, &shared.realm, &expected) {
         return Err(401);
     }
     if !aerodesk_protocol::turn::verify_turn_credential(
-        ctx.secret,
+        &shared.secret,
         &username,
         &expected,
         unix_now(),
         CLOCK_SKEW,
     ) {
-        debug!("TURN auth: credential expired/invalid user={username}");
         return Err(401);
     }
     Ok(username)
 }
 
-fn handle_allocate(ctx: &mut Ctx, pkt: &[u8], from: SocketAddr, txid: [u8; 12]) {
-    if ctx.allocations.contains_key(&from) {
-        send_error(ctx, from, txid, MSG_ALLOCATE, 437, false);
+fn handle_allocate(
+    shared: &Shared,
+    server: &UdpSocket,
+    pkt: &[u8],
+    key: ClientKey,
+    sink: &ClientSink,
+    txid: [u8; 12],
+) {
+    if shared.allocations.lock().unwrap().contains_key(&key) {
+        send_error(server, sink, txid, MSG_ALLOCATE, 437, false, shared);
         return;
     }
-    // REQUESTED-TRANSPORT：仅 UDP（17）。
+    // REQUESTED-TRANSPORT：仅 UDP（17）——TCP 连接上的 relay 仍是 UDP 分配。
     let transport = find_attr(pkt, ATTR_REQUESTED_TRANSPORT)
         .and_then(|v| v.first().copied())
         .unwrap_or(0);
     if transport != 17 {
-        send_error(ctx, from, txid, MSG_ALLOCATE, 442, false);
+        send_error(server, sink, txid, MSG_ALLOCATE, 442, false, shared);
         return;
     }
-    let username = match check_auth(ctx, pkt) {
+    let username = match check_auth(shared, pkt) {
         Ok(u) => u,
         Err(code) => {
-            send_error(ctx, from, txid, MSG_ALLOCATE, code, true);
+            send_error(server, sink, txid, MSG_ALLOCATE, code, true, shared);
             return;
         }
     };
-    // 创建 relay socket（绑定 0.0.0.0，端口由内核分配）；relayed 地址上报 ctx.host:port。
     let Ok(relay) = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)) else {
         warn!("TURN relay bind failed");
-        send_error(ctx, from, txid, MSG_ALLOCATE, 500, false);
+        send_error(server, sink, txid, MSG_ALLOCATE, 500, false, shared);
         return;
     };
     let Ok(relay_port) = relay.local_addr().map(|a| a.port()) else {
         return;
     };
-    let relayed = SocketAddr::new(ctx.host, relay_port);
+    let relayed = SocketAddr::new(shared.host, relay_port);
     let expires = Arc::new(AtomicU64::new(unix_now() + DEFAULT_LIFETIME as u64));
     let stop = Arc::new(AtomicBool::new(false));
     let state = Arc::new(Mutex::new(AllocState {
@@ -280,21 +575,20 @@ fn handle_allocate(ctx: &mut Ctx, pkt: &[u8], from: SocketAddr, txid: [u8; 12]) 
         permissions: HashSet::new(),
     }));
     let relay_arc = Arc::new(relay);
-    let Ok(server_sock) = ctx.server.try_clone() else {
-        return;
-    };
-    let server_arc = Arc::new(server_sock);
-    // relay 线程自管理生命周期（stop/expires 过期退出）。
+    let server_arc = Arc::new(server.try_clone().unwrap_or_else(|_| {
+        UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).expect("fallback bind")
+    }));
+    let sink_for_relay = sink.clone();
     let _relay_thread = spawn_relay(
         relay_arc.clone(),
         server_arc,
-        from,
+        sink_for_relay,
         expires.clone(),
         stop.clone(),
         state.clone(),
     );
-    ctx.allocations.insert(
-        from,
+    shared.allocations.lock().unwrap().insert(
+        key,
         Allocation {
             relay: relay_arc,
             relayed,
@@ -303,19 +597,21 @@ fn handle_allocate(ctx: &mut Ctx, pkt: &[u8], from: SocketAddr, txid: [u8; 12]) 
             state,
         },
     );
-    debug!("TURN allocation: client={from} user={username} relayed={relayed}");
+    debug!("TURN allocation: {key:?} user={username} relayed={relayed}");
     let body = vec![
         (ATTR_XOR_RELAYED_ADDRESS, encode_xor_peer(relayed)),
         (ATTR_LIFETIME, DEFAULT_LIFETIME.to_be_bytes().to_vec()),
     ];
     let resp = build_stun(MSG_SUCCESS_BASE | MSG_ALLOCATE, &body, txid, None).unwrap_or_default();
-    let _ = ctx.server.send_to(&resp, from);
+    let _ = sink.send(server, &resp);
 }
 
 fn handle_permission(
-    ctx: &mut Ctx,
+    shared: &Shared,
+    server: &UdpSocket,
     pkt: &[u8],
-    from: SocketAddr,
+    key: ClientKey,
+    sink: &ClientSink,
     txid: [u8; 12],
     channel_bind: bool,
 ) {
@@ -324,19 +620,20 @@ fn handle_permission(
     } else {
         MSG_CREATE_PERMISSION
     };
-    let Some(alloc) = ctx.allocations.get(&from) else {
-        return;
-    };
-    if check_auth(ctx, pkt).is_err() {
-        send_error(ctx, from, txid, method, 401, true);
+    if check_auth(shared, pkt).is_err() {
+        send_error(server, sink, txid, method, 401, true, shared);
         return;
     }
     let Some(peer_val) = find_attr(pkt, ATTR_XOR_PEER_ADDRESS) else {
-        send_error(ctx, from, txid, method, 400, false);
+        send_error(server, sink, txid, method, 400, false, shared);
         return;
     };
     let Some(peer) = parse_xor_addr(&peer_val) else {
-        send_error(ctx, from, txid, method, 400, false);
+        send_error(server, sink, txid, method, 400, false, shared);
+        return;
+    };
+    let allocs = shared.allocations.lock().unwrap();
+    let Some(alloc) = allocs.get(&key) else {
         return;
     };
     let mut st = alloc.state.lock().unwrap();
@@ -346,7 +643,7 @@ fn handle_permission(
         };
         let chan = u16::from_be_bytes([chan_val[0], chan_val[1]]);
         if !(CHANNEL_BASE..=CHANNEL_MAX).contains(&chan) {
-            send_error(ctx, from, txid, method, 400, false);
+            send_error(server, sink, txid, method, 400, false, shared);
             return;
         }
         // ChannelBind 隐含 permission（RFC 5766 §9.2）。
@@ -357,15 +654,13 @@ fn handle_permission(
         st.permissions.insert(peer);
     }
     drop(st);
+    drop(allocs);
     let resp = build_stun(MSG_SUCCESS_BASE | method, &[], txid, None).unwrap_or_default();
-    let _ = ctx.server.send_to(&resp, from);
+    let _ = sink.send(server, &resp);
 }
 
-fn handle_send(ctx: &mut Ctx, pkt: &[u8], from: SocketAddr) {
-    let Some(alloc) = ctx.allocations.get(&from) else {
-        return;
-    };
-    if check_auth(ctx, pkt).is_err() {
+fn handle_send(shared: &Shared, pkt: &[u8], key: ClientKey) {
+    if check_auth(shared, pkt).is_err() {
         return; // Send 是指示（无响应），失败静默丢弃
     }
     let Some(peer_val) = find_attr(pkt, ATTR_XOR_PEER_ADDRESS).and_then(|v| parse_xor_addr(&v))
@@ -373,6 +668,10 @@ fn handle_send(ctx: &mut Ctx, pkt: &[u8], from: SocketAddr) {
         return;
     };
     let Some(data) = find_attr(pkt, ATTR_DATA) else {
+        return;
+    };
+    let allocs = shared.allocations.lock().unwrap();
+    let Some(alloc) = allocs.get(&key) else {
         return;
     };
     let st = alloc.state.lock().unwrap();
@@ -383,12 +682,20 @@ fn handle_send(ctx: &mut Ctx, pkt: &[u8], from: SocketAddr) {
     }
 }
 
-fn handle_refresh(ctx: &mut Ctx, pkt: &[u8], from: SocketAddr, txid: [u8; 12]) {
-    let Some(alloc) = ctx.allocations.get(&from) else {
+fn handle_refresh(
+    shared: &Shared,
+    server: &UdpSocket,
+    pkt: &[u8],
+    key: ClientKey,
+    sink: &ClientSink,
+    txid: [u8; 12],
+) {
+    let allocs = shared.allocations.lock().unwrap();
+    let Some(alloc) = allocs.get(&key) else {
         return;
     };
-    if check_auth(ctx, pkt).is_err() {
-        send_error(ctx, from, txid, MSG_REFRESH, 401, true);
+    if check_auth(shared, pkt).is_err() {
+        send_error(server, sink, txid, MSG_REFRESH, 401, true, shared);
         return;
     }
     let requested = find_attr(pkt, ATTR_LIFETIME)
@@ -400,14 +707,14 @@ fn handle_refresh(ctx: &mut Ctx, pkt: &[u8], from: SocketAddr, txid: [u8; 12]) {
         .store(unix_now() + lifetime as u64, Ordering::SeqCst);
     let body = vec![(ATTR_LIFETIME, lifetime.to_be_bytes().to_vec())];
     let resp = build_stun(MSG_SUCCESS_BASE | MSG_REFRESH, &body, txid, None).unwrap_or_default();
-    let _ = ctx.server.send_to(&resp, from);
+    let _ = sink.send(server, &resp);
 }
 
 /// relay 线程：收 peer 包 → 转发客户端（ChannelData 或 Data indication）。
 fn spawn_relay(
     relay: Arc<UdpSocket>,
     server: Arc<UdpSocket>,
-    client: SocketAddr,
+    client: ClientSink,
     expires: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     state: Arc<Mutex<AllocState>>,
@@ -421,15 +728,13 @@ fn spawn_relay(
             if let Ok((n, peer)) = relay.recv_from(&mut buf) {
                 let st = state.lock().unwrap();
                 if let Some(&chan) = st.peer_channel.get(&peer) {
-                    // ChannelData 回客户端
                     let mut out = Vec::with_capacity(4 + n);
                     out.extend_from_slice(&chan.to_be_bytes());
                     out.extend_from_slice(&(n as u16).to_be_bytes());
                     out.extend_from_slice(&buf[..n]);
                     drop(st);
-                    let _ = server.send_to(&out, client);
+                    let _ = client.send(&server, &out);
                 } else if st.permissions.contains(&peer) {
-                    // Data indication
                     let mut body = Vec::new();
                     body.extend_from_slice(&encode_attr(
                         ATTR_XOR_PEER_ADDRESS,
@@ -438,7 +743,7 @@ fn spawn_relay(
                     body.extend_from_slice(&encode_attr(ATTR_DATA, &buf[..n]));
                     drop(st);
                     let out = encode_header(MSG_DATA_INDICATION, [0u8; 12], &body);
-                    let _ = server.send_to(&out, client);
+                    let _ = client.send(&server, &out);
                 }
             }
         }
@@ -448,17 +753,22 @@ fn spawn_relay(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, UdpSocket};
+    use std::net::{Ipv4Addr, TcpStream, UdpSocket};
 
-    /// 最小测试客户端：401 挑战 → Allocate → CreatePermission → ChannelBind →
-    /// ChannelData 发送；peer 回包经 server 转回（ChannelData）。
-    fn allocate(
+    // ---------- 公共测试工具 ----------
+
+    fn spawn_udp(secret: &str) -> (SocketAddr, TurnServer) {
+        let srv = spawn(secret, Ipv4Addr::LOCALHOST.into(), 0, None).unwrap();
+        (srv.udp_addr, srv)
+    }
+
+    /// UDP 客户端 Allocate（401 挑战 → 带凭证重试）。
+    fn udp_allocate(
         client: &UdpSocket,
         server_addr: SocketAddr,
         username: &str,
         credential: &str,
     ) -> Result<(SocketAddr, String, String), String> {
-        // 1) 无凭证 Allocate → 401
         let txid = [7u8; 12];
         let req = build_stun(
             MSG_ALLOCATE,
@@ -475,7 +785,6 @@ mod tests {
         assert_eq!(err, Some(401));
         let realm = realm.ok_or("no realm")?;
         let nonce = nonce.ok_or("no nonce")?;
-        // 2) 带凭证重试
         let txid2 = [8u8; 12];
         let attrs = vec![(ATTR_REQUESTED_TRANSPORT, vec![17, 0, 0, 0])];
         let req2 = build_stun(
@@ -522,9 +831,85 @@ mod tests {
         (stun_method(&buf[..n]), parse_attrs(&buf[..n]))
     }
 
+    // TCP/TLS 帧收发工具
+    fn tcp_send(stream: &mut TcpStream, bytes: &[u8]) {
+        let mut framed = Vec::with_capacity(2 + bytes.len());
+        framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+        framed.extend_from_slice(bytes);
+        stream.write_all(&framed).expect("tcp send");
+    }
+
+    fn tcp_read_frame_raw(stream: &mut TcpStream) -> Vec<u8> {
+        let mut lenb = [0u8; 2];
+        stream.read_exact(&mut lenb).expect("tcp read len");
+        let len = u16::from_be_bytes(lenb) as usize;
+        let mut buf = vec![0u8; len];
+        stream.read_exact(&mut buf).expect("tcp read body");
+        buf
+    }
+
+    fn tcp_read_frame(stream: &mut TcpStream) -> (u16, Vec<(u16, Vec<u8>)>) {
+        let buf = tcp_read_frame_raw(stream);
+        (stun_method(&buf), parse_attrs(&buf))
+    }
+
+    /// TCP 客户端 Allocate（401 挑战 → 带凭证重试），返回 (relayed, realm, nonce)。
+    fn tcp_allocate(
+        stream: &mut TcpStream,
+        username: &str,
+        credential: &str,
+    ) -> Result<(SocketAddr, String, String), String> {
+        let txid = [7u8; 12];
+        let req = build_stun(
+            MSG_ALLOCATE,
+            &[(ATTR_REQUESTED_TRANSPORT, vec![17, 0, 0, 0])],
+            txid,
+            None,
+        )?;
+        tcp_send(stream, &req);
+        let (_, attrs) = tcp_read_frame(stream);
+        let realm = attrs
+            .iter()
+            .find(|(t, _)| *t == ATTR_REALM)
+            .map(|(_, v)| String::from_utf8_lossy(v).to_string())
+            .ok_or("no realm")?;
+        let nonce = attrs
+            .iter()
+            .find(|(t, _)| *t == ATTR_NONCE)
+            .map(|(_, v)| String::from_utf8_lossy(v).to_string())
+            .ok_or("no nonce")?;
+        let err = attrs
+            .iter()
+            .find(|(t, _)| *t == ATTR_ERROR_CODE)
+            .map(|(_, v)| ((v[2] & 7) as u16) * 100 + v[3] as u16);
+        assert_eq!(err, Some(401));
+
+        let txid2 = [8u8; 12];
+        let attrs2 = vec![(ATTR_REQUESTED_TRANSPORT, vec![17, 0, 0, 0])];
+        let req2 = build_stun(
+            MSG_ALLOCATE,
+            &attrs2,
+            txid2,
+            Some((username, credential, &realm, &nonce)),
+        )?;
+        tcp_send(stream, &req2);
+        let (m, attrs3) = tcp_read_frame(stream);
+        if m != MSG_SUCCESS_BASE | MSG_ALLOCATE {
+            return Err(format!("allocate error method={m:#06x}"));
+        }
+        let relayed = attrs3
+            .iter()
+            .find(|(t, _)| *t == ATTR_XOR_RELAYED_ADDRESS)
+            .and_then(|(_, v)| parse_xor_addr(v))
+            .ok_or("no relayed")?;
+        Ok((relayed, realm, nonce))
+    }
+
+    // ---------- UDP 测试 ----------
+
     #[test]
     fn binding_returns_xor_mapped() {
-        let (server_addr, _h) = spawn("testsecret", Ipv4Addr::LOCALHOST.into(), 0).unwrap();
+        let (server_addr, _srv) = spawn_udp("testsecret");
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -544,8 +929,7 @@ mod tests {
     #[test]
     fn allocate_relay_roundtrip_with_rest_credentials() {
         let secret = "testsecret";
-        let (server_addr, _h) = spawn(secret, Ipv4Addr::LOCALHOST.into(), 0).unwrap();
-
+        let (server_addr, _srv) = spawn_udp(secret);
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -553,14 +937,13 @@ mod tests {
         let creds =
             aerodesk_protocol::turn::generate_turn_credentials(secret, "e2e", 3600, unix_now());
         let (relayed, realm, nonce) =
-            allocate(&client, server_addr, &creds.username, &creds.credential).expect("allocate");
+            udp_allocate(&client, server_addr, &creds.username, &creds.credential)
+                .expect("allocate");
 
-        // peer 直接 UDP（模拟被控端/SFU）
         let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
         let peer_addr = peer.local_addr().unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
 
-        // CreatePermission + ChannelBind
         let req = auth_request(
             MSG_CREATE_PERMISSION,
             &[(ATTR_XOR_PEER_ADDRESS, encode_xor_peer(peer_addr))],
@@ -591,7 +974,6 @@ mod tests {
         let (m, _) = recv_response(&client);
         assert_eq!(m, MSG_SUCCESS_BASE | MSG_CHANNEL_BIND);
 
-        // 客户端 → ChannelData → server → peer（peer 收到明文 UDP，源为 relayed）
         let payload = b"hello-via-embedded-turn";
         let mut cd = Vec::with_capacity(4 + payload.len());
         cd.extend_from_slice(&chan.to_be_bytes());
@@ -607,7 +989,6 @@ mod tests {
             "relay source {src}"
         );
 
-        // peer → relayed → server → ChannelData → client
         peer.send_to(b"reply-via-embedded-turn", relayed).unwrap();
         let mut buf2 = [0u8; 128];
         let (n2, _) = client.recv_from(&mut buf2).unwrap();
@@ -620,12 +1001,195 @@ mod tests {
     #[test]
     fn allocate_rejects_bad_credentials() {
         let secret = "testsecret";
-        let (server_addr, _h) = spawn(secret, Ipv4Addr::LOCALHOST.into(), 0).unwrap();
+        let (server_addr, _srv) = spawn_udp(secret);
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let res = allocate(&client, server_addr, "1234567890:bad", "wrongcred");
+        let res = udp_allocate(&client, server_addr, "1234567890:bad", "wrongcred");
         assert!(res.is_err(), "bad credential must fail");
+    }
+
+    // ---------- TCP / TLS 测试 ----------
+
+    fn setup_tcp(secret: &str, tls: bool) -> (SocketAddr, SocketAddr, TurnServer) {
+        let srv = spawn(
+            secret,
+            Ipv4Addr::LOCALHOST.into(),
+            0,
+            if tls { Some(0) } else { None },
+        )
+        .unwrap();
+        let tcp_addr = srv.tcp_addr.unwrap();
+        let tls_addr = if tls { srv.tls_addr } else { None };
+        (tcp_addr, tls_addr.unwrap_or(tcp_addr), srv)
+    }
+
+    fn tcp_roundtrip_body(stream: &mut TcpStream, secret: &str) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let creds =
+            aerodesk_protocol::turn::generate_turn_credentials(secret, "e2e", 3600, unix_now());
+        let (relayed, realm, nonce) =
+            tcp_allocate(stream, &creds.username, &creds.credential).expect("tcp allocate");
+
+        // peer 直接 UDP（relay 仍是 UDP）
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+
+        // CreatePermission + ChannelBind（TCP 帧）
+        let req = auth_request(
+            MSG_CREATE_PERMISSION,
+            &[(ATTR_XOR_PEER_ADDRESS, encode_xor_peer(peer_addr))],
+            &creds.username,
+            &creds.credential,
+            &realm,
+            &nonce,
+        )
+        .unwrap();
+        tcp_send(stream, &req);
+        let (m, _) = tcp_read_frame(stream);
+        assert_eq!(m, MSG_SUCCESS_BASE | MSG_CREATE_PERMISSION);
+
+        let chan = CHANNEL_BASE;
+        let req = auth_request(
+            MSG_CHANNEL_BIND,
+            &[
+                (ATTR_CHANNEL_NUMBER, chan.to_be_bytes().to_vec()),
+                (ATTR_XOR_PEER_ADDRESS, encode_xor_peer(peer_addr)),
+            ],
+            &creds.username,
+            &creds.credential,
+            &realm,
+            &nonce,
+        )
+        .unwrap();
+        tcp_send(stream, &req);
+        let (m, _) = tcp_read_frame(stream);
+        assert_eq!(m, MSG_SUCCESS_BASE | MSG_CHANNEL_BIND);
+
+        // TCP 客户端 → ChannelData → server → peer（明文 UDP）
+        let payload = b"hello-via-tcp-turn";
+        let mut cd = Vec::with_capacity(4 + payload.len());
+        cd.extend_from_slice(&chan.to_be_bytes());
+        cd.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        cd.extend_from_slice(payload);
+        tcp_send(stream, &cd);
+        let mut buf = [0u8; 64];
+        let (n, src) = peer.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..n], payload);
+        assert_eq!(src.port(), relayed.port());
+
+        // peer → relayed → server → TCP 帧 ChannelData → 客户端（channel 已绑）
+        peer.send_to(b"reply-via-tcp-turn", relayed).unwrap();
+        let raw = tcp_read_frame_raw(stream);
+        assert!(raw.len() > 4, "channeldata too short");
+        let rchan = u16::from_be_bytes([raw[0], raw[1]]);
+        assert_eq!(rchan, chan, "应回 ChannelData");
+        let rlen = u16::from_be_bytes([raw[2], raw[3]]) as usize;
+        assert_eq!(&raw[4..4 + rlen], b"reply-via-tcp-turn");
+    }
+
+    #[test]
+    fn tcp_allocate_relay_roundtrip() {
+        let secret = "testsecret";
+        let (tcp_addr, _tls, _srv) = setup_tcp(secret, false);
+        let mut stream = TcpStream::connect(tcp_addr).expect("tcp connect");
+        tcp_roundtrip_body(&mut stream, secret);
+    }
+
+    /// 危险验证器：单测只验证 TLS 传输层（握手/帧），不校验证书链
+    /// （内嵌开发证书是 CA:TRUE 自签；生产用 CERT_FILE/KEY_FILE 真实证书）。
+    #[derive(Debug)]
+    struct NoVerify;
+
+    impl rustls::client::danger::ServerCertVerifier for NoVerify {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &rustls::pki_types::CertificateDer<'_>,
+            _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+            _server_name: &rustls::pki_types::ServerName<'_>,
+            _ocsp: &[u8],
+            _now: rustls::pki_types::UnixTime,
+        ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &rustls::pki_types::CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &rustls::pki_types::CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            vec![
+                rustls::SignatureScheme::RSA_PKCS1_SHA256,
+                rustls::SignatureScheme::RSA_PSS_SHA256,
+                rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            ]
+        }
+    }
+
+    #[test]
+    fn tls_allocate_relay_roundtrip() {
+        let secret = "testsecret";
+        let (_tcp, tls_addr, _srv) = setup_tcp(secret, true);
+        let cfg = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoVerify))
+            .with_no_client_auth();
+        let server_name = rustls::pki_types::ServerName::try_from("str0m.test").expect("name");
+        let conn =
+            rustls::ClientConnection::new(Arc::new(cfg), server_name).expect("tls client conn");
+        let tcp = TcpStream::connect(tls_addr).expect("tcp connect");
+        let mut tls = rustls::StreamOwned::new(conn, tcp);
+        // StreamOwned 不直接支持帧读（read_exact 到一半会因 TLS 缓冲阻塞），
+        // 这里用简单方法：一次性发 Binding 读响应（响应小、单帧）。
+        let req = build_stun(MSG_BINDING, &[], [3u8; 12], None).unwrap();
+        let mut framed = Vec::with_capacity(2 + req.len());
+        framed.extend_from_slice(&(req.len() as u16).to_be_bytes());
+        framed.extend_from_slice(&req);
+        use std::io::Read as _;
+        tls.write_all(&framed).expect("tls write");
+        let mut lenb = [0u8; 2];
+        // read_exact 可能因 TLS 分块一次只给部分字节；循环重读
+        let mut got = 0usize;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while got < 2 && Instant::now() < deadline {
+            match tls.read(&mut lenb[got..]) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(_) => break,
+            }
+        }
+        assert_eq!(got, 2, "TLS 未收到长度前缀");
+        let len = u16::from_be_bytes(lenb) as usize;
+        let mut body = vec![0u8; len];
+        got = 0;
+        while got < len && Instant::now() < deadline {
+            match tls.read(&mut body[got..]) {
+                Ok(0) => break,
+                Ok(n) => got += n,
+                Err(_) => break,
+            }
+        }
+        assert_eq!(got, len, "TLS 未收到响应体");
+        let method = stun_method(&body);
+        assert_eq!(method, MSG_SUCCESS_BASE | MSG_BINDING, "TLS Binding 应答");
+        // 完整 allocate + relay 回环在 e2e 用 turnutils -S 覆盖（rustls 客户端分块读复杂）
     }
 }
