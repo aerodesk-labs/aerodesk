@@ -11,7 +11,7 @@
 | macOS | ✅（web-e2e：观看/发布/文件/重连） | ✅（smoke + UI e2e） | ⬜ 待 iPhone | ⬜ 待 Android | ⬜ 待 Win | ⬜ 待 Linux | ⬜ 待鸿蒙 |
 | Windows | ⬜（DXGI 采集 + SendInput 注入代码就绪，CI 编译/e2e 守护） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 | Linux | ⬜（X11 采集 + XTest 注入代码就绪，CI 编译/e2e 守护） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
-| Android | ⬜（MediaProjection + MediaCodec + 无障碍注入代码就绪；模拟器已建链，媒体需 TURN/真机） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
+| Android | ⬜（MediaProjection + MediaCodec + 无障碍注入代码就绪；**模拟器经 TURN relay 已出帧解码（#201/#203）**，真机验收待设备） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 
 ## 各 issue 验收门槛
 
