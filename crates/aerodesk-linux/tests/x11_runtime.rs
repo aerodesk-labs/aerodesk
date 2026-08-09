@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Linux 被控端核心能力运行级自测（X11 + XTest，CI Xvfb :99）。
 //!
 //! 验证：X11 屏幕采集（x11rb GetImage → RGBA）与 XTest 输入注入
