@@ -36,6 +36,9 @@ const ROOM = process.argv[2];
 })().catch(e => { console.error('E2E FAIL:', e.message); process.exit(1); });
 JS
 
+echo "== [1.5/6] Windows 被控端运行级自测（DXGI 采集 + SendInput 注入）"
+cargo test -p aerodesk-windows --test windows_runtime 2>&1 | tail -12
+
 echo "== [2/6] 启动 SFU/signal（Windows）"
 # Windows 防火墙可能阻止 SFU UDP 3478 入站（同机回包）→ 放行（runner 有管理员权限）。
 netsh advfirewall firewall add rule name="aerodesk-e2e-udp3478" dir=in action=allow protocol=UDP localport=3478 >/dev/null 2>&1 || true
