@@ -1,4 +1,4 @@
-# SFU 容量压测基准（#215/#218/#220/#222，#8 方法论）
+# SFU 容量压测基准（#215/#218/#220/#222/#226，#8 方法论）
 
 ## 方法
 `scripts/sfu-capacity-bench.sh`：起 SFU+signal（独立端口）→ `loadtest.sh` 施压
@@ -85,6 +85,24 @@ N×M 对持续施压 → 每 30s 采样 `/metrics/prometheus`（clients/rx·tx/t
   `TURN_LIFETIME_SEC` 可调（默认 600，min 60）；生产短租期部署可收紧
 - SFU 会话清理：信号 WS 断开 → shard 移除，clients 指标 5s 心跳后归零
 
+## 多编码格式转发（#226）
+
+`scripts/sfu-codec-e2e.sh [codec...]`：对 h264（vt 回归）/h265/vp9/av1（ffmpeg 软编）
+各起 SFU+signal → publisher → viewer，断言 DECODED>0、无 panic。SFU 为
+selective forwarding（`writer.match_params` PT 映射），str0m 默认 codec_config
+已含四格式——本脚本做端到端回归。
+
+### 结果（macOS M4，debug 混合，2026-08-10，连跑 2 次全 PASS）
+
+| codec | encoder | RECEIVED | DECODED | errors |
+|---|---|---|---|---|
+| h264 | vt | 96-99 | 49-59 | 0 |
+| h265 | ffmpeg（VT HEVC/libx265） | 35-37 | 31-32 | 0 |
+| vp9 | ffmpeg（libvpx-vp9） | 168-171 | 60-61 | 0 |
+| av1 | ffmpeg（libsvtav1） | 1-33 | 1-33 | 0 |
+
+- SFU 对四格式 codec-agnostic 转发成立；AV1 编码延迟 ~1s，首帧到达后即可解码
+
 ## 复现
 ```sh
 scripts/sfu-capacity-bench.sh 1 2 15 1280 720 30 2000000        # 单档（直连）
@@ -95,6 +113,8 @@ scripts/sfu-longrun.sh 1 1 420 1280 720 30 2000000              # 直连长稳 7
 scripts/sfu-longrun.sh 1 1 660 1280 720 30 2000000 1            # TURN 中继长稳 11 分钟（越过 lifetime）
 scripts/sfu-reconnect.sh 3 1 1 0 120                            # 直连重连韧性 3 轮
 scripts/sfu-reconnect.sh 3 1 1 1 120                            # TURN 中继重连韧性 3 轮（lifetime=60s）
+scripts/sfu-codec-e2e.sh                                       # 多编码格式（h264/h265/vp9/av1）
+scripts/sfu-codec-e2e.sh h265 av1                              # 指定格式
 ```
 
 ## 结论
@@ -103,4 +123,6 @@ scripts/sfu-reconnect.sh 3 1 1 1 120                            # TURN 中继重
   TURN allocation 零泄漏零 churn，Refresh 正常
 - 重连韧性（#222）：直连/TURN 各 3 轮 SIGKILL 循环后 clients 与 allocation 全部
   归零、累计精确、无 panic；TURN allocation 过期回收依赖 lifetime+30s 清扫
+- 多编码格式（#226）：H.264/H.265/VP9/AV1 四格式经 SFU 端到端转发全 PASS，
+  SFU codec-agnostic 成立（AV1 编码延迟 ~1s）
 - 后续 #8 验收按此方法论扩展到真机与 4K60
