@@ -23,6 +23,7 @@ pub fn run_generic_viewer(
     ui_weak: slint::Weak<crate::AppWindow>,
     epoch: Arc<AtomicU64>,
     my_epoch: u64,
+    input_rx: std::sync::mpsc::Receiver<String>,
 ) {
     eprintln!("generic viewer: start server={server} room={room}");
     let stale = || epoch.load(Ordering::SeqCst) != my_epoch;
@@ -88,6 +89,11 @@ pub fn run_generic_viewer(
     let mut media_evts: u64 = 0;
     let mut last_stat = Instant::now();
     while !stale() {
+        // 输入事件：UI 键鼠 → input data channel → SFU → 被控端（与 macOS/Android 同款）。
+        while let Ok(json) = input_rx.try_recv() {
+            live.endpoint
+                .send_channel_data("input", false, json.as_bytes());
+        }
         live.socket
             .set_read_timeout(Some(Duration::from_millis(10)))
             .ok();

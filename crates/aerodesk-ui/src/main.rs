@@ -284,6 +284,8 @@ fn main() -> Result<(), slint::PlatformError> {
                 #[cfg(not(target_os = "macos"))]
                 {
                     // Windows/Linux 主控端：真实媒体观看（OpenH264 软解 + Slint 渲染）。
+                    let (input_tx, input_rx) = std::sync::mpsc::channel();
+                    *INPUT_TX.lock().unwrap() = Some(input_tx);
                     crate::generic_media::run_generic_viewer(
                         server,
                         room,
@@ -291,6 +293,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         weak2.clone(),
                         epoch2.clone(),
                         my_epoch,
+                        input_rx,
                     );
                 } // cfg(not(target_os = "macos"))
                 if let Some(ui) = weak2.upgrade() {
