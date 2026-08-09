@@ -17,6 +17,7 @@ pub mod endpoint;
 pub mod file_transfer;
 pub mod media;
 pub mod media_pipeline;
+pub mod media_socket;
 pub mod pcmu;
 pub mod signaling;
 

@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media::{Vp8Frame, parse_vp8_pcap};
+use aerodesk_core::media_socket::MediaSocket;
+use aerodesk_core::turn_client::setup_turn;
 use aerodesk_core::{Endpoint, media_pipeline::Codec, signaling::WsSignalClient};
 use aerodesk_ffmpeg::encode::FfmpegEncoder;
 use aerodesk_protocol::input::{
@@ -350,7 +352,7 @@ fn init_log() {
         .init();
 }
 
-/// 连接信令 + 建立 Endpoint（公共步骤）。返回 (signal, endpoint, socket, video_mid, audio_mid)。
+/// 连接信令 + 建立 Endpoint（公共步骤）。返回 (signal, endpoint, mut socket, video_mid, audio_mid)。
 fn connect(
     signal_url: &str,
     room: &str,
@@ -361,7 +363,7 @@ fn connect(
     (
         WsSignalClient,
         Endpoint,
-        UdpSocket,
+        MediaSocket,
         str0m::media::Mid,
         Option<str0m::media::Mid>,
     ),
@@ -381,7 +383,7 @@ fn connect_h264(
     (
         WsSignalClient,
         Endpoint,
-        UdpSocket,
+        MediaSocket,
         str0m::media::Mid,
         Option<str0m::media::Mid>,
     ),
@@ -409,7 +411,7 @@ fn connect_codec(
     (
         WsSignalClient,
         Endpoint,
-        UdpSocket,
+        MediaSocket,
         str0m::media::Mid,
         Option<str0m::media::Mid>,
     ),
@@ -430,7 +432,7 @@ fn connect_inner(
     (
         WsSignalClient,
         Endpoint,
-        UdpSocket,
+        MediaSocket,
         str0m::media::Mid,
         Option<str0m::media::Mid>,
     ),
@@ -441,9 +443,13 @@ fn connect_inner(
     let (peer_id, turn) = signal.join(room, role, auth)?;
     info!("joined room {room} as {peer_id}");
 
-    let socket = UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("bind udp: {e}"))?;
-    let addr = socket.local_addr().map_err(|e| e.to_string())?;
+    let direct = UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("bind udp: {e}"))?;
+    let addr = direct.local_addr().map_err(|e| e.to_string())?;
     info!("local UDP addr: {addr}");
+
+    // #157 M2：join 返回 TURN 配置时建立中继传输（失败仅告警，直连兜底）。
+    let turn_transport = turn.as_ref().and_then(|tc| setup_turn(tc, true));
+    let socket = MediaSocket::new(direct, turn_transport);
 
     let mut endpoint = match codec {
         None => Endpoint::new(),
@@ -453,7 +459,17 @@ fn connect_inner(
     endpoint
         .add_local_candidate(addr, Protocol::Udp)
         .map_err(|e| format!("candidate: {e}"))?;
-    let _ = turn;
+    // #157 M2：relayed 候选加入 offer（`typ relay`），ICE 按优先级直连优先、TURN 兜底。
+    if let Some(tt) = socket.turn() {
+        let relayed = tt.relayed_addr();
+        if let Ok(la) = tt.local_addr() {
+            let local = std::net::SocketAddr::new(addr.ip(), la.port());
+            info!("relayed candidate {relayed} (local {local})");
+            if let Err(e) = endpoint.add_relay_candidate(relayed, local) {
+                warn!("relay candidate rejected (TURN disabled): {e:?}");
+            }
+        }
+    }
 
     // #12：viewer 的 offer 用 recvonly（SFU 拒绝 viewer 发布媒体）。
     if role == Role::Viewer {
@@ -921,7 +937,7 @@ fn publisher(
     let frames = parse_vp8_pcap(pcap);
     info!("loaded {} VP8 frames from pcap", frames.len());
 
-    let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
+    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid) =
         connect(signal_url, room, Role::Publisher, auth, audio)?;
     let mut connected = false;
     let mut audio_ticker = AudioTicker::new(audio_opus);
@@ -1077,7 +1093,7 @@ fn viewer(
     cmd_json: bool,
     request_file: Option<&str>,
 ) -> Result<(), String> {
-    let (mut signal, mut endpoint, socket, _, _audio_mid) =
+    let (mut signal, mut endpoint, mut socket, _, _audio_mid) =
         connect(signal_url, room, Role::Viewer, auth, audio)?;
     let mut frames = 0u64;
     let mut bytes = 0u64;
@@ -1553,7 +1569,7 @@ fn publisher_x264(
     const W: u32 = 640;
     const H: u32 = 360;
 
-    let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
+    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid) =
         connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio).expect("connect");
 
     let make_source = |w: u32, h: u32| {
@@ -1711,7 +1727,7 @@ fn publisher_vt(
     use aerodesk_macos::vt_encoder::VtEncoder;
     use str0m::media::Rid;
 
-    let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
+    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid) =
         connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio).expect("connect");
 
     let make_source = |w: u32, h: u32| {
@@ -1862,7 +1878,7 @@ fn publisher_ffmpeg(
     const H: u32 = 360;
     const FPS: u32 = 30;
 
-    let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
+    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid) =
         connect_codec(signal_url, room, Role::Publisher, auth, audio, codec).expect("connect");
     let mut encoder = FfmpegEncoder::new(W, H, FPS, 1_500_000, codec).expect("ffmpeg encoder");
     // #8：--noisy 高熵合成源（码率贴近目标档位，压测/高码率回归用）。
@@ -1990,7 +2006,7 @@ fn publisher_capture_ffmpeg(
     const H: u32 = 1080;
     const FPS: u32 = 30;
 
-    let (mut signal, mut endpoint, socket, video_mid, audio_mid) =
+    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid) =
         connect_codec(signal_url, room, Role::Publisher, auth, audio, codec).expect("connect");
     let mut capture = match ScreenCapture::start(initial_display, FPS, W, H) {
         Ok(c) => c,
@@ -2124,7 +2140,7 @@ fn publisher_capture(
         _ => VtCodec::H264,
     };
 
-    let (mut signal, mut endpoint, socket, video_mid, audio_mid) = connect_inner(
+    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid) = connect_inner(
         signal_url,
         room,
         Role::Publisher,
