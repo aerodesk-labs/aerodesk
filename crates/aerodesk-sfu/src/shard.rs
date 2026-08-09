@@ -1282,7 +1282,10 @@ impl Client {
             return;
         };
         // 先尝试直接写；缓冲满则入背压队列（下一轮重试），不丢包。
-        if channel.write(data.binary, &data.data).is_ok() {
+        // 注意：str0m write 返回 Result<bool,_>——Ok(false) 表示 SCTP 发送缓冲
+        // 满、未写入；用 is_ok() 会把 Ok(false) 当成功导致静默丢包（#211 实测：
+        // 高负载软编 publisher 下 write 全 Ok 但送达仅 ~25%）。
+        if channel.write(data.binary, &data.data).is_ok_and(|v| v) {
             return;
         }
         self.enqueue_pending(label, data.data.clone(), data.binary);
@@ -1326,8 +1329,8 @@ impl Client {
                     // #208：通道尚不可用 → 保持队列顺序，下一轮重试（不丢弃）。
                     break;
                 };
-                if channel.write(*binary, data).is_err() {
-                    break; // 该桶对端缓冲满：保持顺序，下一轮重试
+                if !channel.write(*binary, data).is_ok_and(|v| v) {
+                    break; // 该桶对端缓冲满/未写入（Ok(false)）：保持顺序，下一轮重试
                 }
                 let (_, data, _) = queue.pop_front().unwrap();
                 self.pending_channel_out_bytes =
