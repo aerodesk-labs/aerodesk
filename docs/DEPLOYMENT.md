@@ -1,6 +1,6 @@
 # 服务端部署（生产化）
 
-覆盖信令（aerodesk-signal）、SFU（aerodesk-sfu）、TURN（coturn）、
+覆盖信令（aerodesk-signal）、SFU（aerodesk-sfu，含内嵌 TURN+STUN，#191）、
 录制/审计与 TLS 自动化。对应 Issue #5。
 
 ## 组件拓扑
@@ -13,11 +13,12 @@
    │   UDP:3478 / TCP:443          │ 内部 HTTP(S) :3002（SFU_TOKEN 保护）
    │        │                      ▼
    │        ├────────────▶ aerodesk-sfu（多核分片 /metrics）
-   │        └────────────▶ coturn（ICE 中继兜底）
+   │        │               └─ 内嵌 TURN+STUN server（UDP :3479，#191）
+   │        └────────────▶ coturn（可选：显式 TURN_URLS 时走外部中继）
    └── 录制目录 RECORD_DIR（可选）
 ```
-> 端口组合：#185——SFU 默认媒体端口 3478 与 coturn 默认 3478 同机冲突；
-> 生产建议 SFU 用 `SFU_MEDIA_PORT=443`（coturn 保持 3478/5349），详见 docs/TURN.md §1.5。
+> 端口组合（#185 已解决）：SFU 媒体默认 `3478`，内嵌 TURN 默认 `SFU_TURN_PORT=3479`，
+> 互不冲突；显式设置 `TURN_URLS`（外部 coturn）时按外部地址下发。详见 docs/TURN.md。
 
 ## 1. 环境变量总览
 
@@ -26,7 +27,10 @@
 | signal | `JWT_SECRET` | HS256 共享密钥；**生产必设**，开启 JWT 认证 |
 | signal | `JWT_SECRET_OLD` | 旧密钥（轮换宽限期，可选）：新密钥验证失败时回退；轮换完成后移除 |
 | signal | `AUTH_TOKENS` | 静态 token（兼容模式；JWT 开启时忽略） |
-| signal | `TURN_SECRET` / `TURN_URLS` | coturn REST 凭证下发 |
+| signal | `TURN_SECRET` / `TURN_URLS` | TURN REST 凭证下发（内嵌或 coturn） |
+| sfu | `TURN_SECRET` | 启用 TURN：未设 `TURN_URLS` 时启动内嵌 TURN server（#191） |
+| sfu | `SFU_TURN_PORT` | 内嵌 TURN 端口（默认 3479） |
+| sfu | `TURN_URLS` | 显式设置时走外部 coturn（向后兼容），空/未设走内嵌 |
 | signal | `SFU_URL` / `SFU_TOKEN` | SFU 内部接口 + 内部 token |
 | sfu | `RECORD_DIR` | 录制/审计目录（可选） |
 | sfu | `RECORD_ON_DEMAND` | `1` 时只录显式 start() 的房间（配合内部 API 按需录制，#160） |
@@ -80,7 +84,7 @@ signal.aerodesk.io {
 
 ## 3. 多 PoP 部署
 
-- **就近接入**：每个 PoP 一组 `signal + sfu + coturn`；客户端经 DNS（GeoDNS/Anycast）
+- **就近接入**：每个 PoP 一组 `signal + sfu`（SFU 内嵌 TURN+STUN，#191）；客户端经 DNS（GeoDNS/Anycast）
   选最近 PoP，信令返回该 PoP 的 TURN/SFU 地址。
 - **房间跨 PoP（v1 已支持，#146）**：信令层把房间钉到固定 PoP——每 PoP 设置
   `POP_ID`，并用 `ROOM_POP_MAP`（`房间前缀=PoP`，逗号分隔，最长前缀优先）声明钉 PoP 的房间，
@@ -94,7 +98,9 @@ signal.aerodesk.io {
   （`POP_REGISTRY_FILE` 共享文件 + `POP_REGISTRY_TTL_SECS` 过期）；其它 PoP 加入同房间时
   查注册表命中 → 返回 `Redirect`。文件后端为 last-writer-wins（低变更场景可接受）；
   生产多写并发可换 Redis 后端。示例见 `scripts/popreg-e2e.sh`。
-- **TURN 就近**：每 PoP 部署 coturn，`TURN_URLS` 指向本 PoP；`RELAY 端口段` 开放 UDP 49152-49200。
+- **TURN 就近**：默认每 PoP 由 SFU 内嵌 TURN server 提供中继（`SFU_TURN_PORT=3479`）；
+  外部 coturn 部署可设 `TURN_URLS` 指向本 PoP（向后兼容）。开放 UDP 3479 与
+  `RELAY 端口段` 49152-49200。
 - **监控告警**：SFU 暴露 `GET /metrics/prometheus`（Prometheus 文本格式：每分片
   clients/rx·tx packets/bytes + 合计 + `aerodesk_sfu_draining` gauge），可直接被
   Prometheus 抓取；`GET /metrics`（JSON）保留兼容 bench 工具。+ Alertmanager：
@@ -145,7 +151,7 @@ JWT_SECRET=<secret> cargo run -p aerodesk-cli -- --issue-token \
 ```sh
 export JWT_SECRET=$(openssl rand -base64 48)
 export RECORD_DIR=/tmp/aerodesk-rec
-export TURN_SECRET=<coturn-secret>
+export TURN_SECRET=<共享 secret>  # 未设 TURN_URLS 时 SFU 内嵌 TURN（#191）
 
 cargo run -p aerodesk-sfu &        # 媒体 3478 + HTTPS 3000 + /healthz + /metrics[/prometheus]
 cargo run -p aerodesk-signal &     # WSS 3001 / 明文 3003（开发）
