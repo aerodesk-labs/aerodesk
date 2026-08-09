@@ -66,11 +66,17 @@ RUST_LOG=debug "$ROOT/target/debug/aerodesk-ui.exe" \
   -server 127.0.0.1:3003 -room "$ROOM" -autoconnect >/tmp/winui-ui.log 2>&1 &
 UI_PID=$!
 sleep 8
-echo "UI alive: $(kill -0 $UI_PID 2>/dev/null && echo yes || echo no), log lines: $(wc -l < /tmp/winui-ui.log 2>/dev/null || echo 0)"
+if ! kill -0 $UI_PID 2>/dev/null; then
+  echo "FAIL: UI 进程退出；日志："
+  cat /tmp/winui-ui.log 2>/dev/null || echo "(无日志)"
+  exit 1
+fi
+echo "UI alive: yes, log lines: $(wc -l < /tmp/winui-ui.log 2>/dev/null || echo 0)"
 
 echo "== [5/6] 断言连接链路（ICE Completed = Windows 主控端成功接入 SFU）"
 python3 - <<'PY'
 import time, sys
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 ok = False
 for i in range(60):
     try:
