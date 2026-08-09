@@ -80,8 +80,16 @@ cargo run -p aerodesk-sfu
 ## 3. 客户端
 
 浏览器端自动生效：`GET /config` → `RTCPeerConnection({ iceServers })`。
-native 客户端（aerodesk-core，P2）：信令 `Joined` 消息携带
-`TurnConfig`（aerodesk-protocol::signal）。
+native 客户端（aerodesk-core，#157 M2 已实现）：信令 `Joined` 消息携带
+`TurnConfig`（aerodesk-protocol::signal），客户端在
+`connect_live_role`/CLI `connect_inner` 中建立 TURN 传输（`TurnTransport`）并把
+relayed 候选加入 offer（`typ relay`）；`MediaSocket` 双路收发——ICE 直连优先、
+TURN 兜底，无 TURN 配置时行为不变。
+
+- 信令与 SFU 均支持 `TURN_SECRET` + `TURN_URLS`（逗号分隔，覆盖默认 URL）
+- 本地联调：`scripts/turn-e2e.sh`（需 `turnserver`，coturn ≥ 4.17.2；
+  coturn 4.16.0 的 REST auth 有回归 #1534）
+- 本地 e2e 因 peer 是 127.0.0.1，coturn 需加 `--allow-loopback-peers`（生产真机不需要）
 
 ## 验证
 

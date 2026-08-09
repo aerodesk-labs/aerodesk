@@ -5,7 +5,9 @@
 use std::net::UdpSocket;
 use std::time::Duration;
 
+use crate::media_socket::MediaSocket;
 use crate::signaling::WsSignalClient;
+use crate::turn_client::setup_turn;
 use aerodesk_protocol::signal::Role;
 use str0m::net::Protocol;
 
@@ -36,7 +38,7 @@ impl ConnectResult {
 pub struct LiveSession {
     pub signal: WsSignalClient,
     pub endpoint: crate::Endpoint,
-    pub socket: UdpSocket,
+    pub socket: MediaSocket,
     pub video_mid: Option<str0m::media::Mid>,
     pub room: String,
     pub peer_id: String,
@@ -136,7 +138,7 @@ pub fn connect_live_role(
     auth: Option<&str>,
 ) -> Result<LiveSession, String> {
     let mut signal = WsSignalClient::connect(server).map_err(|e| format!("signal connect: {e}"))?;
-    let (peer_id, _turn) = signal
+    let (peer_id, turn) = signal
         .join(room, role, auth)
         .map_err(|e| format!("join: {e}"))?;
 
@@ -146,12 +148,14 @@ pub fn connect_live_role(
     // 完全一致）；远端信令（真机场景）才绑定 0.0.0.0 并通告出口 IP candidate。
     let loopback_signal =
         server.contains("127.0.0.1") || server.contains("localhost") || server.contains("::1");
-    let socket = if loopback_signal {
+    // #157 M2：join 返回 TURN 配置时建立中继传输（失败仅告警，直连兜底）。
+    let turn_transport = turn.as_ref().and_then(|tc| setup_turn(tc, loopback_signal));
+    let direct = if loopback_signal {
         UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("udp bind: {e}"))?
     } else {
         UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("udp bind: {e}"))?
     };
-    let bind_addr = socket.local_addr().map_err(|e| e.to_string())?;
+    let bind_addr = direct.local_addr().map_err(|e| e.to_string())?;
     // 通配符绑定（0.0.0.0）的 local_addr 不能作为 candidate（str0m 拒绝）。
     let mut candidates = Vec::new();
     if bind_addr.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
@@ -168,13 +172,29 @@ pub fn connect_live_role(
     if candidates.is_empty() {
         candidates.push(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     }
+    let mut socket = MediaSocket::new(direct, turn_transport);
     let mut endpoint = crate::Endpoint::new();
-    for ip in candidates {
-        let addr = std::net::SocketAddr::new(ip, bind_addr.port());
+    for ip in &candidates {
+        let addr = std::net::SocketAddr::new(*ip, bind_addr.port());
         tracing::debug!("local candidate {addr}");
         endpoint
             .add_local_candidate(addr, Protocol::Udp)
             .map_err(|e| format!("candidate: {e:?}"))?;
+    }
+    // #157 M2：relayed 候选加入 offer（`typ relay`），ICE 按优先级直连优先、TURN 兜底。
+    if let Some(tt) = socket.turn() {
+        let relayed = tt.relayed_addr();
+        if let Ok(la) = tt.local_addr() {
+            let local_ip = candidates
+                .first()
+                .copied()
+                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+            let local = std::net::SocketAddr::new(local_ip, la.port());
+            tracing::info!("relayed candidate {relayed} (local {local})");
+            if let Err(e) = endpoint.add_relay_candidate(relayed, local) {
+                tracing::warn!("relay candidate rejected (TURN disabled): {e:?}");
+            }
+        }
     }
     // #12：viewer 的 offer 用 recvonly（SFU 拒绝 viewer 发布媒体）。
     if role == Role::Viewer {
@@ -197,7 +217,8 @@ pub fn connect_live_role(
 
     tracing::debug!("connect_live_role: SDP exchanged, entering ICE loop");
     let mut ice_connected = false;
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let ice_timeout = if socket.turn().is_some() { 10 } else { 5 };
+    let deadline = std::time::Instant::now() + Duration::from_secs(ice_timeout);
     while std::time::Instant::now() < deadline {
         socket
             .set_read_timeout(Some(Duration::from_millis(10)))

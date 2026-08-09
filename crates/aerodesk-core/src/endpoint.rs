@@ -163,6 +163,19 @@ impl Endpoint {
         Ok(())
     }
 
+    /// 添加 relayed（TURN）本地候选（#157 M2）：offer 下发 `typ relay`，
+    /// 对端直接发包到 relayed 地址，由 TURN 服务器中继到本端 allocation socket。
+    pub fn add_relay_candidate(
+        &mut self,
+        relayed: SocketAddr,
+        local: SocketAddr,
+    ) -> Result<(), RtcError> {
+        let candidate = Candidate::relayed(relayed, local, "udp")
+            .map_err(|e| RtcError::Io(std::io::Error::other(e.to_string())))?;
+        let _ = self.rtc.add_local_candidate(candidate);
+        Ok(())
+    }
+
     /// 请求在下一个 offer 中添加视频（VP8 起步）。
     /// 返回的 mid 在 [`create_offer`][Self::create_offer] 返回的 `Option<Mid>` 中。
     /// 请求在下一个 offer 中添加视频（发布方向 SendRecv，兼容默认）。
