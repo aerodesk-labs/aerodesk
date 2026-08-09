@@ -52,9 +52,15 @@ fn sendinput_injects_mouse_key() {
     inj.inject(&InputEvent::Wheel { dx: 0.0, dy: 3.0 })
         .expect("wheel");
     // Key：SendInput 用虚拟键码（A=0x41）
-    inj.inject(&InputEvent::Key { code: 0x41, down: true })
-        .expect("key down");
-    inj.inject(&InputEvent::Key { code: 0x41, down: false })
-        .expect("key up");
+    inj.inject(&InputEvent::Key {
+        code: 0x41,
+        down: true,
+    })
+    .expect("key down");
+    inj.inject(&InputEvent::Key {
+        code: 0x41,
+        down: false,
+    })
+    .expect("key up");
     eprintln!("sendinput inject OK");
 }
