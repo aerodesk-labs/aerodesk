@@ -119,6 +119,8 @@ struct AppState {
     shard_txs: Vec<mpsc::Sender<ShardCommand>>,
     router: Arc<Mutex<router::ShardRouter>>,
     turn: Option<TurnConfig>,
+    /// 内嵌 TURN server 句柄（#220：暴露 allocation 指标；外部 TURN_URLS 时为 None）。
+    turn_server: Option<Arc<turn_server::TurnServer>>,
     shared: Shared,
     internal_token: Option<String>,
 }
@@ -137,6 +139,7 @@ fn public_handler(request: &Request) -> Response {
         state.shard_txs.clone(),
         state.router.clone(),
         state.turn.clone(),
+        state.turn_server.clone(),
         state.shared.clone(),
         false,
     )
@@ -157,6 +160,7 @@ fn internal_handler(request: &Request) -> Response {
         state.shard_txs.clone(),
         state.router.clone(),
         state.turn.clone(),
+        state.turn_server.clone(),
         state.shared.clone(),
         true,
     )
@@ -178,7 +182,11 @@ fn healthz_payload(draining: bool, shard_count: usize, clients: usize) -> (u16, 
 
 /// `/metrics/prometheus`：Prometheus 文本格式（每分片 + 合计 + draining gauge）。
 /// 保留 `/metrics` JSON 兼容 bench_report.py。
-fn prometheus_body(shared: &Shared, draining: bool) -> String {
+fn prometheus_body(
+    shared: &Shared,
+    draining: bool,
+    turn: Option<&turn_server::TurnServer>,
+) -> String {
     let mut per_shard = String::new();
     let mut totals = [0u64; 5];
     for (i, m) in shared.metrics.iter().enumerate() {
@@ -200,6 +208,17 @@ fn prometheus_body(shared: &Shared, draining: bool) -> String {
              aerodesk_sfu_tx_bytes_total{{shard=\"{i}\"}} {txb}\n"
         ));
     }
+    let turn_metrics = match turn {
+        Some(srv) => format!(
+            "# TYPE aerodesk_sfu_turn_allocations gauge\n\
+             # TYPE aerodesk_sfu_turn_allocations_total counter\n\
+             aerodesk_sfu_turn_allocations {}\n\
+             aerodesk_sfu_turn_allocations_total {}\n",
+            srv.active_allocations(),
+            srv.allocations_total()
+        ),
+        None => String::new(),
+    };
     format!(
         "# TYPE aerodesk_sfu_clients gauge\n\
          # TYPE aerodesk_sfu_rx_packets_total counter\n\
@@ -213,7 +232,8 @@ fn prometheus_body(shared: &Shared, draining: bool) -> String {
          aerodesk_sfu_rx_bytes_total {}\n\
          aerodesk_sfu_tx_packets_total {}\n\
          aerodesk_sfu_tx_bytes_total {}\n\
-         aerodesk_sfu_draining {}\n",
+         aerodesk_sfu_draining {}\n\
+         {turn_metrics}",
         totals[0],
         totals[1],
         totals[2],
@@ -338,6 +358,7 @@ pub fn main() {
     // TURN 配置（#191：TURN_SECRET 未设置则不下发；显式 TURN_URLS 走外部 coturn；
     // 否则启动内嵌 TURN+STUN server（SFU_TURN_PORT，默认 3479，与媒体 3478 不冲突）。
     let turn_secret = std::env::var("TURN_SECRET").ok();
+    let mut embedded_turn: Option<Arc<turn_server::TurnServer>> = None;
     let turn = turn_secret.as_ref().and_then(|secret| {
         let urls: Vec<String> = match std::env::var("TURN_URLS") {
             // 空字符串视为未设置（#191：走内嵌 server）。
@@ -348,6 +369,8 @@ pub fn main() {
                 let turn_tls_port = env_port("SFU_TURN_TLS_PORT", 5349);
                 match turn_server::spawn(secret, host_addr, turn_port, Some(turn_tls_port)) {
                     Ok(srv) => {
+                        embedded_turn = Some(Arc::new(srv));
+                        let srv = embedded_turn.as_ref().expect("just set");
                         let mut urls = vec![format!("turn:{}?transport=udp", srv.udp_addr)];
                         if let Some(tcp) = srv.tcp_addr {
                             urls.push(format!("turn:{tcp}?transport=tcp"));
@@ -555,6 +578,7 @@ pub fn main() {
         shard_txs,
         router,
         turn,
+        turn_server: embedded_turn,
         shared: shared.clone(),
         internal_token,
     });
@@ -683,6 +707,7 @@ fn web_request(
     shard_txs: Vec<mpsc::Sender<ShardCommand>>,
     router: Arc<Mutex<router::ShardRouter>>,
     turn: Option<TurnConfig>,
+    turn_server: Option<Arc<turn_server::TurnServer>>,
     shared: Shared,
     internal: bool,
 ) -> Response {
@@ -722,6 +747,8 @@ fn web_request(
             .collect();
         let total: serde_json::Value = serde_json::json!({
             "shards": shards,
+            "turn_allocations": turn_server.as_ref().map(|s| s.active_allocations()),
+            "turn_allocations_total": turn_server.as_ref().map(|s| s.allocations_total()),
         });
         return Response::from_data(
             "application/json",
@@ -742,7 +769,11 @@ fn web_request(
     }
 
     if request.method() == "GET" && request.url() == "/metrics/prometheus" {
-        let body = prometheus_body(&shared, DRAINING.load(Ordering::Relaxed));
+        let body = prometheus_body(
+            &shared,
+            DRAINING.load(Ordering::Relaxed),
+            turn_server.as_deref(),
+        );
         return Response::from_data(
             "text/plain; version=0.0.4; charset=utf-8",
             body.into_bytes(),
@@ -871,7 +902,7 @@ mod tests {
         shared.metrics[0].rx_packets.store(100, Ordering::Relaxed);
         shared.metrics[1].tx_bytes.store(2048, Ordering::Relaxed);
 
-        let body = prometheus_body(&shared, true);
+        let body = prometheus_body(&shared, true, None);
         assert!(
             body.contains("aerodesk_sfu_clients{shard=\"0\"} 3"),
             "{body}"
@@ -885,7 +916,7 @@ mod tests {
         assert!(body.contains("aerodesk_sfu_tx_bytes_total 2048"), "{body}");
         assert!(body.contains("aerodesk_sfu_draining 1"), "{body}");
 
-        let body = prometheus_body(&shared, false);
+        let body = prometheus_body(&shared, false, None);
         assert!(body.contains("aerodesk_sfu_draining 0"), "{body}");
     }
 
@@ -901,6 +932,7 @@ mod tests {
             "127.0.0.1:3478".parse().unwrap(),
             Vec::new(),
             router,
+            None,
             None,
             shared,
             false,
@@ -919,6 +951,7 @@ mod tests {
             "127.0.0.1:3478".parse().unwrap(),
             Vec::new(),
             router,
+            None,
             None,
             shared,
             false,
@@ -943,6 +976,7 @@ mod tests {
             "127.0.0.1:3478".parse().unwrap(),
             Vec::new(),
             router,
+            None,
             None,
             shared,
             false,

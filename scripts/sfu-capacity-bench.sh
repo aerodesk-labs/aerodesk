@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 export RUST_LOG="${RUST_LOG:-info}"
 TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}/debug"
 
-ROOMS="${1:-2}"; PAIRS="${2:-2}"; SECONDS="${3:-20}"
+ROOMS="${1:-2}"; PAIRS="${2:-2}"; RUN_SECONDS="${3:-20}"
 W="${4:-1280}"; H="${5:-720}"; FPS="${6:-30}"; BITRATE="${7:-2000000}"
 TURN_RELAY="${8:-0}"
 TURN_PORT="${TURN_PORT:-14789}"
@@ -69,11 +69,11 @@ M_FILE=/tmp/cap-metrics.tsv
 ) &
 SAMPLER=$!
 
-echo "== 施压: ${ROOMS} 房间 × ${PAIRS} 对 @ ${W}x${H}/${FPS}fps ${BITRATE}bps，时长 ${SECONDS}s"
+echo "== 施压: ${ROOMS} 房间 × ${PAIRS} 对 @ ${W}x${H}/${FPS}fps ${BITRATE}bps，时长 ${RUN_SECONDS}s"
 # 清理旧压测日志
 rm -f /tmp/load-pub-*.log /tmp/load-view-*.log 2>/dev/null || true
 SIGNAL=ws://127.0.0.1:14503 BIN="$TARGET_DIR/aerodesk-cli" BITRATE="$BITRATE" NOISY=1 \
-  ./scripts/loadtest.sh "$ROOMS" "$PAIRS" "$SECONDS" "$W" "$H" "$FPS" || true
+  ./scripts/loadtest.sh "$ROOMS" "$PAIRS" "$RUN_SECONDS" "$W" "$H" "$FPS" || true
 kill "$SAMPLER" 2>/dev/null || true
 
 echo "== 汇总"
@@ -95,7 +95,7 @@ VIEW_ICE=$(grep -l "ICE connected" /tmp/load-view-*.log 2>/dev/null | wc -l | tr
 VIEW_FRAMES=$(grep -h "RECEIVED:" /tmp/load-view-*.log 2>/dev/null | sed -E 's/.*RECEIVED: ([0-9]+) frames.*/\1/' | paste -sd+ - | bc 2>/dev/null || echo 0)
 ERRORS=$(grep -hiE "panic|abort|auth failed" /tmp/cap-sfu.log /tmp/load-pub-*.log /tmp/load-view-*.log 2>/dev/null | wc -l | tr -d ' ')
 
-echo "配置: ${ROOMS}×${PAIRS} @ ${W}x${H}/${FPS} ${BITRATE}bps ${SECONDS}s"
+echo "配置: ${ROOMS}×${PAIRS} @ ${W}x${H}/${FPS} ${BITRATE}bps ${RUN_SECONDS}s"
 echo "峰值并发 clients: $PEAK"
 echo "连接成功: publisher=$PUB_ICE viewer=$VIEW_ICE (目标 $((ROOMS*PAIRS)))"
 if [ "$TURN_RELAY" = "1" ]; then

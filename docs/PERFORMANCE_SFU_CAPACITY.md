@@ -1,4 +1,4 @@
-# SFU 容量压测基准（#215/#218，#8 方法论）
+# SFU 容量压测基准（#215/#218/#220，#8 方法论）
 
 ## 方法
 `scripts/sfu-capacity-bench.sh`：起 SFU+signal（独立端口）→ `loadtest.sh` 施压
@@ -38,14 +38,45 @@ relayed 候选、跳过 host 候选，媒体强制走 TURN 中继。摘要额外
 - 偶发：一次 1080p 档出现 1 对 0 字节日志（启动竞态），重跑全绿——见 ISSUE 记录
   不在本批处理范围
 
+## 长稳压测（#220）
+
+`scripts/sfu-longrun.sh`（参数同 capacity bench，第 8 参 turn_relay）：起 SFU+signal →
+N×M 对持续施压 → 每 30s 采样 `/metrics/prometheus`（clients/rx·tx/turn_allocations）
+→ 看门狗断言：
+- 60s 内连接收敛，之后任一采样低于预期即失败
+- viewer RECEIVED 帧单调递增，90s 无增长判定卡死
+- TURN 变体：`aerodesk_sfu_turn_allocations` 收敛后 == 客户端数，连续 2 采样下降即失败
+- 任何 panic/abort/ICE disconnected/reconnect 即失败
+
+### 结果（macOS M4，debug 混合，2026-08-10）
+
+| 配置 | 时长 | 连接 | 帧增量 | TURN allocation | 错误 |
+|---|---|---|---|---|---|
+| 直连 1×1 @720p30 2Mbps | 420s | 1/1 | 5623 | 不适用 | 0 |
+| TURN 中继 1×1 @720p30 2Mbps（force-relay） | 664s（>600s lifetime） | 1/1 | 5845 | 活跃=2/预期=2，累计=2（零 churn） | 0 |
+
+- TURN 变体跑过 600s allocation lifetime：Refresh 正常维持，无 allocation 消失/重连
+- 累计 allocation 数 = 活跃数（无泄漏、无 churn）；媒体全程持续送达
+- 直连与 TURN 中继长稳均 PASS
+
+### TURN allocation 指标（#220）
+- `aerodesk_sfu_turn_allocations` gauge：当前活跃 allocation 数（`/metrics/prometheus`
+  与 `/metrics` JSON `turn_allocations` 字段）
+- `aerodesk_sfu_turn_allocations_total` counter：累计创建数（观测 churn/重连）
+- `scripts/turn-e2e.sh` 3d 断言连接后活跃数 >= 3（回归防护）
+
 ## 复现
 ```sh
 scripts/sfu-capacity-bench.sh 1 2 15 1280 720 30 2000000        # 单档（直连）
 scripts/sfu-capacity-bench.sh 2 2 20 1920 1080 30 4000000       # 1080p 档（直连）
 scripts/sfu-capacity-bench.sh 1 2 15 1280 720 30 2000000 1      # TURN 中继单档
 scripts/sfu-capacity-bench.sh 2 2 20 1920 1080 30 4000000 1     # TURN 中继 1080p
+scripts/sfu-longrun.sh 1 1 420 1280 720 30 2000000              # 直连长稳 7 分钟
+scripts/sfu-longrun.sh 1 1 660 1280 720 30 2000000 1            # TURN 中继长稳 11 分钟（越过 lifetime）
 ```
 
 ## 结论
-- SFU 转发路径（直连 + TURN 中继）在 8 并发/20Mbps 级无瓶颈；后续 #8 验收按此
-  方法论扩展到真机、4K60 与长稳（#218 已预留 TURN 中继长稳项）
+- SFU 转发路径（直连 + TURN 中继）在 8 并发/20Mbps 级无瓶颈
+- 长稳（#220）：直连 420s 与 TURN 中继 664s（越过 allocation lifetime）均 PASS，
+  TURN allocation 零泄漏零 churn，Refresh 正常
+- 后续 #8 验收按此方法论扩展到真机与 4K60

@@ -220,6 +220,20 @@ else
     exit 1
 fi
 
+echo "== 3d) TURN allocation 指标（#220）：/metrics/prometheus 暴露活跃数"
+BODY=$(curl -s --max-time 2 "http://127.0.0.1:14502/metrics/prometheus")
+TA=$(echo "$BODY" | awk '/^aerodesk_sfu_turn_allocations [0-9]+$/{v=$2} END{print v+0}')
+TAT=$(echo "$BODY" | awk '/^aerodesk_sfu_turn_allocations_total [0-9]+$/{v=$2} END{print v+0}')
+if [ "$TA" -ge 3 ] && [ "$TAT" -ge 3 ]; then
+    echo "PASS TURN allocation 指标 active=${TA} total=${TAT}（3 客户端均已分配）"
+else
+    echo "FAIL TURN allocation 指标 active=${TA} total=${TAT}（预期 >=3）"
+    kill "$PUB_PID" "$VIEW_PID" 2>/dev/null || true
+    kill "$(cat /tmp/turn-e2e-sfu.pid)" "$(cat /tmp/turn-e2e-sig.pid)" 2>/dev/null || true
+    [ -n "$TURN_PID" ] && kill "$TURN_PID" 2>/dev/null || true
+    exit 1
+fi
+
 kill "$PUB_PID" "$VIEW_PID" 2>/dev/null || true
 kill "$(cat /tmp/turn-e2e-sfu.pid)" "$(cat /tmp/turn-e2e-sig.pid)" 2>/dev/null || true
 [ -n "$TURN_PID" ] && kill "$TURN_PID" 2>/dev/null || true

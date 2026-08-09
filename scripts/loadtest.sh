@@ -9,7 +9,7 @@ set -euo pipefail
 
 ROOMS="${1:-2}"
 PAIRS="${2:-1}"
-SECONDS="${3:-10}"
+RUN_SECONDS="${3:-10}"
 W="${4:-1920}"
 H="${5:-1080}"
 FPS="${6:-30}"
@@ -28,7 +28,7 @@ trap cleanup EXIT
 TARG=""
 [ -n "$TOKEN" ] && TARG="--token $TOKEN"
 
-echo "== 压测开始: ${ROOMS} 房间 × ${PAIRS} 对 @ ${W}x${H}/${FPS}fps ${BITRATE}bps，时长 ${SECONDS}s"
+echo "== 压测开始: ${ROOMS} 房间 × ${PAIRS} 对 @ ${W}x${H}/${FPS}fps ${BITRATE}bps，时长 ${RUN_SECONDS}s"
 for r in $(seq 1 "$ROOMS"); do
   for p in $(seq 1 "$PAIRS"); do
     room="load-r${r}"
@@ -43,7 +43,7 @@ for r in $(seq 1 "$ROOMS"); do
   done
 done
 
-sleep "$SECONDS"
+sleep "$RUN_SECONDS"
 cleanup
 wait 2>/dev/null || true
 
