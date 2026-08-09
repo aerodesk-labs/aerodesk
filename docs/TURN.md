@@ -67,6 +67,12 @@ native 客户端（aerodesk-core，#157 M2 已实现）：信令 `Joined` 消息
 （`TurnTransport`）并把 relayed 候选加入 offer（`typ relay`）；`MediaSocket` 双路
 收发——ICE 直连优先、TURN 兜底，无 TURN 配置时行为不变。
 
+> **force-relay（#201）**：某些 NAT/模拟器（qemu slirp）下直连候选"假通"
+> （连通性检查能过但媒体入站被丢），可强制 ICE 只通告 relayed 候选：
+> CLI 设环境变量 `AERODESK_FORCE_RELAY=1`；Android 观看端 intent extra
+> `-e force_relay true`（`connect_live_forced` / `connect_live_role_forced`）。
+> 无 TURN 配置时该开关无效果（仍走直连）。
+
 ## 3. 验证
 
 ```sh
