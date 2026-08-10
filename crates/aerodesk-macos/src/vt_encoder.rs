@@ -27,6 +27,8 @@ pub struct VtEncoder {
     pps: Option<Vec<u8>>,
     vps: Option<Vec<u8>>,
     codec: Codec,
+    /// 下一帧强制关键帧（SFU 关键帧请求后置位，编码一帧后清除）。
+    force_keyframe_pending: bool,
 }
 
 impl VtEncoder {
@@ -60,6 +62,7 @@ impl VtEncoder {
             pps: None,
             vps: None,
             codec,
+            force_keyframe_pending: false,
         })
     }
 
@@ -69,9 +72,23 @@ impl VtEncoder {
 
     /// 请求下一帧编码为关键帧（IDR）。SFU 关键帧请求 / 新 viewer 加入时调用。
     pub fn force_keyframe(&mut self) -> Result<(), String> {
-        self.session
-            .force_keyframe()
-            .map_err(|e| format!("vt force keyframe: {e:?}"))
+        self.force_keyframe_pending = true;
+        Ok(())
+    }
+
+    /// 编码一帧；force_keyframe_pending 时经帧选项强制 IDR（编码后清除）。
+    fn do_encode(&mut self, surface: &IOSurface) -> Result<EncodedFrame, String> {
+        let force = std::mem::take(&mut self.force_keyframe_pending);
+        let r = if force {
+            self.session
+                .encode_force_keyframe(surface, (self.pts, 90_000))
+                .map_err(|e| format!("vt encode force keyframe: {e:?}"))
+        } else {
+            self.session
+                .encode(surface, (self.pts, 90_000))
+                .map_err(|e| format!("vt encode: {e:?}"))
+        }?;
+        Ok(r)
     }
 
     /// 本机是否有 VT HEVC 硬编（64x64 探针）。
@@ -189,10 +206,7 @@ impl VtEncoder {
 
     /// 零拷贝编码：直接硬编 ScreenCaptureKit 输出的 IOSurface。
     pub fn encode_surface(&mut self, surface: &IOSurface) -> Result<Option<EncodedFrame>, String> {
-        let frame = self
-            .session
-            .encode(surface, (self.pts, 90_000))
-            .map_err(|e| format!("vt encode: {e:?}"))?;
+        let frame = self.do_encode(surface)?;
         self.pts += self.pts_inc;
         self.ensure_parameter_sets(&frame);
         if frame.data.is_empty() {
@@ -217,10 +231,7 @@ impl VtEncoder {
                 std::ptr::copy_nonoverlapping(bgra.as_ptr(), dst, bgra.len());
             }
         }
-        let frame = self
-            .session
-            .encode(&surface, (self.pts, 90_000))
-            .map_err(|e| format!("vt encode: {e:?}"))?;
+        let frame = self.do_encode(&surface)?;
         self.pts += self.pts_inc; // 90kHz / fps
         self.ensure_parameter_sets(&frame);
         if frame.data.is_empty() {
