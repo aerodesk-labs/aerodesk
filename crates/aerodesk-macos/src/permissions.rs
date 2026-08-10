@@ -66,3 +66,10 @@ pub fn trigger_screen_capture_registration() {
         let _ = cap.next_frame(Duration::from_millis(250));
     }
 }
+
+/// 主动请求屏幕录制权限（用户显式点击「打开屏幕录制设置」时调用）。
+/// `CGRequestScreenCaptureAccess()` 会把本应用登记进授权列表（不在列表时
+/// 会打开系统设置窗口），比只做采集尝试更可靠；返回当前授权结果。
+pub fn request_screen_capture() -> bool {
+    ScreenCaptureAccess.request()
+}
