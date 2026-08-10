@@ -48,6 +48,18 @@ print(pct(0.50), pct(0.90), pct(0.99))
 PY
 }
 latency_count() { local c; c=$(grep -c "LATENCY:" "$1" 2>/dev/null); echo "${c:-0}"; }
+# 等 SFU 内嵌 TURN 就绪：内部 /metrics 出现 turn_allocations 指标才说明
+# TURN server 已绑定（nc -z UDP 不可靠，慢 CI 上 publisher 10s ICE 期限内
+# TURN 未起会直接失败）。
+wait_turn_ready() { # $1=内部端口 $2=标签
+  for _ in $(seq 1 80); do
+    if curl -s --max-time 2 "http://127.0.0.1:$1/metrics/prometheus" 2>/dev/null       | grep -q "^aerodesk_sfu_turn_allocations"; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
 wait_decoded() {
   for _ in $(seq 1 240); do
     grep -qE "DECODED: [1-9]" "$1" 2>/dev/null && return 0
@@ -72,7 +84,8 @@ POP_ID=pop-a AUTH_TOKENS="$AUTH" SIGNAL_PORT=15001 SIGNAL_PLAIN_PORT="$PLAIN_A" 
   TURN_SECRET="$TURN_SECRET" TURN_URLS="turn:127.0.0.1:${TURN_A}?transport=udp" \
   "$TARGET_DIR/aerodesk-signal" >/tmp/btr-sig-a.log 2>&1 &
 SIG_A_PID=$!
-for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_A" 2>/dev/null && nc -z 127.0.0.1 "$TURN_A" 2>/dev/null && break; sleep 0.2; done
+for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_A" 2>/dev/null && break; sleep 0.2; done
+wait_turn_ready "$INT_A" "PoP-A" || fail "PoP-A 内嵌 TURN 未就绪（见 /tmp/btr-sfu-a.log）"
 sleep 0.3
 
 echo "== 场景 0：PoP-A 直连基线（TURN relay）延迟"
@@ -82,7 +95,11 @@ echo "== 场景 0：PoP-A 直连基线（TURN relay）延迟"
 PUB0=$!
 ok=0
 for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/btr-direct-pub.log 2>/dev/null && ok=1 && break; sleep 0.5; done
-[ "$ok" = "1" ] || fail "场景0：publisher 未连上（TURN relay）"
+if [ "$ok" != "1" ]; then
+  echo "--- publisher 日志尾 ---"; tail -20 /tmp/btr-direct-pub.log
+  echo "--- SFU-A 日志尾 ---"; tail -20 /tmp/btr-sfu-a.log
+  fail "场景0：publisher 未连上（TURN relay）"
+fi
 "$TARGET_DIR/aerodesk-cli" --role viewer --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   >/tmp/btr-direct-view.log 2>&1 &
 VIEW0=$!
@@ -110,7 +127,8 @@ POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=${
   SIGNAL_PORT=15101 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
   "$TARGET_DIR/aerodesk-signal" >/tmp/btr-sig-b.log 2>&1 &
 SIG_B_PID=$!
-for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && nc -z 127.0.0.1 "$TURN_B" 2>/dev/null && break; sleep 0.2; done
+for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break; sleep 0.2; done
+wait_turn_ready "$INT_B" "PoP-B" || fail "PoP-B 内嵌 TURN 未就绪（见 /tmp/btr-sfu-b.log）"
 sleep 0.3
 grep -q "bridge orchestration enabled" /tmp/btr-sig-b.log || fail "PoP-B 未启用桥编排"
 
@@ -121,7 +139,11 @@ echo "== 场景 1：PoP-A publisher(--audio) + bridge（双腿 TURN relay）→ 
 PUB_A=$!
 ok=0
 for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/btr-pub-a.log 2>/dev/null && ok=1 && break; sleep 0.5; done
-[ "$ok" = "1" ] || fail "场景1：PoP-A publisher 未连上（TURN relay）"
+if [ "$ok" != "1" ]; then
+  echo "--- publisher 日志尾 ---"; tail -20 /tmp/btr-pub-a.log
+  echo "--- SFU-A 日志尾 ---"; tail -20 /tmp/btr-sfu-a.log
+  fail "场景1：PoP-A publisher 未连上（TURN relay）"
+fi
 
 "$TARGET_DIR/aerodesk-cli" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" \
   >/tmp/btr-view-b.log 2>&1 &
