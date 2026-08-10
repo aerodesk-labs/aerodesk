@@ -145,7 +145,7 @@ fn run_viewer(
             if !view.endpoint.send_channel_data(&label, binary, &data) {
                 tracing::debug!("viewer: send {label} dropped (channel not open)");
             } else if label == "input" {
-                tracing::info!("viewer: forwarded input {} bytes to remote", data.len());
+                tracing::debug!("viewer: forwarded input {} bytes to remote", data.len());
             }
         }
         if let Ok(kind) = cmd_rx.try_recv() {
@@ -210,16 +210,22 @@ fn main() {
     let (stats_tx, stats_rx) = mpsc::channel::<(u64, u64)>();
     let (data_to_local_tx, data_to_local_rx) = mpsc::channel::<(String, bool, Vec<u8>)>();
     let (data_to_remote_tx, data_to_remote_rx) = mpsc::channel::<(String, bool, Vec<u8>)>();
-    std::thread::spawn(move || {
-        run_viewer(
-            view,
-            media_tx,
-            cmd_rx,
-            stats_tx,
-            data_to_local_tx,
-            data_to_remote_rx,
-        )
-    });
+    // #230：大块 data channel（文件 8KB/块）转发时 str0m SCTP 发送在 2MB 默认栈
+    // 下栈溢出（与 SFU 同款问题，见 LESSON 线程栈溢出）——放大到 16MB。
+    std::thread::Builder::new()
+        .name("bridge-viewer".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            run_viewer(
+                view,
+                media_tx,
+                cmd_rx,
+                stats_tx,
+                data_to_local_tx,
+                data_to_remote_rx,
+            )
+        })
+        .expect("spawn viewer thread");
 
     let mut forwarded = 0u64;
     let mut forwarded_kf = 0u64;

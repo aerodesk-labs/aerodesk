@@ -127,10 +127,42 @@ DF=$(grep -oE "data_forwarded=[0-9]+" /tmp/bridge.log | tail -1 | cut -d= -f2)
 echo "  bridge data_forwarded=${DF}"
 [ "${DF:-0}" -gt 0 ] || fail "bridge 未转发 data channel"
 
+echo "== M3（文件）：跨 PoP 文件传输（sha256 一致性）"
+kill "$PUB_A" "$VIEW_B" 2>/dev/null || true
+sleep 1
+FILESIZE_KB=512
+SRC_FILE="$(mktemp -d)/send-${FILESIZE_KB}kb.bin"
+OUT_DIR="$(mktemp -d)/out"; mkdir -p "$OUT_DIR"
+dd if=/dev/urandom of="$SRC_FILE" bs=1024 count="$FILESIZE_KB" 2>/dev/null
+SRC_HASH=$(shasum -a 256 "$SRC_FILE" | awk '{print $1}')
+# PoP-A publisher 收（--recv-dir），PoP-B viewer 发（--send-file）
+"$TARGET_DIR/aerodesk-cli" --role publisher --recv-dir "$OUT_DIR" \
+  --signal "ws://127.0.0.1:${PLAIN_A}" --room "$ROOM" \
+  --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
+  >/tmp/bridge-pub-a.log 2>&1 &
+PUB_A=$!
+"$TARGET_DIR/aerodesk-cli" --role viewer --send-file "$SRC_FILE" \
+  --signal "ws://127.0.0.1:${PLAIN_B}" --room "$ROOM" \
+  >/tmp/bridge-view-b.log 2>&1 &
+VIEW_B=$!
+OUT_FILE="$OUT_DIR/$(basename "$SRC_FILE")"
+ok=0
+for _ in $(seq 1 600); do
+  if grep -q "file receive complete" /tmp/bridge-pub-a.log 2>/dev/null && [ -f "$OUT_FILE" ]; then ok=1; break; fi
+  if ! kill -0 "$PUB_A" 2>/dev/null || ! kill -0 "$VIEW_B" 2>/dev/null; then break; fi
+  sleep 0.5
+done
+[ "$ok" = "1" ] || fail "跨 PoP 文件接收未完成（见 /tmp/bridge-pub-a.log /tmp/bridge-view-b.log）"
+OUT_HASH=$(shasum -a 256 "$OUT_FILE" | awk '{print $1}')
+[ "$OUT_HASH" = "$SRC_HASH" ] || fail "sha256 不一致 src=${SRC_HASH} out=${OUT_HASH}"
+echo "  跨 PoP 文件传输 ${FILESIZE_KB}KB: sha256 一致（${SRC_HASH:0:16}…）"
+DF2=$(grep -oE "data_forwarded=[0-9]+" /tmp/bridge.log | tail -1 | cut -d= -f2)
+echo "  bridge data_forwarded 累计=${DF2}（含 file 块）"
+
 # 无 panic/abort
 grep -qiE "panic|abort" /tmp/bridge.log /tmp/bridge-sfu-a.log /tmp/bridge-sfu-b.log \
   /tmp/bridge-pub-a.log /tmp/bridge-view-b.log && fail "发现 panic/abort"
 
 kill "$VIEW_B" "$BRIDGE" "$PUB_A" 2>/dev/null || true
 sleep 1
-echo "== 跨 PoP 桥接 M1+M2 PASS（viewer 在 PoP-B 不经 Redirect 收到 PoP-A 媒体；bridge 原样转发 keyframe=${KF}；input 经 data channel 桥到达 PoP-A publisher，data_forwarded=${DF}）=="
+echo "== 跨 PoP 桥接 M1+M2+M3 PASS（媒体 + input + 文件 sha256 一致；bridge 原样转发 keyframe=${KF}）=="
