@@ -1155,9 +1155,14 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui = ui.as_weak();
         move || {
             #[cfg(target_os = "macos")]
-            aerodesk_macos::permissions::open_system_settings(
-                aerodesk_macos::permissions::SettingsPane::ScreenCapture,
-            );
+            {
+                // 先尝试一次采集，让系统把本应用登记进「屏幕录制」授权列表，
+                // 否则系统设置里看不到本应用、无法勾选授权。
+                aerodesk_macos::permissions::trigger_screen_capture_registration();
+                aerodesk_macos::permissions::open_system_settings(
+                    aerodesk_macos::permissions::SettingsPane::ScreenCapture,
+                );
+            }
             #[cfg(not(target_os = "macos"))]
             if let Some(ui) = ui.upgrade() {
                 ui.set_settings_status("被控端权限引导仅 macOS 实现".into());
@@ -1178,6 +1183,10 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // 启动时先尝试一次采集，把应用登记进「屏幕录制」授权列表
+    // （macOS TCC 只列出尝试过受保护资源的应用，否则系统设置里看不到本应用）。
+    #[cfg(target_os = "macos")]
+    aerodesk_macos::permissions::trigger_screen_capture_registration();
     // 启动时刷一次权限状态
     ui.invoke_refresh_perms();
 

@@ -16,4 +16,8 @@ cp "$BIN" "$APP/Contents/MacOS/AeroDesk"
 sed "s/__VERSION__/$VERSION/g" app-assets/Info.plist > "$APP/Contents/Info.plist"
 cp app-assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 chmod +x "$APP/Contents/MacOS/AeroDesk"
-echo "== 完成: $APP (v$VERSION)"
+# 本地开发/CI 统一 ad-hoc 签名：绑定 Info.plist + 密封资源。
+# 未签名/仅 linker-signed 的 bundle 无法被 macOS TCC 识别为独立应用，
+# 屏幕录制/辅助功能授权列表里看不到 AeroDesk.app。
+codesign --force --sign - "$APP" >/dev/null 2>&1
+echo "== 完成: $APP (v$VERSION, ad-hoc signed)"
