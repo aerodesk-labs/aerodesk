@@ -1,4 +1,4 @@
-# SFU 容量压测基准（#215/#218/#220/#222/#226，#8 方法论）
+# SFU 容量压测基准（#215/#218/#220/#222/#226/#228，#8 方法论）
 
 ## 方法
 `scripts/sfu-capacity-bench.sh`：起 SFU+signal（独立端口）→ `loadtest.sh` 施压
@@ -103,6 +103,24 @@ selective forwarding（`writer.match_params` PT 映射），str0m 默认 codec_c
 
 - SFU 对四格式 codec-agnostic 转发成立；AV1 编码延迟 ~1s，首帧到达后即可解码
 
+## 音频转发 + 音视频同步（#228）
+
+`scripts/sfu-audio-e2e.sh [mode...] [audio...]`：{direct, turn} × {pcmu, opus}
+四组合——publisher（ffmpeg h264 + 音频）经 SFU 转发，viewer 断言 AUDIO frames>0、
+played>0、|drift_ms|≤300、视频 DECODED>0。
+
+### 结果（macOS M4，debug 混合，2026-08-10，全矩阵连跑 2 次全 PASS）
+
+| mode | audio | video_decoded | audio_frames | played | drift_ms | errors |
+|---|---|---|---|---|---|---|
+| direct | pcmu | 291-297 | 494-509 | 489-505 | -7~27 | 0 |
+| direct | opus | 317-322 | 535-545 | 531-541 | 13 | 0 |
+| turn | pcmu | 295-348 | 495-600 | 491-596 | 47~113 | 0 |
+| turn | opus | 322-327 | 554-563 | 549-558 | -7~7 | 0 |
+
+- SFU 转发不重写 RTP 时间戳，音频（PCMU/Opus）随视频经直连/TURN 中继均正常到达，
+  AVSYNC drift 全部 ≤113ms（阈值 300ms）
+
 ## 复现
 ```sh
 scripts/sfu-capacity-bench.sh 1 2 15 1280 720 30 2000000        # 单档（直连）
@@ -115,6 +133,7 @@ scripts/sfu-reconnect.sh 3 1 1 0 120                            # 直连重连�
 scripts/sfu-reconnect.sh 3 1 1 1 120                            # TURN 中继重连韧性 3 轮（lifetime=60s）
 scripts/sfu-codec-e2e.sh                                       # 多编码格式（h264/h265/vp9/av1）
 scripts/sfu-codec-e2e.sh h265 av1                              # 指定格式
+scripts/sfu-audio-e2e.sh                                       # 音频+音视频同步（direct/turn × pcmu/opus）
 ```
 
 ## 结论
@@ -125,4 +144,5 @@ scripts/sfu-codec-e2e.sh h265 av1                              # 指定格式
   归零、累计精确、无 panic；TURN allocation 过期回收依赖 lifetime+30s 清扫
 - 多编码格式（#226）：H.264/H.265/VP9/AV1 四格式经 SFU 端到端转发全 PASS，
   SFU codec-agnostic 成立（AV1 编码延迟 ~1s）
+- 音频同步（#228）：PCMU/Opus 经直连/TURN 中继转发正常，AVSYNC drift ≤113ms
 - 后续 #8 验收按此方法论扩展到真机与 4K60
