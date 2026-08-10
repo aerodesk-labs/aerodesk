@@ -79,6 +79,22 @@ pub static INPUT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// #29 会话槽序号（单调递增，作为会话内部标识；UI 稠密索引见 slot_to_ui_index）。
 pub static SESSION_NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// macOS Dock 图标点击：主窗口弱引用（AppWindow::new 后设置，reopen 回调重显用）。
+static MAIN_WINDOW: std::sync::Mutex<Option<slint::Weak<AppWindow>>> =
+    std::sync::Mutex::new(None);
+
+/// macOS：把主窗口带到最前（makeKeyAndOrderFront + deminiaturize + 激活 App）。
+#[cfg(target_os = "macos")]
+pub fn focus_window_to_front(window: &slint::Window) {
+    use raw_window_handle::{HasRawWindowHandle, HasWindowHandle};
+    if let Ok(handle) = window.window_handle().window_handle()
+        && let Ok(raw) = handle.raw_window_handle()
+        && let raw_window_handle::RawWindowHandle::AppKit(appkit) = raw
+    {
+        aerodesk_macos::dock::focus_ns_view(appkit.ns_view.as_ptr() as *mut std::ffi::c_void);
+    }
+}
+
 /// slot（会话内部标识）→ 当前 UI 稠密索引（SESSIONS 顺序即标签顺序）。
 pub fn slot_to_ui_index(slot: usize) -> Option<usize> {
     SESSIONS.lock().unwrap().iter().position(|s| s.slot == slot)
@@ -280,6 +296,20 @@ fn main() -> Result<(), slint::PlatformError> {
         slint::platform::set_platform(Box::new(backend)).expect("set slint platform");
     }
     let ui = AppWindow::new()?;
+    // macOS：Dock 图标点击 → 重显/置前主窗口（含最小化还原）。
+    #[cfg(target_os = "macos")]
+    {
+        *MAIN_WINDOW.lock().unwrap() = Some(ui.as_weak());
+        aerodesk_macos::dock::set_reopen_callback(|| {
+            let weak = MAIN_WINDOW.lock().unwrap().clone();
+            if let Some(weak) = weak {
+                let _ = weak.upgrade_in_event_loop(|ui| {
+                    let _ = ui.show();
+                    focus_window_to_front(ui.window());
+                });
+            }
+        });
+    }
     // #72 拖放发送：填充会话 UI 弱引用（非 macOS 无 handler，仅写入无副作用）。
     *drop_ui.lock().unwrap() = Some(ui.as_weak());
 
@@ -1162,6 +1192,8 @@ fn main() -> Result<(), slint::PlatformError> {
         tray.on_show_window(move || {
             if let Some(ui) = win.upgrade() {
                 let _ = ui.show();
+                // “显示主窗口”：已打开时也要把窗口带到最前（含最小化还原）。
+                focus_window_to_front(ui.window());
             }
         });
         tray.on_quit_app(move || {
