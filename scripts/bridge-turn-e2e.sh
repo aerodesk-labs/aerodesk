@@ -85,7 +85,7 @@ POP_ID=pop-a AUTH_TOKENS="$AUTH" SIGNAL_PORT=15001 SIGNAL_PLAIN_PORT="$PLAIN_A" 
   "$TARGET_DIR/aerodesk-signal" >/tmp/btr-sig-a.log 2>&1 &
 SIG_A_PID=$!
 for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_A" 2>/dev/null && break; sleep 0.2; done
-wait_turn_ready "$INT_A" "PoP-A" || fail "PoP-A 内嵌 TURN 未就绪（见 /tmp/btr-sfu-a.log）"
+wait_turn_ready "$INT_A" "PoP-A" /tmp/btr-sfu-a.log || fail "PoP-A 内嵌 TURN 未就绪"
 sleep 0.3
 
 echo "== 场景 0：PoP-A 直连基线（TURN relay）延迟"
@@ -128,7 +128,7 @@ POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=${
   "$TARGET_DIR/aerodesk-signal" >/tmp/btr-sig-b.log 2>&1 &
 SIG_B_PID=$!
 for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break; sleep 0.2; done
-wait_turn_ready "$INT_B" "PoP-B" || fail "PoP-B 内嵌 TURN 未就绪（见 /tmp/btr-sfu-b.log）"
+wait_turn_ready "$INT_B" "PoP-B" /tmp/btr-sfu-b.log || fail "PoP-B 内嵌 TURN 未就绪"
 sleep 0.3
 grep -q "bridge orchestration enabled" /tmp/btr-sig-b.log || fail "PoP-B 未启用桥编排"
 
