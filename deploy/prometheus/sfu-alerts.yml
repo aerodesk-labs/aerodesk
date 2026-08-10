@@ -59,63 +59,67 @@ groups:
           summary: "SFU {{ $labels.instance }} 客户端大量掉线（5 分钟下降 >50%）"
           description: "在线客户端从 {{ $value | humanizePercentage }} 比例骤降，检查分片线程/网络/进程状态。"
 
-      # 媒体停摆：有在线客户端但收包为 0（发布/转发链路卡死）。
+      # 媒体停摆：某分片有在线客户端但收包为 0（发布/转发链路卡死）。
+      # 注意：房间无人发布媒体（如仅 viewer 在线）也会触发，按部署预期调整。
       - alert: AeroDeskSFUMediaStall
         expr: |
-          aerodesk_sfu_clients > 0
-          and rate(aerodesk_sfu_rx_packets_total[5m]) == 0
+          aerodesk_sfu_clients{shard=~".+"} > 0
+          and rate(aerodesk_sfu_rx_packets_total{shard=~".+"}[5m]) == 0
         for: 5m
         labels:
           severity: page
           team: media
         annotations:
-          summary: "SFU {{ $labels.instance }} 媒体链路停摆"
-          description: "存在 {{ $labels.shard | default(0) }} 在线客户端但 5 分钟收包为 0，媒体转发可能卡死。"
+          summary: "SFU {{ $labels.instance }} 分片 {{ $labels.shard }} 媒体链路停摆"
+          description: "分片 {{ $labels.shard }} 有 {{ $value }} 在线客户端但 5 分钟收包为 0，媒体转发可能卡死。"
 
       # 出向丢包过高（#238 聚合：0.0-1.0，5s 心跳均值）。
+      # 按分片告警：总序列是各分片求和，不能直接用于阈值。
       - alert: AeroDeskSFUHighEgressLoss
-        expr: aerodesk_sfu_egress_loss > 0.05
+        expr: aerodesk_sfu_egress_loss{shard=~".+"} > 0.05
         for: 5m
         labels:
           severity: warning
           team: media
         annotations:
-          summary: "SFU {{ $labels.instance }} 出向丢包 {{ $value | humanizePercentage }}"
-          description: "egress loss 超过 5% 持续 5 分钟：检查对端带宽/网络抖动/SFU 拥塞。"
+          summary: "SFU {{ $labels.instance }} 分片 {{ $labels.shard }} 出向丢包 {{ $value | humanizePercentage }}"
+          description: "分片 {{ $labels.shard }} egress loss 超过 5% 持续 5 分钟：检查对端带宽/网络抖动/SFU 拥塞。"
 
-      # 入向丢包过高。
+      # 入向丢包过高（按分片，理由同上）。
       - alert: AeroDeskSFUHighIngressLoss
-        expr: aerodesk_sfu_ingress_loss > 0.05
+        expr: aerodesk_sfu_ingress_loss{shard=~".+"} > 0.05
         for: 5m
         labels:
           severity: warning
           team: media
         annotations:
-          summary: "SFU {{ $labels.instance }} 入向丢包 {{ $value | humanizePercentage }}"
-          description: "ingress loss 超过 5% 持续 5 分钟：检查发布端上行网络。"
+          summary: "SFU {{ $labels.instance }} 分片 {{ $labels.shard }} 入向丢包 {{ $value | humanizePercentage }}"
+          description: "分片 {{ $labels.shard }} ingress loss 超过 5% 持续 5 分钟：检查发布端上行网络。"
 
-      # RTT 过高（微秒；500ms 已属严重劣化）。
+      # RTT 过高（微秒；500ms 已属严重劣化；按分片告警，总序列是求和）。
       - alert: AeroDeskSFUHighRTT
-        expr: aerodesk_sfu_rtt_us > 500000
+        expr: aerodesk_sfu_rtt_us{shard=~".+"} > 500000
         for: 5m
         labels:
           severity: warning
           team: media
         annotations:
-          summary: "SFU {{ $labels.instance }} RTT {{ $value }}us"
-          description: "平均 RTT 超过 500ms 持续 5 分钟：网络路径或 CPU 过载。"
+          summary: "SFU {{ $labels.instance }} 分片 {{ $labels.shard }} RTT {{ $value }}us"
+          description: "分片 {{ $labels.shard }} 平均 RTT 超过 500ms 持续 5 分钟：网络路径或 CPU 过载。"
 
-      # 质量样本缺失：有在线客户端但 qos_clients==0（#238 心跳聚合未生效，
-      # 可能 PeerStats 链路异常或聚合逻辑回归）。
+      # 质量样本缺失：某分片有在线客户端但该分片 qos_clients==0（#238 心跳
+      # 聚合未生效，可能 PeerStats 链路异常或聚合逻辑回归；按分片告警）。
       - alert: AeroDeskSFUQosClientsMissing
-        expr: aerodesk_sfu_clients > 0 and aerodesk_sfu_qos_clients == 0
+        expr: |
+          aerodesk_sfu_clients{shard=~".+"} > 0
+          and aerodesk_sfu_qos_clients{shard=~".+"} == 0
         for: 10m
         labels:
           severity: warning
           team: media
         annotations:
-          summary: "SFU {{ $labels.instance }} 无质量样本"
-          description: "在线客户端 {{ $value }} 个但 qos_clients 为 0，媒体质量指标失效。"
+          summary: "SFU {{ $labels.instance }} 分片 {{ $labels.shard }} 无质量样本"
+          description: "分片 {{ $labels.shard }} 在线客户端 {{ $value }} 个但 qos_clients 为 0，媒体质量指标失效。"
 
       # 内嵌 TURN allocation 逼近容量（单 PoP 默认阈值 5000，按部署调整）。
       - alert: AeroDeskSFUTurnAllocationsHigh
@@ -141,17 +145,16 @@ groups:
           summary: "录制磁盘可用空间低于 20%"
           description: "RECORD_DIR 磁盘可用 {{ $value | humanizePercentage }}，录制可能失败，需归档/扩容。"
 
-      # 在录房间数：RECORD_ON_DEMAND 部署下，有客户端但没有任何录制进行中
-      # 可能说明按需 start 未被调用或录制失败（仅按需录制部署启用此规则）。
-      - alert: AeroDeskSFUNoActiveRecordings
-        expr: aerodesk_sfu_clients > 0 and aerodesk_sfu_recordings_active == 0
-        for: 30m
-        labels:
-          severity: warning
-          team: infra
-        annotations:
-          summary: "SFU {{ $labels.instance }} 有客户端但无在录房间"
-          description: "在线客户端 {{ $value }} 个，recordings_active 为 0；若期望持续录制请检查按需 start 调用或 RECORD_DIR。"
+      # 在录房间数：仅「按需录制部署且期望持续录制」时启用本规则——有客户端
+      # 但没有任何录制进行中可能说明按需 start 未被调用或录制失败。
+      # 默认注释关闭：自动录制/不录制部署会误报（如仅 viewer 在线 30 分钟）。
+      # - alert: AeroDeskSFUNoActiveRecordings
+      #   expr: aerodesk_sfu_clients > 0 and aerodesk_sfu_recordings_active == 0
+      #   for: 30m
+      #   labels: { severity: warning, team: infra }
+      #   annotations:
+      #     summary: "SFU {{ $labels.instance }} 有客户端但无在录房间"
+      #     description: "在线客户端 {{ $value }} 个，recordings_active 为 0；若期望持续录制请检查按需 start 调用或 RECORD_DIR。"
 
       # 分片 CPU/负载（示例，注释默认关闭）：SFU 未导出每分片 CPU，
       # 用 node_exporter 的进程 CPU 近似，或按容量基准的 pps 阈值告警。

@@ -352,7 +352,14 @@ impl Recorder {
     pub fn start(&self, room: &str) -> Result<(), String> {
         let ts = now_micros();
         let mut recs = self.recordings.lock().unwrap_or_else(|e| e.into_inner());
-        if recs.contains_key(room) {
+        if let Some(existing) = recs.get(room) {
+            if existing.failed {
+                // #240：失败哨兵不得被后续 start 当作成功（此前磁盘故障后
+                // 再调 start 会返回 200 但实际不录制）。
+                return Err(format!(
+                    "recording for {room} previously failed; not retrying this session"
+                ));
+            }
             return Ok(()); // 幂等
         }
         match Recording::open(&self.root, room, ts) {
@@ -596,6 +603,11 @@ mod tests {
         // #15：失败不得 panic，且失败房间不再重试。
         rec.record_payload("blocked-room", b"x");
         rec.record_payload("blocked-room", b"y");
+        // #240：失败哨兵后显式 start 必须报错（不能伪成功）。
+        assert!(
+            rec.start("blocked-room").is_err(),
+            "failed sentinel must not be reported as start success"
+        );
 
         fs::set_permissions(&dir, fs::Permissions::from_mode(orig)).unwrap();
         rec.finalize_all();

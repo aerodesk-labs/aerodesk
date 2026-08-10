@@ -86,8 +86,9 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "X-Internal-Token: $TOK
 
 echo "== audit.log 含 session/kick 事件（含 403/404）"
 AUDIT="$REC/audit.log"
-grep -q '"action":"session/kick"' "$AUDIT" || fail "audit 缺 session/kick"
-grep -q '"status":403' "$AUDIT" && grep -q '"status":404' "$AUDIT" \
+grep -q '"action":"session/kick".*"status":200' "$AUDIT" || fail "audit 缺 session/kick 200"
+grep -q '"action":"session/kick".*"status":403' "$AUDIT" \
+  && grep -q '"action":"session/kick".*"status":404' "$AUDIT" \
   && echo "PASS audit session/kick + 403 + 404" || fail "audit 缺 403/404 留痕"
 
 echo "== /healthz clients 回落"

@@ -614,6 +614,12 @@ pub fn main() {
     //    rouille `poll_timeout` 轮询驱动：SIGHUP 可重建公共 server 热重载证书；
     //    SIGTERM/SIGINT 进入 drain（拒绝新房间 → 限时等现有客户端 → finalize 录制 → 退出）。
     let internal_token = std::env::var("INTERNAL_TOKEN").ok();
+    if internal_token.is_none() {
+        // #240：record/session 管理接口（含踢人）未受保护，仅限开发/回环使用。
+        warn!(
+            "INTERNAL_TOKEN not set: /record/* and /session/* management API are UNAUTHENTICATED (loopback only; production must set INTERNAL_TOKEN)"
+        );
+    }
     let state = Arc::new(AppState {
         media_addr,
         tcp_addr,
@@ -697,9 +703,11 @@ fn recorder_or_503(shared: &Shared) -> Result<&Recorder, Response> {
 }
 
 /// 内部 API 审计（#240）：成功/失败/403 都留痕。audit.log 存在时写
-/// `record_api` 事件（含 action/room/status/ok/detail），否则 tracing 日志兜底。
-fn audit_record_api(
+/// `record_api`/`session_api` 事件（含 action/room/status/ok/detail），
+/// 否则 tracing 日志兜底。
+fn audit_api_event(
     shared: &Shared,
+    event: &str,
     action: &str,
     room: Option<&str>,
     status: u16,
@@ -709,7 +717,7 @@ fn audit_record_api(
     let room = room.unwrap_or("");
     if let Some(rec) = &shared.recorder {
         rec.audit_event(
-            "record_api",
+            event,
             serde_json::json!({
                 "action": action,
                 "room": room,
@@ -729,13 +737,43 @@ fn audit_record_api(
     }
 }
 
-/// 未授权内部调用审计（#240）：仅对录制/会话管理类路径写 audit.log，避免
-/// 探测性请求刷爆审计日志（其它路径走 tracing warn）。
+fn audit_record_api(
+    shared: &Shared,
+    action: &str,
+    room: Option<&str>,
+    status: u16,
+    ok: bool,
+    detail: Option<&str>,
+) {
+    audit_api_event(shared, "record_api", action, room, status, ok, detail);
+}
+
+fn audit_session_api(
+    shared: &Shared,
+    action: &str,
+    room: Option<&str>,
+    status: u16,
+    ok: bool,
+    detail: Option<&str>,
+) {
+    audit_api_event(shared, "session_api", action, room, status, ok, detail);
+}
+
+/// 未授权内部调用审计（#240）：仅对录制/会话管理类路径写 audit.log（带 query
+/// 中的 room/client 便于 SIEM 关联），避免探测性请求刷爆审计日志（其它路径走
+/// tracing warn）。
 fn audit_denied_api(shared: &Shared, request: &Request) {
     let url = request.url();
     let action = url.trim_start_matches('/').to_string();
-    if url.starts_with("/record/") || url.starts_with("/session/") {
-        audit_record_api(shared, &action, None, 403, false, Some("forbidden"));
+    let room = query_param(request.raw_query_string(), "room");
+    let client = query_param(request.raw_query_string(), "client");
+    if url.starts_with("/record/") {
+        audit_record_api(shared, &action, room, 403, false, Some("forbidden"));
+    } else if url.starts_with("/session/") {
+        let detail = client
+            .map(|c| format!("forbidden client={c}"))
+            .unwrap_or_else(|| "forbidden".to_string());
+        audit_session_api(shared, &action, room, 403, false, Some(&detail));
     } else {
         warn!("internal api denied: {action}");
     }
@@ -835,6 +873,16 @@ fn record_status(shared: &Shared) -> Response {
     let rec = match recorder_or_503(shared) {
         Ok(r) => r,
         Err(_) => {
+            // 503 罕见（RECORD_DIR 未配置）且非轮询主路径，写审计便于排障；
+            // 成功路径只读不写 audit.log（防轮询刷爆）。
+            audit_record_api(
+                shared,
+                "record/status",
+                None,
+                503,
+                false,
+                Some("RECORD_DIR not set"),
+            );
             return Response::text("recording disabled (RECORD_DIR not set)").with_status_code(503);
         }
     };
@@ -907,7 +955,7 @@ fn session_kick(
     client: Option<&str>,
 ) -> Response {
     let Some(room) = room.filter(|r| !r.is_empty()) else {
-        audit_record_api(
+        audit_session_api(
             shared,
             "session/kick",
             None,
@@ -918,7 +966,7 @@ fn session_kick(
         return Response::text("room required").with_status_code(400);
     };
     let Some(client) = client.filter(|c| !c.is_empty()) else {
-        audit_record_api(
+        audit_session_api(
             shared,
             "session/kick",
             Some(room),
@@ -929,7 +977,7 @@ fn session_kick(
         return Response::text("client required").with_status_code(400);
     };
     let Ok(client_id) = client.parse::<u64>() else {
-        audit_record_api(
+        audit_session_api(
             shared,
             "session/kick",
             Some(room),
@@ -940,7 +988,7 @@ fn session_kick(
         return Response::text("client must be a numeric id").with_status_code(400);
     };
     let Some(info) = shared.session(client_id) else {
-        audit_record_api(
+        audit_session_api(
             shared,
             "session/kick",
             Some(room),
@@ -959,7 +1007,7 @@ fn session_kick(
         .with_status_code(404);
     };
     if info.room != room {
-        audit_record_api(
+        audit_session_api(
             shared,
             "session/kick",
             Some(room),
@@ -978,7 +1026,7 @@ fn session_kick(
         .with_status_code(404);
     }
     let Some(shard_tx) = shard_txs.get(info.shard) else {
-        audit_record_api(
+        audit_session_api(
             shared,
             "session/kick",
             Some(room),
@@ -988,8 +1036,18 @@ fn session_kick(
         );
         return Response::text("shard unavailable").with_status_code(500);
     };
-    let _ = shard_tx.send(ShardCommand::Kick { client_id });
-    audit_record_api(shared, "session/kick", Some(room), 200, true, None);
+    if shard_tx.send(ShardCommand::Kick { client_id }).is_err() {
+        audit_session_api(
+            shared,
+            "session/kick",
+            Some(room),
+            500,
+            false,
+            Some("shard channel closed"),
+        );
+        return Response::text("shard unavailable").with_status_code(500);
+    }
+    audit_session_api(shared, "session/kick", Some(room), 200, true, None);
     Response::from_data(
         "application/json",
         serde_json::to_vec(&serde_json::json!({
@@ -1040,6 +1098,12 @@ fn web_request(
         };
         if let Some(resp) = record {
             return resp;
+        }
+        // #240：内部接口收到未知/错误方法的 record·session 路径直接 404，
+        // 不落到公共 web/start 处理（避免 GET /session/kick 返回 web 页）。
+        let url = request.url();
+        if url.starts_with("/record/") || url.starts_with("/session/") {
+            return Response::text("not found").with_status_code(404);
         }
     }
     if request.method() == "GET" && request.url() == "/metrics" {
@@ -1364,6 +1428,10 @@ mod tests {
         assert_eq!(rooms.len(), 2);
         assert_eq!(rooms[0]["room"], "demo");
         assert_eq!(rooms[0]["clients"], 2);
+        assert_eq!(
+            rooms[0]["shards"].as_array().unwrap(),
+            serde_json::json!([0, 1]).as_array().unwrap()
+        );
         assert_eq!(rooms[1]["room"], "other");
         assert_eq!(rooms[1]["clients"], 1);
 
@@ -1416,6 +1484,10 @@ mod tests {
         let resp = session_kick(&shared, &shard_txs, Some("other"), Some("10"));
         assert_eq!(resp.status_code, 404);
 
+        // 分片通道不可用（shard_txs 为空）→ 500
+        let resp = session_kick(&shared, &[], Some("demo"), Some("10"));
+        assert_eq!(resp.status_code, 500);
+
         // 正常踢人 → 200 + Kick 命令送达对应分片
         let resp = session_kick(&shared, &shard_txs, Some("demo"), Some("10"));
         assert_eq!(resp.status_code, 200);
@@ -1445,6 +1517,38 @@ mod tests {
         assert_eq!(resp.status_code, 503);
         let resp = record_status(&shared);
         assert_eq!(resp.status_code, 503);
+    }
+
+    #[test]
+    fn internal_unknown_session_path_returns_404_not_web() {
+        let shared = Shared::new(1);
+        let router = Arc::new(Mutex::new(crate::router::ShardRouter::new(1)));
+        // 认证通过但路径/方法不匹配（GET /session/kick）→ 404，不回落 web 页。
+        let req = Request::fake_http(
+            "GET",
+            "/session/kick?room=demo&client=1",
+            vec![],
+            Vec::new(),
+        );
+        let resp = web_request(
+            &req,
+            "127.0.0.1:3478".parse().unwrap(),
+            "127.0.0.1:3478".parse().unwrap(),
+            Vec::new(),
+            router,
+            None,
+            None,
+            shared,
+            true,
+        );
+        assert_eq!(resp.status_code, 404);
+        let (mut reader, _) = resp.data.into_reader_and_size();
+        let mut body = String::new();
+        reader.read_to_string(&mut body).unwrap();
+        assert!(
+            !body.contains("<html"),
+            "must not fall through to web page: {body:.60}"
+        );
     }
 
     #[test]

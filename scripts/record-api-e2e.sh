@@ -39,9 +39,9 @@ curl -s -X POST -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/record/sta
 
 echo "== #240 审计：record_api 403/200 + room_start source=api + recordings gauge"
 AUDIT="$REC/audit.log"
-grep -q '"action":"record/start"' "$AUDIT" && grep -q '"status":403' "$AUDIT" \
+grep -q '"action":"record/start".*"status":403' "$AUDIT" \
   && echo "PASS audit record_api 403" || { echo "FAIL audit 403"; exit 1; }
-grep -q '"action":"record/start"' "$AUDIT" && grep -q '"status":200' "$AUDIT" \
+grep -q '"action":"record/start".*"status":200' "$AUDIT" \
   && echo "PASS audit record_api 200" || { echo "FAIL audit 200"; exit 1; }
 grep -q '"source":"api"' "$AUDIT" && echo "PASS audit room_start source=api" || { echo "FAIL source=api"; exit 1; }
 BODY=$(curl -s -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/metrics/prometheus")
@@ -64,7 +64,7 @@ curl -s -X POST -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/record/sto
   && echo "PASS stop ok" || { echo "FAIL stop"; exit 1; }
 
 echo "== #240 审计：record_api stop + room_end duration + recordings gauge 回落"
-grep -q '"action":"record/stop"' "$AUDIT" && grep -q '"status":200' "$AUDIT" \
+grep -q '"action":"record/stop".*"status":200' "$AUDIT" \
   && echo "PASS audit record_api stop" || { echo "FAIL audit stop"; exit 1; }
 grep -q '"duration_us"' "$AUDIT" && echo "PASS audit room_end duration_us" || { echo "FAIL duration_us"; exit 1; }
 BODY=$(curl -s -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/metrics/prometheus")
