@@ -71,15 +71,24 @@ PoP-B signal（BRIDGE_CMD + ROOM_POP_MAP + POP_URLS）
 配置（PoP-B 信令环境变量）：
 | 变量 | 说明 |
 |---|---|
-| `BRIDGE_CMD` | 房间桥命令模板，必须含 `{room}` 占位符（如 `aerodesk-bridge --remote-signal ws://... --local-signal ws://... --room {room} --codec h264`）。未设置 = 纯 v1 Redirect |
+| `BRIDGE_CMD` | 房间桥命令模板，建议含 `{room}` 占位符（如 `aerodesk-bridge --remote-signal ws://... --local-signal ws://... --room {room} --auth-token \"$BRIDGE_AUTH_TOKEN\" --codec h264`）；缺 `{room}` 时自动追加 `--room {room}`。未设置 = 纯 v1 Redirect |
+| `BRIDGE_AUTH_TOKEN` | 注入桥子进程环境的认证 token（`BRIDGE_CMD` 内以 `$BRIDGE_AUTH_TOKEN` 引用；配合 `--auth-token`，生产开启 JWT/静态 token 时必填） |
 | `BRIDGE_READY_TIMEOUT_SECS` | 桥就绪等待上限（默认 15） |
 | `BRIDGE_FAIL_COOLDOWN_SECS` | 桥失败冷却（默认 30；期间直接 Redirect 不反复 spawn） |
+| `BRIDGE_MAX_RUNNING` | 并发桥上限（默认 8；防房间名轮换绕过冷却的进程滥用） |
 
 语义/边界：
-- 同房间并发 Join 单飞（只 spawn 一次桥）；桥自身 publisher 腿 Join 免 Redirect；
-- 房间名仅 `[A-Za-z0-9._-]` 允许进命令模板（防 `sh -c` 注入），非法 → 直接 Redirect；
-- 桥进程随主 PoP 媒体消失自然退出，信令在下次 Join 时回收；
-- 桥就绪后保持运行直到进程退出/信令退出（Drop 清理子进程）。
+- **认证/配额先行**：桥决策在 `auth_result` 与房间/全局配额通过后执行（未授权
+  客户端无法触发进程 spawn）；桥自身 publisher 腿豁免配额（内部基础设施）；
+- 同房间并发 viewer 统一走 `ensure_ready` 单飞（只 spawn 一次桥，失败一致回退
+  Redirect）；桥自身 publisher 腿以 `is_running` 快路径放行（等自身就绪会死锁）；
+- 真实 publisher 在桥模式下一律回退 Redirect（桥只支持主 PoP→本 PoP 媒体方向）；
+- 房间名仅 `[A-Za-z0-9._-]` 且**不以 `-` 开头**才允许进命令模板（防 `sh -c`
+  注入/选项注入），非法 → 直接 Redirect；
+- 桥就绪后保持运行直到进程退出（主 PoP 媒体消失自然退出）；信令进程被 SIGTERM
+  强杀时桥会短暂孤儿化，随后因 WS 腿断开自行退出（不建议依赖 Drop）；
+- 桥中途死亡：已连接的 viewer 不会自动被踢/重定向，重新 Join（或客户端重连）
+  会按冷却逻辑重建桥；生产监控用 SFU 会话 API（#240）巡检桥两端客户端数。
 
 ### 延迟 p99 验收（本地方法学，`scripts/bridge-fallback-e2e.sh`）
 
@@ -99,7 +108,8 @@ PoP-B signal（BRIDGE_CMD + ROOM_POP_MAP + POP_URLS）
 2. **验收**：跨 PoP viewer 加入 → 本 PoP 接入且无 Redirect；`signal` 日志出现
    `bridge ready`；`/session/clients` 双 PoP 各 +2（publisher+bridge-view / bridge-pub+viewer）。
 3. **延迟 p99**：按 `#8` 方法在真实链路采集 ≥30 个 `LATENCY` 样本，p99 ≤ 验收阈值
-   （预算：直连 p99 + 2×10–30ms 中继预算，按业务 SLA 定）。
+   （预算：直连 p99 + 2×10–30ms 中继预算，按业务 SLA 定）；本地对比
+   `scripts/bridge-fallback-e2e.sh`。
 4. **失败回退**：停掉 PoP-A 信令（或令桥必失败）→ viewer 收到 Redirect 并自动
    跟随到 PoP-A；恢复后冷却期结束自动重新桥接。
 5. **监控**：SFU `/metrics/prometheus`（#238 质量指标）+ 会话 API（#240）巡检

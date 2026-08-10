@@ -376,10 +376,19 @@ fn load_config() -> Config {
                 .and_then(|v| v.parse().ok())
                 .map(Duration::from_secs)
                 .unwrap_or(Duration::from_secs(30));
+            let max_running = std::env::var("BRIDGE_MAX_RUNNING")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8);
             if !cmd.contains("{room}") {
                 warn!("BRIDGE_CMD 不含 {{room}} 占位符（自动追加 --room）；建议显式写明");
             }
-            Arc::new(BridgeManager::new(cmd, ready_timeout, fail_cooldown))
+            Arc::new(BridgeManager::new(
+                cmd,
+                ready_timeout,
+                fail_cooldown,
+                max_running,
+            ))
         });
     if bridge.is_some() {
         info!(
@@ -529,19 +538,96 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 match &target_pop {
                     Some(pop) if pop != &config.pop_id => {
                         if let Some(url) = config.pop_urls.get(pop) {
-                            // #216 M3：配置 BRIDGE_CMD 时先尝试桥接——viewer 在本
-                            // PoP 经桥收流（不 Redirect）；桥失败/超时回退 v1 Redirect。
-                            let bridge_ok = config.bridge.as_ref().is_some_and(|b| {
-                                b.is_running(&room) || b.ensure_ready(&room) == BridgeOutcome::Ready
-                            });
-                            if bridge_ok {
-                                info!(
-                                    "room {room} -> pop {pop} (self={self}): bridge ready, join locally",
-                                    self = config.pop_id
-                                );
+                            // #216 M3：配置 BRIDGE_CMD 时，先认证+配额（防止未授权
+                            // 客户端触发进程 spawn），再尝试桥接——viewer 在本 PoP
+                            // 经桥收流（不 Redirect）；桥失败/超时/冷却回退 v1 Redirect。
+                            if config.bridge.is_some() {
+                                // 认证先行（纯校验，不占配额；下方正式流程会再验一次）。
+                                let claims_pre =
+                                    auth_result(&config, auth_token.as_deref(), &room, role);
+                                let auth_ok_pre = if config.jwt_secret.is_some()
+                                    || !config.auth_tokens.is_empty()
+                                {
+                                    claims_pre.is_some()
+                                } else {
+                                    true
+                                };
+                                if !auth_ok_pre {
+                                    send(
+                                        ws.clone(),
+                                        SignalMessage::Error {
+                                            message: "auth failed".into(),
+                                        },
+                                    );
+                                    break;
+                                }
+                                // 配额先行（纯检查）：桥自身 publisher 腿豁免。
+                                let bridge_leg_pre = config.bridge.as_ref().is_some_and(|b| {
+                                    role == Role::Publisher && b.is_running(&room)
+                                });
+                                if !bridge_leg_pre {
+                                    let room_len = rooms
+                                        .lock()
+                                        .unwrap()
+                                        .get(&room)
+                                        .map(|peers| peers.len())
+                                        .unwrap_or(0);
+                                    let total = TOTAL_CLIENTS
+                                        .get()
+                                        .expect("total initialized")
+                                        .load(Ordering::Relaxed);
+                                    if let Err(reason) = quota_ok(
+                                        room_len,
+                                        total,
+                                        config.max_room_clients,
+                                        config.max_total_clients,
+                                    ) {
+                                        info!("reject join room={room} role={role:?}: {reason}");
+                                        send(
+                                            ws.clone(),
+                                            SignalMessage::Error {
+                                                message: reason.to_string(),
+                                            },
+                                        );
+                                        continue;
+                                    }
+                                }
+                                // 桥决策：桥自身 publisher 腿走 is_running 快路径
+                                // （等自身就绪会死锁）；真实 publisher 回退 Redirect
+                                // （桥只支持主 PoP→本 PoP 媒体方向）；viewer 统一
+                                // ensure_ready（并发 viewer 共享单飞结果，失败一致回退）。
+                                let bridge_ok = match config.bridge.as_ref() {
+                                    Some(b) if role == Role::Publisher && b.is_running(&room) => {
+                                        true
+                                    }
+                                    Some(_) if role == Role::Publisher => false,
+                                    Some(b) => b.ensure_ready(&room) == BridgeOutcome::Ready,
+                                    None => false,
+                                };
+                                if bridge_ok {
+                                    info!(
+                                        "room {room} -> pop {pop} (self={self}): bridge ready, join locally",
+                                        self = config.pop_id
+                                    );
+                                } else {
+                                    info!(
+                                        "room {room} -> pop {pop} (self={self}): bridge unavailable, fallback redirect to {url}",
+                                        self = config.pop_id
+                                    );
+                                    send(
+                                        ws.clone(),
+                                        SignalMessage::Redirect {
+                                            pop: pop.clone(),
+                                            url: url.clone(),
+                                            reason: Some("room pinned to pop".into()),
+                                        },
+                                    );
+                                    continue;
+                                }
                             } else {
+                                // v1：无桥编排 → 直接 Redirect。
                                 info!(
-                                    "room {room} -> pop {pop} (self={self}): bridge unavailable, fallback redirect to {url}",
+                                    "room {room} -> pop {pop} (self={self}); redirect to {url}",
                                     self = config.pop_id
                                 );
                                 send(
@@ -590,8 +676,13 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                     );
                     break;
                 }
-                // #163 配额：房间/全局上限检查（0=不限）。
-                {
+                // #163 配额：房间/全局上限检查（0=不限）。桥自身 publisher 腿是
+                // 内部基础设施，豁免（否则小配额下会把真实 viewer 挤掉）。
+                let bridge_leg = config
+                    .bridge
+                    .as_ref()
+                    .is_some_and(|b| role == Role::Publisher && b.is_running(&room));
+                if !bridge_leg {
                     let room_len = rooms
                         .lock()
                         .unwrap()

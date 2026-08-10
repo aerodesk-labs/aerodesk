@@ -48,6 +48,8 @@
 | signal | `BRIDGE_CMD` | 跨 PoP 桥接编排（#216 M3，可选）：房间桥命令模板（含 `{room}`）。设置后跨 PoP viewer 先经桥在本 PoP 接入，失败/超时回退 v1 Redirect（详见 docs/BRIDGE.md） |
 | signal | `BRIDGE_READY_TIMEOUT_SECS` | 桥就绪等待上限（默认 15） |
 | signal | `BRIDGE_FAIL_COOLDOWN_SECS` | 桥失败冷却（默认 30；期间直接 Redirect 不反复 spawn） |
+| signal | `BRIDGE_MAX_RUNNING` | 并发桥上限（默认 8；防房间名轮换绕过冷却的进程滥用） |
+| signal | `BRIDGE_AUTH_TOKEN` | 注入桥子进程的认证 token（`BRIDGE_CMD` 内 `$BRIDGE_AUTH_TOKEN` 引用，配合 aerodesk-bridge `--auth-token`） |
 
 ## 2. TLS 证书自动化
 

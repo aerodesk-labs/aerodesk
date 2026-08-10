@@ -20,7 +20,9 @@ ROOM="bridge-fb-$(date +%s)"
 SIG_A=14800; INT_A=14802; PLAIN_A=14803; MEDIA_A=14878
 # PoP-B
 SIG_B=14900; INT_B=14902; PLAIN_B=14903; MEDIA_B=14978
-BRIDGE_CMD="$TARGET_DIR/aerodesk-bridge --remote-signal ws://127.0.0.1:${PLAIN_A} --local-signal ws://127.0.0.1:${PLAIN_B} --room {room} --codec h264"
+AUTH="test-bridge-token"
+# 生产认证路径：信令 AUTH_TOKENS 校验；桥经 BRIDGE_AUTH_TOKEN 注入 --auth-token。
+BRIDGE_CMD="$TARGET_DIR/aerodesk-bridge --remote-signal ws://127.0.0.1:${PLAIN_A} --local-signal ws://127.0.0.1:${PLAIN_B} --room {room} --auth-token \"\$BRIDGE_AUTH_TOKEN\" --codec h264"
 
 fail() { echo "FAIL: $*"; exit 1; }
 cleanup() {
@@ -62,21 +64,21 @@ echo "== 启动 PoP-A（148xx）"
 RECORD_DIR="$REC_A" SFU_MEDIA_PORT="$MEDIA_A" SFU_SIGNAL_PORT="$SIG_A" SFU_INTERNAL_PORT="$INT_A" \
   "$TARGET_DIR/aerodesk-sfu" >/tmp/bfb-sfu-a.log 2>&1 &
 SFU_A=$!
-POP_ID=pop-a SIGNAL_PORT=14801 SIGNAL_PLAIN_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
+POP_ID=pop-a AUTH_TOKENS="$AUTH" SIGNAL_PORT=14801 SIGNAL_PLAIN_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
   "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-a.log 2>&1 &
 SIG_A_PID=$!
 for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_A" 2>/dev/null && break; sleep 0.2; done
 sleep 0.3
 
 echo "== 场景 0：直连延迟基线（同 PoP-A publisher+viewer，~20s）"
-"$TARGET_DIR/aerodesk-cli" --role publisher --signal "ws://127.0.0.1:${PLAIN_A}" --room "$ROOM" \
+"$TARGET_DIR/aerodesk-cli" --role publisher --signal "ws://127.0.0.1:${PLAIN_A}" --room "$ROOM" --token "$AUTH" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/bfb-direct-pub.log 2>&1 &
 PUB0=$!
 ok=0
 for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-direct-pub.log 2>/dev/null && ok=1 && break; sleep 0.5; done
 [ "$ok" = "1" ] || fail "场景0：publisher 未连上"
-"$TARGET_DIR/aerodesk-cli" --role viewer --signal "ws://127.0.0.1:${PLAIN_A}" --room "$ROOM" \
+"$TARGET_DIR/aerodesk-cli" --role viewer --signal "ws://127.0.0.1:${PLAIN_A}" --room "$ROOM" --token "$AUTH" \
   >/tmp/bfb-direct-view.log 2>&1 &
 VIEW0=$!
 wait_decoded /tmp/bfb-direct-view.log || fail "场景0：直连 viewer 未解码"
@@ -94,8 +96,8 @@ echo "== 启动 PoP-B（149xx，BRIDGE_CMD 桥优先）"
 RECORD_DIR="$REC_B" SFU_MEDIA_PORT="$MEDIA_B" SFU_SIGNAL_PORT="$SIG_B" SFU_INTERNAL_PORT="$INT_B" \
   "$TARGET_DIR/aerodesk-sfu" >/tmp/bfb-sfu-b.log 2>&1 &
 SFU_B=$!
-POP_ID=pop-b ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=ws://127.0.0.1:${PLAIN_A}" \
-  BRIDGE_CMD="$BRIDGE_CMD" BRIDGE_READY_TIMEOUT_SECS=20 \
+POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=ws://127.0.0.1:${PLAIN_A}" \
+  BRIDGE_CMD="$BRIDGE_CMD" BRIDGE_READY_TIMEOUT_SECS=20 BRIDGE_AUTH_TOKEN="$AUTH" \
   SIGNAL_PORT=14901 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
   "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b.log 2>&1 &
 SIG_B_PID=$!
@@ -105,7 +107,7 @@ grep -q "bridge orchestration enabled" /tmp/bfb-sig-b.log || fail "PoP-B 未启�
 echo "  PoP-B bridge orchestration enabled"
 
 echo "== 场景 1：PoP-A publisher + PoP-B viewer（桥优先，不 Redirect）"
-"$TARGET_DIR/aerodesk-cli" --role publisher --signal "ws://127.0.0.1:${PLAIN_A}" --room "$ROOM" \
+"$TARGET_DIR/aerodesk-cli" --role publisher --signal "ws://127.0.0.1:${PLAIN_A}" --room "$ROOM" --token "$AUTH" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/bfb-pub-a.log 2>&1 &
 PUB_A=$!
@@ -113,7 +115,7 @@ ok=0
 for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-pub-a.log 2>/dev/null && ok=1 && break; sleep 0.5; done
 [ "$ok" = "1" ] || fail "场景1：PoP-A publisher 未连上"; echo "  publisher connected"
 
-"$TARGET_DIR/aerodesk-cli" --role viewer --signal "ws://127.0.0.1:${PLAIN_B}" --room "$ROOM" \
+"$TARGET_DIR/aerodesk-cli" --role viewer --signal "ws://127.0.0.1:${PLAIN_B}" --room "$ROOM" --token "$AUTH" \
   >/tmp/bfb-view-b.log 2>&1 &
 VIEW_B=$!
 wait_decoded /tmp/bfb-view-b.log || fail "场景1：PoP-B viewer 未解码跨 PoP 媒体（见 /tmp/bfb-view-b.log /tmp/bfb-sig-b.log）"
@@ -144,14 +146,14 @@ pkill -f 'aerodesk-bridge' 2>/dev/null || true
 kill "$SIG_B_PID" 2>/dev/null || true; wait "$SIG_B_PID" 2>/dev/null || true
 sleep 1
 # 重启 PoP-B 信令：BRIDGE_CMD 必失败（false）→ 桥失败 → 回退 Redirect。
-POP_ID=pop-b ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=ws://127.0.0.1:${PLAIN_A}" \
+POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=ws://127.0.0.1:${PLAIN_A}" \
   BRIDGE_CMD="false" BRIDGE_READY_TIMEOUT_SECS=5 BRIDGE_FAIL_COOLDOWN_SECS=5 \
   SIGNAL_PORT=14901 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
   "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b2.log 2>&1 &
 SIG_B_PID=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break; sleep 0.2; done
 # PoP-A publisher 仍在 room（重新起）
-"$TARGET_DIR/aerodesk-cli" --role publisher --signal "ws://127.0.0.1:${PLAIN_A}" --room "$ROOM" \
+"$TARGET_DIR/aerodesk-cli" --role publisher --signal "ws://127.0.0.1:${PLAIN_A}" --room "$ROOM" --token "$AUTH" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/bfb-pub-a2.log 2>&1 &
 PUB_A=$!
@@ -159,7 +161,7 @@ ok=0
 for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-pub-a2.log 2>/dev/null && ok=1 && break; sleep 0.5; done
 [ "$ok" = "1" ] || fail "场景2：PoP-A publisher 未连上"
 
-"$TARGET_DIR/aerodesk-cli" --role viewer --signal "ws://127.0.0.1:${PLAIN_B}" --room "$ROOM" \
+"$TARGET_DIR/aerodesk-cli" --role viewer --signal "ws://127.0.0.1:${PLAIN_B}" --room "$ROOM" --token "$AUTH" \
   >/tmp/bfb-view-b2.log 2>&1 &
 VIEW_B=$!
 ok=0

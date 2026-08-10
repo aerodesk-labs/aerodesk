@@ -63,16 +63,24 @@ pub struct BridgeManager {
     ready_timeout: Duration,
     /// 失败冷却（默认 30s，防止桥持续失败时反复 spawn）。
     fail_cooldown: Duration,
+    /// 并发桥上限（默认 8，防房间名轮换绕过冷却的进程滥用，#244 review）。
+    max_running: usize,
     running: Mutex<HashMap<String, RunningBridge>>,
     failed: Mutex<HashMap<String, Instant>>,
 }
 
 impl BridgeManager {
-    pub fn new(cmd: String, ready_timeout: Duration, fail_cooldown: Duration) -> Self {
+    pub fn new(
+        cmd: String,
+        ready_timeout: Duration,
+        fail_cooldown: Duration,
+        max_running: usize,
+    ) -> Self {
         Self {
             cmd,
             ready_timeout,
             fail_cooldown,
+            max_running: max_running.max(1),
             running: Mutex::new(HashMap::new()),
             failed: Mutex::new(HashMap::new()),
         }
@@ -106,6 +114,19 @@ impl BridgeManager {
                     return BridgeOutcome::Redirect;
                 }
                 failed.remove(room);
+            }
+        }
+
+        // 全局并发上限（防房间名轮换绕过 per-room 冷却的进程滥用）。
+        {
+            let running = self.running.lock().unwrap();
+            if running.len() >= self.max_running {
+                warn!(
+                    "bridge: running bridges {} >= max {}; fallback redirect",
+                    running.len(),
+                    self.max_running
+                );
+                return BridgeOutcome::Redirect;
             }
         }
 
@@ -239,6 +260,7 @@ impl Drop for BridgeManager {
 /// 房间名安全校验：仅 `[A-Za-z0-9._-]`（防 `sh -c` 命令注入）。
 pub fn sanitize_room(room: &str) -> bool {
     !room.is_empty()
+        && !room.starts_with('-') // 防模板缺 --room 时被当作命令行选项（#244 review）
         && room
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
@@ -262,6 +284,7 @@ mod tests {
             cmd.to_string(),
             Duration::from_millis(ready_ms),
             Duration::from_secs(cooldown_s),
+            8,
         )
     }
 
@@ -274,6 +297,9 @@ mod tests {
         assert!(!sanitize_room("$(id)"));
         assert!(!sanitize_room("a b"));
         assert!(!sanitize_room("a|b"));
+        // 前导 '-'：模板缺 --room 时会被当作命令行选项（#244 review）。
+        assert!(!sanitize_room("-h"));
+        assert!(!sanitize_room("--help"));
     }
 
     #[test]
@@ -288,6 +314,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn ready_when_marker_printed() {
         let m = mgr("sh -c 'echo \"publisher leg: up\"; sleep 30'", 5000, 60);
@@ -295,6 +322,7 @@ mod tests {
         assert!(m.is_running("demo"), "就绪后桥应仍在运行");
     }
 
+    #[cfg(unix)]
     #[test]
     fn failure_redirects_and_cooldown_blocks_respawn() {
         let m = mgr("sh -c 'exit 1'", 800, 60);
@@ -318,6 +346,7 @@ mod tests {
         assert!(!m.is_running("x; touch /tmp/pwned"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn timeout_without_marker_redirects() {
         let m = mgr("sh -c 'sleep 30'", 300, 60);
@@ -325,15 +354,22 @@ mod tests {
         assert!(!m.is_running("demo"), "超时失败后桥应被清理");
     }
 
+    #[cfg(unix)]
     #[test]
     fn concurrent_ensure_ready_spawns_once() {
-        // 两个线程同时 ensure_ready：只 spawn 一个进程（用 pid 文件计数）。
-        let m = Arc::new(mgr(
-            "sh -c 'echo \"publisher leg: up\"; echo x >> /tmp/bridge-spawn-count; sleep 30'",
-            5000,
-            60,
+        // 两个线程同时 ensure_ready：只 spawn 一个进程（用 temp_dir+pid 计数文件）。
+        let count_file = std::env::temp_dir().join(format!("bridge-spawn-{}", std::process::id()));
+        let _ = std::fs::remove_file(&count_file);
+        let cmd = format!(
+            "sh -c 'echo \"publisher leg: up\"; echo x >> {}; sleep 30'",
+            count_file.display()
+        );
+        let m = Arc::new(BridgeManager::new(
+            cmd,
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+            8,
         ));
-        let _ = std::fs::remove_file("/tmp/bridge-spawn-count");
         let m1 = m.clone();
         let m2 = m.clone();
         let t1 = std::thread::spawn(move || m1.ensure_ready("demo"));
@@ -342,10 +378,25 @@ mod tests {
         let r2 = t2.join().unwrap();
         assert_eq!(r1, BridgeOutcome::Ready);
         assert_eq!(r2, BridgeOutcome::Ready);
-        let count = std::fs::read_to_string("/tmp/bridge-spawn-count")
+        let count = std::fs::read_to_string(&count_file)
             .map(|s| s.lines().count())
             .unwrap_or(0);
         assert_eq!(count, 1, "同房间并发只应 spawn 一次");
-        let _ = std::fs::remove_file("/tmp/bridge-spawn-count");
+        let _ = std::fs::remove_file(&count_file);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn max_running_cap_redirects_new_rooms() {
+        // 上限 1：第一个房间就绪后，第二个房间必须 Redirect（不 spawn）。
+        let m = BridgeManager::new(
+            "sh -c 'echo \"publisher leg: up\"; sleep 30'".to_string(),
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+            1,
+        );
+        assert_eq!(m.ensure_ready("room-a"), BridgeOutcome::Ready);
+        assert_eq!(m.ensure_ready("room-b"), BridgeOutcome::Redirect);
+        assert!(!m.is_running("room-b"), "超限房间不应有桥");
     }
 }
