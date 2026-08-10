@@ -1,0 +1,164 @@
+# AeroDesk SFU 遥测告警规则模板（#240）
+#
+# 依赖指标（aerodesk-sfu /metrics/prometheus）：
+#   aerodesk_sfu_clients / rx·tx_packets·bytes_total / rtt_us / egress·ingress_loss
+#   bwe_tx_bps / qos_clients / turn_allocations[_total] / recordings_active / draining
+# 磁盘水位依赖 node_exporter（挂载 RECORD_DIR 的 filesystem）。
+#
+# 用法：
+#   1. Prometheus scrape_configs 增加：
+#        - job_name: aerodesk-sfu
+#          static_configs: [{ targets: ["<sfu>:3000"] }]
+#          metrics_path: /metrics/prometheus
+#          scheme: https
+#          tls_config: { insecure_skip_verify: true }   # 自签证书时
+#   2. 规则文件挂载到 Prometheus：
+#        rule_files: [ "deploy/prometheus/sfu-alerts.yml" ]
+#   3. 语法校验：promtool check rules deploy/prometheus/sfu-alerts.yml
+#   4. Alertmanager 按 severity 路由：page → 电话/IM，warning → 工单。
+#
+# 阈值按单 PoP 规模给出默认值，生产按容量基线调整（scripts/sfu-capacity-bench.sh）。
+groups:
+  - name: aerodesk-sfu
+    rules:
+      # 优雅关闭 / 滚动发布：SFU 进入 draining 拒绝新房间；长时间处于 draining
+      # 说明排空卡住（超过 3s drain 窗口仍在服务）。
+      - alert: AeroDeskSFUDraining
+        expr: aerodesk_sfu_draining == 1
+        for: 2m
+        labels:
+          severity: page
+          team: infra
+        annotations:
+          summary: "SFU {{ $labels.instance }} 进入 draining 超过 2 分钟"
+          description: "实例可能卡在优雅关闭（客户端未断/录制 finalize 慢），需人工确认发布是否完成。"
+
+      # 抓取/进程级故障：scrape 失败（up==0）或连续无采集。
+      - alert: AeroDeskSFUScrapeDown
+        expr: up{job="aerodesk-sfu"} == 0
+        for: 2m
+        labels:
+          severity: page
+          team: infra
+        annotations:
+          summary: "SFU {{ $labels.instance }} 抓取失败"
+          description: "Prometheus 连续 2 分钟无法抓取该 SFU 指标，服务可能宕机或网络隔离。"
+
+      # 客户端掉线率：5 分钟内在线客户端数下降 >50%（如分片崩溃/网络分区）。
+      - alert: AeroDeskSFUClientDropHigh
+        expr: |
+          (
+            (aerodesk_sfu_clients - aerodesk_sfu_clients offset 5m)
+            / clamp_min(aerodesk_sfu_clients offset 5m, 1)
+          ) < -0.5
+        for: 2m
+        labels:
+          severity: page
+          team: infra
+        annotations:
+          summary: "SFU {{ $labels.instance }} 客户端大量掉线（5 分钟下降 >50%）"
+          description: "在线客户端从 {{ $value | humanizePercentage }} 比例骤降，检查分片线程/网络/进程状态。"
+
+      # 媒体停摆：有在线客户端但收包为 0（发布/转发链路卡死）。
+      - alert: AeroDeskSFUMediaStall
+        expr: |
+          aerodesk_sfu_clients > 0
+          and rate(aerodesk_sfu_rx_packets_total[5m]) == 0
+        for: 5m
+        labels:
+          severity: page
+          team: media
+        annotations:
+          summary: "SFU {{ $labels.instance }} 媒体链路停摆"
+          description: "存在 {{ $labels.shard | default(0) }} 在线客户端但 5 分钟收包为 0，媒体转发可能卡死。"
+
+      # 出向丢包过高（#238 聚合：0.0-1.0，5s 心跳均值）。
+      - alert: AeroDeskSFUHighEgressLoss
+        expr: aerodesk_sfu_egress_loss > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          team: media
+        annotations:
+          summary: "SFU {{ $labels.instance }} 出向丢包 {{ $value | humanizePercentage }}"
+          description: "egress loss 超过 5% 持续 5 分钟：检查对端带宽/网络抖动/SFU 拥塞。"
+
+      # 入向丢包过高。
+      - alert: AeroDeskSFUHighIngressLoss
+        expr: aerodesk_sfu_ingress_loss > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          team: media
+        annotations:
+          summary: "SFU {{ $labels.instance }} 入向丢包 {{ $value | humanizePercentage }}"
+          description: "ingress loss 超过 5% 持续 5 分钟：检查发布端上行网络。"
+
+      # RTT 过高（微秒；500ms 已属严重劣化）。
+      - alert: AeroDeskSFUHighRTT
+        expr: aerodesk_sfu_rtt_us > 500000
+        for: 5m
+        labels:
+          severity: warning
+          team: media
+        annotations:
+          summary: "SFU {{ $labels.instance }} RTT {{ $value }}us"
+          description: "平均 RTT 超过 500ms 持续 5 分钟：网络路径或 CPU 过载。"
+
+      # 质量样本缺失：有在线客户端但 qos_clients==0（#238 心跳聚合未生效，
+      # 可能 PeerStats 链路异常或聚合逻辑回归）。
+      - alert: AeroDeskSFUQosClientsMissing
+        expr: aerodesk_sfu_clients > 0 and aerodesk_sfu_qos_clients == 0
+        for: 10m
+        labels:
+          severity: warning
+          team: media
+        annotations:
+          summary: "SFU {{ $labels.instance }} 无质量样本"
+          description: "在线客户端 {{ $value }} 个但 qos_clients 为 0，媒体质量指标失效。"
+
+      # 内嵌 TURN allocation 逼近容量（单 PoP 默认阈值 5000，按部署调整）。
+      - alert: AeroDeskSFUTurnAllocationsHigh
+        expr: aerodesk_sfu_turn_allocations > 5000
+        for: 10m
+        labels:
+          severity: warning
+          team: infra
+        annotations:
+          summary: "SFU {{ $labels.instance }} TURN allocation 偏高（{{ $value }}）"
+          description: "活跃 allocation 超过 5000 持续 10 分钟，中继端口段可能耗尽，需扩容或分流。"
+
+      # 录制磁盘水位（RECORD_DIR 所在挂载点 <20% 可用；路径按部署修改）。
+      - alert: AeroDeskSFURecordingDiskWatermark
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/var/lib/aerodesk/records"}
+          / node_filesystem_size_bytes{mountpoint="/var/lib/aerodesk/records"} < 0.2
+        for: 5m
+        labels:
+          severity: page
+          team: infra
+        annotations:
+          summary: "录制磁盘可用空间低于 20%"
+          description: "RECORD_DIR 磁盘可用 {{ $value | humanizePercentage }}，录制可能失败，需归档/扩容。"
+
+      # 在录房间数：RECORD_ON_DEMAND 部署下，有客户端但没有任何录制进行中
+      # 可能说明按需 start 未被调用或录制失败（仅按需录制部署启用此规则）。
+      - alert: AeroDeskSFUNoActiveRecordings
+        expr: aerodesk_sfu_clients > 0 and aerodesk_sfu_recordings_active == 0
+        for: 30m
+        labels:
+          severity: warning
+          team: infra
+        annotations:
+          summary: "SFU {{ $labels.instance }} 有客户端但无在录房间"
+          description: "在线客户端 {{ $value }} 个，recordings_active 为 0；若期望持续录制请检查按需 start 调用或 RECORD_DIR。"
+
+      # 分片 CPU/负载（示例，注释默认关闭）：SFU 未导出每分片 CPU，
+      # 用 node_exporter 的进程 CPU 近似，或按容量基准的 pps 阈值告警。
+      # - alert: AeroDeskSFUPpsHigh
+      #   expr: rate(aerodesk_sfu_rx_packets_total[1m]) + rate(aerodesk_sfu_tx_packets_total[1m]) > 150000
+      #   for: 10m
+      #   labels: { severity: warning, team: media }
+      #   annotations:
+      #     summary: "SFU {{ $labels.instance }} 双向包率偏高"
+      #     description: "双向包率超过 15 万 pps 持续 10 分钟，接近分片容量基线（PPS_CAPACITY=20 万）。"

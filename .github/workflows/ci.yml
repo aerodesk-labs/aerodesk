@@ -123,10 +123,16 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/popreg-e2e.sh
 
-      # #160 SFU 按需录制 API：内部接口 start/stop/status + 403 + 产物断言。
+      # #160 SFU 按需录制 API：内部接口 start/stop/status + 403 + 产物断言
+      # （#240 扩展：record_api 审计 + recordings_active gauge）。
       - name: e2e record API (macOS only)
         if: runner.os == 'macOS'
         run: ./scripts/record-api-e2e.sh
+
+      # #240 SFU 会话管理 API：房间/客户端列表 + 踢人 + 审计留痕。
+      - name: e2e session API (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/session-api-e2e.sh
 
       # #163 信令连接配额：房间/全局上限，Join 超限拒绝。
       - name: e2e signal connection quota (macOS only)

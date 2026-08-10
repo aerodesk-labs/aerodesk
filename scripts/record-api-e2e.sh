@@ -37,6 +37,17 @@ echo "== start 录制房间 $ROOM"
 curl -s -X POST -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/record/start?room=$ROOM" | grep -q '"started":true' \
   && echo "PASS start ok" || { echo "FAIL start"; exit 1; }
 
+echo "== #240 审计：record_api 403/200 + room_start source=api + recordings gauge"
+AUDIT="$REC/audit.log"
+grep -q '"action":"record/start"' "$AUDIT" && grep -q '"status":403' "$AUDIT" \
+  && echo "PASS audit record_api 403" || { echo "FAIL audit 403"; exit 1; }
+grep -q '"action":"record/start"' "$AUDIT" && grep -q '"status":200' "$AUDIT" \
+  && echo "PASS audit record_api 200" || { echo "FAIL audit 200"; exit 1; }
+grep -q '"source":"api"' "$AUDIT" && echo "PASS audit room_start source=api" || { echo "FAIL source=api"; exit 1; }
+BODY=$(curl -s -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/metrics/prometheus")
+echo "$BODY" | grep -q '^aerodesk_sfu_recordings_active 1$' \
+  && echo "PASS recordings_active=1" || { echo "FAIL recordings_active"; exit 1; }
+
 echo "== publisher 推流 4s"
 ./target/debug/aerodesk-cli --role publisher --encoder x264 --noisy \
     --signal ws://127.0.0.1:14003 --room "$ROOM" >/tmp/recapi-pub.log 2>&1 &
@@ -51,6 +62,14 @@ curl -s -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/record/status" | g
 echo "== stop 录制"
 curl -s -X POST -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/record/stop?room=$ROOM" | grep -q '"stopped":true' \
   && echo "PASS stop ok" || { echo "FAIL stop"; exit 1; }
+
+echo "== #240 审计：record_api stop + room_end duration + recordings gauge 回落"
+grep -q '"action":"record/stop"' "$AUDIT" && grep -q '"status":200' "$AUDIT" \
+  && echo "PASS audit record_api stop" || { echo "FAIL audit stop"; exit 1; }
+grep -q '"duration_us"' "$AUDIT" && echo "PASS audit room_end duration_us" || { echo "FAIL duration_us"; exit 1; }
+BODY=$(curl -s -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/metrics/prometheus")
+echo "$BODY" | grep -q '^aerodesk_sfu_recordings_active 0$' \
+  && echo "PASS recordings_active=0 after stop" || { echo "FAIL recordings_active reset"; exit 1; }
 
 echo "== 断言产物"
 FAIL=0

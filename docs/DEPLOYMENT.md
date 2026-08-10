@@ -107,15 +107,24 @@ signal.aerodesk.io {
   UDP+TCP，`SFU_TURN_TLS_PORT=5349` TLS，#196）；外部 coturn 部署可设 `TURN_URLS`
   指向本 PoP（向后兼容）。开放 UDP/TCP 3479、TCP 5349 与 `RELAY 端口段` 49152-49200。
 - **监控告警**：SFU 暴露 `GET /metrics/prometheus`（Prometheus 文本格式：每分片
-  clients/rx·tx packets/bytes + 合计 + `aerodesk_sfu_draining` gauge），可直接被
-  Prometheus 抓取；`GET /metrics`（JSON）保留兼容 bench 工具。+ Alertmanager：
-  - 告警项：客户端掉线率、分片 CPU 突增、UDP 端口占用、录制目录磁盘水位 >80%
+  clients/rx·tx packets/bytes + 合计 + `aerodesk_sfu_draining` gauge，以及 #238
+  rtt_us/egress·ingress_loss/bwe_tx_bps/qos_clients、#220 turn_allocations[_total]、
+  #240 recordings_active），可直接被 Prometheus 抓取；`GET /metrics`（JSON）保留
+  兼容 bench 工具。**告警规则模板**：`deploy/prometheus/sfu-alerts.yml`（#240，
+  含 draining/抓取失败/客户端掉线/媒体停摆/丢包/RTT/质量样本缺失/TURN 容量/
+  录制磁盘水位/无在录房间），用 `promtool check rules` 校验后挂载到 Prometheus
+  `rule_files`，Alertmanager 按 `severity` 路由（page/warning）。磁盘水位依赖
+  node_exporter 暴露 RECORD_DIR 所在挂载点；分片 CPU 未导出，模板内置 pps 近似的
+  注释示例（配合容量基线 scripts/sfu-capacity-bench.sh）。
 - **健康检查**：`GET /healthz` 返回 JSON（`status: ok|draining` + shards/clients）；
   正常 200，**draining 中 503**，供 LB/探活与滚动发布判断。
 - **优雅关闭**：`SIGTERM`/`SIGINT` → 拒绝新房间（`/start` 503）→ 限时 3s drain
   现有客户端 → finalize 录制 → 退出；systemd `KillSignal=SIGTERM` 可安全停服。
 - **录制审计**：`RECORD_DIR` 落在独立数据盘（只读权限仅运维），
-  `audit.log` 按天轮转，接入 SIEM/对象存储归档。
+  `audit.log` 按天轮转，接入 SIEM/对象存储归档。事件含 `room_start`/`room_end`
+  （#240 起带 `source`：`auto`=首包自动开启、`api`=按需 API 开启；`room_end`
+  带 `duration_us`）与 `record_api`（#240：按需 API 调用留痕，action/room/status/
+  ok/detail，含 400/403/404/500/503 失败路径；只读 status 不写 audit.log 防轮询刷爆）。
 - **按需录制 API（#160）**：`RECORD_ON_DEMAND=1` 时通过内部接口（127.0.0.1:3002，
   `X-Internal-Token` 保护）按房间 start/stop/查询：
   ```sh
@@ -126,6 +135,16 @@ signal.aerodesk.io {
     'http://127.0.0.1:3002/record/stop?room=demo'   # 立即 finalize + meta.json
   ```
   未设置 `RECORD_DIR` 时返回 503；无 token 返回 403；`stop` 幂等。
+- **会话管理 API（#240）**：同一内部接口提供房间/客户端列表与踢人（运维/客服排障）：
+  ```sh
+  curl -H "X-Internal-Token: $SFU_TOKEN" 'http://127.0.0.1:3002/session/rooms'
+  curl -H "X-Internal-Token: $SFU_TOKEN" 'http://127.0.0.1:3002/session/clients?room=demo'
+  curl -X POST -H "X-Internal-Token: $SFU_TOKEN"     'http://127.0.0.1:3002/session/kick?room=demo&client=<id>'   # 踢人断连，幂等
+  ```
+  `session/rooms` 返回房间 + 客户端数 + 分片分布；`session/clients` 返回
+  id/room/role/shard/joined_at/uptime；kick 对不存在/房间不匹配的客户端返回 404，
+  参数缺失 400。踢人/未授权调用同样写入 audit.log（`record_api` 事件，
+  action=`session/kick`），供追责。
 
 ## 4. JWT 密钥管理
 
@@ -148,7 +167,7 @@ JWT_SECRET=<secret> cargo run -p aerodesk-cli -- --issue-token \
 ```
 {RECORD_DIR}/{room}.adrec       # magic "ADREC1\n" + [u64 ts_us][u32 len][payload]...
 {RECORD_DIR}/{room}.meta.json   # 起止时间/包数/字节数
-{RECORD_DIR}/audit.log          # JSON Lines：room_start / room_end
+{RECORD_DIR}/audit.log          # JSON Lines：room_start / room_end / record_api
 ```
 
 ## 6. 快速起一套（开发）
