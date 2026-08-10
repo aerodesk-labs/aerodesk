@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # #216 M7：桥接 TURN 中继路径验收（真实 NAT 就绪，#262）。
 #
-# 双 PoP（150xx/151xx 独立端口）各自启用内嵌 TURN（SFU_TURN_PORT 15079/15179），
+# 双 PoP（150xx/151xx 独立端口）各自启用内嵌 TURN（SFU_TURN_PORT 15079/15179、
+# SFU_TURN_TLS_PORT 15534/15634 防默认 5349 冲突），
 # 全部客户端 + bridge 双腿走 AERODESK_FORCE_RELAY=1（force_relay_env）：
 #   场景 0：PoP-A 直连基线（TURN relay）延迟 p50/p90/p99
 #   场景 1：PoP-A publisher(--audio) → bridge（view PoP-A + publish PoP-B，双腿 relay）
@@ -17,9 +18,9 @@ ROOM="bridge-turn-$(date +%s)"
 AUTH="test-bridge-token"
 TURN_SECRET="testsecret"
 # PoP-A
-SIG_A=15000; INT_A=15002; PLAIN_A=15003; MEDIA_A=15078; TURN_A=15079
+SIG_A=15000; INT_A=15002; PLAIN_A=15003; MEDIA_A=15078; TURN_A=15079; TURN_TLS_A=15534
 # PoP-B
-SIG_B=15100; INT_B=15102; PLAIN_B=15103; MEDIA_B=15178; TURN_B=15179
+SIG_B=15100; INT_B=15102; PLAIN_B=15103; MEDIA_B=15178; TURN_B=15179; TURN_TLS_B=15634
 SIG_A_URL="ws://127.0.0.1:${PLAIN_A}"; SIG_B_URL="ws://127.0.0.1:${PLAIN_B}"
 BRIDGE_CMD="$TARGET_DIR/aerodesk-bridge --remote-signal ${SIG_A_URL} --local-signal ${SIG_B_URL} --room {room} --auth-token \"\$BRIDGE_AUTH_TOKEN\" --codec h264"
 
@@ -46,7 +47,7 @@ def pct(p):
 print(pct(0.50), pct(0.90), pct(0.99))
 PY
 }
-latency_count() { grep -c "LATENCY:" "$1" 2>/dev/null || echo 0; }
+latency_count() { local c; c=$(grep -c "LATENCY:" "$1" 2>/dev/null); echo "${c:-0}"; }
 wait_decoded() {
   for _ in $(seq 1 240); do
     grep -qE "DECODED: [1-9]" "$1" 2>/dev/null && return 0
@@ -56,7 +57,7 @@ wait_decoded() {
 }
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli -p aerodesk-bridge
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli -p aerodesk-bridge || fail "构建失败"
 REC_A="$(mktemp -d)"; REC_B="$(mktemp -d)"
 
 # 所有客户端 + signal（桥子进程继承）都强制 TURN relay。
@@ -64,7 +65,7 @@ export AERODESK_FORCE_RELAY=1
 
 echo "== 启动 PoP-A（150xx，TURN ${TURN_A}）"
 RECORD_DIR="$REC_A" SFU_MEDIA_PORT="$MEDIA_A" SFU_SIGNAL_PORT="$SIG_A" SFU_INTERNAL_PORT="$INT_A" \
-  TURN_SECRET="$TURN_SECRET" SFU_TURN_PORT="$TURN_A" \
+  TURN_SECRET="$TURN_SECRET" SFU_TURN_PORT="$TURN_A" SFU_TURN_TLS_PORT="$TURN_TLS_A" \
   "$TARGET_DIR/aerodesk-sfu" >/tmp/btr-sfu-a.log 2>&1 &
 SFU_A=$!
 POP_ID=pop-a AUTH_TOKENS="$AUTH" SIGNAL_PORT=15001 SIGNAL_PLAIN_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
@@ -94,12 +95,13 @@ DIRECT_STATS=$(latency_stats /tmp/btr-direct-view.log)
 DIRECT_P99=$(echo "$DIRECT_STATS" | awk '{print $3}')
 DIRECT_N=$(latency_count /tmp/btr-direct-view.log)
 echo "  直连基线（TURN）：samples=${DIRECT_N} p50/p90/p99=${DIRECT_STATS}ms"
+[ "${DIRECT_N:-0}" -ge 15 ] || fail "场景0：直连样本不足（N=${DIRECT_N}，需 ≥15）"
 [ "$DIRECT_P99" != "NONE" ] || fail "场景0：无 LATENCY 样本"
 kill "$VIEW0" "$PUB0" 2>/dev/null || true; sleep 1
 
 echo "== 启动 PoP-B（151xx，TURN ${TURN_B}，BRIDGE_CMD 桥优先）"
 RECORD_DIR="$REC_B" SFU_MEDIA_PORT="$MEDIA_B" SFU_SIGNAL_PORT="$SIG_B" SFU_INTERNAL_PORT="$INT_B" \
-  TURN_SECRET="$TURN_SECRET" SFU_TURN_PORT="$TURN_B" \
+  TURN_SECRET="$TURN_SECRET" SFU_TURN_PORT="$TURN_B" SFU_TURN_TLS_PORT="$TURN_TLS_B" \
   "$TARGET_DIR/aerodesk-sfu" >/tmp/btr-sfu-b.log 2>&1 &
 SFU_B=$!
 POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=${SIG_A_URL}" \
@@ -145,16 +147,26 @@ BRIDGE_STATS=$(latency_stats /tmp/btr-view-b.log)
 BRIDGE_P99=$(echo "$BRIDGE_STATS" | awk '{print $3}')
 BRIDGE_N=$(latency_count /tmp/btr-view-b.log)
 echo "  桥路径（TURN）：samples=${BRIDGE_N} p50/p90/p99=${BRIDGE_STATS}ms（直连基线 ${DIRECT_STATS}ms）"
+[ "${BRIDGE_N:-0}" -ge 15 ] || fail "桥路径样本不足（N=${BRIDGE_N}，需 ≥15）"
 [ "$BRIDGE_P99" != "NONE" ] || fail "桥路径无 LATENCY 样本"
 THRESHOLD=$((DIRECT_P99 * 4 + 500))
 [ "$BRIDGE_P99" -lt "$THRESHOLD" ] || fail "桥延迟 p99=${BRIDGE_P99}ms ≥ 阈值 ${THRESHOLD}ms"
 
+grep -q "force_relay=true" /tmp/btr-pub-a.log || fail "publisher 未走 force-relay（env 未生效）"
+echo "  PASS publisher force-relay=true（进程内生效）"
+
 echo "== 双 SFU TURN allocation 断言"
 ALLOC_A=$(curl -s --max-time 2 "http://127.0.0.1:${INT_A}/metrics/prometheus" | awk '/^aerodesk_sfu_turn_allocations [0-9]+$/{v=$2} END{print v+0}')
 ALLOC_B=$(curl -s --max-time 2 "http://127.0.0.1:${INT_B}/metrics/prometheus" | awk '/^aerodesk_sfu_turn_allocations [0-9]+$/{v=$2} END{print v+0}')
-echo "  PoP-A turn_allocations=${ALLOC_A} PoP-B turn_allocations=${ALLOC_B}"
+TOTAL_A=$(curl -s --max-time 2 "http://127.0.0.1:${INT_A}/metrics/prometheus" | awk '/^aerodesk_sfu_turn_allocations_total [0-9]+$/{v=$2} END{print v+0}')
+TOTAL_B=$(curl -s --max-time 2 "http://127.0.0.1:${INT_B}/metrics/prometheus" | awk '/^aerodesk_sfu_turn_allocations_total [0-9]+$/{v=$2} END{print v+0}')
+echo "  PoP-A turn_allocations=${ALLOC_A}/total=${TOTAL_A} PoP-B turn_allocations=${ALLOC_B}/total=${TOTAL_B}"
 [ "${ALLOC_A:-0}" -gt 0 ] && [ "${ALLOC_B:-0}" -gt 0 ] || fail "TURN allocation 未生效（A=${ALLOC_A} B=${ALLOC_B}）"
+[ "${TOTAL_A:-0}" -gt 0 ] && [ "${TOTAL_B:-0}" -gt 0 ] || fail "TURN allocation 无累计（A=${TOTAL_A} B=${TOTAL_B}）"
 
-grep -qiE "panic|abort" /tmp/btr-*.log && fail "发现 panic/abort"
+# 只检查本次运行产生的日志（避免 /tmp 残留旧 btr-*.log 误报）。
+for lg in btr-sfu-a btr-sfu-b btr-sig-a btr-sig-b btr-pub-a btr-view-b btr-direct-pub btr-direct-view; do
+  grep -qiE "panic|abort" "/tmp/${lg}.log" && fail "发现 panic/abort（${lg}.log）"
+done
 kill "$VIEW_B" "$PUB_A" 2>/dev/null || true
 echo "== #216 M7 桥接 TURN 中继验收 PASS（直连 p50/p90/p99=${DIRECT_STATS}ms 桥=${BRIDGE_STATS}ms；allocations A=${ALLOC_A} B=${ALLOC_B}）=="
