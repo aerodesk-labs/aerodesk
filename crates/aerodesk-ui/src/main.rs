@@ -56,6 +56,35 @@ pub fn dispatch_dropped_files(
     }
 }
 
+/// 主控端视频区像素坐标 → 远端归一化坐标（0..1）。
+///
+/// 视频以 image-fit: contain 展示，主控/被控宽高比不同时有 letterbox 黑边；
+/// 必须先扣掉黑边、按实际绘制区域归一化，否则点击/滚轮位置会偏移（偏移量
+/// 等于黑边宽度）。与 app.slint cursor-pos 的绘制映射保持一致。
+pub fn viewer_to_remote_norm(
+    mx: f32,
+    my: f32,
+    area_w: f32,
+    area_h: f32,
+    frame_w: f32,
+    frame_h: f32,
+) -> (f32, f32) {
+    if frame_w > 0.0 && frame_h > 0.0 && area_w > 0.0 && area_h > 0.0 {
+        let scale = (area_w / frame_w).min(area_h / frame_h);
+        let draw_w = frame_w * scale;
+        let draw_h = frame_h * scale;
+        let ox = (area_w - draw_w) / 2.0;
+        let oy = (area_h - draw_h) / 2.0;
+        let nx = (mx - ox) / draw_w;
+        let ny = (my - oy) / draw_h;
+        return (nx.clamp(0.0, 1.0), ny.clamp(0.0, 1.0));
+    }
+    // 无帧信息：退回按整个视频区归一化（与旧行为一致，避免除零）。
+    let nx = if area_w > 0.0 { mx / area_w } else { 0.0 };
+    let ny = if area_h > 0.0 { my / area_h } else { 0.0 };
+    (nx.clamp(0.0, 1.0), ny.clamp(0.0, 1.0))
+}
+
 /// #29 多会话（主控端同时连接多个被控端，UI 标签最多 MAX_SESSIONS 个）：
 /// - `SESSIONS` 按标签顺序保存活动会话（稠密，与 UI session-tabs/frames 对齐）
 /// - 每会话独立 输入/控制/文件 通道、静音/音量、stop 标志；断开只关当前活动会话
@@ -570,8 +599,10 @@ fn main() -> Result<(), slint::PlatformError> {
     // #29 多会话：输入/控制/文件/静音/音量全部按“活动会话”路由（SESSIONS[idx]）。
     ui.on_send_input({
         let weak = ui.as_weak();
-        move |kind: i32, x: f32, y: f32| {
+        move |kind: i32, mx: f32, my: f32, area_w: f32, area_h: f32, fw: f32, fh: f32| {
             let ui = weak.unwrap();
+            // 主控/被控宽高比不同时视频区有 letterbox：先扣黑边再归一化。
+            let (x, y) = viewer_to_remote_norm(mx, my, area_w, area_h, fw, fh);
             let event = match kind {
                 1 => aerodesk_protocol::input::InputEvent::MouseButton {
                     button: aerodesk_protocol::input::MouseButton::Left,
@@ -659,7 +690,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // #75：会话视图滚轮输入 → InputFrame JSON（归一化坐标 + 像素增量）。
     ui.on_send_wheel({
         let weak = ui.as_weak();
-        move |x: f32, y: f32, dx: f32, dy: f32| {
+        move |mx: f32, my: f32, area_w: f32, area_h: f32, fw: f32, fh: f32, dx: f32, dy: f32| {
+            let (x, y) = viewer_to_remote_norm(mx, my, area_w, area_h, fw, fh);
             let event = aerodesk_protocol::input::InputEvent::Wheel {
                 x: x as f64,
                 y: y as f64,
@@ -1742,6 +1774,83 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(loaded, vec!["NAS · demo · 192.168.1.10:3003 · 家庭"]);
         std::fs::remove_file(&path).ok();
+    }
+
+    fn assert_near(actual: (f32, f32), expect: (f32, f32), eps: f32) {
+        assert!(
+            (actual.0 - expect.0).abs() <= eps && (actual.1 - expect.1).abs() <= eps,
+            "坐标换算不符：got {actual:?}, expect {expect:?}"
+        );
+    }
+
+    #[test]
+    fn viewer_norm_same_aspect_is_identity() {
+        // 主控 1000x562.5（16:9）与远端 1920x1080 同比例：归一化 = 像素/面积
+        assert_near(
+            viewer_to_remote_norm(500.0, 281.25, 1000.0, 562.5, 1920.0, 1080.0),
+            (0.5, 0.5),
+            1e-4,
+        );
+        assert_near(
+            viewer_to_remote_norm(0.0, 0.0, 1000.0, 562.5, 1920.0, 1080.0),
+            (0.0, 0.0),
+            1e-4,
+        );
+        assert_near(
+            viewer_to_remote_norm(1000.0, 562.5, 1000.0, 562.5, 1920.0, 1080.0),
+            (1.0, 1.0),
+            1e-4,
+        );
+    }
+
+    #[test]
+    fn viewer_norm_letterbox_vertical_bars() {
+        // 主控 1000x680、远端 1920x1080：上下黑边各 58.75，绘制区 1000x562.5
+        assert_near(
+            viewer_to_remote_norm(0.0, 58.75, 1000.0, 680.0, 1920.0, 1080.0),
+            (0.0, 0.0),
+            1e-3,
+        );
+        assert_near(
+            viewer_to_remote_norm(1000.0, 680.0 - 58.75, 1000.0, 680.0, 1920.0, 1080.0),
+            (1.0, 1.0),
+            1e-3,
+        );
+        // 黑边内点击：y 夹到 0（x 保持 0.5）
+        let (x, y) = viewer_to_remote_norm(500.0, 20.0, 1000.0, 680.0, 1920.0, 1080.0);
+        assert!((x - 0.5).abs() <= 1e-3, "x 应保持 0.5，got {x}");
+        assert!(y <= 1e-6, "黑边内 y 应夹到 0，got {y}");
+    }
+
+    #[test]
+    fn viewer_norm_letterbox_horizontal_bars() {
+        // 远端竖屏 1080x1920 放进横屏视频区 1000x680：左右黑边各 308.75
+        assert_near(
+            viewer_to_remote_norm(308.75, 340.0, 1000.0, 680.0, 1080.0, 1920.0),
+            (0.0, 0.5),
+            1e-3,
+        );
+        assert_near(
+            viewer_to_remote_norm(1000.0 - 308.75, 340.0, 1000.0, 680.0, 1080.0, 1920.0),
+            (1.0, 0.5),
+            1e-3,
+        );
+    }
+
+    #[test]
+    fn viewer_norm_no_frame_falls_back_to_area() {
+        // 无帧信息：退回按视频区归一化（与旧行为一致）
+        assert_near(
+            viewer_to_remote_norm(50.0, 25.0, 100.0, 50.0, 0.0, 0.0),
+            (0.5, 0.5),
+            1e-4,
+        );
+        // 无视频区也不 panic，坐标归零
+        assert_near(
+            viewer_to_remote_norm(10.0, 10.0, 0.0, 0.0, 0.0, 0.0),
+            (0.0, 0.0),
+            1e-6,
+        );
     }
 
     #[test]
