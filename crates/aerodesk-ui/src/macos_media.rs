@@ -114,10 +114,14 @@ pub fn run_viewer(
     let srv = server.clone();
     let rm = room.clone();
     let auth2 = auth.map(|s| s.to_string());
-    std::thread::spawn(move || {
-        let r = connect_live_role(&srv, &rm, Role::Viewer, auth2.as_deref());
-        let _ = tx.send(r);
-    });
+    // 数据通道收发链（str0m/SCTP）调用栈深，放大线程栈防溢出（RULE 数据通道大块传输线程栈需放大默认2MB.md）。
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let r = connect_live_role(&srv, &rm, Role::Viewer, auth2.as_deref());
+            let _ = tx.send(r);
+        })
+        .expect("spawn connect thread");
     let mut live = match rx.recv_timeout(Duration::from_secs(20)) {
         Ok(Ok(l)) => l,
         Ok(Err(e)) => {
@@ -181,6 +185,8 @@ pub fn run_viewer(
     let mut avsync = aerodesk_core::avsync::AvSync::new();
     let mut jitter = aerodesk_core::avsync::AudioJitterBuffer::new(0.08);
     let mut audio_sink: Option<aerodesk_macos::audio::AudioSink> = None;
+    /// 当前 AudioSink 采样率（codec 切换时重建，防 8k↔48k 重采样变速）。
+    let mut sink_rate: u32 = 0;
     // #73 Opus 音频：libopus 解码（惰性创建）。
     let mut opus_decoder: Option<aerodesk_ffmpeg::audio::OpusDecoder> = None;
     let mut audio_played: u64 = 0;
@@ -190,6 +196,11 @@ pub fn run_viewer(
     let mut pending_frame: Option<(Vec<u8>, u32, u32, f64)> = None;
 
     while !stale() {
+        // #72 文件传输总开关：关闭时跳过 file 通道事件与收发推进（不落盘）。
+        let ft_enabled = ui_weak
+            .upgrade()
+            .map(|u| u.get_file_transfer_enabled())
+            .unwrap_or(true);
         // #73 音量滑块：每次循环同步到 AudioSink（sink 可能尚未创建）。
         if let Some(sink) = &audio_sink {
             sink.set_volume(volume.load(Ordering::SeqCst));
@@ -257,11 +268,17 @@ pub fn run_viewer(
                         });
                     }
                 }
+                FileCmd::Cancel => {
+                    file_transfer.cancel_send(&mut live.endpoint);
+                }
             }
         }
         while let Some(ev) = live.endpoint.poll_event() {
             // #72 文件通道事件交给状态机（非 file 事件为 no-op）。
-            file_transfer.handle_event(&ev, &mut live.endpoint);
+            // 开关关闭时跳过：不处理 Meta/Chunk/Done，绝不落盘。
+            if ft_enabled {
+                file_transfer.handle_event(&ev, &mut live.endpoint);
+            }
             match ev {
                 ClientEvent::Media(data) => {
                     // #58/#73 音频识别：SFU 转发时 mid 是 SFU 本地 mid，用协商
@@ -272,9 +289,10 @@ pub fn run_viewer(
                             audio_dropped += 1;
                         } else {
                             let pcm = aerodesk_core::pcmu::pcmu_decode(&data.data);
-                            if audio_sink.is_none() {
+                            if audio_sink.is_none() || sink_rate != 8000 {
                                 audio_sink =
                                     aerodesk_macos::audio::AudioSink::new_with_rate(8000).ok();
+                                sink_rate = 8000;
                             }
                             avsync.on_audio(data.time.numer(), data.time.denom());
                             jitter.push(avsync.audio_time_secs(), pcm);
@@ -299,11 +317,14 @@ pub fn run_viewer(
                                 .as_mut()
                                 .and_then(|dec| dec.decode(&data.data).ok().flatten())
                                 .unwrap_or_default();
-                            if audio_sink.is_none() {
+                            if audio_sink.is_none()
+                                || sink_rate != aerodesk_ffmpeg::audio::OPUS_SAMPLE_RATE
+                            {
                                 audio_sink = aerodesk_macos::audio::AudioSink::new_with_rate(
                                     aerodesk_ffmpeg::audio::OPUS_SAMPLE_RATE,
                                 )
                                 .ok();
+                                sink_rate = aerodesk_ffmpeg::audio::OPUS_SAMPLE_RATE;
                             }
                             avsync.on_audio(data.time.numer(), data.time.denom());
                             jitter.push(avsync.audio_time_secs(), pcm);
@@ -392,54 +413,64 @@ pub fn run_viewer(
             }
         }
         // #72 文件发送推进 + 远端剪贴板落地 + 进度回显（500ms 节流）。
-        file_transfer.tick(&mut live.endpoint);
-        if let Some(text) = file_transfer.take_incoming_clipboard() {
-            aerodesk_core::clipboard::set_cache(text.clone());
-            aerodesk_core::clipboard::write(&text);
-            if let Some(fui) = ui_weak.upgrade() {
-                fui.set_session_status("已收到远端剪贴板".into());
-            }
-        }
-        if last_file_status.elapsed() >= Duration::from_millis(500) {
-            last_file_status = Instant::now();
-            let st = file_transfer.status();
-            if let Some(msg) = st.message {
+        // 文件传输总开关：关闭时暂停收发（tick 不推进，重新开启后继续）。
+        let ft_enabled = ui_weak
+            .upgrade()
+            .map(|u| u.get_file_transfer_enabled())
+            .unwrap_or(true);
+        if ft_enabled {
+            file_transfer.tick(&mut live.endpoint);
+            if let Some(text) = file_transfer.take_incoming_clipboard() {
+                aerodesk_core::clipboard::set_cache(text.clone());
+                // pbcopy 会阻塞等待子进程，放后台线程避免卡媒体循环。
+                std::thread::spawn(move || {
+                    aerodesk_core::clipboard::write(&text);
+                });
                 if let Some(fui) = ui_weak.upgrade() {
-                    fui.set_session_status(msg.into());
+                    fui.set_session_status("已收到远端剪贴板".into());
+                }
+            }
+            if last_file_status.elapsed() >= Duration::from_millis(500) {
+                last_file_status = Instant::now();
+                let st = file_transfer.status();
+                if let Some(msg) = st.message {
+                    if let Some(fui) = ui_weak.upgrade() {
+                        fui.set_session_status(msg.into());
+                        crate::with_session_ui_state(&fui, session_idx, |s| {
+                            s.file_progress = -1.0;
+                            s.file_label.clear();
+                        });
+                    }
+                } else if let Some((name, done, total)) = st.sending {
+                    if let Some(fui) = ui_weak.upgrade() {
+                        let pct = done as f64 * 100.0 / total.max(1) as f64;
+                        fui.set_session_status(
+                            format!("发送文件：{name} {done}/{total} ({pct:.0}%)").into(),
+                        );
+                        let label = format!("发送 {name} {pct:.0}%");
+                        crate::with_session_ui_state(&fui, session_idx, |s| {
+                            s.file_progress = (pct / 100.0) as f32;
+                            s.file_label = label;
+                        });
+                    }
+                } else if let Some((name, done, total)) = st.receiving {
+                    if let Some(fui) = ui_weak.upgrade() {
+                        let pct = done as f64 * 100.0 / total.max(1) as f64;
+                        fui.set_session_status(
+                            format!("接收文件：{name} {done}/{total} ({pct:.0}%)").into(),
+                        );
+                        let label = format!("接收 {name} {pct:.0}%");
+                        crate::with_session_ui_state(&fui, session_idx, |s| {
+                            s.file_progress = (pct / 100.0) as f32;
+                            s.file_label = label;
+                        });
+                    }
+                } else if let Some(fui) = ui_weak.upgrade() {
                     crate::with_session_ui_state(&fui, session_idx, |s| {
                         s.file_progress = -1.0;
                         s.file_label.clear();
                     });
                 }
-            } else if let Some((name, done, total)) = st.sending {
-                if let Some(fui) = ui_weak.upgrade() {
-                    let pct = done as f64 * 100.0 / total.max(1) as f64;
-                    fui.set_session_status(
-                        format!("发送文件：{name} {done}/{total} ({pct:.0}%)").into(),
-                    );
-                    let label = format!("发送 {name} {pct:.0}%");
-                    crate::with_session_ui_state(&fui, session_idx, |s| {
-                        s.file_progress = (pct / 100.0) as f32;
-                        s.file_label = label;
-                    });
-                }
-            } else if let Some((name, done, total)) = st.receiving {
-                if let Some(fui) = ui_weak.upgrade() {
-                    let pct = done as f64 * 100.0 / total.max(1) as f64;
-                    fui.set_session_status(
-                        format!("接收文件：{name} {done}/{total} ({pct:.0}%)").into(),
-                    );
-                    let label = format!("接收 {name} {pct:.0}%");
-                    crate::with_session_ui_state(&fui, session_idx, |s| {
-                        s.file_progress = (pct / 100.0) as f32;
-                        s.file_label = label;
-                    });
-                }
-            } else if let Some(fui) = ui_weak.upgrade() {
-                crate::with_session_ui_state(&fui, session_idx, |s| {
-                    s.file_progress = -1.0;
-                    s.file_label.clear();
-                });
             }
         }
         if last_stat.elapsed() >= Duration::from_secs(2) {
@@ -458,7 +489,8 @@ pub fn run_viewer(
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    // 会话结束（断开置 stop）：提示后清理注册表与 UI 槽位。
+    // 会话结束（断开置 stop）：先取消未完成发送，再提示并清理注册表与 UI 槽位。
+    file_transfer.cancel_send(&mut live.endpoint);
     if let Some(ui) = ui_weak.upgrade() {
         ui.set_status(format!("已断开：{room}").into());
         crate::session_cleanup(&ui, session_idx, None);

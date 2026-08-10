@@ -153,7 +153,8 @@ fn run() {
     };
 
     // #72 文件传输状态机（进程级单例；发送/接收同一状态机）。
-    file_transfer::init(send_file, recv_dir, cancel_send_after);
+    // 仅 publisher（被控端）响应远端文件请求，viewer 拒绝（安全审查 #255）。
+    file_transfer::init(send_file, recv_dir, cancel_send_after, role == "publisher");
     // #109 远程命令通道：被控端执行器（publisher）/ 控制端响应（viewer）。
     cmd_exec::init();
 
