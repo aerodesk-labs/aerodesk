@@ -67,6 +67,13 @@ impl VtEncoder {
         self.codec
     }
 
+    /// 请求下一帧编码为关键帧（IDR）。SFU 关键帧请求 / 新 viewer 加入时调用。
+    pub fn force_keyframe(&mut self) -> Result<(), String> {
+        self.session
+            .force_keyframe()
+            .map_err(|e| format!("vt force keyframe: {e:?}"))
+    }
+
     /// 本机是否有 VT HEVC 硬编（64x64 探针）。
     pub fn hevc_encoder_available() -> bool {
         Self::new_with_codec(64, 64, 30, 400_000, Codec::HEVC).is_ok()

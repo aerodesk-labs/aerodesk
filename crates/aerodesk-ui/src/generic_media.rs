@@ -100,6 +100,10 @@ pub fn run_generic_viewer(
     let mut pkts: u64 = 0;
     let mut media_evts: u64 = 0;
     let mut last_stat = Instant::now();
+    // #136 关键帧请求：首包/不连续/切层时向 SFU 发 PLI（节流 1s）。
+    let mut last_kf_request: Option<std::time::Instant> = None;
+    let mut last_kf_rid: Option<str0m::media::Rid> = None;
+    let mut seen_video = false;
     while !stale() {
         // 输入事件：UI 键鼠 → input data channel → SFU → 被控端（与 macOS/Android 同款）。
         while let Ok(json) = input_rx.try_recv() {
@@ -141,6 +145,22 @@ pub fn run_generic_viewer(
         while let Some(ev) = live.endpoint.poll_event() {
             if let ClientEvent::Media(data) = ev {
                 media_evts += 1;
+                // #136 首包 / 不连续 / 切层 → 请求关键帧（PLI，节流 1s）。
+                let now = std::time::Instant::now();
+                let rid_changed = last_kf_rid != data.rid;
+                let due = last_kf_request
+                    .map(|t| now.duration_since(t) >= Duration::from_secs(1))
+                    .unwrap_or(true);
+                if due && (rid_changed || !data.contiguous || !seen_video) {
+                    let _ = live.endpoint.request_keyframe(
+                        data.mid,
+                        data.rid,
+                        str0m::media::KeyframeRequestKind::Fir,
+                    );
+                    last_kf_request = Some(now);
+                    last_kf_rid = data.rid;
+                }
+                seen_video = true;
                 // SFU 转发用本地 mid（非协商 mid），iOS/CLI 同款：不过滤直接组装。
                 if let Some(au) = assembler.push(
                     data.data.as_ref(),

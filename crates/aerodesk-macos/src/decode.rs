@@ -483,8 +483,26 @@ mod tests {
 
 // ---------- macOS UI 渲染辅助：CVPixelBuffer → RGBA ----------
 
+/// BT.601 YCbCr → RGB（支持有限/全范围；供 to_rgba 与单测使用）。
+/// full_range=true：Y 0..255、Cb/Cr 128±112 直接映射；
+/// full_range=false（'420v' 视频/有限范围）：Y 16..235、Cb/Cr 16..240 先缩放。
+pub fn yuv_to_rgb(y: f32, u: f32, v: f32, full_range: bool) -> (u8, u8, u8) {
+    let (y_scale, y_off, c_scale) = if full_range {
+        (1.0, 0.0, 1.0)
+    } else {
+        (255.0 / 219.0, 16.0, 255.0 / 224.0)
+    };
+    let yv = (y - y_off) * y_scale;
+    let uc = (u - 128.0) * c_scale;
+    let vc = (v - 128.0) * c_scale;
+    let r = (yv + 1.402 * vc).clamp(0.0, 255.0) as u8;
+    let g = (yv - 0.344136 * uc - 0.714136 * vc).clamp(0.0, 255.0) as u8;
+    let b = (yv + 1.772 * uc).clamp(0.0, 255.0) as u8;
+    (r, g, b)
+}
+
 /// 把解码输出的 CVPixelBuffer 转成 RGBA（供 Slint Image::from_rgba8）。
-/// 支持 BGRA（'BGRA'）与 NV12（'420f'，BT.601 全范围近似）。
+/// 支持 BGRA（'BGRA'）与 NV12（'420f' 全范围 / '420v' 视频有限范围，BT.601）。
 /// 返回 (rgba, width, height)。
 pub fn to_rgba(buf: &CVPixelBuffer) -> Option<(Vec<u8>, usize, usize)> {
     let w = buf.width();
@@ -499,8 +517,8 @@ pub fn to_rgba(buf: &CVPixelBuffer) -> Option<(Vec<u8>, usize, usize)> {
     }
     let fmt = buf.pixel_format();
     const BGRA: u32 = 0x42475241;
-    const NV12_F: u32 = 0x32342066; // '420f' 视频范围
-    const NV12_V: u32 = 0x34323076; // '420v' 全范围（VideoToolbox 解码默认）
+    const NV12_F: u32 = 0x32342066; // '420f' 全范围
+    const NV12_V: u32 = 0x34323076; // '420v' 视频/有限范围（VideoToolbox 解码默认）
     match fmt {
         BGRA => {
             let stride = buf.bytes_per_row();
@@ -528,15 +546,14 @@ pub fn to_rgba(buf: &CVPixelBuffer) -> Option<(Vec<u8>, usize, usize)> {
                 std::slice::from_raw_parts(uv_base, uv_stride * buf.height_of_plane(1))
             };
             let mut rgba = vec![0u8; w * h * 4];
+            let full_range = fmt == NV12_F;
             for y in 0..h {
                 for x in 0..w {
                     let yv = y_plane[y * y_stride + x] as f32;
                     let uv_off = (y / 2) * uv_stride + (x / 2) * 2;
-                    let u = uv_plane[uv_off] as f32 - 128.0;
-                    let v = uv_plane[uv_off + 1] as f32 - 128.0;
-                    let r = (yv + 1.402 * v).clamp(0.0, 255.0) as u8;
-                    let g = (yv - 0.344136 * u - 0.714136 * v).clamp(0.0, 255.0) as u8;
-                    let b = (yv + 1.772 * u).clamp(0.0, 255.0) as u8;
+                    let u = uv_plane[uv_off] as f32;
+                    let v = uv_plane[uv_off + 1] as f32;
+                    let (r, g, b) = yuv_to_rgb(yv, u, v, full_range);
                     let o = (y * w + x) * 4;
                     rgba[o] = r;
                     rgba[o + 1] = g;
@@ -547,5 +564,41 @@ pub fn to_rgba(buf: &CVPixelBuffer) -> Option<(Vec<u8>, usize, usize)> {
             Some((rgba, w, h))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod yuv_range_tests {
+    use super::yuv_to_rgb;
+
+    #[test]
+    fn full_range_black_and_white() {
+        let (r, g, b) = yuv_to_rgb(0.0, 128.0, 128.0, true);
+        assert_eq!((r, g, b), (0, 0, 0));
+        let (r, g, b) = yuv_to_rgb(255.0, 128.0, 128.0, true);
+        assert_eq!((r, g, b), (255, 255, 255));
+    }
+
+    #[test]
+    fn limited_range_maps_16_235_to_0_255() {
+        // '420v' 有限范围：Y=16 黑、Y=235 白（不缩放会发灰）。
+        let (r, g, b) = yuv_to_rgb(16.0, 128.0, 128.0, false);
+        assert!(
+            r <= 2 && g <= 2 && b <= 2,
+            "limited black should be ~0, got {r},{g},{b}"
+        );
+        let (r, g, b) = yuv_to_rgb(235.0, 128.0, 128.0, false);
+        assert!(
+            r >= 253 && g >= 253 && b >= 253,
+            "limited white should be ~255, got {r},{g},{b}"
+        );
+    }
+
+    #[test]
+    fn full_range_red_chroma() {
+        // BT.601 全范围红：Y=76, Cb=84, Cr=255 → R≈255, G/B≈0
+        let (r, g, b) = yuv_to_rgb(76.0, 84.0, 255.0, true);
+        assert!(r >= 250, "R should be ~255, got {r}");
+        assert!(g <= 5 && b <= 5, "G/B should be ~0, got {g},{b}");
     }
 }

@@ -735,6 +735,16 @@ impl CompressionSession {
         Ok(pb)
     }
 
+    /// Force the next encoded frame to be a keyframe (IDR).
+    /// Wraps `kVTCompressionPropertyKey_ForceKeyFrame`; resets after one frame.
+    pub fn force_keyframe(&self) -> Result<(), VTError> {
+        self.set_property_bool(
+            unsafe { ffi::kVTCompressionPropertyKey_ForceKeyFrame },
+            "ForceKeyFrame",
+            true,
+        )
+    }
+
     fn set_property_bool(
         &self,
         key: ffi::CFStringRef,

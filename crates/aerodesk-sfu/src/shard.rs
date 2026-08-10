@@ -604,6 +604,15 @@ fn run_shard(
 
         // 4. UDP 收包
         if let Ok((n, source)) = socket.recv_from(&mut buf) {
+            // 缓冲截断：>2000B 的 UDP 包静默截断后交给 str0m 解析失败会导致
+            // 合法客户端被断连（伪造超大包即可踢人）。截断即丢弃并告警。
+            if n == buf.len() {
+                warn!(
+                    "drop oversized udp packet (>= {} bytes) from {source}",
+                    buf.len()
+                );
+                continue;
+            }
             let data = buf[..n].to_vec();
             route_udp(
                 index,

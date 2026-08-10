@@ -325,6 +325,7 @@ extern "C" {
     pub static kVTCompressionPropertyKey_AverageBitRate: CFStringRef;
     pub static kVTCompressionPropertyKey_ExpectedFrameRate: CFStringRef;
     pub static kVTCompressionPropertyKey_MaxKeyFrameInterval: CFStringRef;
+    pub static kVTCompressionPropertyKey_ForceKeyFrame: CFStringRef;
     pub static kVTCompressionPropertyKey_ProfileLevel: CFStringRef;
     pub static kVTCompressionPropertyKey_H264EntropyMode: CFStringRef;
     pub static kVTCompressionPropertyKey_Quality: CFStringRef;

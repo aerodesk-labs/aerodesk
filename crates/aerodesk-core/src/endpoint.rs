@@ -285,17 +285,16 @@ impl Endpoint {
     /// 轮询输出：Transmit → 调用方发送；Timeout → 记录下次超时；
     /// Event → 转入内部客户端事件队列。
     pub fn poll_output(&mut self) -> Option<Output> {
-        match self.rtc.poll_output() {
-            Ok(Output::Event(e)) => {
-                self.handle_event(e);
-                // 继续 poll 后续输出
-                self.poll_output()
-            }
-            Ok(o) => Some(o),
-            Err(e) => {
-                tracing::warn!("poll_output: {e:?}");
-                self.events.push_back(ClientEvent::Closed);
-                None
+        // 迭代式排空：Event 不递归，避免事件风暴时栈深无界（审查 #255 M1）。
+        loop {
+            match self.rtc.poll_output() {
+                Ok(Output::Event(e)) => self.handle_event(e),
+                Ok(o) => return Some(o),
+                Err(e) => {
+                    tracing::warn!("poll_output: {e:?}");
+                    self.events.push_back(ClientEvent::Closed);
+                    return None;
+                }
             }
         }
     }
@@ -308,6 +307,19 @@ impl Endpoint {
     /// 媒体写入器（发送视频帧）。
     pub fn writer(&mut self, mid: Mid) -> Option<Writer<'_>> {
         self.rtc.writer(mid)
+    }
+
+    /// 请求远端关键帧（观看端 PLI/FIR；rid 用于 simulcast 指定层）。
+    pub fn request_keyframe(
+        &mut self,
+        mid: Mid,
+        rid: Option<str0m::media::Rid>,
+        kind: str0m::media::KeyframeRequestKind,
+    ) -> Result<(), str0m::RtcError> {
+        let Some(mut w) = self.rtc.writer(mid) else {
+            return Err(str0m::RtcError::NoReceiverSource(rid));
+        };
+        w.request_keyframe(rid, kind)
     }
 
     /// 数据通道写句柄。
