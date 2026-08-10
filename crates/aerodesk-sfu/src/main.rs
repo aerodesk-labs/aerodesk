@@ -969,7 +969,7 @@ fn session_kick(
     };
     let Some(client) = client.filter(|c| !c.is_empty()) else {
         // #249：省略 client = 踢掉整个房间（桥死亡恢复/运维排障用）。
-        return session_kick_room(shared, shard_txs, &room);
+        return session_kick_room(shared, shard_txs, room);
     };
     let Ok(client_id) = client.parse::<u64>() else {
         audit_session_api(
@@ -1063,14 +1063,30 @@ fn session_kick_room(
 ) -> Response {
     let sessions = shared.session_snapshot();
     let mut kicked = 0u64;
+    let mut failed_sends = 0u64;
     for info in sessions.iter().filter(|s| s.room == *room) {
         if let Some(tx) = shard_txs.get(info.shard)
             && tx.send(ShardCommand::Kick { client_id: info.id }).is_ok()
         {
             kicked += 1;
+        } else {
+            failed_sends += 1;
         }
     }
-    audit_session_api(shared, "session/kick", Some(room), 200, true, None);
+    // Kick 是异步命令：kicked 表示成功投递数，不代表已确认断开。
+    let detail = if failed_sends > 0 {
+        Some(format!("{failed_sends} shard sends failed"))
+    } else {
+        None
+    };
+    audit_session_api(
+        shared,
+        "session/kick",
+        Some(room),
+        200,
+        true,
+        detail.as_deref(),
+    );
     Response::from_data(
         "application/json",
         serde_json::to_vec(&serde_json::json!({ "room": room, "kicked": kicked })).unwrap(),

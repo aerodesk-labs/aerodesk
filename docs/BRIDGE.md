@@ -78,6 +78,9 @@ PoP-B signal（BRIDGE_CMD + ROOM_POP_MAP + POP_URLS）
 | `BRIDGE_MAX_RUNNING` | 并发桥上限（默认 8；防房间名轮换绕过冷却的进程滥用） |
 | `BRIDGE_IDLE_SECS` | 桥空闲回收阈值（默认 300）：房间内无真实客户端（桥自身
   publisher 腿不计）超过该时长 → 后台 monitor 停桥并释放进程 |
+| `BRIDGE_MONITOR_INTERVAL_SECS` | 桥 monitor 轮询间隔（默认 15，下限 2）：死亡
+  检测/空闲回收粒度；建议 < 客户端 no-media watchdog（CLI 默认 8s）以便 kick
+  先于 watchdog 生效（e2e 用 2） |
 
 语义/边界：
 - **认证/配额先行**：桥决策在 `auth_result` 与房间/全局配额通过后执行（未授权

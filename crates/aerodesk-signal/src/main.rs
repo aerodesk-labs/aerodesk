@@ -32,6 +32,8 @@
 //!   BRIDGE_FAIL_COOLDOWN_SECS  桥失败冷却（默认 30，期间直接 Redirect 不重试）
 //!   BRIDGE_MAX_RUNNING         并发桥上限（默认 8；防房间名轮换绕过冷却的进程滥用）
 //!   BRIDGE_IDLE_SECS           桥空闲回收阈值（默认 300；房间无真实客户端超时停桥）
+//!   BRIDGE_MONITOR_INTERVAL_SECS 桥 monitor 轮询间隔（默认 15，下限 2；死亡检测/
+//!                              空闲回收粒度，e2e 用 2s 快于客户端 8s watchdog）
 
 #[macro_use]
 extern crate tracing;
@@ -76,6 +78,9 @@ struct Config {
     bridge: Option<Arc<BridgeManager>>,
     /// 桥空闲回收阈值（#246）：房间内无真实客户端超过该时长 → 停止桥。
     bridge_idle_secs: Duration,
+    /// 桥生命周期 monitor 轮询间隔（#249 review：可配小值让死亡检测快于客户端
+    /// 8s no-media watchdog，e2e 用 2s；默认 15）。
+    bridge_monitor_interval: Duration,
 }
 
 struct Peer {
@@ -232,7 +237,10 @@ fn reload_tls(
 }
 
 /// 调 SFU 内部接口踢掉房间全部客户端（#249：桥死亡后触发 viewer --reconnect 恢复）。
-fn kick_sfu_room(sfu_url: &str, token: Option<&str>, room: &str) {
+/// 返回是否成功（2xx）；失败由调用方决定重试（#249 review）。
+/// 注意：room 仅来自经过 sanitize_room 校验的房间名（[A-Za-z0-9._-]），
+/// 直接拼进 query 无注入风险——若将来放开调用方需先 URL 编码。
+fn kick_sfu_room(sfu_url: &str, token: Option<&str>, room: &str) -> bool {
     let url = format!("{sfu_url}/session/kick?room={room}");
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(5))
@@ -242,8 +250,14 @@ fn kick_sfu_room(sfu_url: &str, token: Option<&str>, room: &str) {
         req = req.set("X-Internal-Token", token);
     }
     match req.call() {
-        Ok(resp) => info!("bridge monitor: SFU kick room {room} -> {}", resp.status()),
-        Err(e) => warn!("bridge monitor: SFU kick room {room} failed: {e}"),
+        Ok(resp) => {
+            info!("bridge monitor: SFU kick room {room} -> {}", resp.status());
+            true
+        }
+        Err(e) => {
+            warn!("bridge monitor: SFU kick room {room} failed: {e}");
+            false
+        }
     }
 }
 
@@ -272,6 +286,7 @@ fn main() {
         let bridge = bridge.clone();
         let rooms = rooms.clone();
         let idle = config.bridge_idle_secs;
+        let monitor_interval = config.bridge_monitor_interval;
         let sfu_url = config.sfu_url.clone();
         let sfu_token = config.sfu_token.clone();
         std::thread::Builder::new()
@@ -283,11 +298,13 @@ fn main() {
                     std::collections::HashSet::new();
                 let mut monitor_stopped: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
+                // 待重试踢人（房间 → 已尝试次数，#249 review：kick 失败有限重试）。
+                let mut kick_retry: HashMap<String, u32> = HashMap::new();
                 loop {
-                    std::thread::sleep(Duration::from_secs(15));
+                    std::thread::sleep(monitor_interval);
                     let now = Instant::now();
                     let running = bridge.running_rooms();
-                    let alive_now: std::collections::HashSet<String> =
+                    let mut alive_now: std::collections::HashSet<String> =
                         running.iter().map(|(r, _)| r.clone()).collect();
                     let real_peers: HashMap<String, usize> = {
                         let rooms = rooms.lock().unwrap();
@@ -330,20 +347,50 @@ fn main() {
                         };
                         if stop {
                             idle_since.remove(&room);
+                            // #249 review：成功停掉的桥要从本轮存活集合移除，
+                            // 否则下一轮会被误判为「自然死亡」触发无谓 kick。
+                            alive_now.remove(&room);
                         }
                     }
                     // #249 桥死亡检测：自然死亡（消失且非 monitor 停止）→ 踢本地
                     // SFU 房间，断开已连接 viewer 的 WebRTC，触发 --reconnect 恢复。
                     for room in bridge::died_rooms(&alive_prev, &alive_now, &monitor_stopped) {
-                        if !bridge.is_running(&room) {
-                            info!(
-                                "bridge monitor: bridge died for room {room}; kicking SFU room to trigger client recovery"
-                            );
-                            kick_sfu_room(&sfu_url, sfu_token.as_deref(), &room);
-                        } else {
+                        if bridge.is_running(&room) {
                             debug!("bridge monitor: room {room} died but already rebuilt; skip kick");
+                            kick_retry.remove(&room);
+                            continue;
+                        }
+                        info!(
+                            "bridge monitor: bridge died for room {room}; kicking SFU room to trigger client recovery"
+                        );
+                        if kick_sfu_room(&sfu_url, sfu_token.as_deref(), &room) {
+                            kick_retry.remove(&room);
+                        } else {
+                            // 首次失败计入 1：下一次 tick 再重试（同 tick 不立即重复踢）。
+                            kick_retry.entry(room).or_insert(1);
                         }
                     }
+                    // 踢人失败有限重试（最多 3 次；期间房间若被重建则放弃）。
+                    for (room, attempts) in kick_retry.iter_mut() {
+                        if bridge.is_running(room) {
+                            *attempts = u32::MAX; // 已重建，无需再踢
+                            continue;
+                        }
+                        if *attempts >= 3 {
+                            error!(
+                                "bridge monitor: kick room {room} failed after {} attempts; check SFU_URL/SFU_TOKEN",
+                                *attempts
+                            );
+                            *attempts = u32::MAX; // 放弃重试
+                            continue;
+                        }
+                        if kick_sfu_room(&sfu_url, sfu_token.as_deref(), room) {
+                            *attempts = u32::MAX; // 成功，稍后清理
+                        } else {
+                            *attempts += 1;
+                        }
+                    }
+                    kick_retry.retain(|_, a| *a != u32::MAX);
                     alive_prev = alive_now;
                     monitor_stopped.clear();
                 }
@@ -523,9 +570,15 @@ fn load_config() -> Config {
         bridge_idle_secs: std::env::var("BRIDGE_IDLE_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .map(|v| v.max(15)) // 不低于 monitor 轮询间隔（15s），防误杀
+            .map(|v| v.max(2)) // 至少 ≥ monitor 轮询间隔下限
             .map(Duration::from_secs)
             .unwrap_or(Duration::from_secs(300)),
+        bridge_monitor_interval: std::env::var("BRIDGE_MONITOR_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|v| v.max(2))
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(15)),
     }
 }
 
@@ -1075,6 +1128,7 @@ mod tests {
             sfu_token: None,
             bridge: None,
             bridge_idle_secs: Duration::from_secs(300),
+            bridge_monitor_interval: Duration::from_secs(15),
         }
     }
 
