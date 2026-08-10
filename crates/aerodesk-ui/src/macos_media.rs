@@ -354,9 +354,10 @@ pub fn run_viewer(
                         serde_json::from_slice::<aerodesk_protocol::cursor::CursorPos>(&data)
                         && let Some(fui) = ui_weak.upgrade()
                     {
-                        fui.set_remote_cursor_x(pos.x as f32);
-                        fui.set_remote_cursor_y(pos.y as f32);
-                        fui.set_remote_cursor_visible(true);
+                        // 光标按会话保存；仅活动会话同步到 UI（切换会话后恢复各自光标）。
+                        crate::with_session_ui_state(&fui, session_idx, |s| {
+                            s.cursor = Some((pos.x as f32, pos.y as f32));
+                        });
                     }
                 }
                 ClientEvent::Closed => {
@@ -405,8 +406,10 @@ pub fn run_viewer(
             if let Some(msg) = st.message {
                 if let Some(fui) = ui_weak.upgrade() {
                     fui.set_session_status(msg.into());
-                    fui.set_file_progress(-1.0);
-                    fui.set_file_label("".into());
+                    crate::with_session_ui_state(&fui, session_idx, |s| {
+                        s.file_progress = -1.0;
+                        s.file_label.clear();
+                    });
                 }
             } else if let Some((name, done, total)) = st.sending {
                 if let Some(fui) = ui_weak.upgrade() {
@@ -414,8 +417,11 @@ pub fn run_viewer(
                     fui.set_session_status(
                         format!("发送文件：{name} {done}/{total} ({pct:.0}%)").into(),
                     );
-                    fui.set_file_progress((pct / 100.0) as f32);
-                    fui.set_file_label(format!("发送 {name} {pct:.0}%").into());
+                    let label = format!("发送 {name} {pct:.0}%");
+                    crate::with_session_ui_state(&fui, session_idx, |s| {
+                        s.file_progress = (pct / 100.0) as f32;
+                        s.file_label = label;
+                    });
                 }
             } else if let Some((name, done, total)) = st.receiving {
                 if let Some(fui) = ui_weak.upgrade() {
@@ -423,12 +429,17 @@ pub fn run_viewer(
                     fui.set_session_status(
                         format!("接收文件：{name} {done}/{total} ({pct:.0}%)").into(),
                     );
-                    fui.set_file_progress((pct / 100.0) as f32);
-                    fui.set_file_label(format!("接收 {name} {pct:.0}%").into());
+                    let label = format!("接收 {name} {pct:.0}%");
+                    crate::with_session_ui_state(&fui, session_idx, |s| {
+                        s.file_progress = (pct / 100.0) as f32;
+                        s.file_label = label;
+                    });
                 }
             } else if let Some(fui) = ui_weak.upgrade() {
-                fui.set_file_progress(-1.0);
-                fui.set_file_label("".into());
+                crate::with_session_ui_state(&fui, session_idx, |s| {
+                    s.file_progress = -1.0;
+                    s.file_label.clear();
+                });
             }
         }
         if last_stat.elapsed() >= Duration::from_secs(2) {

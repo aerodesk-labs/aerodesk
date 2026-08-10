@@ -82,6 +82,12 @@ pub struct SessionHandle {
     pub stop: Arc<AtomicBool>,
     /// 最近一帧（未收到帧时为 None，UI 显示空槽）。
     pub frame: Option<SessionFrame>,
+    /// 远端光标最新位置（None = 尚未收到光标事件）。
+    pub cursor: Option<(f32, f32)>,
+    /// 文件传输进度（-1 = 无传输；0..=1）。
+    pub file_progress: f32,
+    /// 文件传输标签（如“发送 x.zip 42%”）。
+    pub file_label: String,
 }
 
 pub static SESSIONS: std::sync::Mutex<Vec<SessionHandle>> = std::sync::Mutex::new(Vec::new());
@@ -144,8 +150,6 @@ pub fn present_frame(
     slot: usize,
 ) {
     let Some(fui) = ui_weak.upgrade() else { return };
-    fui.set_frame_w(w as f32);
-    fui.set_frame_h(h as f32);
     // 读-改-写模型在同一 SESSIONS 临界区内完成（多 viewer 线程串行），
     // 只重建当前帧，其它会话沿用模型里已有的 Image，避免每帧全量复制。
     let (ui_idx, img, arr) = {
@@ -170,6 +174,9 @@ pub fn present_frame(
     };
     fui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(arr)));
     if fui.get_active_session() == ui_idx as i32 {
+        // 帧尺寸只在活动会话时写全局（切换会话后由 sync_active_session_ui 恢复）。
+        fui.set_frame_w(w as f32);
+        fui.set_frame_h(h as f32);
         fui.set_video_frame(img);
     }
 }
@@ -213,6 +220,8 @@ pub fn session_refresh_ui(ui: &AppWindow) {
             ui.set_video_frame(f.clone());
         }
         ui.set_in_session(true);
+        // 活动会话可能因加入/离开变化：同步音量/光标/帧尺寸/文件进度。
+        sync_active_session_ui(ui);
     }
 }
 
@@ -221,6 +230,7 @@ pub fn session_joined(ui: &AppWindow, slot: usize) {
     session_refresh_ui(ui);
     if let Some(pos) = slot_to_ui_index(slot) {
         ui.set_active_session(pos as i32);
+        sync_active_session_ui(ui);
     }
 }
 
@@ -237,6 +247,69 @@ pub fn session_cleanup(ui: &AppWindow, slot: usize, terminal: Option<String>) {
         if SESSIONS.lock().unwrap().is_empty() {
             ui.set_status(msg.into());
         }
+    }
+}
+
+/// 把活动会话的 UI 状态（音量/光标/帧尺寸/文件进度）同步到全局属性。
+/// 切换会话、会话加入/离开后调用，保证多会话之间不串状态。
+pub fn sync_active_session_ui(ui: &AppWindow) {
+    let idx = ui.get_active_session() as usize;
+    let (vol, cursor, frame, fp, fl) = {
+        let sessions = SESSIONS.lock().unwrap();
+        let Some(s) = sessions.get(idx) else {
+            return;
+        };
+        (
+            s.volume.load(Ordering::SeqCst) as f32 / 100.0,
+            s.cursor,
+            s.frame.as_ref().map(|f| (f.w as f32, f.h as f32)),
+            s.file_progress,
+            s.file_label.clone(),
+        )
+    };
+    ui.set_volume(vol);
+    match cursor {
+        Some((x, y)) => {
+            ui.set_remote_cursor_x(x);
+            ui.set_remote_cursor_y(y);
+            ui.set_remote_cursor_visible(true);
+        }
+        None => ui.set_remote_cursor_visible(false),
+    }
+    match frame {
+        Some((w, h)) => {
+            ui.set_frame_w(w);
+            ui.set_frame_h(h);
+        }
+        None => {
+            ui.set_frame_w(0.0);
+            ui.set_frame_h(0.0);
+        }
+    }
+    if fp < 0.0 {
+        ui.set_file_progress(-1.0);
+        ui.set_file_label("".into());
+    } else {
+        ui.set_file_progress(fp);
+        ui.set_file_label(fl.into());
+    }
+}
+
+/// 修改某会话的 UI 状态；仅当该会话是活动会话时同步到全局 UI。
+pub fn with_session_ui_state<F>(ui: &AppWindow, slot: usize, f: F)
+where
+    F: FnOnce(&mut SessionHandle),
+{
+    let is_active = {
+        let mut sessions = SESSIONS.lock().unwrap();
+        let Some(idx) = sessions.iter().position(|s| s.slot == slot) else {
+            return;
+        };
+        f(&mut sessions[idx]);
+        ui.get_active_session() == idx as i32
+    };
+    if is_active {
+        sync_active_session_ui(ui);
     }
 }
 
@@ -487,6 +560,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     volume: volume.clone(),
                     stop: stop.clone(),
                     frame: None,
+                    cursor: None,
+                    file_progress: -1.0,
+                    file_label: String::new(),
                 });
             }
             // 连接中的会话立即显示为标签：可看到“连接中”状态，也可直接断开取消。
@@ -870,6 +946,8 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(frame) = ui.get_session_frames().row_data(idx as usize) {
                 ui.set_video_frame(frame);
             }
+            // 切换会话：恢复该会话的音量/光标/帧尺寸/文件进度。
+            sync_active_session_ui(&ui);
             let name = ui
                 .get_session_tabs()
                 .row_data(idx as usize)
@@ -1679,6 +1757,9 @@ mod tests {
             volume: Arc::new(AtomicU16::new(100)),
             stop: Arc::new(AtomicBool::new(false)),
             frame: None,
+            cursor: None,
+            file_progress: -1.0,
+            file_label: String::new(),
         }
     }
 
@@ -1726,6 +1807,67 @@ mod tests {
         let (_, arr) = build_tabs_frames(&[a]);
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0].size().width, 0);
+    }
+
+    /// UI 链路 e2e：真实 AppWindow（无头测试后端）下验证
+    /// session_refresh_ui / sync_active_session_ui / session_cleanup / 帧按 slot 归属。
+    #[test]
+    fn ui_session_state_mapping_real_component() {
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppWindow::new().unwrap();
+
+        let mut a = session_handle(0, "A");
+        a.volume.store(60, Ordering::SeqCst);
+        a.cursor = Some((0.5, 0.5));
+        a.frame = Some(SessionFrame {
+            rgba: Arc::new(vec![0u8; 2 * 1 * 4]),
+            w: 2,
+            h: 1,
+        });
+        a.file_progress = 0.4;
+        a.file_label = "发送 a.zip 40%".into();
+        let mut b = session_handle(1, "B");
+        b.volume.store(20, Ordering::SeqCst);
+        b.cursor = Some((0.2, 0.3));
+        b.frame = Some(SessionFrame {
+            rgba: Arc::new(vec![0u8; 3 * 1 * 4]),
+            w: 3,
+            h: 1,
+        });
+        SESSIONS.lock().unwrap().push(a);
+        SESSIONS.lock().unwrap().push(b);
+
+        // 双会话并存：active=0 → UI 显示 A 的状态
+        session_refresh_ui(&ui);
+        assert_eq!(ui.get_active_session(), 0);
+        assert_eq!(ui.get_session_tabs().row_count(), 2);
+        assert_eq!(ui.get_volume(), 0.6);
+        assert_eq!(ui.get_remote_cursor_x(), 0.5);
+        assert_eq!(ui.get_remote_cursor_y(), 0.5);
+        assert!(ui.get_remote_cursor_visible());
+        assert_eq!(ui.get_frame_w(), 2.0);
+        assert_eq!(ui.get_file_progress(), 0.4);
+        assert_eq!(ui.get_file_label().as_str(), "发送 a.zip 40%");
+
+        // 切到 B：音量/光标/帧尺寸/文件进度全部切到 B
+        ui.set_active_session(1);
+        sync_active_session_ui(&ui);
+        assert_eq!(ui.get_volume(), 0.2);
+        assert_eq!(ui.get_remote_cursor_x(), 0.2);
+        assert_eq!(ui.get_remote_cursor_y(), 0.3);
+        assert_eq!(ui.get_frame_w(), 3.0);
+        assert_eq!(ui.get_frame_h(), 1.0);
+        assert_eq!(ui.get_file_progress(), -1.0);
+        assert_eq!(ui.get_file_label().as_str(), "");
+
+        // 断开 A：只剩 B，active 修正为 0，UI 仍显示 B 的帧与状态
+        session_cleanup(&ui, 0, None);
+        assert_eq!(ui.get_session_tabs().row_count(), 1);
+        assert_eq!(ui.get_session_tabs().row_data(0).unwrap().as_str(), "B");
+        assert_eq!(ui.get_active_session(), 0);
+        assert_eq!(ui.get_volume(), 0.2);
+        assert_eq!(ui.get_frame_w(), 3.0);
+        assert_eq!(ui.get_session_frames().row_data(0).unwrap().size().width, 3);
     }
 
     #[test]
@@ -2144,6 +2286,9 @@ mod multi_session_e2e {
                 volume: Arc::new(AtomicU16::new(100)),
                 stop: stop.clone(),
                 frame: None,
+                cursor: None,
+                file_progress: -1.0,
+                file_label: String::new(),
             });
             let st = stop.clone();
             std::thread::spawn(move || {
