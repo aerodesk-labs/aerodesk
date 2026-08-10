@@ -472,10 +472,13 @@ export component AppWindow inherits Window {
     // #73 观看端音量滑块（0..1）。
     callback change-volume(float);
     // #75：会话视图指针输入 → Rust 侧转发为 InputFrame（0=Move 1=Down 2=Up）。
-    callback send-input(int, float, float);
+    // 传原始鼠标坐标 + 视频区尺寸 + 远端帧尺寸；Rust 侧按 image-fit: contain
+    // 扣除 letterbox 后归一化，保证主控/被控宽高比不同时坐标不错位。
+    callback send-input(int, float, float, float, float, float, float);
     // #75：键盘/滚轮输入 → Rust 侧转发为 InputFrame（send-key: 0=按下 1=抬起）。
     callback send-key(int, string, bool, bool, bool, bool) -> bool;
-    callback send-wheel(float, float, float, float);
+    // #75：滚轮 → send-wheel（原始坐标 + 尺寸 + 像素增量；Rust 侧 letterbox 扣减后归一化）。
+    callback send-wheel(float, float, float, float, float, float, float, float);
     callback toggle-display();
     callback toggle-quality();
     callback toggle-input();
@@ -1236,15 +1239,23 @@ export component AppWindow inherits Window {
                             if event.kind == PointerEventKind.down { fs.focus(); }
                             root.send-input(
                                 event.kind == PointerEventKind.down ? 1 : (event.kind == PointerEventKind.up ? 2 : 0),
-                                self.mouse-x / max(self.width, 1px),
-                                self.mouse-y / max(self.height, 1px)
+                                self.mouse-x / 1px,
+                                self.mouse-y / 1px,
+                                self.width / 1px,
+                                self.height / 1px,
+                                root.frame-w,
+                                root.frame-h
                             );
                         }
-                        // #75：滚轮 → send-wheel（归一化坐标 + 像素增量）。
+                        // #75：滚轮 → send-wheel（原始坐标 + 尺寸 + 像素增量）。
                         scroll-event(event) => {
                             root.send-wheel(
-                                self.mouse-x / max(self.width, 1px),
-                                self.mouse-y / max(self.height, 1px),
+                                self.mouse-x / 1px,
+                                self.mouse-y / 1px,
+                                self.width / 1px,
+                                self.height / 1px,
+                                root.frame-w,
+                                root.frame-h,
                                 event.delta-x / 1px,
                                 event.delta-y / 1px
                             );
