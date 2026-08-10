@@ -1,4 +1,4 @@
-# SFU 容量压测基准（#215/#218/#220/#222/#226/#228/#232，#8 方法论）
+# SFU 容量压测基准（#215/#218/#220/#222/#226/#228/#232/#238，#8 方法论）
 
 ## 方法
 `scripts/sfu-capacity-bench.sh`：起 SFU+signal（独立端口）→ `loadtest.sh` 施压
@@ -138,6 +138,26 @@ played>0、|drift_ms|≤300、视频 DECODED>0。
   转发非瓶颈**（~800pps 无丢）；#8 真机 4K60 验收需先保证编码端 60fps 达标，
   再验 SFU 转发（方法同上，帧率由编码端决定）
 
+## 媒体质量指标（#238）
+
+`Event::PeerStats`（str0m 每 ~1s）聚合到分片 5s 心跳 → `/metrics/prometheus`：
+- `aerodesk_sfu_rtt_us`：RTT 均值（纳秒聚合，输出微秒；0=无样本/同机 loopback 因
+  RTCP NTP 粒度 ~15us 归零）
+- `aerodesk_sfu_egress_loss` / `aerodesk_sfu_ingress_loss`：丢包率 0..1（×1e6 存储）
+- `aerodesk_sfu_bwe_tx_bps`：BWE 目标码率均值（无 TWCC 反馈时为 0）
+- `aerodesk_sfu_qos_clients`：有 RTT 样本的客户端数（验证聚合生效）
+- 每分片 + 合计；`/metrics` JSON 同步字段
+
+`scripts/sfu-quality-check.sh [mode...]`：1×1 直连 + TURN 各 ~18s，断言
+qos_clients>0、loss=0、无 panic。
+
+### 结果（macOS M4，debug 混合，2026-08-10，全 PASS）
+
+| mode | qos_clients | rtt_us | egress_loss | ingress_loss | bwe_tx_bps | errors |
+|---|---|---|---|---|---|---|
+| direct | 2 | 0（loopback） | 0 | 0 | 0（无 TWCC） | 0 |
+| turn | 2 | 0（loopback） | 0 | 0 | 0（无 TWCC） | 0 |
+
 ## 复现
 ```sh
 scripts/sfu-capacity-bench.sh 1 2 15 1280 720 30 2000000        # 单档（直连）
@@ -164,3 +184,5 @@ scripts/sfu-audio-e2e.sh                                       # 音频+音视�
 - 音频同步（#228）：PCMU/Opus 经直连/TURN 中继转发正常，AVSYNC drift ≤113ms
 - 4K60（#232）：本机编码端瓶颈（6-13fps），SFU 转发非瓶颈（~800pps 无丢、0 错误）；
   真机 4K60 验收方法已就绪（#8）
+- 媒体质量（#238）：RTT/丢包/BWE 每分片聚合到 prometheus（qos_clients>0 验证
+  PeerStats 链路；loopback RTT 归零是 RTCP NTP 粒度所致）

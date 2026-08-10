@@ -81,6 +81,14 @@ pub struct ShardMetrics {
     pub rx_bytes: AtomicU64,
     pub tx_packets: AtomicU64,
     pub tx_bytes: AtomicU64,
+    /// #238 媒体质量：最近心跳聚合（5s）——
+    /// RTT 均值（纳秒，0=无样本；输出转微秒）、egress/ingress loss 均值（×1e6）、
+    /// BWE 目标码率均值（bps）、有统计样本的客户端数。
+    pub rtt_avg_ns: AtomicU64,
+    pub egress_loss_ppm: AtomicU64,
+    pub ingress_loss_ppm: AtomicU64,
+    pub bwe_tx_bps: AtomicU64,
+    pub qos_clients: AtomicUsize,
 }
 
 impl ShardMetrics {
@@ -91,8 +99,22 @@ impl ShardMetrics {
             rx_bytes: AtomicU64::new(0),
             tx_packets: AtomicU64::new(0),
             tx_bytes: AtomicU64::new(0),
+            rtt_avg_ns: AtomicU64::new(0),
+            egress_loss_ppm: AtomicU64::new(0),
+            ingress_loss_ppm: AtomicU64::new(0),
+            bwe_tx_bps: AtomicU64::new(0),
+            qos_clients: AtomicUsize::new(0),
         }
     }
+}
+
+/// 客户端最新媒体质量快照（#238，Event::PeerStats / EgressBitrateEstimate 更新）。
+#[derive(Default)]
+pub struct ClientQos {
+    pub rtt: Option<std::time::Duration>,
+    pub egress_loss: Option<f32>,
+    pub ingress_loss: Option<f32>,
+    pub bwe_bps: u64,
 }
 
 /// 全局共享状态（所有分片可见）。
@@ -477,10 +499,34 @@ fn run_shard(
             room_counts = counts;
         }
 
-        // 心跳：向 manager 汇报客户端数（负载路由用）
+        // 心跳：向 manager 汇报客户端数（负载路由用）+ 聚合媒体质量（#238）
         if last_heartbeat.elapsed() >= Duration::from_secs(5) {
             last_heartbeat = Instant::now();
             metrics.clients.store(clients.len(), Ordering::Relaxed);
+            let n = clients.len().max(1) as u64;
+            let (mut rtt_s, mut rtt_n, mut el_s, mut il_s, mut bw_s) =
+                (0u64, 0u64, 0u64, 0u64, 0u64);
+            for c in &clients {
+                let q = c.qos.lock().unwrap();
+                if let Some(r) = q.rtt {
+                    rtt_s += r.as_nanos() as u64;
+                    rtt_n += 1;
+                }
+                if let Some(l) = q.egress_loss {
+                    el_s += (l * 1_000_000.0) as u64;
+                }
+                if let Some(l) = q.ingress_loss {
+                    il_s += (l * 1_000_000.0) as u64;
+                }
+                bw_s += q.bwe_bps;
+            }
+            metrics.qos_clients.store(rtt_n as usize, Ordering::Relaxed);
+            metrics
+                .rtt_avg_ns
+                .store(if rtt_n > 0 { rtt_s / rtt_n } else { 0 }, Ordering::Relaxed);
+            metrics.egress_loss_ppm.store(el_s / n, Ordering::Relaxed);
+            metrics.ingress_loss_ppm.store(il_s / n, Ordering::Relaxed);
+            metrics.bwe_tx_bps.store(bw_s / n, Ordering::Relaxed);
             let _ = manager_tx.send((index, clients.len()));
         }
 
@@ -924,6 +970,8 @@ pub struct Client {
     pub chosen_rid: Option<Rid>,
     /// 可选录制器引用（录制开启时非空）。
     recorder: Option<Arc<Recorder>>,
+    /// #238 媒体质量快照（RTT/丢包/BWE）。
+    qos: std::sync::Mutex<ClientQos>,
     /// #85/#134 出站 data channel 背压队列：按优先级分桶（0=最高，见
     /// `channel_priority`），对端 SCTP 缓冲满时排队，下一轮重试，不再静默丢包。
     pending_channel_out: [VecDeque<(String, Vec<u8>, bool)>; CHANNEL_PRIORITY_LEVELS],
@@ -951,6 +999,7 @@ impl Client {
             tracks_out: vec![],
             chosen_rid: None,
             recorder: None,
+            qos: std::sync::Mutex::new(ClientQos::default()),
             pending_channel_out: std::array::from_fn(|_| VecDeque::new()),
             pending_channel_out_bytes: 0,
             last_sctp_monitor: Instant::now(),
@@ -1079,6 +1128,8 @@ impl Client {
                     };
                     self.bwe.update_estimate(estimate);
                     self.rtc.bwe().set_current_bitrate(self.bwe.target());
+                    // #238：BWE 目标码率进质量快照。
+                    self.qos.lock().unwrap().bwe_bps = self.bwe.target().as_f64() as u64;
                     trace!(
                         "client {} bwe estimate {estimate:?} target {:?}",
                         *self.id,
@@ -1095,7 +1146,12 @@ impl Client {
                     Propagated::Noop
                 }
                 Event::PeerStats(data) => {
-                    info!("{:?}", data);
+                    // #238：媒体质量快照（RTT/丢包），供 5s 心跳聚合到 metrics。
+                    let mut q = self.qos.lock().unwrap();
+                    q.rtt = data.rtt;
+                    q.egress_loss = data.egress_loss_fraction;
+                    q.ingress_loss = data.ingress_loss_fraction;
+                    drop(q);
                     Propagated::Noop
                 }
                 _ => Propagated::Noop,

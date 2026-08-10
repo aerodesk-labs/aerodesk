@@ -188,24 +188,39 @@ fn prometheus_body(
     turn: Option<&turn_server::TurnServer>,
 ) -> String {
     let mut per_shard = String::new();
-    let mut totals = [0u64; 5];
+    let mut totals = [0u64; 9];
     for (i, m) in shared.metrics.iter().enumerate() {
         let c = m.clients.load(Ordering::Relaxed) as u64;
         let rxp = m.rx_packets.load(Ordering::Relaxed);
         let rxb = m.rx_bytes.load(Ordering::Relaxed);
         let txp = m.tx_packets.load(Ordering::Relaxed);
         let txb = m.tx_bytes.load(Ordering::Relaxed);
+        // #238 媒体质量（最近 5s 心跳聚合；rtt 0=无样本）
+        let rtt = m.rtt_avg_ns.load(Ordering::Relaxed) / 1000;
+        let el = m.egress_loss_ppm.load(Ordering::Relaxed) as f64 / 1e6;
+        let il = m.ingress_loss_ppm.load(Ordering::Relaxed) as f64 / 1e6;
+        let bw = m.bwe_tx_bps.load(Ordering::Relaxed);
+        let qc = m.qos_clients.load(Ordering::Relaxed) as u64;
         totals[0] += c;
         totals[1] += rxp;
         totals[2] += rxb;
         totals[3] += txp;
         totals[4] += txb;
+        totals[5] += rtt;
+        totals[6] += m.egress_loss_ppm.load(Ordering::Relaxed);
+        totals[7] += m.ingress_loss_ppm.load(Ordering::Relaxed);
+        totals[8] += bw;
         per_shard.push_str(&format!(
             "aerodesk_sfu_clients{{shard=\"{i}\"}} {c}\n\
              aerodesk_sfu_rx_packets_total{{shard=\"{i}\"}} {rxp}\n\
              aerodesk_sfu_rx_bytes_total{{shard=\"{i}\"}} {rxb}\n\
              aerodesk_sfu_tx_packets_total{{shard=\"{i}\"}} {txp}\n\
-             aerodesk_sfu_tx_bytes_total{{shard=\"{i}\"}} {txb}\n"
+             aerodesk_sfu_tx_bytes_total{{shard=\"{i}\"}} {txb}\n\
+             aerodesk_sfu_rtt_us{{shard=\"{i}\"}} {rtt}\n\
+             aerodesk_sfu_egress_loss{{shard=\"{i}\"}} {el:.6}\n\
+             aerodesk_sfu_ingress_loss{{shard=\"{i}\"}} {il:.6}\n\
+             aerodesk_sfu_bwe_tx_bps{{shard=\"{i}\"}} {bw}\n\
+             aerodesk_sfu_qos_clients{{shard=\"{i}\"}} {qc}\n"
         ));
     }
     let turn_metrics = match turn {
@@ -225,6 +240,11 @@ fn prometheus_body(
          # TYPE aerodesk_sfu_rx_bytes_total counter\n\
          # TYPE aerodesk_sfu_tx_packets_total counter\n\
          # TYPE aerodesk_sfu_tx_bytes_total counter\n\
+         # TYPE aerodesk_sfu_rtt_us gauge\n\
+         # TYPE aerodesk_sfu_egress_loss gauge\n\
+         # TYPE aerodesk_sfu_ingress_loss gauge\n\
+         # TYPE aerodesk_sfu_bwe_tx_bps gauge\n\
+         # TYPE aerodesk_sfu_qos_clients gauge\n\
          # TYPE aerodesk_sfu_draining gauge\n\
          {per_shard}\
          aerodesk_sfu_clients {}\n\
@@ -232,6 +252,11 @@ fn prometheus_body(
          aerodesk_sfu_rx_bytes_total {}\n\
          aerodesk_sfu_tx_packets_total {}\n\
          aerodesk_sfu_tx_bytes_total {}\n\
+         aerodesk_sfu_rtt_us {}\n\
+         aerodesk_sfu_egress_loss {:.6}\n\
+         aerodesk_sfu_ingress_loss {:.6}\n\
+         aerodesk_sfu_bwe_tx_bps {}\n\
+         aerodesk_sfu_qos_clients {}\n\
          aerodesk_sfu_draining {}\n\
          {turn_metrics}",
         totals[0],
@@ -239,6 +264,11 @@ fn prometheus_body(
         totals[2],
         totals[3],
         totals[4],
+        totals[5],
+        totals[6] as f64 / 1e6,
+        totals[7] as f64 / 1e6,
+        totals[8],
+        totals[0],
         if draining { 1 } else { 0 }
     )
 }
@@ -742,6 +772,12 @@ fn web_request(
                     "rx_bytes": m.rx_bytes.load(std::sync::atomic::Ordering::Relaxed),
                     "tx_packets": m.tx_packets.load(std::sync::atomic::Ordering::Relaxed),
                     "tx_bytes": m.tx_bytes.load(std::sync::atomic::Ordering::Relaxed),
+                    // #238 媒体质量（最近 5s 心跳聚合）。
+                    "rtt_us": m.rtt_avg_ns.load(std::sync::atomic::Ordering::Relaxed) / 1000,
+                    "egress_loss": m.egress_loss_ppm.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+                    "ingress_loss": m.ingress_loss_ppm.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+                    "bwe_tx_bps": m.bwe_tx_bps.load(std::sync::atomic::Ordering::Relaxed),
+                    "qos_clients": m.qos_clients.load(std::sync::atomic::Ordering::Relaxed),
                 })
             })
             .collect();
@@ -901,6 +937,20 @@ mod tests {
         shared.metrics[1].clients.store(4, Ordering::Relaxed);
         shared.metrics[0].rx_packets.store(100, Ordering::Relaxed);
         shared.metrics[1].tx_bytes.store(2048, Ordering::Relaxed);
+        // #238 媒体质量：0 分片 250us/0.5% egress/1% ingress/1.2Mbps，1 分片 0 样本。
+        shared.metrics[0]
+            .rtt_avg_ns
+            .store(250_000, Ordering::Relaxed);
+        shared.metrics[0]
+            .egress_loss_ppm
+            .store((0.5 * 1e6) as u64, Ordering::Relaxed);
+        shared.metrics[0]
+            .ingress_loss_ppm
+            .store((1.0 * 1e6) as u64, Ordering::Relaxed);
+        shared.metrics[0]
+            .bwe_tx_bps
+            .store(1_200_000, Ordering::Relaxed);
+        shared.metrics[0].qos_clients.store(2, Ordering::Relaxed);
 
         let body = prometheus_body(&shared, true, None);
         assert!(
@@ -914,6 +964,34 @@ mod tests {
         assert!(body.contains("aerodesk_sfu_clients 7"), "{body}");
         assert!(body.contains("aerodesk_sfu_rx_packets_total 100"), "{body}");
         assert!(body.contains("aerodesk_sfu_tx_bytes_total 2048"), "{body}");
+        // #238 质量指标（分片 + 合计）
+        assert!(
+            body.contains("aerodesk_sfu_rtt_us{shard=\"0\"} 250"),
+            "{body}"
+        );
+        assert!(
+            body.contains("aerodesk_sfu_egress_loss{shard=\"0\"} 0.500000"),
+            "{body}"
+        );
+        assert!(
+            body.contains("aerodesk_sfu_ingress_loss{shard=\"0\"} 1.000000"),
+            "{body}"
+        );
+        assert!(
+            body.contains("aerodesk_sfu_bwe_tx_bps{shard=\"0\"} 1200000"),
+            "{body}"
+        );
+        assert!(
+            body.contains("aerodesk_sfu_qos_clients{shard=\"0\"} 2"),
+            "{body}"
+        );
+        assert!(body.contains("aerodesk_sfu_rtt_us 250"), "{body}");
+        assert!(body.contains("aerodesk_sfu_egress_loss 0.500000"), "{body}");
+        assert!(
+            body.contains("aerodesk_sfu_ingress_loss 1.000000"),
+            "{body}"
+        );
+        assert!(body.contains("aerodesk_sfu_bwe_tx_bps 1200000"), "{body}");
         assert!(body.contains("aerodesk_sfu_draining 1"), "{body}");
 
         let body = prometheus_body(&shared, false, None);
