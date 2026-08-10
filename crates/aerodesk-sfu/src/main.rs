@@ -151,6 +151,9 @@ fn internal_handler(request: &Request) -> Response {
     if let Some(token) = &state.internal_token
         && request.header("X-Internal-Token") != Some(token.as_str())
     {
+        // #240：未授权调用留痕（audit.log 存在时写 record_api/session_api 403，
+        // 否则以 tracing 日志兜底），供 SIEM/追责。
+        audit_denied_api(&state.shared, request);
         return Response::text("forbidden").with_status_code(403);
     }
     web_request(
@@ -234,6 +237,12 @@ fn prometheus_body(
         ),
         None => String::new(),
     };
+    // #240：在录房间数（RECORD_DIR 未开时为 0），供录制停摆/水位告警。
+    let recordings_active = shared
+        .recorder
+        .as_ref()
+        .map(|r| r.active_count())
+        .unwrap_or(0);
     format!(
         "# TYPE aerodesk_sfu_clients gauge\n\
          # TYPE aerodesk_sfu_rx_packets_total counter\n\
@@ -245,6 +254,7 @@ fn prometheus_body(
          # TYPE aerodesk_sfu_ingress_loss gauge\n\
          # TYPE aerodesk_sfu_bwe_tx_bps gauge\n\
          # TYPE aerodesk_sfu_qos_clients gauge\n\
+         # TYPE aerodesk_sfu_recordings_active gauge\n\
          # TYPE aerodesk_sfu_draining gauge\n\
          {per_shard}\
          aerodesk_sfu_clients {}\n\
@@ -257,6 +267,7 @@ fn prometheus_body(
          aerodesk_sfu_ingress_loss {:.6}\n\
          aerodesk_sfu_bwe_tx_bps {}\n\
          aerodesk_sfu_qos_clients {}\n\
+         aerodesk_sfu_recordings_active {}\n\
          aerodesk_sfu_draining {}\n\
          {turn_metrics}",
         totals[0],
@@ -269,6 +280,7 @@ fn prometheus_body(
         totals[7] as f64 / 1e6,
         totals[8],
         totals[0],
+        recordings_active,
         if draining { 1 } else { 0 }
     )
 }
@@ -602,6 +614,12 @@ pub fn main() {
     //    rouille `poll_timeout` 轮询驱动：SIGHUP 可重建公共 server 热重载证书；
     //    SIGTERM/SIGINT 进入 drain（拒绝新房间 → 限时等现有客户端 → finalize 录制 → 退出）。
     let internal_token = std::env::var("INTERNAL_TOKEN").ok();
+    if internal_token.is_none() {
+        // #240：record/session 管理接口（含踢人）未受保护，仅限开发/回环使用。
+        warn!(
+            "INTERNAL_TOKEN not set: /record/* and /session/* management API are UNAUTHENTICATED (loopback only; production must set INTERNAL_TOKEN)"
+        );
+    }
     let state = Arc::new(AppState {
         media_addr,
         tcp_addr,
@@ -684,49 +702,362 @@ fn recorder_or_503(shared: &Shared) -> Result<&Recorder, Response> {
     })
 }
 
+/// 内部 API 审计（#240）：成功/失败/403 都留痕。audit.log 存在时写
+/// `record_api`/`session_api` 事件（含 action/room/status/ok/detail），
+/// 否则 tracing 日志兜底。
+fn audit_api_event(
+    shared: &Shared,
+    event: &str,
+    action: &str,
+    room: Option<&str>,
+    status: u16,
+    ok: bool,
+    detail: Option<&str>,
+) {
+    let room = room.unwrap_or("");
+    if let Some(rec) = &shared.recorder {
+        rec.audit_event(
+            event,
+            serde_json::json!({
+                "action": action,
+                "room": room,
+                "status": status,
+                "ok": ok,
+                "detail": detail.unwrap_or(""),
+            }),
+        );
+    }
+    if ok {
+        info!("internal api {action} room={room} status={status}");
+    } else {
+        warn!(
+            "internal api {action} room={room} status={status} detail={:?}",
+            detail
+        );
+    }
+}
+
+fn audit_record_api(
+    shared: &Shared,
+    action: &str,
+    room: Option<&str>,
+    status: u16,
+    ok: bool,
+    detail: Option<&str>,
+) {
+    audit_api_event(shared, "record_api", action, room, status, ok, detail);
+}
+
+fn audit_session_api(
+    shared: &Shared,
+    action: &str,
+    room: Option<&str>,
+    status: u16,
+    ok: bool,
+    detail: Option<&str>,
+) {
+    audit_api_event(shared, "session_api", action, room, status, ok, detail);
+}
+
+/// 未授权内部调用审计（#240）：仅对录制/会话管理类路径写 audit.log（带 query
+/// 中的 room/client 便于 SIEM 关联），避免探测性请求刷爆审计日志（其它路径走
+/// tracing warn）。
+fn audit_denied_api(shared: &Shared, request: &Request) {
+    let url = request.url();
+    let action = url.trim_start_matches('/').to_string();
+    let room = query_param(request.raw_query_string(), "room");
+    let client = query_param(request.raw_query_string(), "client");
+    if url.starts_with("/record/") {
+        audit_record_api(shared, &action, room, 403, false, Some("forbidden"));
+    } else if url.starts_with("/session/") {
+        let detail = client
+            .map(|c| format!("forbidden client={c}"))
+            .unwrap_or_else(|| "forbidden".to_string());
+        audit_session_api(shared, &action, room, 403, false, Some(&detail));
+    } else {
+        warn!("internal api denied: {action}");
+    }
+}
+
 /// POST /record/start?room=xxx（内部接口，#160）。
 fn record_start(shared: &Shared, room: Option<&str>) -> Response {
     let Some(room) = room.filter(|r| !r.is_empty()) else {
+        audit_record_api(
+            shared,
+            "record/start",
+            None,
+            400,
+            false,
+            Some("room required"),
+        );
         return Response::text("room required").with_status_code(400);
     };
     let rec = match recorder_or_503(shared) {
         Ok(r) => r,
-        Err(resp) => return resp,
+        Err(_) => {
+            audit_record_api(
+                shared,
+                "record/start",
+                Some(room),
+                503,
+                false,
+                Some("RECORD_DIR not set"),
+            );
+            return Response::text("recording disabled (RECORD_DIR not set)").with_status_code(503);
+        }
     };
     match rec.start(room) {
-        Ok(()) => Response::from_data(
-            "application/json",
-            serde_json::to_vec(&serde_json::json!({ "room": room, "started": true })).unwrap(),
-        ),
-        Err(e) => Response::text(format!("start failed: {e}")).with_status_code(500),
+        Ok(()) => {
+            audit_record_api(shared, "record/start", Some(room), 200, true, None);
+            Response::from_data(
+                "application/json",
+                serde_json::to_vec(&serde_json::json!({ "room": room, "started": true })).unwrap(),
+            )
+        }
+        Err(e) => {
+            audit_record_api(shared, "record/start", Some(room), 500, false, Some(&e));
+            Response::text(format!("start failed: {e}")).with_status_code(500)
+        }
     }
 }
 
 /// POST /record/stop?room=xxx（内部接口，#160）。
 fn record_stop(shared: &Shared, room: Option<&str>) -> Response {
     let Some(room) = room.filter(|r| !r.is_empty()) else {
+        audit_record_api(
+            shared,
+            "record/stop",
+            None,
+            400,
+            false,
+            Some("room required"),
+        );
         return Response::text("room required").with_status_code(400);
     };
     let rec = match recorder_or_503(shared) {
         Ok(r) => r,
-        Err(resp) => return resp,
+        Err(_) => {
+            audit_record_api(
+                shared,
+                "record/stop",
+                Some(room),
+                503,
+                false,
+                Some("RECORD_DIR not set"),
+            );
+            return Response::text("recording disabled (RECORD_DIR not set)").with_status_code(503);
+        }
     };
     let stopped = rec.stop(room);
+    if stopped {
+        audit_record_api(shared, "record/stop", Some(room), 200, true, None);
+    } else {
+        audit_record_api(
+            shared,
+            "record/stop",
+            Some(room),
+            200,
+            true,
+            Some("already stopped"),
+        );
+    }
     Response::from_data(
         "application/json",
         serde_json::to_vec(&serde_json::json!({ "room": room, "stopped": stopped })).unwrap(),
     )
 }
 
-/// GET /record/status（内部接口，#160）。
+/// GET /record/status（内部接口，#160）。只读查询不写 audit.log（避免轮询刷爆
+/// 审计日志），以 tracing debug 留痕。
 fn record_status(shared: &Shared) -> Response {
     let rec = match recorder_or_503(shared) {
         Ok(r) => r,
-        Err(resp) => return resp,
+        Err(_) => {
+            // 503 罕见（RECORD_DIR 未配置）且非轮询主路径，写审计便于排障；
+            // 成功路径只读不写 audit.log（防轮询刷爆）。
+            audit_record_api(
+                shared,
+                "record/status",
+                None,
+                503,
+                false,
+                Some("RECORD_DIR not set"),
+            );
+            return Response::text("recording disabled (RECORD_DIR not set)").with_status_code(503);
+        }
     };
+    let recordings = rec.status();
+    debug!("internal api record/status recordings={}", recordings.len());
     Response::from_data(
         "application/json",
-        serde_json::to_vec(&serde_json::json!({ "recordings": rec.status() })).unwrap(),
+        serde_json::to_vec(&serde_json::json!({ "recordings": recordings })).unwrap(),
+    )
+}
+
+/// GET /session/rooms（内部接口，#240）：房间列表 + 客户端数（按 shard 汇总）。
+fn session_rooms(shared: &Shared) -> Response {
+    let mut rooms: Vec<serde_json::Value> = Vec::new();
+    let mut by_room: std::collections::BTreeMap<String, (usize, Vec<usize>)> =
+        std::collections::BTreeMap::new();
+    for s in shared.session_snapshot() {
+        let e = by_room.entry(s.room).or_default();
+        e.0 += 1;
+        if !e.1.contains(&s.shard) {
+            e.1.push(s.shard);
+        }
+    }
+    for (room, (clients, mut shards)) in by_room {
+        // 分片集合来自 HashMap 快照，顺序不确定；排序保证响应确定性（CI 复现）。
+        shards.sort_unstable();
+        rooms.push(serde_json::json!({
+            "room": room,
+            "clients": clients,
+            "shards": shards,
+        }));
+    }
+    Response::from_data(
+        "application/json",
+        serde_json::to_vec(&serde_json::json!({ "rooms": rooms })).unwrap(),
+    )
+}
+
+/// GET /session/clients?room=xxx（内部接口，#240）：客户端明细。
+/// 不传 room 返回全部客户端（运维/排障用）。
+fn session_clients(shared: &Shared, room: Option<&str>) -> Response {
+    let now = crate::util::unix_micros();
+    let room = room.filter(|r| !r.is_empty());
+    let mut clients: Vec<serde_json::Value> = shared
+        .session_snapshot()
+        .into_iter()
+        .filter(|s| room.is_none_or(|r| s.room == r))
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "room": s.room,
+                "role": s.role,
+                "shard": s.shard,
+                "joined_at": s.joined_at,
+                "uptime_us": now.saturating_sub(s.joined_at),
+            })
+        })
+        .collect();
+    clients.sort_by(|a, b| a["id"].as_u64().cmp(&b["id"].as_u64()));
+    Response::from_data(
+        "application/json",
+        serde_json::to_vec(&serde_json::json!({ "clients": clients })).unwrap(),
+    )
+}
+
+/// POST /session/kick?room=xxx&client=xxx（内部接口，#240）：踢人断连。
+/// 会话存在 → 向所在分片发 Kick（下一轮清理回收），幂等可重试；不存在 → 404。
+fn session_kick(
+    shared: &Shared,
+    shard_txs: &[mpsc::Sender<ShardCommand>],
+    room: Option<&str>,
+    client: Option<&str>,
+) -> Response {
+    let Some(room) = room.filter(|r| !r.is_empty()) else {
+        audit_session_api(
+            shared,
+            "session/kick",
+            None,
+            400,
+            false,
+            Some("room required"),
+        );
+        return Response::text("room required").with_status_code(400);
+    };
+    let Some(client) = client.filter(|c| !c.is_empty()) else {
+        audit_session_api(
+            shared,
+            "session/kick",
+            Some(room),
+            400,
+            false,
+            Some("client required"),
+        );
+        return Response::text("client required").with_status_code(400);
+    };
+    let Ok(client_id) = client.parse::<u64>() else {
+        audit_session_api(
+            shared,
+            "session/kick",
+            Some(room),
+            400,
+            false,
+            Some("client must be u64"),
+        );
+        return Response::text("client must be a numeric id").with_status_code(400);
+    };
+    let Some(info) = shared.session(client_id) else {
+        audit_session_api(
+            shared,
+            "session/kick",
+            Some(room),
+            404,
+            false,
+            Some("client not found"),
+        );
+        return Response::from_data(
+            "application/json",
+            serde_json::to_vec(&serde_json::json!({
+                "kicked": false,
+                "error": "client not found",
+            }))
+            .unwrap(),
+        )
+        .with_status_code(404);
+    };
+    if info.room != room {
+        audit_session_api(
+            shared,
+            "session/kick",
+            Some(room),
+            404,
+            false,
+            Some("client not in room"),
+        );
+        return Response::from_data(
+            "application/json",
+            serde_json::to_vec(&serde_json::json!({
+                "kicked": false,
+                "error": "client not in room",
+            }))
+            .unwrap(),
+        )
+        .with_status_code(404);
+    }
+    let Some(shard_tx) = shard_txs.get(info.shard) else {
+        audit_session_api(
+            shared,
+            "session/kick",
+            Some(room),
+            500,
+            false,
+            Some("shard unavailable"),
+        );
+        return Response::text("shard unavailable").with_status_code(500);
+    };
+    if shard_tx.send(ShardCommand::Kick { client_id }).is_err() {
+        audit_session_api(
+            shared,
+            "session/kick",
+            Some(room),
+            500,
+            false,
+            Some("shard channel closed"),
+        );
+        return Response::text("shard unavailable").with_status_code(500);
+    }
+    audit_session_api(shared, "session/kick", Some(room), 200, true, None);
+    Response::from_data(
+        "application/json",
+        serde_json::to_vec(&serde_json::json!({
+            "kicked": true,
+            "room": room,
+            "client": client_id,
+        }))
+        .unwrap(),
     )
 }
 
@@ -753,10 +1084,28 @@ fn web_request(
                 query_param(request.raw_query_string(), "room"),
             )),
             ("GET", "/record/status") => Some(record_status(&shared)),
+            // 会话管理 API（#240）：仅内部接口暴露。
+            ("GET", "/session/rooms") => Some(session_rooms(&shared)),
+            ("GET", "/session/clients") => Some(session_clients(
+                &shared,
+                query_param(request.raw_query_string(), "room"),
+            )),
+            ("POST", "/session/kick") => Some(session_kick(
+                &shared,
+                &shard_txs,
+                query_param(request.raw_query_string(), "room"),
+                query_param(request.raw_query_string(), "client"),
+            )),
             _ => None,
         };
         if let Some(resp) = record {
             return resp;
+        }
+        // #240：内部接口收到未知/错误方法的 record·session 路径直接 404，
+        // 不落到公共 web/start 处理（避免 GET /session/kick 返回 web 页）。
+        let url = request.url();
+        if url.starts_with("/record/") || url.starts_with("/session/") {
+            return Response::text("not found").with_status_code(404);
         }
     }
     if request.method() == "GET" && request.url() == "/metrics" {
@@ -785,6 +1134,7 @@ fn web_request(
             "shards": shards,
             "turn_allocations": turn_server.as_ref().map(|s| s.active_allocations()),
             "turn_allocations_total": turn_server.as_ref().map(|s| s.allocations_total()),
+            "recordings_active": shared.recorder.as_ref().map(|r| r.active_count()).unwrap_or(0),
         });
         return Response::from_data(
             "application/json",
@@ -993,9 +1343,12 @@ mod tests {
         );
         assert!(body.contains("aerodesk_sfu_bwe_tx_bps 1200000"), "{body}");
         assert!(body.contains("aerodesk_sfu_draining 1"), "{body}");
+        // #240 录制 gauge：无 RECORD_DIR → 0
+        assert!(body.contains("aerodesk_sfu_recordings_active 0"), "{body}");
 
         let body = prometheus_body(&shared, false, None);
         assert!(body.contains("aerodesk_sfu_draining 0"), "{body}");
+        assert!(body.contains("aerodesk_sfu_recordings_active 0"), "{body}");
     }
 
     #[test]
@@ -1039,6 +1392,165 @@ mod tests {
         let mut body = String::new();
         let ok = reader.read_to_string(&mut body).is_ok() && body.contains("aerodesk_sfu_clients");
         assert!(ok, "prometheus body expected, got: {body:.80}");
+    }
+
+    #[test]
+    fn session_api_lists_rooms_and_clients() {
+        let shared = Shared::new(2);
+        shared.register_session(shard::SessionInfo {
+            id: 10,
+            room: "demo".into(),
+            role: Role::Publisher,
+            shard: 0,
+            joined_at: 1_000_000,
+        });
+        shared.register_session(shard::SessionInfo {
+            id: 11,
+            room: "demo".into(),
+            role: Role::Viewer,
+            shard: 1,
+            joined_at: 2_000_000,
+        });
+        shared.register_session(shard::SessionInfo {
+            id: 12,
+            room: "other".into(),
+            role: Role::Viewer,
+            shard: 1,
+            joined_at: 3_000_000,
+        });
+
+        // 房间列表：demo=2、other=1
+        let resp = session_rooms(&shared);
+        assert_eq!(resp.status_code, 200);
+        let (mut reader, _) = resp.data.into_reader_and_size();
+        let mut body = String::new();
+        reader.read_to_string(&mut body).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let rooms = v["rooms"].as_array().unwrap();
+        assert_eq!(rooms.len(), 2);
+        assert_eq!(rooms[0]["room"], "demo");
+        assert_eq!(rooms[0]["clients"], 2);
+        assert_eq!(
+            rooms[0]["shards"].as_array().unwrap(),
+            serde_json::json!([0, 1]).as_array().unwrap()
+        );
+        assert_eq!(rooms[1]["room"], "other");
+        assert_eq!(rooms[1]["clients"], 1);
+
+        // 客户端明细（按房间过滤）
+        let resp = session_clients(&shared, Some("demo"));
+        let (mut reader, _) = resp.data.into_reader_and_size();
+        let mut body = String::new();
+        reader.read_to_string(&mut body).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let clients = v["clients"].as_array().unwrap();
+        assert_eq!(clients.len(), 2);
+        assert_eq!(clients[0]["id"], 10);
+        assert_eq!(clients[0]["role"], "publisher");
+        assert_eq!(clients[0]["shard"], 0);
+        assert!(clients[0]["uptime_us"].as_u64().is_some());
+
+        // 不传 room → 全部
+        let resp = session_clients(&shared, None);
+        let (mut reader, _) = resp.data.into_reader_and_size();
+        let mut body = String::new();
+        reader.read_to_string(&mut body).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["clients"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn session_kick_validates_and_sends_command() {
+        let shared = Shared::new(2);
+        shared.register_session(shard::SessionInfo {
+            id: 10,
+            room: "demo".into(),
+            role: Role::Publisher,
+            shard: 1,
+            joined_at: 1_000_000,
+        });
+        let (tx, rx) = mpsc::channel::<ShardCommand>();
+        let shard_txs = vec![mpsc::channel::<ShardCommand>().0, tx];
+
+        // 参数缺失 → 400
+        let resp = session_kick(&shared, &shard_txs, None, None);
+        assert_eq!(resp.status_code, 400);
+        let resp = session_kick(&shared, &shard_txs, Some("demo"), None);
+        assert_eq!(resp.status_code, 400);
+
+        // 未知客户端 → 404
+        let resp = session_kick(&shared, &shard_txs, Some("demo"), Some("99"));
+        assert_eq!(resp.status_code, 404);
+
+        // 房间不匹配 → 404
+        let resp = session_kick(&shared, &shard_txs, Some("other"), Some("10"));
+        assert_eq!(resp.status_code, 404);
+
+        // 分片通道不可用（shard_txs 为空）→ 500
+        let resp = session_kick(&shared, &[], Some("demo"), Some("10"));
+        assert_eq!(resp.status_code, 500);
+
+        // 正常踢人 → 200 + Kick 命令送达对应分片
+        let resp = session_kick(&shared, &shard_txs, Some("demo"), Some("10"));
+        assert_eq!(resp.status_code, 200);
+        let (mut reader, _) = resp.data.into_reader_and_size();
+        let mut body = String::new();
+        reader.read_to_string(&mut body).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["kicked"], true);
+        assert_eq!(v["client"], 10);
+        match rx.try_recv() {
+            Ok(ShardCommand::Kick { client_id }) => assert_eq!(client_id, 10),
+            other => panic!("expected Kick command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_api_audits_failures_without_recorder() {
+        // 无 RECORD_DIR（无 Recorder）：start 400/503 有审计（tracing 兜底）且状态码正确。
+        let shared = Shared::new(1);
+        let resp = record_start(&shared, None);
+        assert_eq!(resp.status_code, 400);
+        let resp = record_start(&shared, Some("demo"));
+        assert_eq!(resp.status_code, 503);
+        let resp = record_stop(&shared, None);
+        assert_eq!(resp.status_code, 400);
+        let resp = record_stop(&shared, Some("demo"));
+        assert_eq!(resp.status_code, 503);
+        let resp = record_status(&shared);
+        assert_eq!(resp.status_code, 503);
+    }
+
+    #[test]
+    fn internal_unknown_session_path_returns_404_not_web() {
+        let shared = Shared::new(1);
+        let router = Arc::new(Mutex::new(crate::router::ShardRouter::new(1)));
+        // 认证通过但路径/方法不匹配（GET /session/kick）→ 404，不回落 web 页。
+        let req = Request::fake_http(
+            "GET",
+            "/session/kick?room=demo&client=1",
+            vec![],
+            Vec::new(),
+        );
+        let resp = web_request(
+            &req,
+            "127.0.0.1:3478".parse().unwrap(),
+            "127.0.0.1:3478".parse().unwrap(),
+            Vec::new(),
+            router,
+            None,
+            None,
+            shared,
+            true,
+        );
+        assert_eq!(resp.status_code, 404);
+        let (mut reader, _) = resp.data.into_reader_and_size();
+        let mut body = String::new();
+        reader.read_to_string(&mut body).unwrap();
+        assert!(
+            !body.contains("<html"),
+            "must not fall through to web page: {body:.60}"
+        );
     }
 
     #[test]

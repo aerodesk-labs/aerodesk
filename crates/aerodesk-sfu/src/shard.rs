@@ -27,6 +27,7 @@ use crate::recorder::Recorder;
 
 /// 发往分片的命令。
 #[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
 pub enum ShardCommand {
     /// 新客户端（信令线程创建 Rtc 后送入）。
     /// role 用于 #12 角色校验：viewer 禁止发布媒体。
@@ -39,6 +40,8 @@ pub enum ShardCommand {
         proto: Protocol,
         data: Vec<u8>,
     },
+    /// 踢人（会话管理 API，#240）：按 client_id 断开客户端，下一轮清理回收。
+    Kick { client_id: u64 },
 }
 
 /// 跨分片事件。
@@ -117,6 +120,17 @@ pub struct ClientQos {
     pub bwe_bps: u64,
 }
 
+/// 客户端会话快照（会话管理 API 用，#240）。
+#[derive(Debug, Clone)]
+pub struct SessionInfo {
+    pub id: u64,
+    pub room: String,
+    pub role: Role,
+    pub shard: usize,
+    /// 加入时刻（Unix 微秒）。
+    pub joined_at: u64,
+}
+
 /// 全局共享状态（所有分片可见）。
 #[derive(Clone)]
 pub struct Shared {
@@ -142,6 +156,8 @@ pub struct Shared {
     pub max_total_clients: usize,
     /// 可选录制器（RECORD_DIR 开启时存在）。
     pub recorder: Option<Arc<Recorder>>,
+    /// 会话注册表：client_id → 会话快照（会话管理 API 读取，#240）。
+    pub sessions: Arc<RwLock<HashMap<u64, SessionInfo>>>,
 }
 
 impl Shared {
@@ -158,6 +174,7 @@ impl Shared {
             total_clients: Arc::new(AtomicUsize::new(0)),
             max_room_clients: 0,
             max_total_clients: 0,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -290,6 +307,29 @@ impl Shared {
             .unwrap()
             .get(&(room.to_string(), client_id))
             .copied()
+    }
+
+    /// 登记会话（AddClient 成功后由分片调用，#240）。
+    pub fn register_session(&self, info: SessionInfo) {
+        self.sessions.write().unwrap().insert(info.id, info);
+    }
+
+    /// 注销会话（仅当 shard 匹配时删除，避免跨分片误删，#240）。
+    pub fn unregister_session(&self, client_id: u64, shard: usize) {
+        let mut reg = self.sessions.write().unwrap();
+        if reg.get(&client_id).is_some_and(|s| s.shard == shard) {
+            reg.remove(&client_id);
+        }
+    }
+
+    /// 查询单个会话。
+    pub fn session(&self, client_id: u64) -> Option<SessionInfo> {
+        self.sessions.read().unwrap().get(&client_id).cloned()
+    }
+
+    /// 会话快照（会话管理 API：房间/客户端列表，#240）。
+    pub fn session_snapshot(&self) -> Vec<SessionInfo> {
+        self.sessions.read().unwrap().values().cloned().collect()
     }
 }
 
@@ -444,7 +484,23 @@ fn run_shard(
                     clients.push(client);
                     addr_cache.clear();
                     shared.register_client(&room, id.as_u64(), index);
+                    shared.register_session(SessionInfo {
+                        id: id.as_u64(),
+                        room: room.clone(),
+                        role,
+                        shard: index,
+                        joined_at: crate::util::unix_micros(),
+                    });
                     info!("shard {index}: client {id:?} joined room {room}");
+                }
+                ShardCommand::Kick { client_id } => {
+                    if let Some(client) = clients.iter_mut().find(|c| c.id.as_u64() == client_id) {
+                        info!(
+                            "shard {index}: kick client {client_id} (room {})",
+                            client.room
+                        );
+                        client.rtc.disconnect();
+                    }
                 }
                 ShardCommand::Cross(ev) => {
                     handle_cross_event(
@@ -485,6 +541,7 @@ fn run_shard(
             addr_cache.clear();
             for (room, id) in &dead {
                 shared.unregister_client(room, *id, index);
+                shared.unregister_session(*id, index);
                 shared.release(room); // #180 配额计数释放
             }
             let mut counts = std::mem::take(&mut room_counts);
@@ -1756,6 +1813,44 @@ mod tests {
         shared.register_client("r", 7, 2);
         shared.unregister_client("r", 7, 3);
         assert_eq!(shared.client_shard("r", 7), Some(2));
+    }
+
+    #[test]
+    fn session_registry_register_snapshot_cleanup() {
+        let shared = Shared::new(4);
+        assert!(shared.session(7).is_none());
+        assert!(shared.session_snapshot().is_empty());
+
+        shared.register_session(SessionInfo {
+            id: 7,
+            room: "r".into(),
+            role: Role::Publisher,
+            shard: 2,
+            joined_at: 1_000,
+        });
+        shared.register_session(SessionInfo {
+            id: 8,
+            room: "r".into(),
+            role: Role::Viewer,
+            shard: 2,
+            joined_at: 2_000,
+        });
+        shared.register_session(SessionInfo {
+            id: 9,
+            room: "other".into(),
+            role: Role::Viewer,
+            shard: 3,
+            joined_at: 3_000,
+        });
+        assert_eq!(shared.session(7).map(|s| s.shard), Some(2));
+        assert_eq!(shared.session_snapshot().len(), 3);
+
+        // 其它 shard 注销不误删
+        shared.unregister_session(7, 3);
+        assert!(shared.session(7).is_some(), "错误 shard 不得删除会话");
+        shared.unregister_session(7, 2);
+        assert!(shared.session(7).is_none(), "正确 shard 应删除会话");
+        assert_eq!(shared.session_snapshot().len(), 2);
     }
 
     #[test]

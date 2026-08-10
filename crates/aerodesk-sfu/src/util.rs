@@ -20,3 +20,11 @@ pub fn select_host_address() -> IpAddr {
 
     panic!("Found no usable network interface");
 }
+
+/// 当前 Unix 时间（微秒，会话审计/列表用；系统时钟异常时回退 0）。
+pub fn unix_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros().try_into().unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}

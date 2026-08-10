@@ -260,6 +260,15 @@ impl Recorder {
         let _ = f.flush();
     }
 
+    /// 写一条审计事件（含按需录制 API 调用追责，#240）。
+    /// `payload` 与 `event`/`ts` 合并后以 JSON Lines 追加到 audit.log。
+    pub fn audit_event(&self, event: &str, payload: serde_json::Value) {
+        let mut line = payload;
+        line["ts"] = serde_json::json!(now_micros());
+        line["event"] = serde_json::json!(event);
+        self.audit(line);
+    }
+
     /// 记录一条媒体载荷（发布端 → SFU 的入口）。
     ///
     /// #15：录制文件创建失败（磁盘满/权限错误）时 warn 并跳过该房间，
@@ -285,12 +294,14 @@ impl Recorder {
         if !recs.contains_key(room) {
             match Recording::open(&self.root, room, ts) {
                 Ok(rec) => {
-                    self.audit(serde_json::json!({
-                        "ts": ts,
-                        "event": "room_start",
-                        "room": room,
-                        "path": rec.path.display().to_string(),
-                    }));
+                    self.audit_event(
+                        "room_start",
+                        serde_json::json!({
+                            "room": room,
+                            "path": rec.path.display().to_string(),
+                            "source": "auto",
+                        }),
+                    );
                     recs.insert(room.to_string(), rec);
                 }
                 Err(e) => {
@@ -341,17 +352,26 @@ impl Recorder {
     pub fn start(&self, room: &str) -> Result<(), String> {
         let ts = now_micros();
         let mut recs = self.recordings.lock().unwrap_or_else(|e| e.into_inner());
-        if recs.contains_key(room) {
+        if let Some(existing) = recs.get(room) {
+            if existing.failed {
+                // #240：失败哨兵不得被后续 start 当作成功（此前磁盘故障后
+                // 再调 start 会返回 200 但实际不录制）。
+                return Err(format!(
+                    "recording for {room} previously failed; not retrying this session"
+                ));
+            }
             return Ok(()); // 幂等
         }
         match Recording::open(&self.root, room, ts) {
             Ok(rec) => {
-                self.audit(serde_json::json!({
-                    "ts": ts,
-                    "event": "room_start",
-                    "room": room,
-                    "path": rec.path.display().to_string(),
-                }));
+                self.audit_event(
+                    "room_start",
+                    serde_json::json!({
+                        "room": room,
+                        "path": rec.path.display().to_string(),
+                        "source": "api",
+                    }),
+                );
                 recs.insert(room.to_string(), rec);
                 Ok(())
             }
@@ -374,14 +394,16 @@ impl Recorder {
             return true;
         }
         self.finalize_recording(&mut rec, now);
-        self.audit(serde_json::json!({
-            "ts": now,
-            "event": "room_end",
-            "room": rec.room,
-            "packets": rec.packets,
-            "bytes": rec.bytes,
-            "segments": rec.segments.len(),
-        }));
+        self.audit_event(
+            "room_end",
+            serde_json::json!({
+                "room": rec.room,
+                "packets": rec.packets,
+                "bytes": rec.bytes,
+                "segments": rec.segments.len(),
+                "duration_us": now.saturating_sub(rec.started_at),
+            }),
+        );
         true
     }
 
@@ -402,6 +424,12 @@ impl Recorder {
             .collect()
     }
 
+    /// 当前在录房间数（供 /metrics/prometheus gauge，不含失败哨兵，#240）。
+    pub fn active_count(&self) -> usize {
+        let recs = self.recordings.lock().unwrap_or_else(|e| e.into_inner());
+        recs.values().filter(|r| !r.failed).count()
+    }
+
     /// 结束所有录制并写元数据（进程退出/手动调用时）。
     pub fn finalize_all(&self) {
         let mut recs = self.recordings.lock().unwrap_or_else(|e| e.into_inner());
@@ -411,14 +439,16 @@ impl Recorder {
                 continue;
             }
             self.finalize_recording(&mut rec, now);
-            self.audit(serde_json::json!({
-                "ts": now,
-                "event": "room_end",
-                "room": rec.room,
-                "packets": rec.packets,
-                "bytes": rec.bytes,
-                "segments": rec.segments.len(),
-            }));
+            self.audit_event(
+                "room_end",
+                serde_json::json!({
+                    "room": rec.room,
+                    "packets": rec.packets,
+                    "bytes": rec.bytes,
+                    "segments": rec.segments.len(),
+                    "duration_us": now.saturating_sub(rec.started_at),
+                }),
+            );
         }
     }
 }
@@ -526,6 +556,37 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn audit_tracks_api_calls_and_source() {
+        let dir = tmpdir("audit");
+        let rec = Recorder::new(&dir, false, 0, 0).unwrap();
+
+        // API start → room_start source=api
+        rec.start("room-api").unwrap();
+        // 自动首包 → room_start source=auto
+        rec.record_payload("room-auto", b"x");
+        // 按需录制 API 调用留痕（start/stop/403 语义）
+        rec.audit_event(
+            "record_api",
+            serde_json::json!({ "action": "record/start", "room": "room-api", "status": 200, "ok": true }),
+        );
+        rec.audit_event(
+            "record_api",
+            serde_json::json!({ "action": "record/start", "room": "", "status": 403, "ok": false, "detail": "forbidden" }),
+        );
+        rec.stop("room-api");
+
+        let audit = fs::read_to_string(dir.join("audit.log")).unwrap();
+        assert!(audit.contains("\"source\":\"api\""), "{audit}");
+        assert!(audit.contains("\"source\":\"auto\""), "{audit}");
+        assert!(audit.contains("\"event\":\"record_api\""), "{audit}");
+        assert!(audit.contains("\"action\":\"record/start\""), "{audit}");
+        assert!(audit.contains("\"status\":403"), "{audit}");
+        assert!(audit.contains("\"event\":\"room_end\""), "{audit}");
+        assert!(audit.contains("\"duration_us\""), "{audit}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn create_failure_skips_room_without_panic() {
@@ -542,6 +603,11 @@ mod tests {
         // #15：失败不得 panic，且失败房间不再重试。
         rec.record_payload("blocked-room", b"x");
         rec.record_payload("blocked-room", b"y");
+        // #240：失败哨兵后显式 start 必须报错（不能伪成功）。
+        assert!(
+            rec.start("blocked-room").is_err(),
+            "failed sentinel must not be reported as start success"
+        );
 
         fs::set_permissions(&dir, fs::Permissions::from_mode(orig)).unwrap();
         rec.finalize_all();
