@@ -10,6 +10,9 @@
 #   p50/p90/p99 → （可选 BRIDGE_KILL_CMD）4 桥死亡自动恢复。
 #   远程模式需 AUTH（信令 token）；BRIDGE_KILL_CMD 例：
 #     'ssh pop-b "pkill -f aerodesk-bridge"'  或  'systemctl restart aerodesk-signal'
+# - REMOTE_LOOPBACK=1（#257）：本地起双 PoP（同 local）但走 remote 断言流——
+#   端到端验证远程验收工具（无本地日志断言、BRIDGE_KILL_CMD 恢复用
+#   pkill -f aerodesk-bridge）。CI 双跑。
 #
 # 延迟 p99 断言（两种模式）：桥 p99 ≤ 直连 p99×4+500ms（SCTP 每跳 ~150ms，见 BRIDGE.md）。
 set -uo pipefail
@@ -27,13 +30,18 @@ if [ -n "${POP_A_SIGNAL:-}" ] || [ -n "${POP_B_SIGNAL:-}" ]; then
     echo "WARN: 只设置了 POP_A_SIGNAL/POP_B_SIGNAL 之一，按 local 模式运行；远程模式需两者都设" >&2
   fi
 fi
+# #257：REMOTE_LOOPBACK=1 → 本地起双 PoP 但走 remote 断言流（端到端验证远程工具）。
+if [ "${REMOTE_LOOPBACK:-}" = "1" ]; then
+  REMOTE=1
+  echo "== REMOTE_LOOPBACK 模式：本地双 PoP + remote 断言流（#257）"
+fi
 
 ROOM="bridge-fb-$(date +%s)"
 # PoP-A
 SIG_A=14800; INT_A=14802; PLAIN_A=14803; MEDIA_A=14878
 # PoP-B
 SIG_B=14900; INT_B=14902; PLAIN_B=14903; MEDIA_B=14978
-if [ "$REMOTE" = "1" ]; then
+if [ "$REMOTE" = "1" ] && [ "${REMOTE_LOOPBACK:-}" != "1" ]; then
   SIG_A_URL="$POP_A_SIGNAL"; SIG_B_URL="$POP_B_SIGNAL"
 else
   SIG_A_URL="ws://127.0.0.1:${PLAIN_A}"; SIG_B_URL="ws://127.0.0.1:${PLAIN_B}"
@@ -41,7 +49,7 @@ fi
 AUTH="${AUTH:-}"
 BRIDGE_KILL_CMD="${BRIDGE_KILL_CMD:-}"
 # 生产认证路径：信令 AUTH_TOKENS 校验；桥经 BRIDGE_AUTH_TOKEN 注入 --auth-token。
-if [ "$REMOTE" = "1" ]; then
+if [ "$REMOTE" = "1" ] && [ "${REMOTE_LOOPBACK:-}" != "1" ]; then
   [ -n "$AUTH" ] || fail "远程模式必须设置 AUTH（信令 token）"
   BRIDGE_CMD="${BRIDGE_CMD:-}"
   [ -n "$BRIDGE_CMD" ] || fail "远程模式必须设置 BRIDGE_CMD（与 PoP-B 信令同款命令模板，含 {room}；实际由 PoP-B 信令执行，本脚本仅校验非空）"
@@ -94,14 +102,14 @@ wait_log() {
 }
 
 echo "== 构建"
-if [ "$REMOTE" = "1" ]; then
+if [ "$REMOTE" = "1" ] && [ "${REMOTE_LOOPBACK:-}" != "1" ]; then
   cargo build -q -p aerodesk-cli   # 远程验收只需 CLI；SFU/signal/bridge 在 PoP 上
 else
   cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli -p aerodesk-bridge
 fi
 REC_A="$(mktemp -d)"; REC_B="$(mktemp -d)"
 
-if [ "$REMOTE" = "0" ]; then
+if [ "$REMOTE" = "0" ] || [ "${REMOTE_LOOPBACK:-}" = "1" ]; then
   echo "== 启动 PoP-A（148xx）"
   RECORD_DIR="$REC_A" SFU_MEDIA_PORT="$MEDIA_A" SFU_SIGNAL_PORT="$SIG_A" SFU_INTERNAL_PORT="$INT_A" \
     "$TARGET_DIR/aerodesk-sfu" >/tmp/bfb-sfu-a.log 2>&1 &
@@ -111,7 +119,7 @@ if [ "$REMOTE" = "0" ]; then
   SIG_A_PID=$!
   for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_A" 2>/dev/null && break; sleep 0.2; done
   sleep 0.3
-else
+elif [ "${REMOTE_LOOPBACK:-}" != "1" ]; then
   echo "== 远程模式：使用外部 PoP（A=${POP_A_SIGNAL} B=${POP_B_SIGNAL}），跳过本地启动"
 fi
 
@@ -139,7 +147,7 @@ echo "  直连基线：samples=${DIRECT_N} p50/p90/p99=${DIRECT_STATS}ms"
 [ "$DIRECT_P99" != "NONE" ] || fail "场景0：无 LATENCY 样本"
 kill "$VIEW0" "$PUB0" 2>/dev/null || true; sleep 1
 
-if [ "$REMOTE" = "0" ]; then
+if [ "$REMOTE" = "0" ] || [ "${REMOTE_LOOPBACK:-}" = "1" ]; then
   echo "== 启动 PoP-B（149xx，BRIDGE_CMD 桥优先）"
   RECORD_DIR="$REC_B" SFU_MEDIA_PORT="$MEDIA_B" SFU_SIGNAL_PORT="$SIG_B" SFU_INTERNAL_PORT="$INT_B" \
     "$TARGET_DIR/aerodesk-sfu" >/tmp/bfb-sfu-b.log 2>&1 &
@@ -200,6 +208,10 @@ THRESHOLD=$((DIRECT_P99 * 4 + 500))
 
 if [ "$REMOTE" = "1" ]; then
   # 远程模式：场景 3/2 需本地信令控制，跳过；场景 4 可选（需 BRIDGE_KILL_CMD）。
+  # REMOTE_LOOPBACK 未显式给 BRIDGE_KILL_CMD 时默认本地 pkill（#257）。
+  if [ "${REMOTE_LOOPBACK:-}" = "1" ] && [ -z "$BRIDGE_KILL_CMD" ]; then
+    BRIDGE_KILL_CMD="pkill -f aerodesk-bridge"
+  fi
   if [ -n "$BRIDGE_KILL_CMD" ]; then
     echo "== 场景 4（远程）：桥死亡自动恢复（BRIDGE_KILL_CMD）"
     BEFORE=$(grep -c "DECODED:" /tmp/bfb-view-b.log 2>/dev/null || echo 0)

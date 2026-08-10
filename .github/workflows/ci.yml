@@ -136,9 +136,13 @@ jobs:
 
       # #216 M3 桥接编排：BRIDGE_CMD 桥优先（自动 spawn）+ 失败回退 Redirect +
       # 延迟 p99（与直连基线对比）。
+      # #257：同一 step 先 local 五场景，再 REMOTE_LOOPBACK（本地双 PoP + remote
+      # 断言流，端到端验证远程验收工具含 BRIDGE_KILL_CMD 恢复）。
       - name: e2e bridge fallback (macOS only)
         if: runner.os == 'macOS'
-        run: ./scripts/bridge-fallback-e2e.sh
+        run: |
+          ./scripts/bridge-fallback-e2e.sh
+          REMOTE_LOOPBACK=1 ./scripts/bridge-fallback-e2e.sh
 
       # #163 信令连接配额：房间/全局上限，Join 超限拒绝。
       - name: e2e signal connection quota (macOS only)
