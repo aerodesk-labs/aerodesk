@@ -51,13 +51,15 @@ latency_count() { local c; c=$(grep -c "LATENCY:" "$1" 2>/dev/null); echo "${c:-
 # 等 SFU 内嵌 TURN 就绪：内部 /metrics 出现 turn_allocations 指标才说明
 # TURN server 已绑定（nc -z UDP 不可靠，慢 CI 上 publisher 10s ICE 期限内
 # TURN 未起会直接失败）。
-wait_turn_ready() { # $1=内部端口 $2=标签
-  for _ in $(seq 1 80); do
+wait_turn_ready() { # $1=内部端口 $2=标签 $3=SFU 日志
+  for _ in $(seq 1 160); do
     if curl -s --max-time 2 "http://127.0.0.1:$1/metrics/prometheus" 2>/dev/null       | grep -q "^aerodesk_sfu_turn_allocations"; then
       return 0
     fi
     sleep 0.5
   done
+  echo "--- $2 SFU 日志尾 ---"; tail -30 "$3"
+  echo "--- $2 内部 /metrics 输出 ---"; curl -s --max-time 2 "http://127.0.0.1:$1/metrics/prometheus" | head -10
   return 1
 }
 wait_decoded() {
