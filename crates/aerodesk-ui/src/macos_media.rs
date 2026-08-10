@@ -14,7 +14,6 @@ use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media_pipeline::Codec;
 use aerodesk_macos::decode::{H264Decoder, HevcDecoder, to_rgba};
 use aerodesk_protocol::signal::Role;
-use slint::{Image, Model, Rgba8Pixel, SharedPixelBuffer};
 use str0m::net::Protocol;
 
 use crate::{AppWindow, FileCmd};
@@ -109,9 +108,19 @@ pub fn run_viewer(
     // #29 多会话：本会话 stop 置位即退出（断开只关当前活动会话）。
     let stale = || stop.load(Ordering::SeqCst);
     let auth = token.as_deref().filter(|t| !t.is_empty());
-    let mut live = match connect_live_role(&server, &room, Role::Viewer, auth) {
-        Ok(l) => l,
-        Err(e) => {
+    // connect_live_role 可能阻塞（异常网络环境）；放子线程 + 20s 超时保护，
+    // 避免连接中的会话占满 MAX_SESSIONS 槽位且无法取消。
+    let (tx, rx) = std::sync::mpsc::channel::<Result<_, String>>();
+    let srv = server.clone();
+    let rm = room.clone();
+    let auth2 = auth.map(|s| s.to_string());
+    std::thread::spawn(move || {
+        let r = connect_live_role(&srv, &rm, Role::Viewer, auth2.as_deref());
+        let _ = tx.send(r);
+    });
+    let mut live = match rx.recv_timeout(Duration::from_secs(20)) {
+        Ok(Ok(l)) => l,
+        Ok(Err(e)) => {
             if !stale() {
                 if let Some(ui) = ui_weak.upgrade() {
                     ui.set_conn_state(3);
@@ -119,14 +128,26 @@ pub fn run_viewer(
                 }
             }
             if let Some(ui) = ui_weak.upgrade() {
-                crate::session_cleanup(&ui, session_idx);
+                crate::session_cleanup(&ui, session_idx, Some(format!("连接失败：{e}")));
+            }
+            return;
+        }
+        Err(_) => {
+            if !stale() {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_conn_state(3);
+                    ui.set_status("连接超时".into());
+                }
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                crate::session_cleanup(&ui, session_idx, Some("连接超时".into()));
             }
             return;
         }
     };
     if stale() {
         if let Some(ui) = ui_weak.upgrade() {
-            crate::session_cleanup(&ui, session_idx);
+            crate::session_cleanup(&ui, session_idx, None);
         }
         return;
     }
@@ -341,7 +362,11 @@ pub fn run_viewer(
                 ClientEvent::Closed => {
                     if let Some(fui) = ui_weak.upgrade() {
                         fui.set_status("会话结束（连接关闭）".into());
-                        crate::session_cleanup(&fui, session_idx);
+                        crate::session_cleanup(
+                            &fui,
+                            session_idx,
+                            Some("会话结束（连接关闭）".into()),
+                        );
                     }
                     return;
                 }
@@ -422,9 +447,10 @@ pub fn run_viewer(
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    // 会话结束（断开置 stop）：清理注册表与 UI 槽位。
+    // 会话结束（断开置 stop）：提示后清理注册表与 UI 槽位。
     if let Some(ui) = ui_weak.upgrade() {
-        crate::session_cleanup(&ui, session_idx);
+        ui.set_status(format!("已断开：{room}").into());
+        crate::session_cleanup(&ui, session_idx, None);
     }
 }
 

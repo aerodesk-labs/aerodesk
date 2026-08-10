@@ -1190,6 +1190,7 @@ export component AppWindow inherits Window {
                 spacing: 0px;
                 vertical-stretch: 1;
                 // 会话标签行（仅有多会话时显示）
+                // 标签数量与 Rust 侧 MAX_SESSIONS=4 耦合（见 main.rs const MAX_SESSIONS）。
                 if root.session-tabs.length > 0: HorizontalLayout {
                     spacing: 0px;
                     if root.session-tabs.length > 0: SessionTab { text: root.session-tabs[0]; selected: root.active-session == 0; clicked => { root.switch-session(0); } }
