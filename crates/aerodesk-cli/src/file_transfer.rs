@@ -40,8 +40,12 @@ pub fn init(
     send_file: Option<PathBuf>,
     recv_dir: Option<PathBuf>,
     cancel_send_after: Option<Duration>,
+    allow_request: bool,
 ) {
     let mut ft = aerodesk_core::file_transfer::FileTransfer::new(recv_dir);
+    // 仅被控端（publisher）允许响应 FileControl::Request 提供文件；
+    // viewer 默认拒绝，防房间内任意对端读取本机文件（审查 #255 Critical）。
+    ft.set_allow_request(allow_request);
     if let Some(path) = send_file {
         if let Err(e) = ft.send_file(&path) {
             eprintln!("file transfer send init failed: {e}");

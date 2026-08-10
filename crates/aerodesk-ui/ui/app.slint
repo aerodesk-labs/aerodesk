@@ -82,6 +82,7 @@ component IconBtn {
     in property <string> tooltip: "";
     in property <bool> active: false;
     in property <bool> danger: false;
+    in property <bool> enabled: true;
     callback clicked;
     width: 36px;
     height: 32px;
@@ -89,19 +90,20 @@ component IconBtn {
         width: 100%;
         height: 100%;
         border-radius: 6px;
-        background: ta.has-hover ? (root.danger ? #ffecec : #e8e8ec) : transparent;
+        background: root.enabled && ta.has-hover ? (root.danger ? #ffecec : #e8e8ec) : transparent;
         border-width: 1px;
         border-color: root.active ? #0071ff : transparent;
         ta := TouchArea {
             width: 100%;
             height: 100%;
+            enabled: root.enabled;
             mouse-cursor: pointer;
             clicked => { root.clicked(); }
         }
         MIcon {
             icon: root.icon;
             size: 18px;
-            color: root.danger ? #d93025 : (root.active ? #0071ff : #5f6368);
+            color: root.enabled ? (root.danger ? #d93025 : (root.active ? #0071ff : #5f6368)) : #bdbdc4;
         }
         if root.tooltip != "": Tooltip {
             Rectangle {
@@ -456,6 +458,10 @@ export component AppWindow inherits Window {
     in-out property <bool> inc-enabled: false;
     in-out property <bool> inc-audio: true;
     in-out property <bool> inc-mouse: true;
+    // #72 文件传输总开关：关闭后禁用发文件/剪贴板/拖放，并暂停接收落盘。
+    in-out property <bool> file-transfer-enabled: true;
+    // #58 当前会话静音态（工具栏音频按钮高亮用，按会话同步）。
+    in-out property <bool> audio-muted: false;
     in-out property <bool> inc-view-only: false;
     // 设置页密码编辑
     in-out property <string> pw-edit: "";
@@ -483,8 +489,10 @@ export component AppWindow inherits Window {
     callback toggle-quality();
     callback toggle-input();
     // #72：会话视图文件/剪贴板按钮。
+    callback toggle-file-transfer();
     callback send-file();
     callback send-clipboard();
+    callback cancel-file();
     callback switch-session(int);
     callback set-settings-tab(int);
     // #109 AI 远控管理：白名单增删/刷新 + 审计刷新。
@@ -1302,6 +1310,7 @@ export component AppWindow inherits Window {
                                 color: #212121;
                                 vertical-alignment: center;
                             }
+                            IconBtn { icon: "\u{e5cd}"; danger: true; width: 22px; height: 20px; tooltip: "取消发送"; clicked => { root.cancel-file(); } }
                         }
                     }
                     if root.session-frames[root.active-session].width == 0: Text {
@@ -1355,7 +1364,7 @@ export component AppWindow inherits Window {
                             padding-right: 4px;
                             spacing: 2px;
                             IconBtn { icon: "\u{e5d0}"; tooltip: "全屏"; clicked => { root.toggle-fullscreen(); } }
-                            IconBtn { icon: "\u{e050}"; tooltip: "音频"; clicked => { root.toggle-audio(); } }
+                            IconBtn { icon: "\u{e050}"; active: root.audio-muted; danger: root.audio-muted; tooltip: root.audio-muted ? "音频已静音（本会话）" : "音频"; clicked => { root.toggle-audio(); } }
                             Slider {
                                 width: 80px;
                                 minimum: 0;
@@ -1369,8 +1378,9 @@ export component AppWindow inherits Window {
                             IconBtn { icon: "\u{e30c}"; tooltip: "显示器"; clicked => { root.toggle-display(); } }
                             IconBtn { icon: "\u{e429}"; tooltip: "画质"; clicked => { root.toggle-quality(); } }
                             IconBtn { icon: "\u{e312}"; tooltip: "输入"; clicked => { root.toggle-input(); } }
-                            IconBtn { icon: "\u{e2c8}"; tooltip: "发文件"; clicked => { root.send-file(); } }
-                            IconBtn { icon: "\u{e14f}"; tooltip: "剪贴板"; clicked => { root.send-clipboard(); } }
+                            IconBtn { icon: "\u{e2c8}"; active: root.file-transfer-enabled; danger: !root.file-transfer-enabled; tooltip: root.file-transfer-enabled ? "文件传输：开" : "文件传输：关（点击开启）"; clicked => { root.toggle-file-transfer(); } }
+                            IconBtn { icon: "\u{e14f}"; enabled: root.file-transfer-enabled; tooltip: "发文件"; clicked => { root.send-file(); } }
+                            IconBtn { icon: "\u{e2c7}"; enabled: root.file-transfer-enabled; tooltip: "剪贴板"; clicked => { root.send-clipboard(); } }
                             Rectangle { width: 1px; height: 22px; background: #dedee2; }
                             IconBtn { icon: "\u{e5cd}"; danger: true; tooltip: "断开"; clicked => { root.disconnect(); } }
                             Rectangle { width: 6px; }

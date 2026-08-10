@@ -28,6 +28,8 @@ pub enum FileCmd {
     SendFile(std::path::PathBuf),
     /// 把文本写入被控端剪贴板。
     SendClipboard(String),
+    /// 取消当前发送。
+    Cancel,
 }
 
 /// #72 拖放发送纯路由（可单测）：把文件交给会话 file 通道，返回状态文案。
@@ -46,13 +48,16 @@ pub fn dispatch_dropped_files(
     if files.is_empty() {
         return format!("发送文件：{} 不是文件", paths[0].display());
     }
-    for f in &files {
-        let _ = tx.send(FileCmd::SendFile(f.clone()));
-    }
+    // 当前一次只传一个文件（FileTransfer 单发送任务）：只发第一个，其余提示逐个发送。
+    let _ = tx.send(FileCmd::SendFile(files[0].clone()));
     if files.len() == 1 {
         format!("发送文件：{}", files[0].display())
     } else {
-        format!("发送文件：{} 个文件", files.len())
+        format!(
+            "发送文件：{}（一次一个，其余 {} 个文件请等待完成后再发）",
+            files[0].display(),
+            files.len() - 1
+        )
     }
 }
 
@@ -283,13 +288,14 @@ pub fn session_cleanup(ui: &AppWindow, slot: usize, terminal: Option<String>) {
 /// 切换会话、会话加入/离开后调用，保证多会话之间不串状态。
 pub fn sync_active_session_ui(ui: &AppWindow) {
     let idx = ui.get_active_session() as usize;
-    let (vol, cursor, frame, fp, fl) = {
+    let (vol, muted, cursor, frame, fp, fl) = {
         let sessions = SESSIONS.lock().unwrap();
         let Some(s) = sessions.get(idx) else {
             return;
         };
         (
             s.volume.load(Ordering::SeqCst) as f32 / 100.0,
+            s.muted.load(Ordering::SeqCst),
             s.cursor,
             s.frame.as_ref().map(|f| (f.w as f32, f.h as f32)),
             s.file_progress,
@@ -297,6 +303,7 @@ pub fn sync_active_session_ui(ui: &AppWindow) {
         )
     };
     ui.set_volume(vol);
+    ui.set_audio_muted(muted);
     match cursor {
         Some((x, y)) => {
             ui.set_remote_cursor_x(x);
@@ -392,6 +399,10 @@ impl FileDropHandler {
         let Some(ui) = self.ui.lock().unwrap().as_ref().and_then(|w| w.upgrade()) else {
             return "发送文件：未连接会话".to_string();
         };
+        // #72 文件传输开关：关闭时拒绝拖放发送。
+        if !ui.get_file_transfer_enabled() {
+            return "发送文件：文件传输已关闭".to_string();
+        }
         let idx = ui.get_active_session() as usize;
         let tx = {
             let sessions = crate::SESSIONS.lock().unwrap();
@@ -597,41 +608,45 @@ fn main() -> Result<(), slint::PlatformError> {
             // 连接中的会话立即显示为标签：可看到“连接中”状态，也可直接断开取消。
             session_refresh_ui(&ui);
             let weak2 = weak.clone();
-            std::thread::spawn(move || {
-                #[cfg(target_os = "macos")]
-                {
-                    // macOS：真实 H.264 解码渲染 + 音频/文件/多会话（每会话独立）。
-                    crate::macos_media::run_viewer(
-                        server,
-                        room,
-                        Some(token),
-                        weak2.clone(),
-                        slot,
-                        control_rx,
-                        input_rx,
-                        file_cmd_rx,
-                        muted,
-                        volume,
-                        stop,
-                    );
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    // Windows/Linux 主控端：真实媒体观看（OpenH264 软解 + Slint 渲染）。
-                    crate::generic_media::run_generic_viewer(
-                        server,
-                        room,
-                        Some(token),
-                        weak2.clone(),
-                        slot,
-                        input_rx,
-                        stop,
-                    );
-                }
-                if let Some(ui) = weak2.upgrade() {
-                    ui.set_connecting(false);
-                }
-            });
+            // 数据通道收发链（str0m/SCTP）调用栈深，放大线程栈防溢出（RULE 数据通道大块传输线程栈需放大默认2MB.md）。
+            std::thread::Builder::new()
+                .stack_size(16 * 1024 * 1024)
+                .spawn(move || {
+                    #[cfg(target_os = "macos")]
+                    {
+                        // macOS：真实 H.264 解码渲染 + 音频/文件/多会话（每会话独立）。
+                        crate::macos_media::run_viewer(
+                            server,
+                            room,
+                            Some(token),
+                            weak2.clone(),
+                            slot,
+                            control_rx,
+                            input_rx,
+                            file_cmd_rx,
+                            muted,
+                            volume,
+                            stop,
+                        );
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        // Windows/Linux 主控端：真实媒体观看（OpenH264 软解 + Slint 渲染）。
+                        crate::generic_media::run_generic_viewer(
+                            server,
+                            room,
+                            Some(token),
+                            weak2.clone(),
+                            slot,
+                            input_rx,
+                            stop,
+                        );
+                    }
+                    if let Some(ui) = weak2.upgrade() {
+                        ui.set_connecting(false);
+                    }
+                })
+                .expect("spawn viewer thread");
         }
     });
 
@@ -1014,16 +1029,13 @@ fn main() -> Result<(), slint::PlatformError> {
                     ui.set_session_status("没有活动会话".into());
                     return;
                 };
-                let m = !s.muted.fetch_xor(true, Ordering::SeqCst);
-                let _ = s.control_tx.send(format!("{{\"audio_mute\":{m}}}"));
-                m
+                !s.muted.fetch_xor(true, Ordering::SeqCst)
             };
+            // 本地静音只对当前会话生效（观看端丢帧）；不下发控制指令，
+            // 避免把共享音频流的其它观看者一起静音（审查 #255 Important）。
+            ui.set_audio_muted(m);
             ui.set_session_status(
-                format!(
-                    "音频：{}（静音指令已下发）",
-                    if m { "已静音" } else { "已开启" }
-                )
-                .into(),
+                format!("音频：{}（仅本会话）", if m { "已静音" } else { "已开启" }).into(),
             );
         }
     });
@@ -1169,38 +1181,82 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     // ---- #72 文件/剪贴板 ----
+    // 取消当前文件发送（进度条旁的取消按钮）。
+    ui.on_cancel_file({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            let ok = {
+                let sessions = SESSIONS.lock().unwrap();
+                sessions
+                    .get(ui.get_active_session() as usize)
+                    .map(|s| s.file_tx.send(FileCmd::Cancel))
+                    .is_some()
+            };
+            ui.set_session_status(if ok {
+                "正在取消文件发送…".into()
+            } else {
+                "取消发送：未连接会话".into()
+            });
+        }
+    });
+    // 文件传输总开关：关闭后禁用发文件/剪贴板/拖放（接收端在 macos_media 暂停落盘）。
+    ui.on_toggle_file_transfer({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            let on = !ui.get_file_transfer_enabled();
+            ui.set_file_transfer_enabled(on);
+            ui.set_session_status(if on {
+                "文件传输：开".into()
+            } else {
+                "文件传输：关（发文件/剪贴板/拖放已禁用）".into()
+            });
+        }
+    });
     // 发文件：macOS 原生文件选择器（osascript choose file）→ file 通道 → 被控端。
     ui.on_send_file({
         let ui = ui.as_weak();
         move || {
             let ui = ui.unwrap();
+            if !ui.get_file_transfer_enabled() {
+                ui.set_session_status("发送文件：文件传输已关闭".into());
+                return;
+            }
             #[cfg(target_os = "macos")]
             {
-                let out = std::process::Command::new("osascript")
-                    .args(["-e", "POSIX path of (choose file)"])
-                    .output();
-                match out {
-                    Ok(o) if o.status.success() => {
-                        let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                        if path.is_empty() {
-                            ui.set_session_status("已取消选择文件".into());
-                            return;
+                // 文件选择器会阻塞等待用户选择，放后台线程避免卡 UI 事件循环。
+                let ui = ui.as_weak();
+                std::thread::spawn(move || {
+                    let out = std::process::Command::new("osascript")
+                        .args(["-e", "POSIX path of (choose file)"])
+                        .output();
+                    let Some(ui) = ui.upgrade() else {
+                        return;
+                    };
+                    match out {
+                        Ok(o) if o.status.success() => {
+                            let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                            if path.is_empty() {
+                                ui.set_session_status("已取消选择文件".into());
+                                return;
+                            }
+                            let idx = ui.get_active_session() as usize;
+                            let sessions = SESSIONS.lock().unwrap();
+                            if let Some(s) = sessions.get(idx) {
+                                let _ = s.file_tx.send(FileCmd::SendFile(path.clone().into()));
+                                drop(sessions);
+                                ui.set_session_status(format!("发送文件：{path}").into());
+                            } else {
+                                drop(sessions);
+                                ui.set_session_status("发送文件：未连接会话".into());
+                            }
                         }
-                        let idx = ui.get_active_session() as usize;
-                        let sessions = SESSIONS.lock().unwrap();
-                        if let Some(s) = sessions.get(idx) {
-                            let _ = s.file_tx.send(FileCmd::SendFile(path.clone().into()));
-                            drop(sessions);
-                            ui.set_session_status(format!("发送文件：{path}").into());
-                        } else {
-                            drop(sessions);
-                            ui.set_session_status("发送文件：未连接会话".into());
+                        _ => {
+                            ui.set_session_status("发送文件：无法打开文件选择器".into());
                         }
                     }
-                    _ => {
-                        ui.set_session_status("发送文件：无法打开文件选择器".into());
-                    }
-                }
+                });
             }
             #[cfg(not(target_os = "macos"))]
             {
@@ -1213,25 +1269,36 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui = ui.as_weak();
         move || {
             let ui = ui.unwrap();
+            if !ui.get_file_transfer_enabled() {
+                ui.set_session_status("剪贴板：文件传输已关闭".into());
+                return;
+            }
             #[cfg(target_os = "macos")]
             {
-                match aerodesk_core::clipboard::read() {
-                    Some(text) if !text.is_empty() => {
-                        let idx = ui.get_active_session() as usize;
-                        let sessions = SESSIONS.lock().unwrap();
-                        if let Some(s) = sessions.get(idx) {
-                            let _ = s.file_tx.send(FileCmd::SendClipboard(text.clone()));
-                            drop(sessions);
-                            ui.set_session_status("已发送剪贴板到被控端".into());
-                        } else {
-                            drop(sessions);
-                            ui.set_session_status("剪贴板：未连接会话".into());
+                // pbpaste 会阻塞，放后台线程避免卡 UI 事件循环。
+                let ui = ui.as_weak();
+                std::thread::spawn(move || {
+                    let Some(ui) = ui.upgrade() else {
+                        return;
+                    };
+                    match aerodesk_core::clipboard::read() {
+                        Some(text) if !text.is_empty() => {
+                            let idx = ui.get_active_session() as usize;
+                            let sessions = SESSIONS.lock().unwrap();
+                            if let Some(s) = sessions.get(idx) {
+                                let _ = s.file_tx.send(FileCmd::SendClipboard(text.clone()));
+                                drop(sessions);
+                                ui.set_session_status("已发送剪贴板到被控端".into());
+                            } else {
+                                drop(sessions);
+                                ui.set_session_status("剪贴板：未连接会话".into());
+                            }
+                        }
+                        _ => {
+                            ui.set_session_status("剪贴板为空".into());
                         }
                     }
-                    _ => {
-                        ui.set_session_status("剪贴板为空".into());
-                    }
-                }
+                });
             }
             #[cfg(not(target_os = "macos"))]
             {
@@ -2043,7 +2110,8 @@ mod tests {
     }
 
     #[test]
-    fn multiple_dropped_files_each_sent() {
+    fn multiple_dropped_files_first_sent_rest_queued_notice() {
+        // 一次一个：多文件拖放只发第一个，状态文案提示其余逐个发送。
         let (tx, rx) = std::sync::mpsc::channel();
         let dir = std::env::temp_dir();
         let p1 = dir.join("aerodesk-ui-drop-batch-1.txt");
@@ -2051,15 +2119,13 @@ mod tests {
         std::fs::write(&p1, b"1").unwrap();
         std::fs::write(&p2, b"2").unwrap();
         let status = dispatch_dropped_files(Some(&tx), &[p1.clone(), p2.clone()]);
-        assert!(status.contains("2 个文件"), "status={status}");
+        assert!(status.contains("一次一个"), "status={status}");
+        assert!(status.contains("其余 1 个文件"), "status={status}");
         let mut got = Vec::new();
         while let Ok(cmd) = rx.try_recv() {
             got.push(cmd);
         }
-        assert_eq!(
-            got,
-            vec![FileCmd::SendFile(p1.clone()), FileCmd::SendFile(p2.clone())]
-        );
+        assert_eq!(got, vec![FileCmd::SendFile(p1.clone())]);
         let _ = std::fs::remove_file(p1);
         let _ = std::fs::remove_file(p2);
     }
