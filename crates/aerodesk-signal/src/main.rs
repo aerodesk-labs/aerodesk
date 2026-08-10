@@ -23,6 +23,13 @@
 //!   POP_ID        本 PoP 标识（默认 local）
 //!   ROOM_POP_MAP  房间前缀=PoP，逗号分隔（如 eu-=pop-eu,us-=pop-us）；最长前缀优先
 //!   POP_URLS      PoP=客户端信令 URL，逗号分隔（如 pop-eu=wss://eu.example.com:443/ws）
+//!
+//! 跨 PoP 桥接（#216 M3，可选）：
+//!   BRIDGE_CMD                 房间桥命令模板（含 {room} 占位符）。设置后，加入
+//!                              「钉在其它 PoP」房间的 viewer 先经桥在本 PoP 接入，
+//!                              桥失败/超时回退 v1 Redirect
+//!   BRIDGE_READY_TIMEOUT_SECS  桥就绪等待上限（默认 15）
+//!   BRIDGE_FAIL_COOLDOWN_SECS  桥失败冷却（默认 30，期间直接 Redirect 不重试）
 
 #[macro_use]
 extern crate tracing;
@@ -35,10 +42,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aerodesk_protocol::jwt::Claims;
 use aerodesk_protocol::signal::{PeerInfo, Role, SignalMessage, TurnConfig};
+use bridge::{BridgeManager, BridgeOutcome};
 use pop_registry::PopRegistry;
 use rouille::websocket::{self, Message, Websocket};
 use rouille::{Request, Response};
 
+mod bridge;
 mod pop_registry;
 
 struct Config {
@@ -61,6 +70,8 @@ struct Config {
     turn: Option<TurnConfig>,
     sfu_url: String,
     sfu_token: Option<String>,
+    /// 跨 PoP 桥接编排（#216 M3）：BRIDGE_CMD 设置时启用；桥失败回退 Redirect。
+    bridge: Option<Arc<BridgeManager>>,
 }
 
 struct Peer {
@@ -351,6 +362,31 @@ fn load_config() -> Config {
             Arc::new(PopRegistry::new(Some(path.into()), ttl))
         });
 
+    let bridge = std::env::var("BRIDGE_CMD")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|cmd| {
+            let ready_timeout = std::env::var("BRIDGE_READY_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(Duration::from_secs(15));
+            let fail_cooldown = std::env::var("BRIDGE_FAIL_COOLDOWN_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(Duration::from_secs(30));
+            if !cmd.contains("{room}") {
+                warn!("BRIDGE_CMD 不含 {{room}} 占位符（自动追加 --room）；建议显式写明");
+            }
+            Arc::new(BridgeManager::new(cmd, ready_timeout, fail_cooldown))
+        });
+    if bridge.is_some() {
+        info!(
+            "bridge orchestration enabled (BRIDGE_CMD); cross-PoP rooms bridge-first, fallback Redirect"
+        );
+    }
+
     Config {
         auth_tokens,
         jwt_secret: std::env::var("JWT_SECRET").ok().filter(|s| !s.is_empty()),
@@ -366,6 +402,7 @@ fn load_config() -> Config {
         turn,
         sfu_url: std::env::var("SFU_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into()),
         sfu_token: std::env::var("SFU_TOKEN").ok(),
+        bridge,
     }
 }
 
@@ -492,21 +529,34 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 match &target_pop {
                     Some(pop) if pop != &config.pop_id => {
                         if let Some(url) = config.pop_urls.get(pop) {
-                            info!(
-                                "room {room} -> pop {pop} (self={self}); redirect to {url}",
-                                self = config.pop_id
-                            );
-                            send(
-                                ws.clone(),
-                                SignalMessage::Redirect {
-                                    pop: pop.clone(),
-                                    url: url.clone(),
-                                    reason: Some("room pinned to pop".into()),
-                                },
-                            );
-                            continue;
+                            // #216 M3：配置 BRIDGE_CMD 时先尝试桥接——viewer 在本
+                            // PoP 经桥收流（不 Redirect）；桥失败/超时回退 v1 Redirect。
+                            let bridge_ok = config.bridge.as_ref().is_some_and(|b| {
+                                b.is_running(&room) || b.ensure_ready(&room) == BridgeOutcome::Ready
+                            });
+                            if bridge_ok {
+                                info!(
+                                    "room {room} -> pop {pop} (self={self}): bridge ready, join locally",
+                                    self = config.pop_id
+                                );
+                            } else {
+                                info!(
+                                    "room {room} -> pop {pop} (self={self}): bridge unavailable, fallback redirect to {url}",
+                                    self = config.pop_id
+                                );
+                                send(
+                                    ws.clone(),
+                                    SignalMessage::Redirect {
+                                        pop: pop.clone(),
+                                        url: url.clone(),
+                                        reason: Some("room pinned to pop".into()),
+                                    },
+                                );
+                                continue;
+                            }
+                        } else {
+                            warn!("room {room} -> pop {pop} but no POP_URLS entry; ignoring pin");
                         }
-                        warn!("room {room} -> pop {pop} but no POP_URLS entry; ignoring pin");
                     }
                     Some(_) => {
                         // 本 PoP：静态钉住或动态命中本 PoP——刷新动态条目 TTL（若开启）。
@@ -816,6 +866,7 @@ mod tests {
             turn: None,
             sfu_url: "http://127.0.0.1:3002".into(),
             sfu_token: None,
+            bridge: None,
         }
     }
 
