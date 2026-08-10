@@ -144,6 +144,12 @@ jobs:
           ./scripts/bridge-fallback-e2e.sh
           REMOTE_LOOPBACK=1 ./scripts/bridge-fallback-e2e.sh
 
+      # #216 M7：桥接 TURN 中继路径验收（#262）——双 PoP 内嵌 TURN +
+      # AERODESK_FORCE_RELAY=1，桥双腿走 relay（真实 NAT 就绪）。
+      - name: e2e bridge TURN relay (macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/bridge-turn-e2e.sh
+
       # #163 信令连接配额：房间/全局上限，Join 超限拒绝。
       - name: e2e signal connection quota (macOS only)
         if: runner.os == 'macOS'

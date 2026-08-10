@@ -37,6 +37,7 @@ PoP-A (14600 系)                        PoP-B (14700 系)
 ```sh
 # 1) 起双 PoP（脚本内置端口：PoP-A 14600 系 / PoP-B 14700 系）
 scripts/bridge-e2e.sh          # 全自动：起双 SFU+signal → PoP-A publisher → bridge → PoP-B viewer → 断言
+scripts/bridge-turn-e2e.sh     # M7（#262）：双 PoP 内嵌 TURN + force-relay，桥双腿走 TURN（真实 NAT 就绪）
 
 # 手动
 aerodesk-bridge --remote-signal ws://127.0.0.1:14603 --local-signal ws://127.0.0.1:14703 \

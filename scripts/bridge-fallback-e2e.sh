@@ -86,7 +86,7 @@ def pct(p):
 print(pct(0.50), pct(0.90), pct(0.99))
 PY
 }
-latency_count() { grep -c "LATENCY:" "$1" 2>/dev/null || echo 0; }
+latency_count() { local c; c=$(grep -c "LATENCY:" "$1" 2>/dev/null); echo "${c:-0}"; }
 
 wait_decoded() { # $1=logfile
   for _ in $(seq 1 240); do
