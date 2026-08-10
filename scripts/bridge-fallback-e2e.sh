@@ -20,8 +20,12 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}/debug"
 fail() { echo "FAIL: $*"; exit 1; }
 
 REMOTE=0
-if [ -n "${POP_A_SIGNAL:-}" ] && [ -n "${POP_B_SIGNAL:-}" ]; then
-  REMOTE=1
+if [ -n "${POP_A_SIGNAL:-}" ] || [ -n "${POP_B_SIGNAL:-}" ]; then
+  if [ -n "${POP_A_SIGNAL:-}" ] && [ -n "${POP_B_SIGNAL:-}" ]; then
+    REMOTE=1
+  else
+    echo "WARN: 只设置了 POP_A_SIGNAL/POP_B_SIGNAL 之一，按 local 模式运行；远程模式需两者都设" >&2
+  fi
 fi
 
 ROOM="bridge-fb-$(date +%s)"
@@ -34,13 +38,15 @@ if [ "$REMOTE" = "1" ]; then
 else
   SIG_A_URL="ws://127.0.0.1:${PLAIN_A}"; SIG_B_URL="ws://127.0.0.1:${PLAIN_B}"
 fi
-AUTH="${AUTH:-test-bridge-token}"
+AUTH="${AUTH:-}"
 BRIDGE_KILL_CMD="${BRIDGE_KILL_CMD:-}"
 # 生产认证路径：信令 AUTH_TOKENS 校验；桥经 BRIDGE_AUTH_TOKEN 注入 --auth-token。
 if [ "$REMOTE" = "1" ]; then
+  [ -n "$AUTH" ] || fail "远程模式必须设置 AUTH（信令 token）"
   BRIDGE_CMD="${BRIDGE_CMD:-}"
-  [ -n "$BRIDGE_CMD" ] || fail "远程模式必须设置 BRIDGE_CMD（PoP-B 信令同款命令模板，含 {room}）"
+  [ -n "$BRIDGE_CMD" ] || fail "远程模式必须设置 BRIDGE_CMD（与 PoP-B 信令同款命令模板，含 {room}；实际由 PoP-B 信令执行，本脚本仅校验非空）"
 else
+  AUTH="test-bridge-token"
   BRIDGE_CMD="$TARGET_DIR/aerodesk-bridge --remote-signal ${SIG_A_URL} --local-signal ${SIG_B_URL} --room {room} --auth-token \"\$BRIDGE_AUTH_TOKEN\" --codec h264"
 fi
 
@@ -63,11 +69,11 @@ vals = sorted(int(m) for m in re.findall(r'LATENCY: (\d+) ms', s))
 if not vals:
     print("NONE NONE NONE"); raise SystemExit(0)
 def pct(p):
+    # 截断式索引（保守偏高；n=30 时 p50/p90 比 nearest-rank 高一档，p99=max）
     return vals[min(len(vals)-1, int(len(vals)*p))]
 print(pct(0.50), pct(0.90), pct(0.99))
 PY
 }
-latency_p99() { latency_stats "$1" | awk '{print $3}'; }
 latency_count() { grep -c "LATENCY:" "$1" 2>/dev/null || echo 0; }
 
 wait_decoded() { # $1=logfile
@@ -88,7 +94,11 @@ wait_log() {
 }
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli -p aerodesk-bridge
+if [ "$REMOTE" = "1" ]; then
+  cargo build -q -p aerodesk-cli   # 远程验收只需 CLI；SFU/signal/bridge 在 PoP 上
+else
+  cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli -p aerodesk-bridge
+fi
 REC_A="$(mktemp -d)"; REC_B="$(mktemp -d)"
 
 if [ "$REMOTE" = "0" ]; then
@@ -125,6 +135,7 @@ DIRECT_STATS=$(latency_stats /tmp/bfb-direct-view.log)
 DIRECT_P99=$(echo "$DIRECT_STATS" | awk '{print $3}')
 DIRECT_N=$(latency_count /tmp/bfb-direct-view.log)
 echo "  直连基线：samples=${DIRECT_N} p50/p90/p99=${DIRECT_STATS}ms"
+[ "${DIRECT_N:-0}" -ge 30 ] || fail "场景0：直连样本不足（N=${DIRECT_N}，需 ≥30）"
 [ "$DIRECT_P99" != "NONE" ] || fail "场景0：无 LATENCY 样本"
 kill "$VIEW0" "$PUB0" 2>/dev/null || true; sleep 1
 
@@ -156,7 +167,11 @@ ok=0
 for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-pub-a.log 2>/dev/null && ok=1 && break; sleep 0.5; done
 [ "$ok" = "1" ] || fail "场景1：PoP-A publisher 未连上"; echo "  publisher connected"
 
-"$TARGET_DIR/aerodesk-cli" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" \
+# 远程模式场景 4（可选 BRIDGE_KILL_CMD）依赖 viewer --reconnect；本地模式场景 3 会
+# 另起带 --reconnect 的 viewer，此处带上也无害。
+RECONNECT_FLAG=""
+[ "$REMOTE" = "1" ] && RECONNECT_FLAG="--reconnect"
+"$TARGET_DIR/aerodesk-cli" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" $RECONNECT_FLAG \
   >/tmp/bfb-view-b.log 2>&1 &
 VIEW_B=$!
 wait_decoded /tmp/bfb-view-b.log || fail "场景1：PoP-B viewer 未解码跨 PoP 媒体（见 /tmp/bfb-view-b.log）"
@@ -178,6 +193,7 @@ BRIDGE_STATS=$(latency_stats /tmp/bfb-view-b.log)
 BRIDGE_P99=$(echo "$BRIDGE_STATS" | awk '{print $3}')
 BRIDGE_N=$(latency_count /tmp/bfb-view-b.log)
 echo "  桥路径：samples=${BRIDGE_N} p50/p90/p99=${BRIDGE_STATS}ms（直连基线 ${DIRECT_STATS}ms）"
+[ "${BRIDGE_N:-0}" -ge 30 ] || fail "桥路径样本不足（N=${BRIDGE_N}，需 ≥30）"
 [ "$BRIDGE_P99" != "NONE" ] || fail "桥路径无 LATENCY 样本（cursor 链路未通）"
 THRESHOLD=$((DIRECT_P99 * 4 + 500))
 [ "$BRIDGE_P99" -lt "$THRESHOLD" ] || fail "桥延迟 p99=${BRIDGE_P99}ms ≥ 阈值 ${THRESHOLD}ms（直连 ${DIRECT_P99}ms）"

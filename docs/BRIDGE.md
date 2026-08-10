@@ -124,8 +124,10 @@ POP_A_SIGNAL=wss://pop-a.example.com:443/ws POP_B_SIGNAL=wss://pop-b.example.com
 ```
 
 远程模式执行：直连基线（A）→ 桥优先（viewer@B 无 Redirect 解码）→ 延迟
-≥30 样本 p50/p90/p99 → （可选 `BRIDGE_KILL_CMD`）桥死亡自动恢复。本地模式
-（默认）为 CI 五场景全量回归。
+≥30 样本 p50/p90/p99 → （可选 `BRIDGE_KILL_CMD`）桥死亡自动恢复。注意：
+远程模式**不执行** `BRIDGE_CMD`——桥由 PoP-B 信令（`BRIDGE_CMD` 配置）实际
+拉起，脚本里的 `BRIDGE_CMD` 仅作非空校验（防漏配）。本地模式（默认）为
+CI 五场景全量回归。
 
 ### 真实多 PoP 部署验收 runbook（M3 剩余项）
 
@@ -137,7 +139,7 @@ POP_A_SIGNAL=wss://pop-a.example.com:443/ws POP_B_SIGNAL=wss://pop-b.example.com
 2. **验收**：跨 PoP viewer 加入 → 本 PoP 接入且无 Redirect；`signal` 日志出现
    `bridge ready`；`/session/clients` 双 PoP 各 +2（publisher+bridge-view / bridge-pub+viewer）；
    自动化验收 = `scripts/bridge-fallback-e2e.sh` 远程模式（见上节，直连基线 →
-   桥优先 → 延迟 p50/p90/p99 → 桥死亡自动恢复）。
+   桥优先 → 延迟 p50/p90/p99 → 可选 `BRIDGE_KILL_CMD` 桥死亡自动恢复）。
 3. **延迟 p99**：按 `#8` 方法在真实链路采集 ≥30 个 `LATENCY` 样本，p99 ≤ 验收阈值
    （预算：直连 p99 + 2×10–30ms 中继预算，按业务 SLA 定）；本地对比
    `scripts/bridge-fallback-e2e.sh`。
