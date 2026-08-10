@@ -108,13 +108,24 @@ PoP-B signal（BRIDGE_CMD + ROOM_POP_MAP + POP_URLS）
   模板，含 `BRIDGE_CMD`/`BRIDGE_AUTH_TOKEN`/`BRIDGE_IDLE_SECS` 等完整示例；
 - `deploy/prometheus/prometheus.yml`：双 PoP 抓取示例（配合 `sfu-alerts.yml`）。
 
-### 延迟 p99 验收（本地方法学，`scripts/bridge-fallback-e2e.sh`）
+### 延迟验收（本地/远程方法学，`scripts/bridge-fallback-e2e.sh` 双模式）
 
 `#8` 光标墙钟法：publisher 每 30Hz 经 cursor 通道带发送时间戳，viewer 计算
-`LATENCY: N ms`（节流 1s）。脚本先测同 PoP 直连基线 p99，再测桥路径 p99，
+`LATENCY: N ms`（#253 起节流 200ms，~5 样本/s，p99 更快收敛）。脚本采集
+**≥30 样本**并报告 **p50/p90/p99**；先测同 PoP 直连基线，再测桥路径，
 断言 `桥 p99 < 直连 p99 × 4 + 500ms`（SCTP 每跳 ~150ms；桥比直连多 2 跳）。
-本地 debug/loopback 实测（2026-08-10）：直连 p99 ≈ 0.5–1.5s、桥 p99 ≈ 0.9–1.6s
-（负载敏感），桥相对直连增加 ~100–400ms。
+本地 debug/loopback 实测（2026-08-10）：直连 p99 ≈ 0.4–1.5s、桥 p99 ≈ 0.4–1.5s
+（负载敏感），桥相对直连增加 ~0–400ms。
+
+**真实多 PoP 部署验收（#253）**：在可访问双 PoP 的验收机上直接跑远程模式：
+
+```sh
+POP_A_SIGNAL=wss://pop-a.example.com:443/ws POP_B_SIGNAL=wss://pop-b.example.com:443/ws AUTH=<桥/客户端 token> BRIDGE_CMD='... 与 PoP-B 信令 BRIDGE_CMD 同款（含 {room}）...' BRIDGE_KILL_CMD='ssh pop-b "pkill -f aerodesk-bridge"'   scripts/bridge-fallback-e2e.sh
+```
+
+远程模式执行：直连基线（A）→ 桥优先（viewer@B 无 Redirect 解码）→ 延迟
+≥30 样本 p50/p90/p99 → （可选 `BRIDGE_KILL_CMD`）桥死亡自动恢复。本地模式
+（默认）为 CI 五场景全量回归。
 
 ### 真实多 PoP 部署验收 runbook（M3 剩余项）
 
@@ -125,8 +136,8 @@ PoP-B signal（BRIDGE_CMD + ROOM_POP_MAP + POP_URLS）
    （桥凭证走信令 JWT/静态 token；生产建议 `BRIDGE_READY_TIMEOUT_SECS=30`）。
 2. **验收**：跨 PoP viewer 加入 → 本 PoP 接入且无 Redirect；`signal` 日志出现
    `bridge ready`；`/session/clients` 双 PoP 各 +2（publisher+bridge-view / bridge-pub+viewer）；
-   本地自动化验证 = `scripts/bridge-fallback-e2e.sh`（直连基线 → 桥优先 → 桥死亡
-   重建 → 失败回退 Redirect 四场景）。
+   自动化验收 = `scripts/bridge-fallback-e2e.sh` 远程模式（见上节，直连基线 →
+   桥优先 → 延迟 p50/p90/p99 → 桥死亡自动恢复）。
 3. **延迟 p99**：按 `#8` 方法在真实链路采集 ≥30 个 `LATENCY` 样本，p99 ≤ 验收阈值
    （预算：直连 p99 + 2×10–30ms 中继预算，按业务 SLA 定）；本地对比
    `scripts/bridge-fallback-e2e.sh`。

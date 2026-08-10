@@ -111,7 +111,9 @@ signal.aerodesk.io {
   不再直接 Redirect，而是由信令自动拉起 `aerodesk-bridge`（view 主 PoP + publish
   本 PoP，RTP 载荷直通不重编码 + data channel 白名单桥）并在就绪后本 PoP 接入；
   桥失败/超时回退 v1 Redirect（`BRIDGE_READY_TIMEOUT_SECS`/`BRIDGE_FAIL_COOLDOWN_SECS`
-  可调）。设计/验收见 [ADR-0004](adr/0004-multipop-bridging.md) 与 `docs/BRIDGE.md`。
+  可调）。设计/验收见 [ADR-0004](adr/0004-multipop-bridging.md) 与 `docs/BRIDGE.md`；
+  真实部署验收直接跑 `POP_A_SIGNAL=... POP_B_SIGNAL=... scripts/bridge-fallback-e2e.sh`
+  （远程模式，直连基线 + 桥优先 + 延迟 p50/p90/p99 + 桥死亡恢复，见 BRIDGE.md）。
 - **动态注册表（v2，#154）**：不配 `ROOM_POP_MAP` 时，房间归属由**首个加入者所在 PoP 登记**
   （`POP_REGISTRY_FILE` 共享文件 + `POP_REGISTRY_TTL_SECS` 过期）；其它 PoP 加入同房间时
   查注册表命中 → 返回 `Redirect`。文件后端为 last-writer-wins（低变更场景可接受）；

@@ -1,34 +1,49 @@
 #!/usr/bin/env bash
-# #216 M3：桥接编排端到端——BRIDGE_CMD 桥优先接入 + 失败回退 v1 Redirect + 延迟 p99。
+# #216 M3：桥接编排端到端——BRIDGE_CMD 桥优先 + 失败回退 Redirect + 延迟分布验收。
 #
-# 拓扑（本地双 SFU 模拟双 PoP，独立端口 148xx/149xx 避免与其它 e2e 冲突）：
-#   PoP-A（pop-a，148xx）: CLI publisher 发布 room
-#   PoP-B（pop-b，149xx）: ROOM_POP_MAP 把 bridge-* 钉到 pop-a + POP_URLS + BRIDGE_CMD
-# 场景 0（直连基线）：同 PoP-A 的 publisher+viewer LATENCY p99（#8 光标墙钟法）
-# 场景 1（桥优先）：PoP-B viewer 加入 → 信令自动 spawn aerodesk-bridge（view pop-a +
-#   publish pop-b）→ 就绪后 viewer 本 PoP 接入（无 Redirect）→ 解码跨 PoP 媒体；
-#   桥 p99 ≤ 直连 p99×4+500ms（SCTP 每跳 ~150ms，见 BRIDGE.md 实测）
-# 场景 3（桥死亡重建，#246）：kill 桥 → 新 viewer 加入 → 信令自动重建桥（spawn=2）
-#   恢复解码，自然死亡不触发失败冷却
-# 场景 4（连接中 viewer 自动恢复，#249）：kill 桥 → signal monitor 检测死亡 →
-#   SFU room-kick 断开已连接 viewer → 客户端 --reconnect 重连 → 自动重建桥恢复解码
-# 场景 2（回退）：PoP-B 信令改用 BRIDGE_CMD=false（桥必失败）→ viewer 加入 →
-#   信令回退 v1 Redirect → viewer 自动跟随到 pop-a 直连解码。
+# 双模式：
+# - local（默认，CI）：本地双 SFU 模拟双 PoP（148xx/149xx 独立端口），五场景全跑：
+#   0 直连基线 → 1 桥优先 → 3 桥死亡重建 → 4 连接中 viewer 自动恢复 → 2 失败回退
+# - remote（真实多 PoP 部署验收，#253）：设置 POP_A_SIGNAL / POP_B_SIGNAL（如
+#   wss://pop-a.example.com/ws）即远程模式——不拉起本地 PoP，直接对真实端点执行：
+#   0 直连基线（A）→ 1 桥优先（viewer@B 无 Redirect 解码）→ 延迟 ≥30 样本
+#   p50/p90/p99 → （可选 BRIDGE_KILL_CMD）4 桥死亡自动恢复。
+#   远程模式需 AUTH（信令 token）；BRIDGE_KILL_CMD 例：
+#     'ssh pop-b "pkill -f aerodesk-bridge"'  或  'systemctl restart aerodesk-signal'
+#
+# 延迟 p99 断言（两种模式）：桥 p99 ≤ 直连 p99×4+500ms（SCTP 每跳 ~150ms，见 BRIDGE.md）。
 set -uo pipefail
 cd "$(dirname "$0")/.."
 export RUST_LOG="${RUST_LOG:-info}"
 TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}/debug"
+
+fail() { echo "FAIL: $*"; exit 1; }
+
+REMOTE=0
+if [ -n "${POP_A_SIGNAL:-}" ] && [ -n "${POP_B_SIGNAL:-}" ]; then
+  REMOTE=1
+fi
 
 ROOM="bridge-fb-$(date +%s)"
 # PoP-A
 SIG_A=14800; INT_A=14802; PLAIN_A=14803; MEDIA_A=14878
 # PoP-B
 SIG_B=14900; INT_B=14902; PLAIN_B=14903; MEDIA_B=14978
-AUTH="test-bridge-token"
+if [ "$REMOTE" = "1" ]; then
+  SIG_A_URL="$POP_A_SIGNAL"; SIG_B_URL="$POP_B_SIGNAL"
+else
+  SIG_A_URL="ws://127.0.0.1:${PLAIN_A}"; SIG_B_URL="ws://127.0.0.1:${PLAIN_B}"
+fi
+AUTH="${AUTH:-test-bridge-token}"
+BRIDGE_KILL_CMD="${BRIDGE_KILL_CMD:-}"
 # 生产认证路径：信令 AUTH_TOKENS 校验；桥经 BRIDGE_AUTH_TOKEN 注入 --auth-token。
-BRIDGE_CMD="$TARGET_DIR/aerodesk-bridge --remote-signal ws://127.0.0.1:${PLAIN_A} --local-signal ws://127.0.0.1:${PLAIN_B} --room {room} --auth-token \"\$BRIDGE_AUTH_TOKEN\" --codec h264"
+if [ "$REMOTE" = "1" ]; then
+  BRIDGE_CMD="${BRIDGE_CMD:-}"
+  [ -n "$BRIDGE_CMD" ] || fail "远程模式必须设置 BRIDGE_CMD（PoP-B 信令同款命令模板，含 {room}）"
+else
+  BRIDGE_CMD="$TARGET_DIR/aerodesk-bridge --remote-signal ${SIG_A_URL} --local-signal ${SIG_B_URL} --room {room} --auth-token \"\$BRIDGE_AUTH_TOKEN\" --codec h264"
+fi
 
-fail() { echo "FAIL: $*"; exit 1; }
 cleanup() {
   pkill -f 'aerodesk-bridge' 2>/dev/null || true
   pkill -f 'aerodesk-cli' 2>/dev/null || true
@@ -39,17 +54,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
-latency_p99() { # $1=logfile → 输出 p99（无样本输出 NONE）
+# 输出 "p50 p90 p99"（无样本输出 "NONE NONE NONE"）。
+latency_stats() {
   python3 - "$1" <<'PY'
 import re, sys
 s = open(sys.argv[1]).read()
 vals = sorted(int(m) for m in re.findall(r'LATENCY: (\d+) ms', s))
 if not vals:
-    print("NONE"); raise SystemExit(0)
-idx = min(len(vals)-1, int(len(vals)*0.99))
-print(vals[idx])
+    print("NONE NONE NONE"); raise SystemExit(0)
+def pct(p):
+    return vals[min(len(vals)-1, int(len(vals)*p))]
+print(pct(0.50), pct(0.90), pct(0.99))
 PY
 }
+latency_p99() { latency_stats "$1" | awk '{print $3}'; }
 latency_count() { grep -c "LATENCY:" "$1" 2>/dev/null || echo 0; }
 
 wait_decoded() { # $1=logfile
@@ -59,60 +77,78 @@ wait_decoded() { # $1=logfile
   done
   return 1
 }
+# 等某日志出现子串（$1=logfile $2=pattern $3=循环次数默认 240）
+wait_log() {
+  local n="${3:-240}"
+  for _ in $(seq 1 "$n"); do
+    grep -q "$2" "$1" 2>/dev/null && return 0
+    sleep 0.5
+  done
+  return 1
+}
 
 echo "== 构建"
 cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli -p aerodesk-bridge
 REC_A="$(mktemp -d)"; REC_B="$(mktemp -d)"
 
-echo "== 启动 PoP-A（148xx）"
-RECORD_DIR="$REC_A" SFU_MEDIA_PORT="$MEDIA_A" SFU_SIGNAL_PORT="$SIG_A" SFU_INTERNAL_PORT="$INT_A" \
-  "$TARGET_DIR/aerodesk-sfu" >/tmp/bfb-sfu-a.log 2>&1 &
-SFU_A=$!
-POP_ID=pop-a AUTH_TOKENS="$AUTH" SIGNAL_PORT=14801 SIGNAL_PLAIN_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
-  "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-a.log 2>&1 &
-SIG_A_PID=$!
-for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_A" 2>/dev/null && break; sleep 0.2; done
-sleep 0.3
+if [ "$REMOTE" = "0" ]; then
+  echo "== 启动 PoP-A（148xx）"
+  RECORD_DIR="$REC_A" SFU_MEDIA_PORT="$MEDIA_A" SFU_SIGNAL_PORT="$SIG_A" SFU_INTERNAL_PORT="$INT_A" \
+    "$TARGET_DIR/aerodesk-sfu" >/tmp/bfb-sfu-a.log 2>&1 &
+  SFU_A=$!
+  POP_ID=pop-a AUTH_TOKENS="$AUTH" SIGNAL_PORT=14801 SIGNAL_PLAIN_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
+    "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-a.log 2>&1 &
+  SIG_A_PID=$!
+  for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_A" 2>/dev/null && break; sleep 0.2; done
+  sleep 0.3
+else
+  echo "== 远程模式：使用外部 PoP（A=${POP_A_SIGNAL} B=${POP_B_SIGNAL}），跳过本地启动"
+fi
 
-echo "== 场景 0：直连延迟基线（同 PoP-A publisher+viewer，~20s）"
-"$TARGET_DIR/aerodesk-cli" --role publisher --signal "ws://127.0.0.1:${PLAIN_A}" --room "$ROOM" --token "$AUTH" \
+echo "== 场景 0：直连延迟基线（同 PoP-A publisher+viewer）"
+"$TARGET_DIR/aerodesk-cli" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/bfb-direct-pub.log 2>&1 &
 PUB0=$!
 ok=0
 for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-direct-pub.log 2>/dev/null && ok=1 && break; sleep 0.5; done
 [ "$ok" = "1" ] || fail "场景0：publisher 未连上"
-"$TARGET_DIR/aerodesk-cli" --role viewer --signal "ws://127.0.0.1:${PLAIN_A}" --room "$ROOM" --token "$AUTH" \
+"$TARGET_DIR/aerodesk-cli" --role viewer --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   >/tmp/bfb-direct-view.log 2>&1 &
 VIEW0=$!
 wait_decoded /tmp/bfb-direct-view.log || fail "场景0：直连 viewer 未解码"
-for _ in $(seq 1 40); do
-  [ "$(latency_count /tmp/bfb-direct-view.log)" -ge 15 ] && break
+for _ in $(seq 1 80); do
+  [ "$(latency_count /tmp/bfb-direct-view.log)" -ge 30 ] && break
   sleep 0.5
 done
-DIRECT_P99=$(latency_p99 /tmp/bfb-direct-view.log)
+DIRECT_STATS=$(latency_stats /tmp/bfb-direct-view.log)
+DIRECT_P99=$(echo "$DIRECT_STATS" | awk '{print $3}')
 DIRECT_N=$(latency_count /tmp/bfb-direct-view.log)
-echo "  直连基线：samples=${DIRECT_N} p99=${DIRECT_P99}ms"
+echo "  直连基线：samples=${DIRECT_N} p50/p90/p99=${DIRECT_STATS}ms"
 [ "$DIRECT_P99" != "NONE" ] || fail "场景0：无 LATENCY 样本"
 kill "$VIEW0" "$PUB0" 2>/dev/null || true; sleep 1
 
-echo "== 启动 PoP-B（149xx，BRIDGE_CMD 桥优先）"
-RECORD_DIR="$REC_B" SFU_MEDIA_PORT="$MEDIA_B" SFU_SIGNAL_PORT="$SIG_B" SFU_INTERNAL_PORT="$INT_B" \
-  "$TARGET_DIR/aerodesk-sfu" >/tmp/bfb-sfu-b.log 2>&1 &
-SFU_B=$!
-POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=ws://127.0.0.1:${PLAIN_A}" \
-  BRIDGE_CMD="$BRIDGE_CMD" BRIDGE_READY_TIMEOUT_SECS=20 BRIDGE_AUTH_TOKEN="$AUTH" \
-  BRIDGE_MONITOR_INTERVAL_SECS=2 \
-  SIGNAL_PORT=14901 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
-  "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b.log 2>&1 &
-SIG_B_PID=$!
-for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break; sleep 0.2; done
-sleep 0.3
-grep -q "bridge orchestration enabled" /tmp/bfb-sig-b.log || fail "PoP-B 未启用桥编排（BRIDGE_CMD 未生效）"
-echo "  PoP-B bridge orchestration enabled"
+if [ "$REMOTE" = "0" ]; then
+  echo "== 启动 PoP-B（149xx，BRIDGE_CMD 桥优先）"
+  RECORD_DIR="$REC_B" SFU_MEDIA_PORT="$MEDIA_B" SFU_SIGNAL_PORT="$SIG_B" SFU_INTERNAL_PORT="$INT_B" \
+    "$TARGET_DIR/aerodesk-sfu" >/tmp/bfb-sfu-b.log 2>&1 &
+  SFU_B=$!
+  POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=${SIG_A_URL}" \
+    BRIDGE_CMD="$BRIDGE_CMD" BRIDGE_READY_TIMEOUT_SECS=20 BRIDGE_AUTH_TOKEN="$AUTH" \
+    BRIDGE_MONITOR_INTERVAL_SECS=2 \
+    SIGNAL_PORT=14901 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
+    "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b.log 2>&1 &
+  SIG_B_PID=$!
+  for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break; sleep 0.2; done
+  sleep 0.3
+  grep -q "bridge orchestration enabled" /tmp/bfb-sig-b.log || fail "PoP-B 未启用桥编排（BRIDGE_CMD 未生效）"
+  echo "  PoP-B bridge orchestration enabled"
+else
+  echo "== 场景 1（远程）：PoP-B viewer 经桥接入（需 PoP-B 信令已配 BRIDGE_CMD/ROOM_POP_MAP/POP_URLS）"
+fi
 
 echo "== 场景 1：PoP-A publisher + PoP-B viewer（桥优先，不 Redirect）"
-"$TARGET_DIR/aerodesk-cli" --role publisher --signal "ws://127.0.0.1:${PLAIN_A}" --room "$ROOM" --token "$AUTH" \
+"$TARGET_DIR/aerodesk-cli" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/bfb-pub-a.log 2>&1 &
 PUB_A=$!
@@ -120,29 +156,55 @@ ok=0
 for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-pub-a.log 2>/dev/null && ok=1 && break; sleep 0.5; done
 [ "$ok" = "1" ] || fail "场景1：PoP-A publisher 未连上"; echo "  publisher connected"
 
-"$TARGET_DIR/aerodesk-cli" --role viewer --signal "ws://127.0.0.1:${PLAIN_B}" --room "$ROOM" --token "$AUTH" \
+"$TARGET_DIR/aerodesk-cli" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" \
   >/tmp/bfb-view-b.log 2>&1 &
 VIEW_B=$!
-wait_decoded /tmp/bfb-view-b.log || fail "场景1：PoP-B viewer 未解码跨 PoP 媒体（见 /tmp/bfb-view-b.log /tmp/bfb-sig-b.log）"
+wait_decoded /tmp/bfb-view-b.log || fail "场景1：PoP-B viewer 未解码跨 PoP 媒体（见 /tmp/bfb-view-b.log）"
 grep -q "signal redirect" /tmp/bfb-view-b.log && fail "场景1：viewer 不应收到 Redirect（桥优先应本 PoP 接入）"
-grep -q "bridge ready" /tmp/bfb-sig-b.log || fail "场景1：PoP-B 信令未记录 bridge ready"
-grep -q "bridge: spawned" /tmp/bfb-sig-b.log || fail "场景1：PoP-B 信令未自动 spawn 桥"
-echo "  场景1 PASS：viewer 本 PoP 接入（无 Redirect），信令自动 spawn 桥并就绪"
+if [ "$REMOTE" = "0" ]; then
+  grep -q "bridge ready" /tmp/bfb-sig-b.log || fail "场景1：PoP-B 信令未记录 bridge ready"
+  grep -q "bridge: spawned" /tmp/bfb-sig-b.log || fail "场景1：PoP-B 信令未自动 spawn 桥"
+fi
+echo "  场景1 PASS：viewer 本 PoP 接入（无 Redirect）"
 DECODED=$(grep -oE "DECODED: [0-9]+" /tmp/bfb-view-b.log | tail -1 | cut -d' ' -f2)
 echo "  viewer DECODED=${DECODED}"
 
-echo "== 桥延迟 p99（LATENCY 采样 ≥15，与直连基线对比）"
-for _ in $(seq 1 40); do
-  [ "$(latency_count /tmp/bfb-view-b.log)" -ge 15 ] && break
+echo "== 桥延迟分布（LATENCY ≥30 样本，与直连基线对比）"
+for _ in $(seq 1 80); do
+  [ "$(latency_count /tmp/bfb-view-b.log)" -ge 30 ] && break
   sleep 0.5
 done
-BRIDGE_P99=$(latency_p99 /tmp/bfb-view-b.log)
+BRIDGE_STATS=$(latency_stats /tmp/bfb-view-b.log)
+BRIDGE_P99=$(echo "$BRIDGE_STATS" | awk '{print $3}')
 BRIDGE_N=$(latency_count /tmp/bfb-view-b.log)
-echo "  桥路径：samples=${BRIDGE_N} p99=${BRIDGE_P99}ms（直连基线 p99=${DIRECT_P99}ms）"
+echo "  桥路径：samples=${BRIDGE_N} p50/p90/p99=${BRIDGE_STATS}ms（直连基线 ${DIRECT_STATS}ms）"
 [ "$BRIDGE_P99" != "NONE" ] || fail "桥路径无 LATENCY 样本（cursor 链路未通）"
-# SCTP 每跳 ~150ms（debug/loopback 实测，见 BRIDGE.md）；桥比直连多 2 跳。
 THRESHOLD=$((DIRECT_P99 * 4 + 500))
 [ "$BRIDGE_P99" -lt "$THRESHOLD" ] || fail "桥延迟 p99=${BRIDGE_P99}ms ≥ 阈值 ${THRESHOLD}ms（直连 ${DIRECT_P99}ms）"
+
+if [ "$REMOTE" = "1" ]; then
+  # 远程模式：场景 3/2 需本地信令控制，跳过；场景 4 可选（需 BRIDGE_KILL_CMD）。
+  if [ -n "$BRIDGE_KILL_CMD" ]; then
+    echo "== 场景 4（远程）：桥死亡自动恢复（BRIDGE_KILL_CMD）"
+    BEFORE=$(grep -c "DECODED:" /tmp/bfb-view-b.log 2>/dev/null || echo 0)
+    sh -c "$BRIDGE_KILL_CMD" || fail "场景4：BRIDGE_KILL_CMD 执行失败"
+    wait_log /tmp/bfb-view-b.log "reconnecting" 240 || fail "场景4：viewer 未重连（见 /tmp/bfb-view-b.log）"
+    ok=0
+    for _ in $(seq 1 240); do
+      AFTER=$(grep -c "DECODED:" /tmp/bfb-view-b.log 2>/dev/null || echo 0)
+      [ "${AFTER:-0}" -gt "${BEFORE:-0}" ] && ok=1 && break
+      sleep 0.5
+    done
+    [ "$ok" = "1" ] || fail "场景4：viewer 重连后未恢复解码"
+    echo "  场景4 PASS（远程）：桥死亡 → viewer 自动重连并恢复解码"
+  else
+    echo "  （跳过场景 4：远程模式未设 BRIDGE_KILL_CMD）"
+  fi
+  kill "$VIEW_B" "$PUB_A" 2>/dev/null || true
+  grep -qiE "panic|abort" /tmp/bfb-view-b.log /tmp/bfb-pub-a.log && fail "发现 panic/abort"
+  echo "== #216 M3 远程验收 PASS（直连 p50/p90/p99=${DIRECT_STATS}ms 桥=${BRIDGE_STATS}ms）=="
+  exit 0
+fi
 
 echo "== 场景 3：桥死亡后新 viewer 加入自动重建桥（自然死亡不触发冷却）"
 kill "$VIEW_B" 2>/dev/null || true
@@ -150,7 +212,7 @@ sleep 1
 pkill -f 'aerodesk-bridge' 2>/dev/null || true
 sleep 2
 # --reconnect：场景 4 需要连接中 viewer 在 kick 后自动重连。
-"$TARGET_DIR/aerodesk-cli" --role viewer --signal "ws://127.0.0.1:${PLAIN_B}" --room "$ROOM" --token "$AUTH" --reconnect \
+"$TARGET_DIR/aerodesk-cli" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" --reconnect \
   >/tmp/bfb-view-b3.log 2>&1 &
 VIEW_B=$!
 wait_decoded /tmp/bfb-view-b3.log || fail "场景3：桥死亡后 viewer 未恢复解码（见 /tmp/bfb-view-b3.log）"
@@ -165,20 +227,10 @@ echo "== 场景 4：连接中 viewer 自动恢复（桥死亡 → SFU room-kick 
 BEFORE=$(grep -c "DECODED:" /tmp/bfb-view-b3.log 2>/dev/null || echo 0)
 pkill -f 'aerodesk-bridge' 2>/dev/null || true
 # 1) 信令 2s 轮询检测死亡并执行 room-kick（必须先于客户端 8s watchdog）。
-ok=0
-for _ in $(seq 1 60); do
-  if grep -q "kicking SFU room" /tmp/bfb-sig-b.log 2>/dev/null; then ok=1; break; fi
-  sleep 0.5
-done
-[ "$ok" = "1" ] || fail "场景4：signal 未执行 SFU room-kick（见 /tmp/bfb-sig-b.log）"
+wait_log /tmp/bfb-sig-b.log "kicking SFU room" 60 || fail "场景4：signal 未执行 SFU room-kick（见 /tmp/bfb-sig-b.log）"
 # 2) SFU 侧确认 kick 投递到房间会话（媒体停止 → viewer 8s watchdog/ICE 断开 → 重连）。
 grep -q "kick client" /tmp/bfb-sfu-b.log || fail "场景4：SFU 未执行 room-kick（见 /tmp/bfb-sfu-b.log）"
-ok=0
-for _ in $(seq 1 120); do
-  if grep -q "reconnecting" /tmp/bfb-view-b3.log 2>/dev/null; then ok=1; break; fi
-  sleep 0.5
-done
-[ "$ok" = "1" ] || fail "场景4：viewer 未重连（见 /tmp/bfb-view-b3.log）"
+wait_log /tmp/bfb-view-b3.log "reconnecting" 120 || fail "场景4：viewer 未重连（见 /tmp/bfb-view-b3.log）"
 # 3) 信令重建桥（spawn≥3）。
 ok=0
 for _ in $(seq 1 120); do
@@ -210,14 +262,14 @@ pkill -f 'aerodesk-bridge' 2>/dev/null || true
 kill "$SIG_B_PID" 2>/dev/null || true; wait "$SIG_B_PID" 2>/dev/null || true
 sleep 1
 # 重启 PoP-B 信令：BRIDGE_CMD 必失败（false）→ 桥失败 → 回退 Redirect。
-POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=ws://127.0.0.1:${PLAIN_A}" \
+POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=${SIG_A_URL}" \
   BRIDGE_CMD="false" BRIDGE_READY_TIMEOUT_SECS=5 BRIDGE_FAIL_COOLDOWN_SECS=5 \
   SIGNAL_PORT=14901 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
   "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b2.log 2>&1 &
 SIG_B_PID=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break; sleep 0.2; done
 # PoP-A publisher 仍在 room（重新起）
-"$TARGET_DIR/aerodesk-cli" --role publisher --signal "ws://127.0.0.1:${PLAIN_A}" --room "$ROOM" --token "$AUTH" \
+"$TARGET_DIR/aerodesk-cli" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/bfb-pub-a2.log 2>&1 &
 PUB_A=$!
@@ -225,15 +277,10 @@ ok=0
 for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-pub-a2.log 2>/dev/null && ok=1 && break; sleep 0.5; done
 [ "$ok" = "1" ] || fail "场景2：PoP-A publisher 未连上"
 
-"$TARGET_DIR/aerodesk-cli" --role viewer --signal "ws://127.0.0.1:${PLAIN_B}" --room "$ROOM" --token "$AUTH" \
+"$TARGET_DIR/aerodesk-cli" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" \
   >/tmp/bfb-view-b2.log 2>&1 &
 VIEW_B=$!
-ok=0
-for _ in $(seq 1 240); do
-  grep -q "signal redirect" /tmp/bfb-view-b2.log 2>/dev/null && ok=1 && break
-  sleep 0.5
-done
-[ "$ok" = "1" ] || fail "场景2：viewer 未收到 Redirect（桥失败应回退 v1）"
+wait_log /tmp/bfb-view-b2.log "signal redirect" 240 || fail "场景2：viewer 未收到 Redirect（桥失败应回退 v1）"
 wait_decoded /tmp/bfb-view-b2.log || fail "场景2：viewer 跟随 Redirect 到 pop-a 后未解码"
 grep -q "fallback redirect" /tmp/bfb-sig-b2.log || fail "场景2：PoP-B 信令未记录 fallback redirect"
 echo "  场景2 PASS：桥失败 → v1 Redirect → viewer 自动跟随到 pop-a 解码"
@@ -241,4 +288,4 @@ echo "  场景2 PASS：桥失败 → v1 Redirect → viewer 自动跟随到 pop-
 grep -qiE "panic|abort" /tmp/bfb-*.log && fail "发现 panic/abort"
 
 kill "$VIEW_B" "$PUB_A" 2>/dev/null || true
-echo "== #216 M3 桥接编排 e2e PASS（桥优先 + 失败回退 + 延迟 p99：直连=${DIRECT_P99}ms 桥=${BRIDGE_P99}ms）=="
+echo "== #216 M3 桥接编排 e2e PASS（直连 p50/p90/p99=${DIRECT_STATS}ms 桥=${BRIDGE_STATS}ms；桥优先+重建+恢复+回退）=="
