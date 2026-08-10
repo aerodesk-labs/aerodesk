@@ -906,7 +906,9 @@ fn session_rooms(shared: &Shared) -> Response {
             e.1.push(s.shard);
         }
     }
-    for (room, (clients, shards)) in by_room {
+    for (room, (clients, mut shards)) in by_room {
+        // 分片集合来自 HashMap 快照，顺序不确定；排序保证响应确定性（CI 复现）。
+        shards.sort_unstable();
         rooms.push(serde_json::json!({
             "room": room,
             "clients": clients,
