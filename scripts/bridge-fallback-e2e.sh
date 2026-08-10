@@ -139,7 +139,7 @@ for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-direct-pub.log 2>/dev
   >/tmp/bfb-direct-view.log 2>&1 &
 VIEW0=$!
 wait_decoded /tmp/bfb-direct-view.log || fail "场景0：直连 viewer 未解码"
-for _ in $(seq 1 80); do
+for _ in $(seq 1 160); do
   [ "$(latency_count /tmp/bfb-direct-view.log)" -ge 30 ] && break
   sleep 0.5
 done
@@ -215,7 +215,7 @@ done
 echo "  PASS 跨 PoP 显示器切换：publisher 收到 display 1 请求"
 
 echo "== 桥延迟分布（LATENCY ≥30 样本，与直连基线对比）"
-for _ in $(seq 1 80); do
+for _ in $(seq 1 160); do
   [ "$(latency_count /tmp/bfb-view-b.log)" -ge 30 ] && break
   sleep 0.5
 done

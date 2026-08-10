@@ -382,7 +382,7 @@ mod tests {
     #[test]
     fn signaling_labels_never_forwarded() {
         assert!(!should_forward("offer/answer", b"{}"));
-        assert!(!should_forward("control", br#"{"display":1,"layer":"f"}"#) == false);
+        assert!(!should_forward("answer", b"{}"));
         // 混合消息含 display 也放行（display 优先）。
         assert!(should_forward("control", br#"{"display":1,"layer":"f"}"#));
     }
