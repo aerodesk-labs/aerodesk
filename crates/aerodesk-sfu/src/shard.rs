@@ -1120,7 +1120,14 @@ impl Client {
 
     fn handle_media_data_in(&mut self, data: MediaData) -> Propagated {
         if let Some(rec) = &self.recorder {
-            rec.record(&self.room, &data.data);
+            // #234：ADREC2 携带 codec/RTP 时间戳/keyframe，供 rec2mp4 转封装。
+            rec.record(
+                &self.room,
+                data.params.spec().codec,
+                Some(data.time.numer() as u64),
+                data.is_keyframe(),
+                &data.data,
+            );
         }
         if !data.contiguous {
             self.request_keyframe_throttled(data.mid, data.rid, KeyframeRequestKind::Fir);

@@ -4,6 +4,7 @@
 pub mod audio;
 pub mod decode;
 pub mod encode;
+pub mod mux;
 
 /// FFmpeg 版本探测（最小可用性检查）。
 pub fn version() -> u32 {

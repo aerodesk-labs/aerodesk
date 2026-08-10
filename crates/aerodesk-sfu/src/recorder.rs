@@ -8,11 +8,13 @@
 //! - 按需模式（`RECORD_ON_DEMAND=1`）：仅 `start(room)` 显式开启的房间录制，
 //!   支持内部 API 按房间 start/stop/status（#160）。
 //!
-//! 文件格式（`ADREC1`）：
+//! 文件格式（`ADREC2`，#234 容器化）：
 //! ```text
-//! magic "ADREC1\n"
-//! 每包: [u64 timestamp_us][u32 len][payload bytes]
+//! magic "ADREC2\n"
+//! 每包: [u8 kind(0=video,1=audio)][u8 codec][u8 flags(bit0=keyframe)][u8 rsv]
+//!       [u64 wall_us][u64 rtp_ts][u32 len][payload bytes]
 //! ```
+//! codec id：0=none 1=H264 2=H265 3=VP8 4=VP9 5=AV1 6=Opus 7=PCMU。
 //! 媒体文件：`{RECORD_DIR}/{room}.adrec`；元数据：`{room}.meta.json`；
 //! 审计日志：`{RECORD_DIR}/audit.log`（JSON Lines）。
 
@@ -23,7 +25,36 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const MAGIC: &[u8] = b"ADREC1\n";
+const MAGIC: &[u8] = b"ADREC2\n";
+
+/// ADREC2 包 kind 值。
+pub const KIND_VIDEO: u8 = 0;
+pub const KIND_AUDIO: u8 = 1;
+/// ADREC2 包 codec id（#234：与 str0m Codec 映射，供 rec2mp4 识别）。
+pub const CODEC_NONE: u8 = 0;
+pub const CODEC_H264: u8 = 1;
+pub const CODEC_H265: u8 = 2;
+pub const CODEC_VP8: u8 = 3;
+pub const CODEC_VP9: u8 = 4;
+pub const CODEC_AV1: u8 = 5;
+pub const CODEC_OPUS: u8 = 6;
+pub const CODEC_PCMU: u8 = 7;
+/// ADREC2 包固定头长：kind+codec+flags+rsv+wall_us+rtp_ts+len。
+pub const PACKET_HEADER_LEN: usize = 24;
+
+pub fn codec_id(codec: str0m::format::Codec) -> u8 {
+    use str0m::format::Codec;
+    match codec {
+        Codec::H264 => CODEC_H264,
+        Codec::H265 => CODEC_H265,
+        Codec::Vp8 => CODEC_VP8,
+        Codec::Vp9 => CODEC_VP9,
+        Codec::Av1 => CODEC_AV1,
+        Codec::Opus => CODEC_OPUS,
+        Codec::PCMU => CODEC_PCMU,
+        _ => CODEC_NONE,
+    }
+}
 
 /// 每房间录制状态。
 struct Recording {
@@ -233,7 +264,15 @@ impl Recorder {
     ///
     /// #15：录制文件创建失败（磁盘满/权限错误）时 warn 并跳过该房间，
     /// 绝不 panic——否则会杀死分片线程、断开该分片全部客户端。
-    pub fn record(&self, room: &str, payload: &[u8]) {
+    /// #234：ADREC2 每包携带 kind/codec/RTP 时间戳/keyframe，供 rec2mp4 精确转封装。
+    pub fn record(
+        &self,
+        room: &str,
+        codec: str0m::format::Codec,
+        rtp_ts: Option<u64>,
+        keyframe: bool,
+        payload: &[u8],
+    ) {
         let ts = now_micros();
         let mut recs = self.recordings.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -267,9 +306,18 @@ impl Recorder {
             return;
         }
         let len = payload.len() as u32;
-        let mut header = [0u8; 12];
-        header[0..8].copy_from_slice(&ts.to_le_bytes());
-        header[8..12].copy_from_slice(&len.to_le_bytes());
+        let mut header = [0u8; PACKET_HEADER_LEN];
+        header[0] = if codec.is_audio() {
+            KIND_AUDIO
+        } else {
+            KIND_VIDEO
+        };
+        header[1] = codec_id(codec);
+        header[2] = if keyframe { 1 } else { 0 };
+        header[3] = 0;
+        header[4..12].copy_from_slice(&ts.to_le_bytes());
+        header[12..20].copy_from_slice(&rtp_ts.unwrap_or(0).to_le_bytes());
+        header[20..24].copy_from_slice(&len.to_le_bytes());
         if entry.writer.write_all(&header).is_ok() && entry.writer.write_all(payload).is_ok() {
             entry.packets += 1;
             entry.bytes += len as u64;
@@ -280,6 +328,12 @@ impl Recorder {
             }
             self.maybe_rotate(entry, ts);
         }
+    }
+
+    /// 测试便捷入口：以 H264/keyframe 默认元数据落盘（等价 ADREC2 video/H264）。
+    #[cfg(test)]
+    pub fn record_payload(&self, room: &str, payload: &[u8]) {
+        self.record(room, str0m::format::Codec::H264, None, true, payload);
     }
 
     /// 显式开始录制一个房间（幂等）。创建文件失败返回 Err（调用方按 503 处理）。
@@ -391,7 +445,7 @@ mod tests {
         let rec = Recorder::new(&dir, false, 0, 0).unwrap();
         rec.start("room-a").unwrap(); // 自动模式也可显式 start（空房间）
         rec.start("room-a").unwrap(); // 幂等
-        rec.record("room-a", b"x");
+        rec.record_payload("room-a", b"x");
         assert!(rec.stop("room-a"));
         assert_eq!(rec.status().len(), 0);
         let meta: serde_json::Value =
@@ -406,12 +460,12 @@ mod tests {
         let dir = tmpdir("ondemand");
         let rec = Recorder::new(&dir, true, 0, 0).unwrap();
         // 未 start 的房间不录制
-        rec.record("room-x", b"ignored");
+        rec.record_payload("room-x", b"ignored");
         assert_eq!(rec.status().len(), 0);
         // start 后开始录制
         rec.start("room-x").unwrap();
-        rec.record("room-x", b"hello");
-        rec.record("room-x", b"world");
+        rec.record_payload("room-x", b"hello");
+        rec.record_payload("room-x", b"world");
         let st = rec.status();
         assert_eq!(st.len(), 1);
         assert_eq!(st[0]["room"], "room-x");
@@ -422,7 +476,7 @@ mod tests {
             !rec.stop("room-x"),
             "stop must be idempotent (false when absent)"
         );
-        rec.record("room-x", b"after-stop");
+        rec.record_payload("room-x", b"after-stop");
         assert_eq!(
             rec.status().len(),
             0,
@@ -439,14 +493,23 @@ mod tests {
     fn records_and_finalizes() {
         let dir = tmpdir("t1");
         let rec = Recorder::new(&dir, false, 0, 0).unwrap();
-        rec.record("room-a", b"hello world");
-        rec.record("room-a", b"hello world");
+        rec.record_payload("room-a", b"hello world");
+        rec.record_payload("room-a", b"hello world");
         rec.finalize_all();
 
         // 媒体文件：magic + 2 条记录。
         let raw = fs::read(dir.join("room-a.adrec")).unwrap();
-        assert_eq!(&raw[..7], MAGIC);
-        assert_eq!(raw.len(), 7 + 2 * (8 + 4 + 11));
+        assert_eq!(&raw[..MAGIC.len()], MAGIC);
+        assert_eq!(
+            raw.len(),
+            MAGIC.len() + 2 * (PACKET_HEADER_LEN + 11),
+            "ADREC2 每包 24B 头 + 载荷"
+        );
+        // 首包元数据：video/h264/keyframe 标记 + rtp_ts 落盘（供 rec2mp4）。
+        let h = &raw[MAGIC.len()..MAGIC.len() + PACKET_HEADER_LEN];
+        assert_eq!(h[0], KIND_VIDEO);
+        assert_eq!(h[1], CODEC_H264);
+        assert_eq!(h[2], 1, "keyframe 标记");
 
         // 元数据。
         let meta: serde_json::Value =
@@ -470,15 +533,15 @@ mod tests {
 
         let dir = tmpdir("t3");
         let rec = Recorder::new(&dir, false, 0, 0).unwrap();
-        rec.record("ok-room", b"first");
+        rec.record_payload("ok-room", b"first");
 
         // 目录改为只读：新房间创建录制文件必失败。
         let orig = fs::metadata(&dir).unwrap().permissions().mode();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
 
         // #15：失败不得 panic，且失败房间不再重试。
-        rec.record("blocked-room", b"x");
-        rec.record("blocked-room", b"y");
+        rec.record_payload("blocked-room", b"x");
+        rec.record_payload("blocked-room", b"y");
 
         fs::set_permissions(&dir, fs::Permissions::from_mode(orig)).unwrap();
         rec.finalize_all();
@@ -505,7 +568,7 @@ mod tests {
         fn unsafe_room_name_sanitized() {
             let dir = tmpdir("t2");
             let rec = Recorder::new(&dir, false, 0, 0).unwrap();
-            rec.record("../bad/room", b"x");
+            rec.record_payload("../bad/room", b"x");
             rec.finalize_all();
             // 路径分隔符被替换为 _；点号保留（仍是安全文件名）。
             assert!(dir.join(".._bad_room.adrec").exists());
@@ -517,9 +580,9 @@ mod tests {
     fn rotates_by_bytes() {
         let dir = tmpdir("rotate-bytes");
         let rec = Recorder::new(&dir, false, 40, 0).unwrap();
-        rec.record("room-r", b"12345678901234567890");
-        rec.record("room-r", b"12345678901234567890");
-        rec.record("room-r", b"12345678901234567890");
+        rec.record_payload("room-r", b"12345678901234567890");
+        rec.record_payload("room-r", b"12345678901234567890");
+        rec.record_payload("room-r", b"12345678901234567890");
         rec.stop("room-r");
 
         let files: Vec<String> = fs::read_dir(&dir)
@@ -542,9 +605,9 @@ mod tests {
     fn rotates_by_time() {
         let dir = tmpdir("rotate-time");
         let rec = Recorder::new(&dir, false, 0, 1_000_000).unwrap(); // 1s 段
-        rec.record("room-t", b"x");
+        rec.record_payload("room-t", b"x");
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        rec.record("room-t", b"y");
+        rec.record_payload("room-t", b"y");
         rec.stop("room-t");
         let meta: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(dir.join("room-t.meta.json")).unwrap())
