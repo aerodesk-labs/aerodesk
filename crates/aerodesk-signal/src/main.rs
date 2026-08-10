@@ -250,6 +250,8 @@ fn main() {
     let _ = USER_CONNS.set(Mutex::new(HashMap::new()));
 
     // #246 桥生命周期 monitor：房间无真实客户端超过 BRIDGE_IDLE_SECS → 停桥。
+    // 空闲判定用纯函数 idle_rooms_to_stop（按 spawn 代数防旧时间戳误杀新桥）；
+    // 停桥前持 rooms 锁二次确认并执行 stop，避免与并发 Join 的 TOCTOU。
     if let Some(bridge) = &config.bridge {
         let bridge = bridge.clone();
         let rooms = rooms.clone();
@@ -258,26 +260,50 @@ fn main() {
             .name("bridge-monitor".into())
             .spawn(move || {
                 let mut idle_since: HashMap<String, Instant> = HashMap::new();
+                let mut last_epoch: HashMap<String, u64> = HashMap::new();
                 loop {
                     std::thread::sleep(Duration::from_secs(15));
                     let now = Instant::now();
-                    for room in bridge.running_rooms() {
-                        let real_peers = rooms
-                            .lock()
-                            .unwrap()
-                            .get(&room)
-                            .map(|peers| peers.iter().filter(|p| !p.bridge_leg).count())
-                            .unwrap_or(0);
-                        if real_peers == 0 {
-                            let since = idle_since.entry(room.clone()).or_insert(now);
-                            if now.duration_since(*since) >= idle {
+                    let running = bridge.running_rooms();
+                    let real_peers: HashMap<String, usize> = {
+                        let rooms = rooms.lock().unwrap();
+                        running
+                            .iter()
+                            .map(|(room, _)| {
+                                let n = rooms
+                                    .get(room)
+                                    .map(|peers| peers.iter().filter(|p| !p.bridge_leg).count())
+                                    .unwrap_or(0);
+                                (room.clone(), n)
+                            })
+                            .collect()
+                    };
+                    for room in bridge::idle_rooms_to_stop(
+                        &running,
+                        &real_peers,
+                        &mut idle_since,
+                        &mut last_epoch,
+                        idle,
+                        now,
+                    ) {
+                        // 二次确认 + 停桥：持 rooms 锁（无锁序环：running 锁不反向取 rooms）。
+                        let stop = {
+                            let rooms = rooms.lock().unwrap();
+                            let real = rooms
+                                .get(&room)
+                                .map(|peers| peers.iter().filter(|p| !p.bridge_leg).count())
+                                .unwrap_or(0);
+                            if real == 0 && bridge.is_running(&room) {
                                 info!(
                                     "bridge monitor: room {room} idle ({idle:?} no real peers), stopping bridge"
                                 );
                                 bridge.stop(&room);
-                                idle_since.remove(&room);
+                                true
+                            } else {
+                                false
                             }
-                        } else {
+                        };
+                        if stop {
                             idle_since.remove(&room);
                         }
                     }
@@ -457,7 +483,8 @@ fn load_config() -> Config {
         bridge,
         bridge_idle_secs: std::env::var("BRIDGE_IDLE_SECS")
             .ok()
-            .and_then(|v| v.parse().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|v| v.max(15)) // 不低于 monitor 轮询间隔（15s），防误杀
             .map(Duration::from_secs)
             .unwrap_or(Duration::from_secs(300)),
     }

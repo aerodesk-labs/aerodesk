@@ -1,7 +1,8 @@
 # AeroDesk 双 PoP Prometheus 抓取配置示例（#216 M3 部署自动化，#246）
 # 与 deploy/prometheus/sfu-alerts.yml（#240）配合：
 #   prometheus --config.file=deploy/prometheus/prometheus.yml
-# 告警规则文件：把 sfu-alerts.yml 放到 rule_files 指向的路径。
+# 告警规则文件：先复制（sudo cp deploy/prometheus/sfu-alerts.yml /etc/prometheus/rules/），
+# 否则 Prometheus 因缺失 rule 文件启动失败。
 global:
   scrape_interval: 15s
   evaluation_interval: 15s

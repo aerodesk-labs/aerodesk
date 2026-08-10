@@ -9,6 +9,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=aerodesk
+Group=aerodesk
+StateDirectory=aerodesk
 ExecStart=/opt/aerodesk/aerodesk-sfu
 Restart=on-failure
 RestartSec=2
