@@ -24,14 +24,16 @@ def in_arrow(x: int, y: int) -> bool:
 def main() -> None:
     out = sys.argv[1] if len(sys.argv) > 1 else "app-assets/icon-1024.png"
     w = h = 1024
-    bg = (0x1F, 0x6F, 0xEB)   # 深蓝（与 Slint UI 主色近似）
+    bg = (0x00, 0x71, 0xFF)   # 品牌蓝（与 Slint UI 主按钮色 #0071ff 一致）
     fg = (0xFF, 0xFF, 0xFF)   # 白色箭头
     rows = []
     for y in range(h):
         row = bytearray()
         for x in range(w):
             row += bytes(fg if in_arrow(x, y) else bg) + b"\xff"
-        rows.append(bytes(row))
+        # PNG 每条扫描线必须以 1 字节 filter（0=None）开头，否则标准解码器会把
+        # 首像素当作 filter 导致整行通道错位（生成彩虹马赛克）。
+        rows.append(b"\x00" + bytes(row))
     raw = b"".join(rows)
 
     def chunk(tag: bytes, data: bytes) -> bytes:

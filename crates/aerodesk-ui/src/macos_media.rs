@@ -5,7 +5,7 @@
 //! 替换演示帧源；其余平台仍走演示帧（等各自解码管线接入）。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 use aerodesk_core::access_unit::AccessUnitAssembler;
@@ -98,16 +98,16 @@ pub fn run_viewer(
     room: String,
     token: Option<String>,
     ui_weak: slint::Weak<AppWindow>,
-    epoch: Arc<AtomicU64>,
-    my_epoch: u64,
+    session_idx: usize,
     control_rx: std::sync::mpsc::Receiver<String>,
     input_rx: std::sync::mpsc::Receiver<String>,
     file_cmd_rx: std::sync::mpsc::Receiver<FileCmd>,
-    muted: &'static AtomicBool,
-    volume: &'static AtomicU16,
-    session_idx: usize,
+    muted: Arc<AtomicBool>,
+    volume: Arc<AtomicU16>,
+    stop: Arc<AtomicBool>,
 ) {
-    let stale = || epoch.load(Ordering::SeqCst) != my_epoch;
+    // #29 多会话：本会话 stop 置位即退出（断开只关当前活动会话）。
+    let stale = || stop.load(Ordering::SeqCst);
     let auth = token.as_deref().filter(|t| !t.is_empty());
     let mut live = match connect_live_role(&server, &room, Role::Viewer, auth) {
         Ok(l) => l,
@@ -118,10 +118,16 @@ pub fn run_viewer(
                     ui.set_status(format!("连接失败：{e}").into());
                 }
             }
+            if let Some(ui) = ui_weak.upgrade() {
+                crate::session_cleanup(&ui, session_idx);
+            }
             return;
         }
     };
     if stale() {
+        if let Some(ui) = ui_weak.upgrade() {
+            crate::session_cleanup(&ui, session_idx);
+        }
         return;
     }
     let Some(ui) = ui_weak.upgrade() else { return };
@@ -138,24 +144,8 @@ pub fn run_viewer(
     ui.set_in_session(true);
     ui.set_session_status("会话中 · 真实解码（H.264/H.265/VP9/AV1）".into());
 
-    // #29 多会话标签：登记会话房间与帧槽。
-    {
-        let mut tabs: Vec<slint::SharedString> = (0..ui.get_session_tabs().row_count())
-            .filter_map(|i| ui.get_session_tabs().row_data(i))
-            .collect();
-        if !tabs.iter().any(|t| t.as_str() == room) {
-            tabs.push(room.clone().into());
-        }
-        ui.set_session_tabs(slint::ModelRc::new(slint::VecModel::from(tabs)));
-        let mut frames: Vec<slint::Image> = (0..ui.get_session_frames().row_count())
-            .filter_map(|i| ui.get_session_frames().row_data(i))
-            .collect();
-        if frames.len() <= session_idx {
-            frames.resize(session_idx + 1, slint::Image::default());
-        }
-        ui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(frames)));
-        ui.set_active_session(session_idx as i32);
-    }
+    // #29 多会话：登记会话标签并切到当前会话（SESSIONS 为唯一事实源）。
+    crate::session_joined(&ui, session_idx);
 
     let mut assembler = AccessUnitAssembler::new();
     let mut decoder: Option<UiDecoder> = None;
@@ -350,8 +340,8 @@ pub fn run_viewer(
                 }
                 ClientEvent::Closed => {
                     if let Some(fui) = ui_weak.upgrade() {
-                        fui.set_in_session(false);
                         fui.set_status("会话结束（连接关闭）".into());
+                        crate::session_cleanup(&fui, session_idx);
                     }
                     return;
                 }
@@ -432,9 +422,14 @@ pub fn run_viewer(
         }
         std::thread::sleep(Duration::from_millis(1));
     }
+    // 会话结束（断开置 stop）：清理注册表与 UI 槽位。
+    if let Some(ui) = ui_weak.upgrade() {
+        crate::session_cleanup(&ui, session_idx);
+    }
 }
 
-/// 把一帧 RGBA 呈现到会话帧槽 + 当前显示帧（#73 抽出的渲染入口）。
+/// 把一帧 RGBA 呈现到会话帧槽 + 当前显示帧（#73 抽出的渲染入口；
+/// 多会话映射到稠密槽位见 crate::present_frame）。
 fn present_frame(
     ui_weak: &slint::Weak<AppWindow>,
     rgba: &[u8],
@@ -443,25 +438,7 @@ fn present_frame(
     session_idx: usize,
     frames: &mut u64,
 ) {
-    let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(rgba, w as u32, h as u32);
-    let img = Image::from_rgba8(buffer);
-    if let Some(fui) = ui_weak.upgrade() {
-        // #75：视频源尺寸（letterbox 光标换算用）。
-        fui.set_frame_w(w as f32);
-        fui.set_frame_h(h as f32);
-        // 更新本会话帧槽；当前标签同时更新显示帧。
-        let mut arr: Vec<slint::Image> = (0..fui.get_session_frames().row_count())
-            .filter_map(|i| fui.get_session_frames().row_data(i))
-            .collect();
-        if arr.len() <= session_idx {
-            arr.resize(session_idx + 1, slint::Image::default());
-        }
-        arr[session_idx] = img.clone();
-        fui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(arr)));
-        if fui.get_active_session() == session_idx as i32 {
-            fui.set_video_frame(img);
-        }
-    }
+    crate::present_frame(ui_weak, rgba, w, h, session_idx);
     *frames += 1;
 }
 

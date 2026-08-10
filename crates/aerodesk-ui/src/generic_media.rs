@@ -5,7 +5,7 @@
 //! 音频/文件传输/多会话标签为 macOS 增强项，非 macOS 先收敛到"真实视频观看"。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use aerodesk_core::access_unit::AccessUnitAssembler;
@@ -21,12 +21,13 @@ pub fn run_generic_viewer(
     room: String,
     token: Option<String>,
     ui_weak: slint::Weak<crate::AppWindow>,
-    epoch: Arc<AtomicU64>,
-    my_epoch: u64,
+    session_idx: usize,
     input_rx: std::sync::mpsc::Receiver<String>,
+    stop: Arc<AtomicBool>,
 ) {
     eprintln!("generic viewer: start server={server} room={room}");
-    let stale = || epoch.load(Ordering::SeqCst) != my_epoch;
+    // #29 多会话：本会话 stop 置位即退出（断开只关当前活动会话）。
+    let stale = || stop.load(Ordering::SeqCst);
     let auth = token.as_deref().filter(|t| !t.is_empty());
     // connect_live_role 在异常环境可能阻塞（如 UDP read_timeout 失效）；
     // 放子线程 + 20s 超时保护，避免 UI 线程永久挂起。
@@ -48,6 +49,9 @@ pub fn run_generic_viewer(
                     ui.set_status(format!("连接失败：{e}").into());
                 }
             }
+            if let Some(ui) = ui_weak.upgrade() {
+                crate::session_cleanup(&ui, session_idx);
+            }
             return;
         }
         Err(_) => {
@@ -58,10 +62,16 @@ pub fn run_generic_viewer(
                     ui.set_status("连接超时".into());
                 }
             }
+            if let Some(ui) = ui_weak.upgrade() {
+                crate::session_cleanup(&ui, session_idx);
+            }
             return;
         }
     };
     if stale() {
+        if let Some(ui) = ui_weak.upgrade() {
+            crate::session_cleanup(&ui, session_idx);
+        }
         return;
     }
     let Some(ui) = ui_weak.upgrade() else { return };
@@ -77,6 +87,8 @@ pub fn run_generic_viewer(
     ui.set_conn_state(2);
     ui.set_in_session(true);
     ui.set_session_status("会话中 · OpenH264 软解".into());
+    // #29 多会话：登记标签并切到当前会话。
+    crate::session_joined(&ui, session_idx);
     eprintln!(
         "generic viewer connected peer={} ice={}",
         live.peer_id, live.ice_connected
@@ -147,15 +159,8 @@ pub fn run_generic_viewer(
                     let d = decoder.as_mut().unwrap();
                     if let Ok(Some((rgba, w, h))) = d.decode_rgba(&au.data) {
                         frames += 1;
-                        if let Some(ui) = ui_weak.upgrade() {
-                            let buffer =
-                                slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
-                                    &rgba, w as u32, h as u32,
-                                );
-                            ui.set_video_frame(slint::Image::from_rgba8(buffer));
-                            ui.set_frame_w(w as f32);
-                            ui.set_frame_h(h as f32);
-                        }
+                        // 多会话：写入本会话帧槽 + 活动会话显示帧。
+                        crate::present_frame(&ui_weak, &rgba, w, h, session_idx);
                         if last_stat.elapsed() >= Duration::from_secs(5) {
                             eprintln!("generic viewer: decoded {frames} frames");
                             last_stat = Instant::now();
@@ -166,8 +171,8 @@ pub fn run_generic_viewer(
         }
         std::thread::sleep(Duration::from_millis(1));
     }
+    // 会话结束（断开置 stop）：清理注册表与 UI 槽位。
     if let Some(ui) = ui_weak.upgrade() {
-        ui.set_conn_state(4);
-        ui.set_in_session(false);
+        crate::session_cleanup(&ui, session_idx);
     }
 }

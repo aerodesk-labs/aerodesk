@@ -28,6 +28,13 @@ component MIcon {
     }
 }
 
+// 设备组（按地址簿“分组”字段聚合展示）：is-header 行为组标题，否则为设备行。
+export struct DeviceGroupEntry {
+    is-header: bool,
+    text: string,
+    entry: string,
+}
+
 // ---------- 通用控件 ----------
 
 // RustDesk 风格按钮：主按钮蓝底白字 / 次按钮浅灰底，圆角 8。
@@ -402,6 +409,7 @@ export component AppWindow inherits Window {
     in-out property <[string]> recents: [];
     in-out property <[string]> favorites: [];
     in-out property <[string]> addressbook: [];
+    in-out property <[DeviceGroupEntry]> device-groups: [];
     in-out property <[string]> discovered: [];
     in-out property <string> ab-alias: "";
     in-out property <string> ab-group: "";
@@ -971,28 +979,36 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                // ---- 设备组（按分组展示地址簿）----
+                // ---- 设备组（按地址簿“分组”字段聚合展示：组标题 + 组内设备）----
                 if root.peer-tab == 4: ScrollView {
                     vertical-stretch: 1;
                     VerticalLayout {
                         spacing: 2px;
-                        for group in root.addressbook: Rectangle {
-                            height: 40px;
+                        for item in root.device-groups: Rectangle {
+                            visible: item.is-header;
+                            height: 30px;
+                            padding-left: 10px;
+                            Text { text: item.text; font-size: 13px; font-weight: 600; color: #7d7d84; vertical-alignment: center; }
+                        }
+                        for item in root.device-groups: Rectangle {
+                            visible: !item.is-header;
+                            height: 42px;
                             border-radius: 8px;
-                            background: grp.has-hover ? #f2f2f5 : transparent;
-                            grp := TouchArea {
+                            background: dgrp.has-hover ? #f2f2f5 : transparent;
+                            dgrp := TouchArea {
                                 width: 100%;
                                 height: 100%;
                                 mouse-cursor: pointer;
-                                clicked => { root.connect-addressbook(group); }
+                                clicked => { root.connect-addressbook(item.entry); }
                             }
                             HorizontalLayout {
                                 cross-axis-alignment: center;
                                 padding-left: 10px;
                                 spacing: 10px;
-                                Rectangle { width: 26px; height: 26px; border-radius: 13px; background: #6d3bdc; Text { text: "☰"; color: #fff; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; width: 100%; height: 100%; } }
-                                Text { text: group; font-size: 13px; color: #212121; vertical-alignment: center; overflow: elide; }
+                                Rectangle { width: 30px; height: 30px; border-radius: 15px; background: #6d3bdc; Text { text: "☰"; color: #fff; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; width: 100%; height: 100%; } }
+                                Text { text: item.text; font-size: 13px; color: #212121; vertical-alignment: center; overflow: elide; }
                                 Rectangle { width: 0px; horizontal-stretch: 1; }
+                                IconBtn { icon: "\u{e872}"; danger: true; tooltip: "删除"; clicked => { root.remove-addressbook(item.entry); } }
                             }
                         }
                     }

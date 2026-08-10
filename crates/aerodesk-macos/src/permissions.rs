@@ -55,3 +55,14 @@ mod tests {
         let _ = (SettingsPane::ScreenCapture, SettingsPane::Accessibility);
     }
 }
+
+/// 触发一次屏幕采集尝试，让系统把本应用登记进「屏幕录制」授权列表。
+/// macOS TCC 只列出尝试过受保护资源的应用；仅 preflight 检查不会登记。
+/// 无权限时本次采集会失败（返回 None），但登记动作已完成，用户随后
+/// 可在系统设置里勾选本应用。
+pub fn trigger_screen_capture_registration() {
+    use std::time::Duration;
+    if let Ok(mut cap) = crate::capture::ScreenCapture::start(0, 5, 320, 200) {
+        let _ = cap.next_frame(Duration::from_millis(250));
+    }
+}

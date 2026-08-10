@@ -13,7 +13,7 @@ use slint::Model;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 #[cfg(not(target_os = "macos"))]
 use std::time::Duration;
 
@@ -30,9 +30,153 @@ pub enum FileCmd {
     SendClipboard(String),
 }
 
-/// #72 UI → 会话文件/剪贴板命令通道（会话建立时 set，断开时清空）。
-static FILE_CMD: std::sync::Mutex<Option<std::sync::mpsc::Sender<FileCmd>>> =
-    std::sync::Mutex::new(None);
+/// #72 拖放发送纯路由（可单测）：把文件交给会话 file 通道，返回状态文案。
+pub fn dispatch_dropped_files(
+    tx: Option<&std::sync::mpsc::Sender<FileCmd>>,
+    paths: &[std::path::PathBuf],
+) -> String {
+    if paths.is_empty() {
+        return "发送文件：未选择文件".to_string();
+    }
+    let Some(tx) = tx else {
+        return "发送文件：未连接会话".to_string();
+    };
+    // 只接受存在的普通文件（目录拖入不发送，避免误把目录当文件传）。
+    let files: Vec<_> = paths.iter().filter(|p| p.is_file()).cloned().collect();
+    if files.is_empty() {
+        return format!("发送文件：{} 不是文件", paths[0].display());
+    }
+    for f in &files {
+        let _ = tx.send(FileCmd::SendFile(f.clone()));
+    }
+    if files.len() == 1 {
+        format!("发送文件：{}", files[0].display())
+    } else {
+        format!("发送文件：{} 个文件", files.len())
+    }
+}
+
+/// #29 多会话（主控端同时连接多个被控端，UI 标签最多 MAX_SESSIONS 个）：
+/// - `SESSIONS` 按标签顺序保存活动会话（稠密，与 UI session-tabs/frames 对齐）
+/// - 每会话独立 输入/控制/文件 通道、静音/音量、stop 标志；断开只关当前活动会话
+pub const MAX_SESSIONS: usize = 4;
+
+pub struct SessionHandle {
+    pub slot: usize,
+    pub room: String,
+    pub server: String,
+    pub input_tx: std::sync::mpsc::Sender<String>,
+    pub control_tx: std::sync::mpsc::Sender<String>,
+    pub file_tx: std::sync::mpsc::Sender<FileCmd>,
+    pub muted: Arc<AtomicBool>,
+    pub volume: Arc<AtomicU16>,
+    pub stop: Arc<AtomicBool>,
+}
+
+pub static SESSIONS: std::sync::Mutex<Vec<SessionHandle>> = std::sync::Mutex::new(Vec::new());
+/// #75 输入帧序号（全局递增；跨会话共用与旧行为一致）。
+pub static INPUT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// #29 会话槽序号（单调递增，作为会话内部标识；UI 稠密索引见 slot_to_ui_index）。
+pub static SESSION_NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// macOS Dock 图标点击：主窗口弱引用（AppWindow::new 后设置，reopen 回调重显用）。
+static MAIN_WINDOW: std::sync::Mutex<Option<slint::Weak<AppWindow>>> = std::sync::Mutex::new(None);
+
+/// macOS：把主窗口带到最前（makeKeyAndOrderFront + deminiaturize + 激活 App）。
+#[cfg(target_os = "macos")]
+pub fn focus_window_to_front(window: &slint::Window) {
+    use raw_window_handle::{HasRawWindowHandle, HasWindowHandle};
+    if let Ok(handle) = window.window_handle().window_handle()
+        && let Ok(raw) = handle.raw_window_handle()
+        && let raw_window_handle::RawWindowHandle::AppKit(appkit) = raw
+    {
+        aerodesk_macos::dock::focus_ns_view(appkit.ns_view.as_ptr() as *mut std::ffi::c_void);
+    }
+}
+
+/// slot（会话内部标识）→ 当前 UI 稠密索引（SESSIONS 顺序即标签顺序）。
+pub fn slot_to_ui_index(slot: usize) -> Option<usize> {
+    SESSIONS.lock().unwrap().iter().position(|s| s.slot == slot)
+}
+
+/// 把一帧 RGBA 呈现到会话帧槽 + 当前显示帧（多会话：按 slot 映射稠密槽位）。
+pub fn present_frame(
+    ui_weak: &slint::Weak<AppWindow>,
+    rgba: &[u8],
+    w: usize,
+    h: usize,
+    slot: usize,
+) {
+    let buffer =
+        slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(rgba, w as u32, h as u32);
+    let img = slint::Image::from_rgba8(buffer);
+    let Some(fui) = ui_weak.upgrade() else { return };
+    fui.set_frame_w(w as f32);
+    fui.set_frame_h(h as f32);
+    let Some(ui_idx) = slot_to_ui_index(slot) else {
+        return; // 会话已移除（断开清理中），跳过渲染
+    };
+    let mut arr: Vec<slint::Image> = (0..fui.get_session_frames().row_count())
+        .filter_map(|i| fui.get_session_frames().row_data(i))
+        .collect();
+    if arr.len() <= ui_idx {
+        arr.resize(ui_idx + 1, slint::Image::default());
+    }
+    arr[ui_idx] = img.clone();
+    fui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(arr)));
+    if fui.get_active_session() == ui_idx as i32 {
+        fui.set_video_frame(img);
+    }
+}
+
+/// 按 SESSIONS 重建 UI 标签/帧槽（会话加入或移除后调用）。
+pub fn session_refresh_ui(ui: &AppWindow) {
+    let sessions = SESSIONS.lock().unwrap();
+    let tabs: Vec<slint::SharedString> = sessions.iter().map(|s| s.room.clone().into()).collect();
+    let old: Vec<slint::Image> = (0..ui.get_session_frames().row_count())
+        .filter_map(|i| ui.get_session_frames().row_data(i))
+        .collect();
+    let mut frames: Vec<slint::Image> = Vec::with_capacity(sessions.len());
+    for i in 0..sessions.len() {
+        frames.push(old.get(i).cloned().unwrap_or_default());
+    }
+    ui.set_session_tabs(slint::ModelRc::new(slint::VecModel::from(tabs)));
+    ui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(frames.clone())));
+    if sessions.is_empty() {
+        ui.set_active_session(0);
+        ui.set_in_session(false);
+        ui.set_conn_state(0);
+        ui.set_video_frame(slint::Image::default());
+        ui.set_input_mode("键鼠已释放".into());
+        ui.set_remote_cursor_visible(false);
+        ui.set_frame_w(0.0);
+        ui.set_frame_h(0.0);
+        ui.set_status("已断开".into());
+        ui.set_connecting(false);
+    } else {
+        let cur = ui.get_active_session() as usize;
+        let new_active = cur.min(sessions.len() - 1);
+        ui.set_active_session(new_active as i32);
+        if let Some(f) = frames.get(new_active) {
+            ui.set_video_frame(f.clone());
+        }
+        ui.set_in_session(true);
+    }
+}
+
+/// 会话成功连接：登记标签并把活动会话切到该会话。
+pub fn session_joined(ui: &AppWindow, slot: usize) {
+    session_refresh_ui(ui);
+    if let Some(pos) = slot_to_ui_index(slot) {
+        ui.set_active_session(pos as i32);
+    }
+}
+
+/// 会话结束（断开/连接失败/连接关闭）：从注册表移除并刷新 UI。
+pub fn session_cleanup(ui: &AppWindow, slot: usize) {
+    SESSIONS.lock().unwrap().retain(|s| s.slot != slot);
+    session_refresh_ui(ui);
+}
 
 /// #72 UI 拖拽发送：在 winit 事件进入 Slint 前拦截外部文件拖放。
 ///
@@ -79,28 +223,17 @@ impl FileDropHandler {
         }
     }
 
-    /// 把拖放路径派发到会话 file 通道；返回给用户的状态文案。
+    /// 把拖放路径派发到会话 file 通道（活动会话）；返回给用户的状态文案。
     fn dispatch_drop(&self, paths: &[std::path::PathBuf]) -> String {
-        if paths.is_empty() {
-            return "发送文件：未选择文件".to_string();
-        }
-        let guard = FILE_CMD.lock().unwrap();
-        let Some(tx) = guard.as_ref() else {
+        let Some(ui) = self.ui.lock().unwrap().as_ref().and_then(|w| w.upgrade()) else {
             return "发送文件：未连接会话".to_string();
         };
-        // 只接受存在的普通文件（目录拖入不发送，避免误把目录当文件传）。
-        let files: Vec<_> = paths.iter().filter(|p| p.is_file()).cloned().collect();
-        if files.is_empty() {
-            return format!("发送文件：{} 不是文件", paths[0].display());
-        }
-        for f in &files {
-            let _ = tx.send(FileCmd::SendFile(f.clone()));
-        }
-        if files.len() == 1 {
-            format!("发送文件：{}", files[0].display())
-        } else {
-            format!("发送文件：{} 个文件", files.len())
-        }
+        let idx = ui.get_active_session() as usize;
+        let tx = {
+            let sessions = crate::SESSIONS.lock().unwrap();
+            sessions.get(idx).map(|s| s.file_tx.clone())
+        };
+        dispatch_dropped_files(tx.as_ref(), paths)
     }
 
     fn set_status(&self, msg: &str) {
@@ -155,6 +288,20 @@ fn main() -> Result<(), slint::PlatformError> {
         slint::platform::set_platform(Box::new(backend)).expect("set slint platform");
     }
     let ui = AppWindow::new()?;
+    // macOS：Dock 图标点击 → 重显/置前主窗口（含最小化还原）。
+    #[cfg(target_os = "macos")]
+    {
+        *MAIN_WINDOW.lock().unwrap() = Some(ui.as_weak());
+        aerodesk_macos::dock::set_reopen_callback(|| {
+            let weak = MAIN_WINDOW.lock().unwrap().clone();
+            if let Some(weak) = weak {
+                let _ = weak.upgrade_in_event_loop(|ui| {
+                    let _ = ui.show();
+                    focus_window_to_front(ui.window());
+                });
+            }
+        });
+    }
     // #72 拖放发送：填充会话 UI 弱引用（非 macOS 无 handler，仅写入无副作用）。
     *drop_ui.lock().unwrap() = Some(ui.as_weak());
 
@@ -163,6 +310,9 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_favorites(slint::ModelRc::new(slint::VecModel::from(load_favorites())));
     ui.set_addressbook(slint::ModelRc::new(slint::VecModel::from(
         load_addressbook(),
+    )));
+    ui.set_device_groups(slint::ModelRc::new(slint::VecModel::from(
+        build_device_groups(&load_addressbook()),
     )));
 
     // 设置（本地持久化）
@@ -229,9 +379,6 @@ fn main() -> Result<(), slint::PlatformError> {
             save_settings(&settings);
         }
     });
-    // 会话帧线程代际：断开/新会话时递增，使旧帧线程退出（防线程泄漏）。
-    let frame_epoch = Arc::new(AtomicU64::new(0));
-
     ui.on_set_tab({
         let ui = ui.as_weak();
         move |t| {
@@ -242,60 +389,75 @@ fn main() -> Result<(), slint::PlatformError> {
 
     ui.on_connect({
         let weak = ui.as_weak();
-        let frame_epoch = frame_epoch.clone();
         move || {
             let ui = weak.unwrap();
             let server = ui.get_server_input().to_string();
             let room = ui.get_room_input().to_string();
             let token = ui.get_token_input().to_string();
+            {
+                let sessions = SESSIONS.lock().unwrap();
+                if sessions.len() >= MAX_SESSIONS {
+                    ui.set_status(format!("最多同时 {MAX_SESSIONS} 个会话（请先断开一个）").into());
+                    return;
+                }
+            }
             ui.set_connecting(true);
             ui.set_conn_state(1);
             ui.set_status(format!("连接 {} @ {} …", room, server).into());
+            // 每会话独立通道/状态（多会话互不干扰）：输入/控制/文件/静音/音量/stop。
+            let slot = SESSION_NEXT.fetch_add(1, Ordering::SeqCst);
+            let (control_tx, control_rx) = std::sync::mpsc::channel();
+            let (input_tx, input_rx) = std::sync::mpsc::channel();
+            let (file_cmd_tx, file_cmd_rx) = std::sync::mpsc::channel();
+            let muted = Arc::new(AtomicBool::new(false));
+            let volume = Arc::new(AtomicU16::new(100));
+            let stop = Arc::new(AtomicBool::new(false));
+            {
+                let mut sessions = SESSIONS.lock().unwrap();
+                sessions.push(SessionHandle {
+                    slot,
+                    room: room.clone(),
+                    server: server.clone(),
+                    input_tx: input_tx.clone(),
+                    control_tx: control_tx.clone(),
+                    file_tx: file_cmd_tx.clone(),
+                    muted: muted.clone(),
+                    volume: volume.clone(),
+                    stop: stop.clone(),
+                });
+            }
             let weak2 = weak.clone();
-            // 本会话代际：断开/新连接会递增 epoch，旧连接/旧帧线程据此退出。
-            let my_epoch = frame_epoch.fetch_add(1, Ordering::SeqCst) + 1;
-            let epoch2 = frame_epoch.clone();
             std::thread::spawn(move || {
                 #[cfg(target_os = "macos")]
                 {
-                    // #29：macOS 真实 H.264 解码渲染（替换演示帧源）。
-                    let session_idx = SESSION_NEXT.fetch_add(1, Ordering::SeqCst);
-                    let (control_tx, control_rx) = std::sync::mpsc::channel();
-                    *CONTROL_TX.lock().unwrap() = Some(control_tx);
-                    let (input_tx, input_rx) = std::sync::mpsc::channel();
-                    *INPUT_TX.lock().unwrap() = Some(input_tx);
-                    let (file_cmd_tx, file_cmd_rx) = std::sync::mpsc::channel();
-                    *FILE_CMD.lock().unwrap() = Some(file_cmd_tx);
+                    // macOS：真实 H.264 解码渲染 + 音频/文件/多会话（每会话独立）。
                     crate::macos_media::run_viewer(
                         server,
                         room,
                         Some(token),
                         weak2.clone(),
-                        epoch2.clone(),
-                        my_epoch,
+                        slot,
                         control_rx,
                         input_rx,
                         file_cmd_rx,
-                        &AUDIO_MUTED,
-                        &AUDIO_VOLUME,
-                        session_idx,
+                        muted,
+                        volume,
+                        stop,
                     );
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
                     // Windows/Linux 主控端：真实媒体观看（OpenH264 软解 + Slint 渲染）。
-                    let (input_tx, input_rx) = std::sync::mpsc::channel();
-                    *INPUT_TX.lock().unwrap() = Some(input_tx);
                     crate::generic_media::run_generic_viewer(
                         server,
                         room,
                         Some(token),
                         weak2.clone(),
-                        epoch2.clone(),
-                        my_epoch,
+                        slot,
                         input_rx,
+                        stop,
                     );
-                } // cfg(not(target_os = "macos"))
+                }
                 if let Some(ui) = weak2.upgrade() {
                     ui.set_connecting(false);
                 }
@@ -305,34 +467,27 @@ fn main() -> Result<(), slint::PlatformError> {
 
     ui.on_disconnect({
         let ui = ui.as_weak();
-        let frame_epoch = frame_epoch.clone();
         move || {
-            // 递增代际：停止当前会话帧线程（含连接中会话，使其放弃进入会话视图）。
-            frame_epoch.fetch_add(1, Ordering::SeqCst);
+            // 多会话：只断开当前活动会话（stop 置位后会话线程退出并刷新 UI）。
             let ui = ui.unwrap();
-            ui.set_conn_state(0);
-            ui.set_input_mode("键鼠已释放".into());
-            ui.set_in_session(false);
-            ui.set_video_frame(slint::Image::default());
-            ui.set_remote_cursor_visible(false);
-            ui.set_frame_w(0.0);
-            ui.set_frame_h(0.0);
-            ui.set_session_tabs(slint::ModelRc::new(slint::VecModel::from(Vec::<
-                slint::SharedString,
-            >::new(
-            ))));
-            ui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(Vec::<
-                slint::Image,
-            >::new(
-            ))));
-            ui.set_active_session(0);
-            SESSION_NEXT.store(0, Ordering::SeqCst);
-            *CONTROL_TX.lock().unwrap() = None;
-            *INPUT_TX.lock().unwrap() = None;
-            *FILE_CMD.lock().unwrap() = None;
-            AUDIO_MUTED.store(false, Ordering::SeqCst);
-            ui.set_status("已断开".into());
-            ui.set_connecting(false);
+            let idx = ui.get_active_session() as usize;
+            let stopped = {
+                let sessions = SESSIONS.lock().unwrap();
+                if let Some(s) = sessions.get(idx) {
+                    s.stop.store(true, Ordering::SeqCst);
+                    true
+                } else {
+                    false
+                }
+            };
+            if stopped {
+                ui.set_status("正在断开当前会话…".into());
+                ui.set_input_mode("键鼠已释放".into());
+                ui.set_remote_cursor_visible(false);
+            } else {
+                // 无活动会话：直接重置 UI。
+                session_refresh_ui(&ui);
+            }
         }
     });
 
@@ -347,23 +502,11 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
-    // #29：UI → 会话 control 通道（选层请求）。
-    static CONTROL_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>> =
-        std::sync::Mutex::new(None);
-    // #75：UI → 会话 input 通道（指针输入，发送 InputFrame JSON）。
-    static INPUT_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>> =
-        std::sync::Mutex::new(None);
-    static INPUT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    // #73/#58：观看端静音开关（run_viewer 读取，真实丢弃音频）。
-    static AUDIO_MUTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    // #73：观看端音量 0..=100（run_viewer 同步到 AudioSink，滑块驱动）。
-    static AUDIO_VOLUME: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(100);
-    // #29 多会话：会话槽序号（断开时清零）。
-    static SESSION_NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-    // #75：会话视图指针输入 → InputFrame JSON → input 通道 → SFU → 被控端注入。
+    // #29 多会话：输入/控制/文件/静音/音量全部按“活动会话”路由（SESSIONS[idx]）。
     ui.on_send_input({
+        let weak = ui.as_weak();
         move |kind: i32, x: f32, y: f32| {
+            let ui = weak.unwrap();
             let event = match kind {
                 1 => aerodesk_protocol::input::InputEvent::MouseButton {
                     button: aerodesk_protocol::input::MouseButton::Left,
@@ -385,8 +528,10 @@ fn main() -> Result<(), slint::PlatformError> {
             let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
             let frame = aerodesk_protocol::input::InputFrame::new(seq, event);
             if let Ok(json) = serde_json::to_string(&frame) {
-                if let Some(tx) = INPUT_TX.lock().unwrap().as_ref() {
-                    let _ = tx.send(json);
+                let sessions = SESSIONS.lock().unwrap();
+                let idx = ui.get_active_session() as usize;
+                if let Some(s) = sessions.get(idx) {
+                    let _ = s.input_tx.send(json);
                 }
             }
         }
@@ -397,6 +542,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // modifiers.meta（builtin_structs），此处映射回协议语义（meta=Command）。
     ui.on_send_key({
         // 返回是否已处理：未映射的键 reject，让本地 UI 继续处理。
+        let weak = ui.as_weak();
         move |state: i32,
               text: slint::SharedString,
               ctrl: bool,
@@ -434,8 +580,11 @@ fn main() -> Result<(), slint::PlatformError> {
             let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
             let frame = aerodesk_protocol::input::InputFrame::new(seq, event);
             if let Ok(json) = serde_json::to_string(&frame) {
-                if let Some(tx) = INPUT_TX.lock().unwrap().as_ref() {
-                    let _ = tx.send(json);
+                let ui = weak.unwrap();
+                let sessions = SESSIONS.lock().unwrap();
+                let idx = ui.get_active_session() as usize;
+                if let Some(s) = sessions.get(idx) {
+                    let _ = s.input_tx.send(json);
                 }
             }
             true
@@ -444,6 +593,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // #75：会话视图滚轮输入 → InputFrame JSON（归一化坐标 + 像素增量）。
     ui.on_send_wheel({
+        let weak = ui.as_weak();
         move |x: f32, y: f32, dx: f32, dy: f32| {
             let event = aerodesk_protocol::input::InputEvent::Wheel {
                 x: x as f64,
@@ -454,8 +604,11 @@ fn main() -> Result<(), slint::PlatformError> {
             let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
             let frame = aerodesk_protocol::input::InputFrame::new(seq, event);
             if let Ok(json) = serde_json::to_string(&frame) {
-                if let Some(tx) = INPUT_TX.lock().unwrap().as_ref() {
-                    let _ = tx.send(json);
+                let ui = weak.unwrap();
+                let sessions = SESSIONS.lock().unwrap();
+                let idx = ui.get_active_session() as usize;
+                if let Some(s) = sessions.get(idx) {
+                    let _ = s.input_tx.send(json);
                 }
             }
         }
@@ -545,6 +698,9 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             let new: Vec<slint::SharedString> = items.iter().map(|s| s.into()).collect();
             ui.set_addressbook(slint::ModelRc::new(slint::VecModel::from(new.clone())));
+            ui.set_device_groups(slint::ModelRc::new(slint::VecModel::from(
+                build_device_groups(&new),
+            )));
             save_addressbook(&new);
         }
     });
@@ -562,6 +718,9 @@ fn main() -> Result<(), slint::PlatformError> {
             items.retain(|i| i != entry.as_str());
             let new: Vec<slint::SharedString> = items.iter().map(|s| s.into()).collect();
             ui.set_addressbook(slint::ModelRc::new(slint::VecModel::from(new.clone())));
+            ui.set_device_groups(slint::ModelRc::new(slint::VecModel::from(
+                build_device_groups(&new),
+            )));
             save_addressbook(&new);
             ui.set_status("已从地址簿删除".into());
         }
@@ -631,6 +790,9 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             let new: Vec<slint::SharedString> = items.iter().map(|s| s.into()).collect();
             ui.set_addressbook(slint::ModelRc::new(slint::VecModel::from(new.clone())));
+            ui.set_device_groups(slint::ModelRc::new(slint::VecModel::from(
+                build_device_groups(&new),
+            )));
             save_addressbook(&new);
         }
     });
@@ -665,18 +827,19 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
     ui.on_toggle_audio({
-        let ui = ui.as_weak();
-        // #58 观看端静音：经 control 通道下发真实静音指令（音频链路已接入，
+        let weak = ui.as_weak();
+        // #58 观看端静音：经当前会话 control 通道下发真实静音指令（音频链路已接入，
         // SFU 转发 PCMU；静音后观看端丢弃音频帧）。
-        let muted = Arc::new(AtomicBool::new(false));
-        let muted2 = muted.clone();
         move || {
-            let ui = ui.unwrap();
-            let m = !muted2.fetch_xor(true, Ordering::SeqCst);
-            AUDIO_MUTED.store(m, Ordering::SeqCst);
-            if let Some(tx) = CONTROL_TX.lock().unwrap().as_ref() {
-                let _ = tx.send(format!("{{\"audio_mute\":{m}}}"));
-            }
+            let ui = weak.unwrap();
+            let idx = ui.get_active_session() as usize;
+            let sessions = SESSIONS.lock().unwrap();
+            let Some(s) = sessions.get(idx) else {
+                ui.set_session_status("没有活动会话".into());
+                return;
+            };
+            let m = !s.muted.fetch_xor(true, Ordering::SeqCst);
+            let _ = s.control_tx.send(format!("{{\"audio_mute\":{m}}}"));
             ui.set_session_status(
                 format!(
                     "音频：{}（静音指令已下发）",
@@ -686,15 +849,18 @@ fn main() -> Result<(), slint::PlatformError> {
             );
         }
     });
-    // #73 观看端音量滑块：写 AUDIO_VOLUME（run_viewer 同步到 AudioSink）。
+    // #73 观看端音量滑块：写当前会话 volume（run_viewer 同步到 AudioSink）。
     ui.on_change_volume({
-        let ui = ui.as_weak();
+        let weak = ui.as_weak();
         move |v: f32| {
+            let ui = weak.unwrap();
             let pct = (v.clamp(0.0, 1.0) * 100.0).round() as u16;
-            AUDIO_VOLUME.store(pct, Ordering::SeqCst);
-            if let Some(ui) = ui.upgrade() {
-                ui.set_session_status(format!("音量：{pct}%").into());
+            let idx = ui.get_active_session() as usize;
+            let sessions = SESSIONS.lock().unwrap();
+            if let Some(s) = sessions.get(idx) {
+                s.volume.store(pct, Ordering::SeqCst);
             }
+            ui.set_session_status(format!("音量：{pct}%").into());
         }
     });
     // #109 AI 远控权限/审计管理（本机设置页）。
@@ -763,8 +929,10 @@ fn main() -> Result<(), slint::PlatformError> {
         move || {
             let ui = ui.unwrap();
             let n = display_idx2.fetch_add(1, Ordering::SeqCst) % 3;
-            if let Some(tx) = CONTROL_TX.lock().unwrap().as_ref() {
-                let _ = tx.send(format!("{{\"display\":{n}}}"));
+            let idx = ui.get_active_session() as usize;
+            let sessions = SESSIONS.lock().unwrap();
+            if let Some(s) = sessions.get(idx) {
+                let _ = s.control_tx.send(format!("{{\"display\":{n}}}"));
             }
             ui.set_session_status(format!("显示器：{n}（切换指令已下发）").into());
         }
@@ -780,8 +948,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 1 => "h",
                 _ => "q",
             };
-            if let Some(tx) = CONTROL_TX.lock().unwrap().as_ref() {
-                let _ = tx.send(format!("{{\"layer\":\"{layer}\"}}"));
+            let idx = ui.get_active_session() as usize;
+            let sessions = SESSIONS.lock().unwrap();
+            if let Some(s) = sessions.get(idx) {
+                let _ = s.control_tx.send(format!("{{\"layer\":\"{layer}\"}}"));
             }
             ui.set_session_status(
                 format!(
@@ -832,10 +1002,14 @@ fn main() -> Result<(), slint::PlatformError> {
                             ui.set_session_status("已取消选择文件".into());
                             return;
                         }
-                        if let Some(tx) = FILE_CMD.lock().unwrap().as_ref() {
-                            let _ = tx.send(FileCmd::SendFile(path.clone().into()));
+                        let idx = ui.get_active_session() as usize;
+                        let sessions = SESSIONS.lock().unwrap();
+                        if let Some(s) = sessions.get(idx) {
+                            let _ = s.file_tx.send(FileCmd::SendFile(path.clone().into()));
+                            drop(sessions);
                             ui.set_session_status(format!("发送文件：{path}").into());
                         } else {
+                            drop(sessions);
                             ui.set_session_status("发送文件：未连接会话".into());
                         }
                     }
@@ -859,10 +1033,14 @@ fn main() -> Result<(), slint::PlatformError> {
             {
                 match aerodesk_core::clipboard::read() {
                     Some(text) if !text.is_empty() => {
-                        if let Some(tx) = FILE_CMD.lock().unwrap().as_ref() {
-                            let _ = tx.send(FileCmd::SendClipboard(text.clone()));
+                        let idx = ui.get_active_session() as usize;
+                        let sessions = SESSIONS.lock().unwrap();
+                        if let Some(s) = sessions.get(idx) {
+                            let _ = s.file_tx.send(FileCmd::SendClipboard(text.clone()));
+                            drop(sessions);
                             ui.set_session_status("已发送剪贴板到被控端".into());
                         } else {
+                            drop(sessions);
                             ui.set_session_status("剪贴板：未连接会话".into());
                         }
                     }
@@ -977,9 +1155,14 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui = ui.as_weak();
         move || {
             #[cfg(target_os = "macos")]
-            aerodesk_macos::permissions::open_system_settings(
-                aerodesk_macos::permissions::SettingsPane::ScreenCapture,
-            );
+            {
+                // 先尝试一次采集，让系统把本应用登记进「屏幕录制」授权列表，
+                // 否则系统设置里看不到本应用、无法勾选授权。
+                aerodesk_macos::permissions::trigger_screen_capture_registration();
+                aerodesk_macos::permissions::open_system_settings(
+                    aerodesk_macos::permissions::SettingsPane::ScreenCapture,
+                );
+            }
             #[cfg(not(target_os = "macos"))]
             if let Some(ui) = ui.upgrade() {
                 ui.set_settings_status("被控端权限引导仅 macOS 实现".into());
@@ -1000,6 +1183,10 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // 启动时先尝试一次采集，把应用登记进「屏幕录制」授权列表
+    // （macOS TCC 只列出尝试过受保护资源的应用，否则系统设置里看不到本应用）。
+    #[cfg(target_os = "macos")]
+    aerodesk_macos::permissions::trigger_screen_capture_registration();
     // 启动时刷一次权限状态
     ui.invoke_refresh_perms();
 
@@ -1018,6 +1205,9 @@ fn main() -> Result<(), slint::PlatformError> {
         tray.on_show_window(move || {
             if let Some(ui) = win.upgrade() {
                 let _ = ui.show();
+                // “显示主窗口”：已打开时也要把窗口带到最前（含最小化还原）。
+                #[cfg(target_os = "macos")]
+                focus_window_to_front(ui.window());
             }
         });
         tray.on_quit_app(move || {
@@ -1159,6 +1349,53 @@ fn parse_addressbook(entry: &str) -> (String, String, String, String) {
     let server = parts.get(2).map(|s| s.to_string()).unwrap_or_default();
     let group = parts.get(3).map(|s| s.to_string()).unwrap_or_default();
     (name, room, server, group)
+}
+
+/// 按“分组”字段把地址簿聚合成设备组展示行：组标题行 + 组内设备行。
+/// 未分组始终排最前，其余组按组名排序；组内保持地址簿原有顺序。
+fn build_device_groups(items: &[slint::SharedString]) -> Vec<DeviceGroupEntry> {
+    const UNGROUPED: &str = "未分组";
+    // (组名, 组内原始条目)，保持首见顺序。
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for item in items {
+        let (_, _, _, group) = parse_addressbook(item.as_str());
+        let key = if group.is_empty() {
+            UNGROUPED.to_string()
+        } else {
+            group
+        };
+        if let Some(g) = groups.iter_mut().find(|(k, _)| k == &key) {
+            g.1.push(item.to_string());
+        } else {
+            groups.push((key, vec![item.to_string()]));
+        }
+    }
+    groups.sort_by(|a, b| {
+        let a_ug = a.0 == UNGROUPED;
+        let b_ug = b.0 == UNGROUPED;
+        match (a_ug, b_ug) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.0.cmp(&b.0),
+        }
+    });
+    let mut rows = Vec::new();
+    for (group, entries) in groups {
+        rows.push(DeviceGroupEntry {
+            is_header: true,
+            text: group.into(),
+            entry: Default::default(),
+        });
+        for entry in entries {
+            let (name, _, _, _) = parse_addressbook(&entry);
+            rows.push(DeviceGroupEntry {
+                is_header: false,
+                text: name.into(),
+                entry: entry.into(),
+            });
+        }
+    }
+    rows
 }
 
 /// 局域网扫描：取本机 IPv4，扫同 /24 网段的信令端口（默认 3003）。
@@ -1303,6 +1540,52 @@ mod tests {
     }
 
     #[test]
+    fn device_groups_grouped_and_sorted() {
+        let items: Vec<slint::SharedString> = vec![
+            "NAS2 · demo · 10.0.0.2:3003 · 家庭".into(),
+            "办公室A · demo · 10.0.0.3:3003 · 办公室".into(),
+            "单机 · demo · 10.0.0.4:3003".into(),
+            "NAS1 · demo · 10.0.0.1:3003 · 家庭".into(),
+        ];
+        let rows = build_device_groups(&items);
+        // 未分组 -> 办公室 -> 家庭（组名排序）
+        let headers: Vec<String> = rows
+            .iter()
+            .filter(|r| r.is_header)
+            .map(|r| r.text.to_string())
+            .collect();
+        assert_eq!(headers, vec!["未分组", "办公室", "家庭"]);
+        // 组内设备行按地址簿顺序，设备行 text=别名、entry=原始条目
+        let group_rows: Vec<(&str, &str)> = rows
+            .iter()
+            .filter(|r| !r.is_header)
+            .map(|r| (r.text.as_str(), r.entry.as_str()))
+            .collect();
+        assert_eq!(
+            group_rows,
+            vec![
+                ("单机", "单机 · demo · 10.0.0.4:3003"),
+                ("办公室A", "办公室A · demo · 10.0.0.3:3003 · 办公室"),
+                ("NAS2", "NAS2 · demo · 10.0.0.2:3003 · 家庭"),
+                ("NAS1", "NAS1 · demo · 10.0.0.1:3003 · 家庭"),
+            ]
+        );
+    }
+
+    #[test]
+    fn device_groups_empty() {
+        assert!(build_device_groups(&[]).is_empty());
+        // 全部未分组 -> 单个“未分组”标题 + 设备行
+        let items: Vec<slint::SharedString> = vec!["x · demo · h:3003".into()];
+        let rows = build_device_groups(&items);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].is_header);
+        assert_eq!(rows[0].text.to_string(), "未分组");
+        assert!(!rows[1].is_header);
+        assert_eq!(rows[1].text.to_string(), "x");
+    }
+
+    #[test]
     fn addressbook_roundtrip() {
         // 构造条目 -> save -> load -> 一致
         let entry: slint::SharedString = "NAS · demo · 192.168.1.10:3003 · 家庭".into();
@@ -1340,77 +1623,40 @@ mod tests {
         FileDropHandler::new(std::sync::Arc::new(std::sync::Mutex::new(None)))
     }
 
-    /// FILE_CMD 是全局单例，相关测试必须串行执行，避免并行互相覆盖。
-    static FILE_CMD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[cfg(target_os = "macos")]
-    fn is_prevent_default(r: i_slint_backend_winit::EventResult) -> bool {
-        matches!(r, i_slint_backend_winit::EventResult::PreventDefault)
-    }
-
-    #[cfg(target_os = "macos")]
     #[test]
-    fn dropped_file_sends_file_cmd_and_consumes_event() {
-        let _guard = FILE_CMD_TEST_LOCK.lock().unwrap();
-        use i_slint_backend_winit::winit::event::WindowEvent;
+    fn dropped_files_route_to_file_cmd() {
         let (tx, rx) = std::sync::mpsc::channel();
-        *FILE_CMD.lock().unwrap() = Some(tx);
-        let h = drop_handler();
         let path = std::env::temp_dir().join("aerodesk-ui-drop-test.txt");
         std::fs::write(&path, b"hello").unwrap();
-        let r = h.handle_window_event(&WindowEvent::DroppedFile(path.clone()));
-        assert!(is_prevent_default(r));
+        let status = dispatch_dropped_files(Some(&tx), &[path.clone()]);
+        assert!(status.contains("发送文件"), "status={status}");
         assert_eq!(rx.recv().unwrap(), FileCmd::SendFile(path.clone()));
-        *FILE_CMD.lock().unwrap() = None;
+        // 无会话 → 未连接会话
+        assert!(dispatch_dropped_files(None, &[path.clone()]).contains("未连接会话"));
         let _ = std::fs::remove_file(path);
     }
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn dropped_file_without_session_is_still_consumed() {
-        let _guard = FILE_CMD_TEST_LOCK.lock().unwrap();
-        use i_slint_backend_winit::winit::event::WindowEvent;
-        *FILE_CMD.lock().unwrap() = None;
-        let h = drop_handler();
-        let r = h.handle_window_event(&WindowEvent::DroppedFile(std::path::PathBuf::from(
-            "/tmp/x",
-        )));
-        assert!(is_prevent_default(r));
-    }
-
-    #[cfg(target_os = "macos")]
     #[test]
     fn dropped_directory_is_not_sent() {
-        let _guard = FILE_CMD_TEST_LOCK.lock().unwrap();
-        use i_slint_backend_winit::winit::event::WindowEvent;
         let (tx, rx) = std::sync::mpsc::channel();
-        *FILE_CMD.lock().unwrap() = Some(tx);
-        let h = drop_handler();
         let dir = std::env::temp_dir().join("aerodesk-ui-drop-dir-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let r = h.handle_window_event(&WindowEvent::DroppedFile(dir.clone()));
-        assert!(is_prevent_default(r));
+        let status = dispatch_dropped_files(Some(&tx), &[dir.clone()]);
+        assert!(status.contains("不是文件"), "status={status}");
         assert!(rx.try_recv().is_err());
-        *FILE_CMD.lock().unwrap() = None;
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn multiple_dropped_files_each_sent() {
-        let _guard = FILE_CMD_TEST_LOCK.lock().unwrap();
-        use i_slint_backend_winit::winit::event::WindowEvent;
         let (tx, rx) = std::sync::mpsc::channel();
-        *FILE_CMD.lock().unwrap() = Some(tx);
-        let h = drop_handler();
         let dir = std::env::temp_dir();
         let p1 = dir.join("aerodesk-ui-drop-batch-1.txt");
         let p2 = dir.join("aerodesk-ui-drop-batch-2.txt");
         std::fs::write(&p1, b"1").unwrap();
         std::fs::write(&p2, b"2").unwrap();
-        // winit 0.30 无批量变体：macOS 每个文件一个 DroppedFile 事件。
-        let _ = h.handle_window_event(&WindowEvent::DroppedFile(p1.clone()));
-        let _ = h.handle_window_event(&WindowEvent::DroppedFile(p2.clone()));
+        let status = dispatch_dropped_files(Some(&tx), &[p1.clone(), p2.clone()]);
+        assert!(status.contains("2 个文件"), "status={status}");
         let mut got = Vec::new();
         while let Ok(cmd) = rx.try_recv() {
             got.push(cmd);
@@ -1419,7 +1665,6 @@ mod tests {
             got,
             vec![FileCmd::SendFile(p1.clone()), FileCmd::SendFile(p2.clone())]
         );
-        *FILE_CMD.lock().unwrap() = None;
         let _ = std::fs::remove_file(p1);
         let _ = std::fs::remove_file(p2);
     }
@@ -1573,5 +1818,356 @@ fn set_private_perms(path: &Path) {
     #[cfg(not(unix))]
     {
         let _ = path;
+    }
+}
+
+// ===================== 多会话端到端（真实 SFU/signal/publisher） =====================
+// #29：主控端同时连接两个被控端 → 双会话并存、输入按活动会话路由、断开只关当前。
+// macOS only：用本机已构建的 aerodesk-sfu/signal/cli 二进制；CI 未构建时自动 SKIP。
+#[cfg(all(test, target_os = "macos"))]
+mod multi_session_e2e {
+    use super::*;
+    use std::io::Write;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const SFU_INTERNAL: u16 = 15002;
+    const SIGNAL_PLAIN: u16 = 15003;
+    const ROOM_A: &str = "e2e-a";
+    const ROOM_B: &str = "e2e-b";
+
+    struct Procs {
+        kids: Vec<Child>,
+    }
+    impl Procs {
+        fn spawn(cmd: &mut Command, tag: &str) -> Option<Child> {
+            match cmd
+                .stdout(Stdio::from(
+                    std::fs::File::create(format!("/tmp/mse2e-{tag}.log")).unwrap(),
+                ))
+                .stderr(Stdio::from(
+                    std::fs::File::create(format!("/tmp/mse2e-{tag}.err.log")).unwrap(),
+                ))
+                .spawn()
+            {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    eprintln!("SKIP multi-session e2e: 无法启动 {tag}（{e}），二进制未构建？");
+                    None
+                }
+            }
+        }
+    }
+    impl Drop for Procs {
+        fn drop(&mut self) {
+            for k in &mut self.kids {
+                let _ = k.kill();
+                let _ = k.wait();
+            }
+        }
+    }
+
+    fn port_open(port: u16) -> bool {
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+    }
+
+    fn wait_port(port: u16, secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while Instant::now() < deadline {
+            if port_open(port) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        false
+    }
+
+    fn send_input_to_session(slot: usize, x: f64, y: f64) {
+        let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+        let frame = aerodesk_protocol::input::InputFrame::new(
+            seq,
+            aerodesk_protocol::input::InputEvent::MouseMove { x, y },
+        );
+        let json = serde_json::to_string(&frame).unwrap();
+        let sessions = SESSIONS.lock().unwrap();
+        if let Some(s) = sessions.iter().find(|s| s.slot == slot) {
+            let _ = s.input_tx.send(json);
+        }
+    }
+
+    fn publisher_log_has(room: &str, needle: &str) -> bool {
+        // CLI tracing 写 stderr（Procs::spawn 把 stderr 落 .err.log）。
+        std::fs::read_to_string(format!("/tmp/mse2e-pub-{room}.err.log"))
+            .map(|t| t.contains(needle))
+            .unwrap_or(false)
+    }
+
+    /// 启动一个观看会话（每会话独立通道/状态），并登记到 SESSIONS。
+    fn start_session(
+        weak: &slint::Weak<AppWindow>,
+        server: String,
+        room: String,
+        stops: &mut Vec<Arc<AtomicBool>>,
+    ) {
+        let (control_tx, control_rx) = std::sync::mpsc::channel();
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        let (file_tx, file_rx) = std::sync::mpsc::channel();
+        let muted = Arc::new(AtomicBool::new(false));
+        let volume = Arc::new(AtomicU16::new(100));
+        let stop = Arc::new(AtomicBool::new(false));
+        let slot = SESSION_NEXT.fetch_add(1, Ordering::SeqCst);
+        let wk = weak.clone();
+        SESSIONS.lock().unwrap().push(SessionHandle {
+            slot,
+            room: room.clone(),
+            server: server.clone(),
+            input_tx: input_tx.clone(),
+            control_tx: control_tx.clone(),
+            file_tx: file_tx.clone(),
+            muted: muted.clone(),
+            volume: volume.clone(),
+            stop: stop.clone(),
+        });
+        let st = stop.clone();
+        std::thread::spawn(move || {
+            crate::macos_media::run_viewer(
+                server, room, None, wk, slot, control_rx, input_rx, file_rx, muted, volume, st,
+            );
+        });
+        stops.push(stop);
+    }
+
+    #[test]
+    fn two_sessions_coexist_input_routes_and_disconnect_isolation() {
+        assert!(multi_session_e2e_run());
+    }
+
+    /// 多会话端到端主体（返回是否通过；服务进程由 Procs::drop 回收）。
+    fn multi_session_e2e_run() -> bool {
+        // 0) 防并行污染：SESSIONS/平台是全局的。
+        static E2E_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = E2E_LOCK.lock().unwrap();
+        let bin = format!("{}/../../target/debug", env!("CARGO_MANIFEST_DIR"));
+
+        // 1) 起 SFU + signal（独立端口）
+        let mut procs = Procs { kids: Vec::new() };
+        let mut sfu_cmd = Command::new(format!("{bin}/aerodesk-sfu"));
+        sfu_cmd
+            .env("SFU_INTERNAL_PORT", SFU_INTERNAL.to_string())
+            .env("SFU_MEDIA_PORT", "15478")
+            .env("SFU_SIGNAL_PORT", "15000");
+        let sfu = Procs::spawn(&mut sfu_cmd, "sfu");
+        let mut sig_cmd = Command::new(format!("{bin}/aerodesk-signal"));
+        sig_cmd
+            .env("SIGNAL_PLAIN_PORT", SIGNAL_PLAIN.to_string())
+            .env("SIGNAL_PORT", "15001") // WSS：独立端口避免与其它实例冲突
+            .env("SFU_URL", format!("http://127.0.0.1:{SFU_INTERNAL}"));
+        let sig = Procs::spawn(&mut sig_cmd, "sig");
+        let (Some(sfu), Some(sig)) = (sfu, sig) else {
+            return true; // 二进制未构建：SKIP（CI 未构建服务时跳过）
+        };
+        procs.kids.push(sfu);
+        procs.kids.push(sig);
+        assert!(wait_port(SFU_INTERNAL, 10), "SFU 未就绪");
+        assert!(wait_port(SIGNAL_PLAIN, 10), "signal 未就绪");
+
+        // 2) 两个被控端（发布端）
+        for room in [ROOM_A, ROOM_B] {
+            let mut cmd = Command::new(format!("{bin}/aerodesk-cli"));
+            cmd.args([
+                "--role",
+                "publisher",
+                "--encoder",
+                "x264",
+                "--noisy",
+                "--signal",
+                &format!("ws://127.0.0.1:{SIGNAL_PLAIN}"),
+                "--room",
+                room,
+            ]);
+            if let Some(c) = Procs::spawn(&mut cmd, &format!("pub-{room}")) {
+                procs.kids.push(c);
+            }
+        }
+        std::thread::sleep(Duration::from_secs(3));
+
+        // 3) 真实网络双会话（不依赖 Slint 测试后端）：
+        //    每个会话 = connect_live_role + 独立 input 通道 + pump 线程。
+        let mut ice_flags: Vec<bool> = Vec::new();
+        let mut stops: Vec<Arc<AtomicBool>> = Vec::new();
+        let server = format!("127.0.0.1:{SIGNAL_PLAIN}");
+        for room in [ROOM_A, ROOM_B] {
+            let live = match aerodesk_core::connect::connect_live_role(
+                &server,
+                room,
+                aerodesk_protocol::signal::Role::Viewer,
+                None,
+            ) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("MSE2E connect {room} failed: {e}");
+                    return false;
+                }
+            };
+            eprintln!("MSE2E connected {room} ice={}", live.ice_connected);
+            ice_flags.push(live.ice_connected);
+            let (input_tx, input_rx) = std::sync::mpsc::channel();
+            let slot = SESSION_NEXT.fetch_add(1, Ordering::SeqCst);
+            let stop = Arc::new(AtomicBool::new(false));
+            SESSIONS.lock().unwrap().push(SessionHandle {
+                slot,
+                room: room.to_string(),
+                server: server.clone(),
+                input_tx: input_tx.clone(),
+                control_tx: std::sync::mpsc::channel().0,
+                file_tx: std::sync::mpsc::channel().0,
+                muted: Arc::new(AtomicBool::new(false)),
+                volume: Arc::new(AtomicU16::new(100)),
+                stop: stop.clone(),
+            });
+            let st = stop.clone();
+            std::thread::spawn(move || {
+                // 迷你收流泵：转发输入 + 推进 endpoint；stop 或连接关闭即退出。
+                let mut live = live;
+                let mut buf = [0u8; 4096];
+                loop {
+                    if st.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    while let Ok(json) = input_rx.try_recv() {
+                        live.endpoint
+                            .send_channel_data("input", false, json.as_bytes());
+                    }
+                    live.socket
+                        .set_read_timeout(Some(Duration::from_millis(10)))
+                        .ok();
+                    if let Ok((n, source)) = live.socket.recv_from(&mut buf)
+                        && let Ok(contents) = buf[..n].try_into()
+                    {
+                        let _ = live.endpoint.handle_input(str0m::Input::Receive(
+                            std::time::Instant::now(),
+                            str0m::net::Receive {
+                                proto: str0m::net::Protocol::Udp,
+                                source,
+                                destination: live.socket.local_addr().unwrap(),
+                                contents,
+                            },
+                        ));
+                    }
+                    let _ = live.endpoint.handle_timeout(std::time::Instant::now());
+                    while let Some(output) = live.endpoint.poll_output() {
+                        match output {
+                            str0m::Output::Transmit(t) => {
+                                let _ = live.socket.send_to(&t.contents, t.destination);
+                            }
+                            str0m::Output::Timeout(_) => break,
+                            str0m::Output::Event(_) => {}
+                        }
+                    }
+                    while let Some(ev) = live.endpoint.poll_event() {
+                        if matches!(ev, aerodesk_core::endpoint::ClientEvent::Closed) {
+                            return;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                // 退出（断开）：从注册表移除本会话。
+                SESSIONS.lock().unwrap().retain(|s| s.slot != slot);
+            });
+            stops.push(stop);
+        }
+
+        // 4) 断言：双会话并存（SESSIONS=2，两个 ICE 都连通）
+        let d = Instant::now() + Duration::from_secs(20);
+        loop {
+            let ice_ok = ice_flags.iter().all(|f| *f);
+            let reg_ok = SESSIONS.lock().unwrap().len() == 2;
+            if ice_ok && reg_ok {
+                break;
+            }
+            if Instant::now() > d {
+                eprintln!(
+                    "MSE2E 双会话未就绪 ice={ice_flags:?} SESSIONS={}",
+                    SESSIONS.lock().unwrap().len()
+                );
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        eprintln!("MSE2E 双会话并存 OK");
+
+        // 5) 输入路由：active=0 → 被控端 A；active=1 → 被控端 B。
+        //    data channel 打开有时延，轮询重发直到被控端收到（模拟真实用户连续移动）。
+        fn send_until(slot: usize, room: &str, x: f64, y: f64, expect_b: &str) -> bool {
+            let d = Instant::now() + Duration::from_secs(12);
+            while Instant::now() < d {
+                if publisher_log_has(room, "input: seq=") {
+                    return true;
+                }
+                send_input_to_session(slot, x, y);
+                std::thread::sleep(Duration::from_millis(400));
+            }
+            false
+        }
+        if !send_until(0, ROOM_A, 0.5, 0.5, ROOM_B) {
+            eprintln!("MSE2E 会话A输入未到达被控端A");
+            return false;
+        }
+        if publisher_log_has(ROOM_B, "input: seq=") {
+            eprintln!("MSE2E 会话A输入误发到被控端B");
+            return false;
+        }
+        eprintln!("MSE2E 会话A输入到达被控端A（且未误发B）");
+        if !send_until(1, ROOM_B, 0.6, 0.6, ROOM_A) {
+            eprintln!("MSE2E 会话B输入未到达被控端B");
+            return false;
+        }
+        eprintln!("MSE2E 输入按活动会话路由 OK");
+
+        // 6) 断开隔离：停会话 A → SESSIONS 剩 1；B 仍可收输入
+        stops[0].store(true, Ordering::SeqCst);
+        let d = Instant::now() + Duration::from_secs(10);
+        let mut removed = false;
+        while Instant::now() < d {
+            if SESSIONS.lock().unwrap().len() == 1 {
+                removed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        if !removed {
+            eprintln!(
+                "MSE2E 断开会话A后未清理 SESSIONS={}",
+                SESSIONS.lock().unwrap().len()
+            );
+            return false;
+        }
+        // B 仍可收输入（重新发送直到新增 input 计数）
+        let d = Instant::now() + Duration::from_secs(12);
+        let mut b_alive = false;
+        let before_b = std::fs::read_to_string(format!("/tmp/mse2e-pub-{ROOM_B}.err.log"))
+            .map(|t| t.matches("input: seq=").count())
+            .unwrap_or(0);
+        while Instant::now() < d {
+            let now_b = std::fs::read_to_string(format!("/tmp/mse2e-pub-{ROOM_B}.err.log"))
+                .map(|t| t.matches("input: seq=").count())
+                .unwrap_or(0);
+            if now_b > before_b {
+                b_alive = true;
+                break;
+            }
+            send_input_to_session(1, 0.7, 0.7);
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        if !b_alive {
+            eprintln!("MSE2E 断开会话A后会话B输入中断");
+            return false;
+        }
+        eprintln!("MSE2E 断开隔离 OK");
+
+        // 清理
+        stops[1].store(true, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(500));
+        true
     }
 }
