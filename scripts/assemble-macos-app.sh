@@ -16,12 +16,23 @@ cp "$BIN" "$APP/Contents/MacOS/AeroDesk"
 sed "s/__VERSION__/$VERSION/g" app-assets/Info.plist > "$APP/Contents/Info.plist"
 cp app-assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 chmod +x "$APP/Contents/MacOS/AeroDesk"
-# 本地开发/CI 统一 ad-hoc 签名：绑定 Info.plist + 密封资源。
-# 未签名/仅 linker-signed 的 bundle 无法被 macOS TCC 识别为独立应用，
-# 屏幕录制/辅助功能授权列表里看不到 AeroDesk.app。
-codesign --force --sign - "$APP" >/dev/null 2>&1
+# 签名：优先使用稳定身份（Developer ID / 自签证书），保证 TCC 授权跨重建有效。
+# ad-hoc（-）每次重建 cdhash 都变，TCC 授权会失配（设置里已授权、程序内未授权）。
+# 未签名/仅 linker-signed 的 bundle 也无法被 macOS TCC 识别为独立应用。
+BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist" 2>/dev/null || echo io.aerodesk.desktop)"
+IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\([^"]*\)".*/\1/p' | grep 'Developer ID Application' | head -1)"
+if [ -z "$IDENTITY" ]; then
+  IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\([^"]*\)".*/\1/p' | head -1)"
+fi
+if [ -n "$IDENTITY" ]; then
+  codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$APP" >/dev/null 2>&1
+  SIGN_TAG="stable identity: $IDENTITY"
+else
+  codesign --force --sign - "$APP" >/dev/null 2>&1
+  SIGN_TAG="ad-hoc（无稳定身份，TCC 授权可能失配）"
+fi
 if codesign --verify --deep --strict "$APP" >/dev/null 2>&1; then
-  echo "== 完成: $APP (v$VERSION, ad-hoc signed + verified)"
+  echo "== 完成: $APP (v$VERSION, $SIGN_TAG, verified)"
 else
   echo "!! 警告: $APP codesign 验证失败" >&2
   exit 1

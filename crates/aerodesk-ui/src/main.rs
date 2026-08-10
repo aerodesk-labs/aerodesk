@@ -1308,10 +1308,11 @@ fn main() -> Result<(), slint::PlatformError> {
         move || {
             #[cfg(target_os = "macos")]
             {
-                // 先尝试一次采集（后台线程），让系统把本应用登记进「屏幕录制」
-                // 授权列表，否则系统设置里看不到本应用、无法勾选授权。
+                // 显式请求屏幕录制：CGRequestScreenCaptureAccess 会把本应用
+                // 登记进「屏幕录制」授权列表（不在列表时打开设置窗口），
+                // 后台线程避免阻塞 UI；随后再打开系统设置对应面板。
                 std::thread::spawn(|| {
-                    aerodesk_macos::permissions::trigger_screen_capture_registration();
+                    let _ = aerodesk_macos::permissions::request_screen_capture();
                 });
                 aerodesk_macos::permissions::open_system_settings(
                     aerodesk_macos::permissions::SettingsPane::ScreenCapture,
