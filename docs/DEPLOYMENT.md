@@ -45,6 +45,11 @@
 | signal | `POP_REGISTRY_TTL_SECS` | 注册条目 TTL（默认 3600，过期后可被重新登记） |
 | signal | `MAX_ROOM_CLIENTS` | 每房间人数上限（0=不限，#163）；超限 Join 返回 `Error("room full")` |
 | signal | `MAX_TOTAL_CLIENTS` | 单实例全局连接上限（0=不限，#163）；超限返回 `Error("server full")` |
+| signal | `BRIDGE_CMD` | 跨 PoP 桥接编排（#216 M3，可选）：房间桥命令模板（含 `{room}`）。设置后跨 PoP viewer 先经桥在本 PoP 接入，失败/超时回退 v1 Redirect（详见 docs/BRIDGE.md） |
+| signal | `BRIDGE_READY_TIMEOUT_SECS` | 桥就绪等待上限（默认 15） |
+| signal | `BRIDGE_FAIL_COOLDOWN_SECS` | 桥失败冷却（默认 30；期间直接 Redirect 不反复 spawn） |
+| signal | `BRIDGE_MAX_RUNNING` | 并发桥上限（默认 8；防房间名轮换绕过冷却的进程滥用） |
+| signal | `BRIDGE_AUTH_TOKEN` | 注入桥子进程的认证 token（`BRIDGE_CMD` 内 `$BRIDGE_AUTH_TOKEN` 引用，配合 aerodesk-bridge `--auth-token`） |
 
 ## 2. TLS 证书自动化
 
@@ -97,8 +102,12 @@ signal.aerodesk.io {
   `Redirect`，原生客户端（aerodesk-core）自动重连到目标 PoP 的 signal/SFU
   （最多 3 跳防环）；Web 端重定向支持为后续。
   单机多 PoP 测试可用 `SFU_MEDIA_PORT`/`SFU_SIGNAL_PORT`/`SFU_INTERNAL_PORT` 覆盖 SFU 端口，
-  示例见 `scripts/multipop-e2e.sh`。暂不支持实时跨区媒体桥接（房间内成员必须落在同一 PoP）；
-  跨 PoP 桥接/容灾路线见 [ADR-0004](adr/0004-multipop-bridging.md)。
+  示例见 `scripts/multipop-e2e.sh`。
+- **跨 PoP 实时桥接（v3，#216）**：副 PoP 信令设置 `BRIDGE_CMD` 后，跨 PoP viewer
+  不再直接 Redirect，而是由信令自动拉起 `aerodesk-bridge`（view 主 PoP + publish
+  本 PoP，RTP 载荷直通不重编码 + data channel 白名单桥）并在就绪后本 PoP 接入；
+  桥失败/超时回退 v1 Redirect（`BRIDGE_READY_TIMEOUT_SECS`/`BRIDGE_FAIL_COOLDOWN_SECS`
+  可调）。设计/验收见 [ADR-0004](adr/0004-multipop-bridging.md) 与 `docs/BRIDGE.md`。
 - **动态注册表（v2，#154）**：不配 `ROOM_POP_MAP` 时，房间归属由**首个加入者所在 PoP 登记**
   （`POP_REGISTRY_FILE` 共享文件 + `POP_REGISTRY_TTL_SECS` 过期）；其它 PoP 加入同房间时
   查注册表命中 → 返回 `Redirect`。文件后端为 last-writer-wins（低变更场景可接受）；

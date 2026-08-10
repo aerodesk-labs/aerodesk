@@ -54,7 +54,66 @@ aerodesk-bridge --remote-signal ws://127.0.0.1:14603 --local-signal ws://127.0.0
 ## 状态
 - M1 ✅（本地双 SFU 端到端媒体互通）
 - M2 ✅（data channel 桥：input 已验证；clipboard/file/cursor 同机制按白名单转发）
-- M3 ✅（本地：跨 PoP 文件传输 sha256 一致；真实多 PoP 部署验收：延迟 p99、失败回退 ⏳）
+- M3 编排 ✅（`BRIDGE_CMD` 桥优先自动接入 + 失败回退 v1 Redirect，本地双 SFU e2e 全 PASS）
+- M3 延迟 p99 ✅（本地方法学 + 直连基线对比；真实多 PoP 部署按下方 runbook 验收）
+
+## M3：桥接编排（#216，`BRIDGE_CMD`）
+
+PoP-B 信令配置 `BRIDGE_CMD` 后，跨 PoP viewer **无需人工起桥**：
+
+```
+PoP-B signal（BRIDGE_CMD + ROOM_POP_MAP + POP_URLS）
+  viewer Join room(R 钉在 pop-a)
+   ├─ 已有/可起桥？ ── 是 → 等待就绪（stdout "publisher leg:"）→ 本 PoP 接入（不 Redirect）
+   └─ 桥失败/超时/冷却 ── → 回退 v1 Redirect → viewer 自动跟随到 pop-a
+```
+
+配置（PoP-B 信令环境变量）：
+| 变量 | 说明 |
+|---|---|
+| `BRIDGE_CMD` | 房间桥命令模板，建议含 `{room}` 占位符（如 `aerodesk-bridge --remote-signal ws://... --local-signal ws://... --room {room} --auth-token \"$BRIDGE_AUTH_TOKEN\" --codec h264`）；缺 `{room}` 时自动追加 `--room {room}`。未设置 = 纯 v1 Redirect |
+| `BRIDGE_AUTH_TOKEN` | 注入桥子进程环境的认证 token（`BRIDGE_CMD` 内以 `$BRIDGE_AUTH_TOKEN` 引用；配合 `--auth-token`，生产开启 JWT/静态 token 时必填） |
+| `BRIDGE_READY_TIMEOUT_SECS` | 桥就绪等待上限（默认 15） |
+| `BRIDGE_FAIL_COOLDOWN_SECS` | 桥失败冷却（默认 30；期间直接 Redirect 不反复 spawn） |
+| `BRIDGE_MAX_RUNNING` | 并发桥上限（默认 8；防房间名轮换绕过冷却的进程滥用） |
+
+语义/边界：
+- **认证/配额先行**：桥决策在 `auth_result` 与房间/全局配额通过后执行（未授权
+  客户端无法触发进程 spawn）；桥自身 publisher 腿豁免配额（内部基础设施）；
+- 同房间并发 viewer 统一走 `ensure_ready` 单飞（只 spawn 一次桥，失败一致回退
+  Redirect）；桥自身 publisher 腿以 `is_running` 快路径放行（等自身就绪会死锁）；
+- 真实 publisher 在桥模式下一律回退 Redirect（桥只支持主 PoP→本 PoP 媒体方向）；
+- 房间名仅 `[A-Za-z0-9._-]` 且**不以 `-` 开头**才允许进命令模板（防 `sh -c`
+  注入/选项注入），非法 → 直接 Redirect；
+- 桥就绪后保持运行直到进程退出（主 PoP 媒体消失自然退出）；信令进程被 SIGTERM
+  强杀时桥会短暂孤儿化，随后因 WS 腿断开自行退出（不建议依赖 Drop）；
+- 桥中途死亡：已连接的 viewer 不会自动被踢/重定向，重新 Join（或客户端重连）
+  会按冷却逻辑重建桥；生产监控用 SFU 会话 API（#240）巡检桥两端客户端数。
+
+### 延迟 p99 验收（本地方法学，`scripts/bridge-fallback-e2e.sh`）
+
+`#8` 光标墙钟法：publisher 每 30Hz 经 cursor 通道带发送时间戳，viewer 计算
+`LATENCY: N ms`（节流 1s）。脚本先测同 PoP 直连基线 p99，再测桥路径 p99，
+断言 `桥 p99 < 直连 p99 × 4 + 500ms`（SCTP 每跳 ~150ms；桥比直连多 2 跳）。
+本地 debug/loopback 实测（2026-08-10）：直连 p99 ≈ 0.5–1.5s、桥 p99 ≈ 0.9–1.6s
+（负载敏感），桥相对直连增加 ~100–400ms。
+
+### 真实多 PoP 部署验收 runbook（M3 剩余项）
+
+1. **部署**：每 PoP 一组 signal+SFU（+可选 coturn），见 `DEPLOYMENT.md`；
+   PoP-A 用 `ROOM_POP_MAP`/`POP_REGISTRY_FILE` 钉房间；PoP-B 设置
+   `POP_ID=pop-b`、`ROOM_POP_MAP="<前缀>=pop-a"`、`POP_URLS="pop-a=wss://<pop-a>:443/ws"`、
+   `BRIDGE_CMD="aerodesk-bridge --remote-signal wss://<pop-a>:443/ws --local-signal wss://<pop-b>:443/ws --room {room}"`
+   （桥凭证走信令 JWT/静态 token；生产建议 `BRIDGE_READY_TIMEOUT_SECS=30`）。
+2. **验收**：跨 PoP viewer 加入 → 本 PoP 接入且无 Redirect；`signal` 日志出现
+   `bridge ready`；`/session/clients` 双 PoP 各 +2（publisher+bridge-view / bridge-pub+viewer）。
+3. **延迟 p99**：按 `#8` 方法在真实链路采集 ≥30 个 `LATENCY` 样本，p99 ≤ 验收阈值
+   （预算：直连 p99 + 2×10–30ms 中继预算，按业务 SLA 定）；本地对比
+   `scripts/bridge-fallback-e2e.sh`。
+4. **失败回退**：停掉 PoP-A 信令（或令桥必失败）→ viewer 收到 Redirect 并自动
+   跟随到 PoP-A；恢复后冷却期结束自动重新桥接。
+5. **监控**：SFU `/metrics/prometheus`（#238 质量指标）+ 会话 API（#240）巡检
+   桥两端客户端数。
 
 ## 关联
 - #216（立项）、ADR-0004（v3 设计）、#146/#150/#154（v1/v2）、#8（延迟验收）

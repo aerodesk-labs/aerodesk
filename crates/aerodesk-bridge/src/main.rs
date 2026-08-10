@@ -15,8 +15,11 @@
 //! 用法：
 //! ```sh
 //! aerodesk-bridge --remote-signal ws://127.0.0.1:14603 --local-signal ws://127.0.0.1:14703 \
-//!   --room bridge-demo [--codec h264|hevc|vp9|av1|default]
+//!   --room bridge-demo [--auth-token <token>] [--codec h264|hevc|vp9|av1|default]
 //! ```
+//!
+//! `--auth-token` 传给双腿 Join（生产信令开启 JWT/静态 token 时必填；#216 M3 编排
+//! 中经 `BRIDGE_CMD` 的 `$BRIDGE_AUTH_TOKEN` 注入）。
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -180,13 +183,14 @@ fn main() {
     let local_signal =
         arg(&args, "--local-signal").unwrap_or_else(|| "ws://127.0.0.1:14703".into());
     let room = arg(&args, "--room").unwrap_or_else(|| "bridge-demo".into());
+    let auth = arg(&args, "--auth-token");
     let codec = parse_codec(arg(&args, "--codec").as_deref());
     tracing::info!(
         "bridge start: remote(view)={remote_signal} local(pub)={local_signal} room={room} codec={codec:?}"
     );
 
     // viewer leg（主 PoP，收流）
-    let view = connect_live_role_codec(&remote_signal, &room, Role::Viewer, None, codec)
+    let view = connect_live_role_codec(&remote_signal, &room, Role::Viewer, auth.as_deref(), codec)
         .expect("viewer leg connect");
     tracing::info!("viewer leg: {}", view.summary());
     let Some(view_mid) = view.video_mid else {
@@ -196,8 +200,14 @@ fn main() {
     tracing::info!("viewer video mid: {view_mid:?}");
 
     // publisher leg（本 PoP，转发）
-    let mut local = connect_live_role_codec(&local_signal, &room, Role::Publisher, None, codec)
-        .expect("publisher leg connect");
+    let mut local = connect_live_role_codec(
+        &local_signal,
+        &room,
+        Role::Publisher,
+        auth.as_deref(),
+        codec,
+    )
+    .expect("publisher leg connect");
     tracing::info!("publisher leg: {}", local.summary());
     let Some(local_mid) = local.video_mid else {
         eprintln!("fatal: no video mid on publisher leg");
