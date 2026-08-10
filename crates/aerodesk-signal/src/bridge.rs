@@ -93,6 +93,25 @@ impl BridgeManager {
         self.running.lock().unwrap().contains_key(room)
     }
 
+    /// 当前运行中（含等待就绪）的房间列表（生命周期 monitor 用，#246）。
+    pub fn running_rooms(&self) -> Vec<String> {
+        self.reap_dead();
+        self.running.lock().unwrap().keys().cloned().collect()
+    }
+
+    /// 停止指定房间的桥（kill + 回收 + 移除）。不存在/已退出返回 false。
+    /// 不写失败冷却——运维/空闲回收触发，不应阻塞后续正常重建。
+    pub fn stop(&self, room: &str) -> bool {
+        let mut running = self.running.lock().unwrap();
+        if let Some(mut rb) = running.remove(room) {
+            rb.kill();
+            info!("bridge: stopped for room {room}");
+            true
+        } else {
+            false
+        }
+    }
+
     /// 确保房间桥就绪：spawn（如缺）→ 轮询就绪/退出至超时。
     /// `Ready` → viewer 本 PoP 加入；`Redirect` → 调用方回退 v1。
     pub fn ensure_ready(&self, room: &str) -> BridgeOutcome {
@@ -383,6 +402,24 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(count, 1, "同房间并发只应 spawn 一次");
         let _ = std::fs::remove_file(&count_file);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn running_rooms_and_stop() {
+        let m = BridgeManager::new(
+            "sh -c 'echo \"publisher leg: up\"; sleep 30'".to_string(),
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+            8,
+        );
+        assert_eq!(m.ensure_ready("room-a"), BridgeOutcome::Ready);
+        assert!(m.running_rooms().contains(&"room-a".to_string()));
+        assert!(m.stop("room-a"), "运行中的桥 stop 应成功");
+        assert!(!m.stop("room-a"), "重复 stop 返回 false");
+        assert!(!m.running_rooms().contains(&"room-a".to_string()));
+        // stop 后再次 ensure_ready 应能重建（stop 不写失败冷却）。
+        assert_eq!(m.ensure_ready("room-a"), BridgeOutcome::Ready);
     }
 
     #[cfg(unix)]

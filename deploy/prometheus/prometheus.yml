@@ -1,0 +1,28 @@
+# AeroDesk 双 PoP Prometheus 抓取配置示例（#216 M3 部署自动化，#246）
+# 与 deploy/prometheus/sfu-alerts.yml（#240）配合：
+#   prometheus --config.file=deploy/prometheus/prometheus.yml
+# 告警规则文件：把 sfu-alerts.yml 放到 rule_files 指向的路径。
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules/sfu-alerts.yml
+
+scrape_configs:
+  # SFU 公共 HTTPS /metrics/prometheus（自签证书时 insecure_skip_verify）。
+  - job_name: aerodesk-sfu
+    metrics_path: /metrics/prometheus
+    scheme: https
+    static_configs:
+      - targets: ["pop-a.example.com:443"]
+        labels: { pop: pop-a }
+      - targets: ["pop-b.example.com:443"]
+        labels: { pop: pop-b }
+    tls_config:
+      insecure_skip_verify: true
+
+  # 节点（RECORD_DIR 磁盘水位告警依赖 node_exporter 的 filesystem 指标）。
+  - job_name: node
+    static_configs:
+      - targets: ["pop-a.example.com:9100", "pop-b.example.com:9100"]

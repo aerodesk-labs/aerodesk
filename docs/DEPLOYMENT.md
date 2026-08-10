@@ -50,6 +50,7 @@
 | signal | `BRIDGE_FAIL_COOLDOWN_SECS` | 桥失败冷却（默认 30；期间直接 Redirect 不反复 spawn） |
 | signal | `BRIDGE_MAX_RUNNING` | 并发桥上限（默认 8；防房间名轮换绕过冷却的进程滥用） |
 | signal | `BRIDGE_AUTH_TOKEN` | 注入桥子进程的认证 token（`BRIDGE_CMD` 内 `$BRIDGE_AUTH_TOKEN` 引用，配合 aerodesk-bridge `--auth-token`） |
+| signal | `BRIDGE_IDLE_SECS` | 桥空闲回收阈值（默认 300；房间无真实客户端超时停桥，#246） |
 
 ## 2. TLS 证书自动化
 
@@ -79,6 +80,9 @@ Environment=KEY_FILE=/etc/aerodesk/tls/key.pem
 Environment=JWT_SECRET=...
 Restart=on-failure
 ```
+完整可用的 systemd 单元模板见 `deploy/systemd/aerodesk-signal.service` /
+`aerodesk-sfu.service`（含 BRIDGE_CMD/BRIDGE_AUTH_TOKEN 等跨 PoP 桥接示例，
+#246）。Prometheus 双 PoP 抓取示例见 `deploy/prometheus/prometheus.yml`。
 
 Caddy 示例：
 

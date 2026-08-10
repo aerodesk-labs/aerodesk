@@ -1,0 +1,34 @@
+# AeroDesk SFU systemd 单元模板（#216 M3 部署自动化，#246）
+# 安装：sudo cp deploy/systemd/aerodesk-sfu.service /etc/systemd/system/
+#       然后按部署填写 Environment= 并 sudo systemctl enable --now aerodesk-sfu
+# 提示：RECORD_DIR 建议独立数据盘；TURN_SECRET 与 signal 共享或独立。
+[Unit]
+Description=AeroDesk SFU (WebRTC media server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/aerodesk/aerodesk-sfu
+Restart=on-failure
+RestartSec=2
+# 媒体端口（默认 3478；生产 443 时注意特权端口 CAP_NET_BIND_SERVICE）
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Environment=SFU_MEDIA_PORT=3478
+Environment=SFU_SIGNAL_PORT=3000
+Environment=SFU_INTERNAL_PORT=3002
+# 内部接口保护（必设；会话管理/录制 API 均在此，见 #240）
+Environment=INTERNAL_TOKEN=CHANGE_ME_SFU_INTERNAL_TOKEN
+# 录制/审计（可选）
+# Environment=RECORD_DIR=/var/lib/aerodesk/records
+# Environment=RECORD_ON_DEMAND=1
+# TURN（未设 TURN_URLS 时内嵌 TURN，#191）
+# Environment=TURN_SECRET=CHANGE_ME_TURN_SECRET
+# Environment=SFU_TURN_PORT=3479
+# Environment=SFU_TURN_TLS_PORT=5349
+# 证书（可选；缺省用仓库内嵌开发证书，生产必须配）
+# Environment=CERT_FILE=/etc/aerodesk/tls/cer.pem
+# Environment=KEY_FILE=/etc/aerodesk/tls/key.pem
+
+[Install]
+WantedBy=multi-user.target
