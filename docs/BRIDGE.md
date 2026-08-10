@@ -128,7 +128,9 @@ POP_A_SIGNAL=wss://pop-a.example.com:443/ws POP_B_SIGNAL=wss://pop-b.example.com
 远程模式**不执行** `BRIDGE_CMD`——桥由 PoP-B 信令（`BRIDGE_CMD` 配置）实际
 拉起，脚本里的 `BRIDGE_CMD` 仅作非空校验（防漏配）。本地模式（默认）为
 CI 五场景全量回归；`REMOTE_LOOPBACK=1`（#257）在本地起双 PoP 但走 remote
-断言流，CI 双跑——远程验收工具已端到端验证（含 `BRIDGE_KILL_CMD` 恢复）。
+断言流（忽略 `POP_A_SIGNAL`/`POP_B_SIGNAL`/`AUTH`/`BRIDGE_CMD`，`BRIDGE_KILL_CMD`
+默认 `pkill -f '[a]erodesk-bridge'` 作用于本地桥），CI 双跑——远程验收工具已
+端到端验证（含 `BRIDGE_KILL_CMD` 恢复与「非 Redirect 回退」断言）。
 
 ### 真实多 PoP 部署验收 runbook（M3 剩余项）
 

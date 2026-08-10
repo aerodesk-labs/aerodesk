@@ -23,17 +23,20 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}/debug"
 fail() { echo "FAIL: $*"; exit 1; }
 
 REMOTE=0
-if [ -n "${POP_A_SIGNAL:-}" ] || [ -n "${POP_B_SIGNAL:-}" ]; then
+# #257：REMOTE_LOOPBACK=1 → 本地起双 PoP 但走 remote 断言流（端到端验证远程工具），
+# 优先级高于 POP_A_SIGNAL/POP_B_SIGNAL（后者被忽略）。
+if [ "${REMOTE_LOOPBACK:-}" = "1" ]; then
+  REMOTE=1
+  if [ -n "${POP_A_SIGNAL:-}" ] || [ -n "${POP_B_SIGNAL:-}" ]; then
+    echo "WARN: REMOTE_LOOPBACK 优先，忽略 POP_A_SIGNAL/POP_B_SIGNAL" >&2
+  fi
+  echo "== REMOTE_LOOPBACK 模式：本地双 PoP + remote 断言流（#257）"
+elif [ -n "${POP_A_SIGNAL:-}" ] || [ -n "${POP_B_SIGNAL:-}" ]; then
   if [ -n "${POP_A_SIGNAL:-}" ] && [ -n "${POP_B_SIGNAL:-}" ]; then
     REMOTE=1
   else
     echo "WARN: 只设置了 POP_A_SIGNAL/POP_B_SIGNAL 之一，按 local 模式运行；远程模式需两者都设" >&2
   fi
-fi
-# #257：REMOTE_LOOPBACK=1 → 本地起双 PoP 但走 remote 断言流（端到端验证远程工具）。
-if [ "${REMOTE_LOOPBACK:-}" = "1" ]; then
-  REMOTE=1
-  echo "== REMOTE_LOOPBACK 模式：本地双 PoP + remote 断言流（#257）"
 fi
 
 ROOM="bridge-fb-$(date +%s)"
@@ -61,10 +64,11 @@ fi
 cleanup() {
   pkill -f 'aerodesk-bridge' 2>/dev/null || true
   pkill -f 'aerodesk-cli' 2>/dev/null || true
-  [ -n "${SFU_A:-}" ] && kill "$SFU_A" 2>/dev/null || true
-  [ -n "${SFU_B:-}" ] && kill "$SFU_B" 2>/dev/null || true
-  [ -n "${SIG_A_PID:-}" ] && kill "$SIG_A_PID" 2>/dev/null || true
-  [ -n "${SIG_B_PID:-}" ] && kill "$SIG_B_PID" 2>/dev/null || true
+  # #257 review：kill 后 wait，确保端口释放再退出（CI 同 step 双跑防 bind 竞争）。
+  [ -n "${SFU_A:-}" ] && { kill "$SFU_A" 2>/dev/null || true; wait "$SFU_A" 2>/dev/null || true; }
+  [ -n "${SFU_B:-}" ] && { kill "$SFU_B" 2>/dev/null || true; wait "$SFU_B" 2>/dev/null || true; }
+  [ -n "${SIG_A_PID:-}" ] && { kill "$SIG_A_PID" 2>/dev/null || true; wait "$SIG_A_PID" 2>/dev/null || true; }
+  [ -n "${SIG_B_PID:-}" ] && { kill "$SIG_B_PID" 2>/dev/null || true; wait "$SIG_B_PID" 2>/dev/null || true; }
 }
 trap cleanup EXIT
 
@@ -210,26 +214,45 @@ if [ "$REMOTE" = "1" ]; then
   # 远程模式：场景 3/2 需本地信令控制，跳过；场景 4 可选（需 BRIDGE_KILL_CMD）。
   # REMOTE_LOOPBACK 未显式给 BRIDGE_KILL_CMD 时默认本地 pkill（#257）。
   if [ "${REMOTE_LOOPBACK:-}" = "1" ] && [ -z "$BRIDGE_KILL_CMD" ]; then
-    BRIDGE_KILL_CMD="pkill -f aerodesk-bridge"
+    # [a] 技巧：避免 pkill -f 匹配到自身 sh -c 命令行（Linux 上会自杀）。
+    BRIDGE_KILL_CMD="pkill -f '[a]erodesk-bridge'"
   fi
   if [ -n "$BRIDGE_KILL_CMD" ]; then
     echo "== 场景 4（远程）：桥死亡自动恢复（BRIDGE_KILL_CMD）"
     BEFORE=$(grep -c "DECODED:" /tmp/bfb-view-b.log 2>/dev/null || echo 0)
     sh -c "$BRIDGE_KILL_CMD" || fail "场景4：BRIDGE_KILL_CMD 执行失败"
     wait_log /tmp/bfb-view-b.log "reconnecting" 240 || fail "场景4：viewer 未重连（见 /tmp/bfb-view-b.log）"
+    if [ "${REMOTE_LOOPBACK:-}" = "1" ]; then
+      # #257 review：loopback 有本地日志，先等桥重建（spawn≥2）再等解码——避免
+      # 用 kill 前的旧统计行假 PASS，并证明「桥恢复」而非回退 Redirect。
+      ok=0
+      for _ in $(seq 1 240); do
+        N=$(grep -c "bridge: spawned" /tmp/bfb-sig-b.log 2>/dev/null || echo 0)
+        [ "${N:-0}" -ge 2 ] && ok=1 && break
+        sleep 0.5
+      done
+      [ "$ok" = "1" ] || fail "场景4(loopback)：桥未重建（见 /tmp/bfb-sig-b.log）"
+      grep -q "signal redirect" /tmp/bfb-view-b.log && fail "场景4(loopback)：恢复不应走 Redirect 回退"
+      grep -q "bridge died for room $ROOM" /tmp/bfb-sig-b.log || fail "场景4(loopback)：signal 未检测到桥死亡"
+      grep -q "fail cooldown" /tmp/bfb-sig-b.log && fail "场景4(loopback)：恢复过程不应触发失败冷却"
+    fi
     ok=0
     for _ in $(seq 1 240); do
       AFTER=$(grep -c "DECODED:" /tmp/bfb-view-b.log 2>/dev/null || echo 0)
       [ "${AFTER:-0}" -gt "${BEFORE:-0}" ] && ok=1 && break
       sleep 0.5
     done
-    [ "$ok" = "1" ] || fail "场景4：viewer 重连后未恢复解码"
+    [ "$ok" = "1" ] || fail "场景4：viewer 重连后未恢复解码" 
     echo "  场景4 PASS（远程）：桥死亡 → viewer 自动重连并恢复解码"
   else
     echo "  （跳过场景 4：远程模式未设 BRIDGE_KILL_CMD）"
   fi
   kill "$VIEW_B" "$PUB_A" 2>/dev/null || true
-  grep -qiE "panic|abort" /tmp/bfb-view-b.log /tmp/bfb-pub-a.log && fail "发现 panic/abort"
+  if [ "${REMOTE_LOOPBACK:-}" = "1" ]; then
+    grep -qiE "panic|abort" /tmp/bfb-*.log && fail "发现 panic/abort"
+  else
+    grep -qiE "panic|abort" /tmp/bfb-view-b.log /tmp/bfb-pub-a.log && fail "发现 panic/abort"
+  fi
   echo "== #216 M3 远程验收 PASS（直连 p50/p90/p99=${DIRECT_STATS}ms 桥=${BRIDGE_STATS}ms）=="
   exit 0
 fi
