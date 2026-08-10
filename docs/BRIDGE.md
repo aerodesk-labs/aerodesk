@@ -78,6 +78,9 @@ PoP-B signal（BRIDGE_CMD + ROOM_POP_MAP + POP_URLS）
 | `BRIDGE_MAX_RUNNING` | 并发桥上限（默认 8；防房间名轮换绕过冷却的进程滥用） |
 | `BRIDGE_IDLE_SECS` | 桥空闲回收阈值（默认 300）：房间内无真实客户端（桥自身
   publisher 腿不计）超过该时长 → 后台 monitor 停桥并释放进程 |
+| `BRIDGE_MONITOR_INTERVAL_SECS` | 桥 monitor 轮询间隔（默认 15，下限 2）：死亡
+  检测/空闲回收粒度；建议 < 客户端 no-media watchdog（CLI 默认 8s）以便 kick
+  先于 watchdog 生效（e2e 用 2） |
 
 语义/边界：
 - **认证/配额先行**：桥决策在 `auth_result` 与房间/全局配额通过后执行（未授权
@@ -89,9 +92,11 @@ PoP-B signal（BRIDGE_CMD + ROOM_POP_MAP + POP_URLS）
   注入/选项注入），非法 → 直接 Redirect；
 - 桥就绪后保持运行直到进程退出（主 PoP 媒体消失自然退出）；信令进程被 SIGTERM
   强杀时桥会短暂孤儿化，随后因 WS 腿断开自行退出（不建议依赖 Drop）；
-- **桥死亡恢复（#246，e2e 场景 3）**：桥进程被杀/退出后，下一位 viewer Join 会
-  自动重建桥（自然死亡不触发失败冷却），无需人工干预；已连接的 viewer 由客户端
-  `--reconnect` 重连后走同一条重建/回退逻辑；
+- **桥死亡恢复（#246/#249，e2e 场景 3/4）**：桥进程被杀/退出后，下一位 viewer
+  Join 会自动重建桥（自然死亡不触发失败冷却），无需人工干预；**已连接的 viewer
+  由 signal monitor 检测桥死亡（died_rooms 差集）后自动调 SFU room-kick**
+  （`POST /session/kick?room=R`，#249）断开其 WebRTC，客户端 `--reconnect`
+  重连后走同一条重建/回退逻辑——全程无需人工；
 - **空闲回收（#246）**：房间内无真实客户端超过 `BRIDGE_IDLE_SECS` 时，signal
   后台 monitor 停桥（释放进程与主 PoP 连接）；桥自身 publisher 腿通过 Peer
   `bridge_leg` 标记排除，不误判为真实客户端；

@@ -156,11 +156,15 @@ signal.aerodesk.io {
   ```sh
   curl -H "X-Internal-Token: $SFU_TOKEN" 'http://127.0.0.1:3002/session/rooms'
   curl -H "X-Internal-Token: $SFU_TOKEN" 'http://127.0.0.1:3002/session/clients?room=demo'
-  curl -X POST -H "X-Internal-Token: $SFU_TOKEN"     'http://127.0.0.1:3002/session/kick?room=demo&client=<id>'   # 踢人断连，幂等
+  curl -X POST -H "X-Internal-Token: $SFU_TOKEN"     'http://127.0.0.1:3002/session/kick?room=demo&client=<id>'   # 踢单客户端，幂等
+  curl -X POST -H "X-Internal-Token: $SFU_TOKEN"     'http://127.0.0.1:3002/session/kick?room=demo'                # 踢整个房间（#249）
   ```
   `session/rooms` 返回房间 + 客户端数 + 分片分布；`session/clients` 返回
-  id/room/role/shard/joined_at/uptime；kick 对不存在/房间不匹配的客户端返回 404，
-  参数缺失 400，分片通道不可用返回 500。踢人/未授权调用写入 audit.log
+  id/room/role/shard/joined_at/uptime；单客户端 kick 对不存在/房间不匹配返回 404、
+  参数缺失 400、分片通道不可用 500；省略 `client` = 踢掉房间全部客户端
+  （返回 `{room, kicked}`，幂等；kicked 是命令投递数而非确认断开数；room 级
+  对分片投递失败仅审计 detail 不返回 500；也会踢掉该房间的 publisher——跨 PoP
+  桥拓扑下真实 publisher 已被 Redirect 走，安全）。踢人/未授权调用写入 audit.log
   （`session_api` 事件，action=`session/kick`），供追责。
 
 ## 3.5 内部接口安全（#240）

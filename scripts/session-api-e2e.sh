@@ -64,8 +64,11 @@ PID=$(echo "$CLIENTS" | jget "[c['id'] for c in v['clients'] if c['role']=='publ
 echo "PASS clients=$N roles=$ROLES publisher_id=$PID"
 
 echo "== 参数/不存在校验"
-CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/session/kick?room=$ROOM")
-[ "$CODE" = "400" ] && echo "PASS kick missing client 400" || fail "expected 400 got $CODE"
+# #249：省略 client = room 级踢人（#249）→ 对空房间幂等 200 kicked=0。
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/session/kick?room=empty-room-$ROOM")
+[ "$CODE" = "200" ] || fail "room-kick 空房间应 200，got $CODE"
+curl -s -X POST -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/session/kick?room=empty-room-$ROOM"   | grep -q '"kicked":0' || fail "room-kick 空房间应 kicked=0"
+echo "PASS room-kick 空房间 200 kicked=0"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/session/kick?room=$ROOM&client=999999")
 [ "$CODE" = "404" ] && echo "PASS kick unknown client 404" || fail "expected 404 got $CODE"
 

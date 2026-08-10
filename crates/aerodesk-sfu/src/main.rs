@@ -968,15 +968,8 @@ fn session_kick(
         return Response::text("room required").with_status_code(400);
     };
     let Some(client) = client.filter(|c| !c.is_empty()) else {
-        audit_session_api(
-            shared,
-            "session/kick",
-            Some(room),
-            400,
-            false,
-            Some("client required"),
-        );
-        return Response::text("client required").with_status_code(400);
+        // #249：省略 client = 踢掉整个房间（桥死亡恢复/运维排障用）。
+        return session_kick_room(shared, shard_txs, room);
     };
     let Ok(client_id) = client.parse::<u64>() else {
         audit_session_api(
@@ -1058,6 +1051,45 @@ fn session_kick(
             "client": client_id,
         }))
         .unwrap(),
+    )
+}
+
+/// POST /session/kick?room=xxx（内部接口，#249）：踢掉房间全部客户端。
+/// 幂等：房间无客户端返回 200 且 kicked=0。返回 JSON { room, kicked }。
+fn session_kick_room(
+    shared: &Shared,
+    shard_txs: &[mpsc::Sender<ShardCommand>],
+    room: &str,
+) -> Response {
+    let sessions = shared.session_snapshot();
+    let mut kicked = 0u64;
+    let mut failed_sends = 0u64;
+    for info in sessions.iter().filter(|s| s.room == *room) {
+        if let Some(tx) = shard_txs.get(info.shard)
+            && tx.send(ShardCommand::Kick { client_id: info.id }).is_ok()
+        {
+            kicked += 1;
+        } else {
+            failed_sends += 1;
+        }
+    }
+    // Kick 是异步命令：kicked 表示成功投递数，不代表已确认断开。
+    let detail = if failed_sends > 0 {
+        Some(format!("{failed_sends} shard sends failed"))
+    } else {
+        None
+    };
+    audit_session_api(
+        shared,
+        "session/kick",
+        Some(room),
+        200,
+        true,
+        detail.as_deref(),
+    );
+    Response::from_data(
+        "application/json",
+        serde_json::to_vec(&serde_json::json!({ "room": room, "kicked": kicked })).unwrap(),
     )
 }
 
@@ -1472,11 +1504,31 @@ mod tests {
         let (tx, rx) = mpsc::channel::<ShardCommand>();
         let shard_txs = vec![mpsc::channel::<ShardCommand>().0, tx];
 
-        // 参数缺失 → 400
+        // 参数缺失（room 都没有）→ 400
         let resp = session_kick(&shared, &shard_txs, None, None);
         assert_eq!(resp.status_code, 400);
+
+        // 省略 client → room 级踢人（#249）：demo 房间 1 个客户端被踢
         let resp = session_kick(&shared, &shard_txs, Some("demo"), None);
-        assert_eq!(resp.status_code, 400);
+        assert_eq!(resp.status_code, 200);
+        let (mut reader, _) = resp.data.into_reader_and_size();
+        let mut body = String::new();
+        reader.read_to_string(&mut body).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["kicked"], 1);
+        match rx.try_recv() {
+            Ok(ShardCommand::Kick { client_id }) => assert_eq!(client_id, 10),
+            other => panic!("expected Kick command, got {other:?}"),
+        }
+
+        // room 级踢人幂等：无客户端 → 200 kicked=0
+        let resp = session_kick(&shared, &shard_txs, Some("empty"), None);
+        assert_eq!(resp.status_code, 200);
+        let (mut reader, _) = resp.data.into_reader_and_size();
+        let mut body = String::new();
+        reader.read_to_string(&mut body).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["kicked"], 0);
 
         // 未知客户端 → 404
         let resp = session_kick(&shared, &shard_txs, Some("demo"), Some("99"));
@@ -1503,6 +1555,54 @@ mod tests {
             Ok(ShardCommand::Kick { client_id }) => assert_eq!(client_id, 10),
             other => panic!("expected Kick command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn session_kick_room_sends_all_clients() {
+        let shared = Shared::new(2);
+        shared.register_session(shard::SessionInfo {
+            id: 10,
+            room: "demo".into(),
+            role: Role::Publisher,
+            shard: 0,
+            joined_at: 1_000_000,
+        });
+        shared.register_session(shard::SessionInfo {
+            id: 11,
+            room: "demo".into(),
+            role: Role::Viewer,
+            shard: 1,
+            joined_at: 2_000_000,
+        });
+        shared.register_session(shard::SessionInfo {
+            id: 12,
+            room: "other".into(),
+            role: Role::Viewer,
+            shard: 1,
+            joined_at: 3_000_000,
+        });
+        let (tx0, rx0) = mpsc::channel::<ShardCommand>();
+        let (tx1, rx1) = mpsc::channel::<ShardCommand>();
+        let shard_txs = vec![tx0, tx1];
+
+        let resp = session_kick_room(&shared, &shard_txs, "demo");
+        assert_eq!(resp.status_code, 200);
+        let (mut reader, _) = resp.data.into_reader_and_size();
+        let mut body = String::new();
+        reader.read_to_string(&mut body).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["kicked"], 2, "只踢 demo 房间的 2 个客户端");
+        assert_eq!(v["room"], "demo");
+
+        let mut kicked_ids = Vec::new();
+        while let Ok(ShardCommand::Kick { client_id }) = rx0.try_recv() {
+            kicked_ids.push(client_id);
+        }
+        while let Ok(ShardCommand::Kick { client_id }) = rx1.try_recv() {
+            kicked_ids.push(client_id);
+        }
+        kicked_ids.sort_unstable();
+        assert_eq!(kicked_ids, vec![10, 11], "其它房间客户端不被误踢");
     }
 
     #[test]
