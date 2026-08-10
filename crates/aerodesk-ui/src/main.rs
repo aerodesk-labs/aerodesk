@@ -1003,6 +1003,20 @@ fn main() -> Result<(), slint::PlatformError> {
     // 启动时刷一次权限状态
     ui.invoke_refresh_perms();
 
+    /// macOS：把主窗口带到最前（makeKeyAndOrderFront + deminiaturize + 激活 App）。
+    #[cfg(target_os = "macos")]
+    fn focus_window_to_front(window: &slint::Window) {
+        use raw_window_handle::{HasRawWindowHandle, HasWindowHandle};
+        if let Ok(handle) = window.window_handle().window_handle()
+            && let Ok(raw) = handle.raw_window_handle()
+            && let raw_window_handle::RawWindowHandle::AppKit(appkit) = raw
+        {
+            aerodesk_macos::dock::focus_ns_view(
+                appkit.ns_view.as_ptr() as *mut std::ffi::c_void,
+            );
+        }
+    }
+
     // macOS：点击 Dock 图标恢复隐藏窗口（配合托盘隐藏）。
     #[cfg(target_os = "macos")]
     aerodesk_macos::dock::install_reopen_handler();
@@ -1018,6 +1032,8 @@ fn main() -> Result<(), slint::PlatformError> {
         tray.on_show_window(move || {
             if let Some(ui) = win.upgrade() {
                 let _ = ui.show();
+                // “显示主窗口”：已打开时也要把窗口带到最前（含最小化还原）。
+                focus_window_to_front(ui.window());
             }
         });
         tray.on_quit_app(move || {

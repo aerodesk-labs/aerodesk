@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-slint = { version = "1", default-features = false, features = ["std", "backend-winit", "renderer-software", "system-tray", "compat-1-2"] }
+slint = { version = "1", default-features = false, features = ["std", "backend-winit", "renderer-software", "system-tray", "raw-window-handle-06", "compat-1-2"] }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
@@ -18,6 +18,8 @@ aerodesk-protocol = { path = "../aerodesk-protocol" }
 aerodesk-softenc = { path = "../aerodesk-softenc" }
 # 一次性密码/设备 ID 用系统 CSPRNG（wasm32 下由下方 target 依赖启用 js 后端）
 getrandom = "0.2"
+# macOS“显示主窗口”置前：经 raw-window-handle 拿到 NSView 做 makeKeyAndOrderFront/deminiaturize。
+raw-window-handle = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 aerodesk-macos = { path = "../aerodesk-macos" }

@@ -7,7 +7,8 @@
 //! （不替换 delegate，避免破坏 winit）。
 
 use objc::runtime::{Class, Imp, Object, Sel};
-use objc::{sel, sel_impl};
+use objc::{msg_send, sel, sel_impl};
+use std::ffi::c_void;
 
 /// 在 winit 的 `WinitApplicationDelegate` 类上添加 reopen 处理方法。
 pub fn install_reopen_handler() {
@@ -36,5 +37,34 @@ unsafe extern "C" fn should_handle_reopen(
     _: &Object,
     _has_visible_windows: bool,
 ) -> bool {
+    // 点击 Dock 图标：激活 App，让已打开的窗口回到最前（最小化窗口由
+    // AppKit reopen 语义还原）。
+    activate_app();
     true
+}
+
+/// 激活应用并忽略其它 App（配合托盘“显示主窗口”/Dock reopen 把窗口带到最前）。
+pub fn activate_app() {
+    unsafe {
+        let Some(cls) = Class::get("NSRunningApplication") else {
+            return;
+        };
+        let current: *mut Object = msg_send![cls, currentApplication];
+        // NSApplicationActivateIgnoringOtherApps = 1 << 1
+        let _: bool = msg_send![current, activateWithOptions: 2u64];
+    }
+}
+
+/// 把 Slint/winit 的 NSView 所在窗口置前 + 还原最小化（“显示主窗口”菜单用）。
+pub fn focus_ns_view(ns_view: *mut c_void) {
+    unsafe {
+        let view = ns_view as *mut Object;
+        let window: *mut Object = msg_send![view, window];
+        if !window.is_null() {
+            let nil: *mut c_void = std::ptr::null_mut();
+            let _: () = msg_send![window, makeKeyAndOrderFront: nil];
+            let _: () = msg_send![window, deminiaturize: nil];
+        }
+        activate_app();
+    }
 }
