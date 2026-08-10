@@ -139,7 +139,7 @@ for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-direct-pub.log 2>/dev
   >/tmp/bfb-direct-view.log 2>&1 &
 VIEW0=$!
 wait_decoded /tmp/bfb-direct-view.log || fail "场景0：直连 viewer 未解码"
-for _ in $(seq 1 80); do
+for _ in $(seq 1 160); do
   [ "$(latency_count /tmp/bfb-direct-view.log)" -ge 30 ] && break
   sleep 0.5
 done
@@ -171,8 +171,9 @@ else
 fi
 
 echo "== 场景 1：PoP-A publisher + PoP-B viewer（桥优先，不 Redirect）"
+# --audio（PCMU）：验证 #260 音频跨 PoP 桥转发。
 "$TARGET_DIR/aerodesk-cli" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
-  --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
+  --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy --audio \
   >/tmp/bfb-pub-a.log 2>&1 &
 PUB_A=$!
 ok=0
@@ -183,7 +184,8 @@ for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-pub-a.log 2>/dev/null
 # 另起带 --reconnect 的 viewer，此处带上也无害。
 RECONNECT_FLAG=""
 [ "$REMOTE" = "1" ] && RECONNECT_FLAG="--reconnect"
-"$TARGET_DIR/aerodesk-cli" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" $RECONNECT_FLAG \
+# --display 1：验证 #260 显示器切换经 control 通道跨 PoP（到主 PoP publisher）。
+"$TARGET_DIR/aerodesk-cli" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" $RECONNECT_FLAG --display 1 \
   >/tmp/bfb-view-b.log 2>&1 &
 VIEW_B=$!
 wait_decoded /tmp/bfb-view-b.log || fail "场景1：PoP-B viewer 未解码跨 PoP 媒体（见 /tmp/bfb-view-b.log）"
@@ -196,8 +198,24 @@ echo "  场景1 PASS：viewer 本 PoP 接入（无 Redirect）"
 DECODED=$(grep -oE "DECODED: [0-9]+" /tmp/bfb-view-b.log | tail -1 | cut -d' ' -f2)
 echo "  viewer DECODED=${DECODED}"
 
+# #260：音频跨 PoP（viewer AUDIO 帧 >0）+ 显示器切换到达主 PoP publisher。
+ok=0
+for _ in $(seq 1 60); do
+  grep -qE "AUDIO: [1-9]" /tmp/bfb-view-b.log 2>/dev/null && ok=1 && break
+  sleep 0.5
+done
+[ "$ok" = "1" ] || fail "场景1：viewer 未收到跨 PoP 音频（AUDIO=0，见 /tmp/bfb-view-b.log）"
+echo "  PASS 跨 PoP 音频：viewer AUDIO>0"
+ok=0
+for _ in $(seq 1 60); do
+  grep -q "control: display switch request -> display 1" /tmp/bfb-pub-a.log 2>/dev/null && ok=1 && break
+  sleep 0.5
+done
+[ "$ok" = "1" ] || fail "场景1：PoP-A publisher 未收到跨 PoP 显示器切换（见 /tmp/bfb-pub-a.log）"
+echo "  PASS 跨 PoP 显示器切换：publisher 收到 display 1 请求"
+
 echo "== 桥延迟分布（LATENCY ≥30 样本，与直连基线对比）"
-for _ in $(seq 1 80); do
+for _ in $(seq 1 160); do
   [ "$(latency_count /tmp/bfb-view-b.log)" -ge 30 ] && break
   sleep 0.5
 done

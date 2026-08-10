@@ -58,6 +58,7 @@ version = "0.1.0"
 dependencies = [
  "aerodesk-core",
  "aerodesk-protocol",
+ "serde_json",
  "str0m",
  "tracing",
  "tracing-subscriber",

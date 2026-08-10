@@ -42,6 +42,8 @@ pub struct LiveSession {
     pub endpoint: crate::Endpoint,
     pub socket: MediaSocket,
     pub video_mid: Option<str0m::media::Mid>,
+    /// #216 M6：音频 mid（桥跨 PoP 转发用；CLI 不用此字段）。
+    pub audio_mid: Option<str0m::media::Mid>,
     pub room: String,
     pub peer_id: String,
     pub ice_connected: bool,
@@ -148,7 +150,7 @@ pub fn connect_live_role(
     role: Role,
     auth: Option<&str>,
 ) -> Result<LiveSession, String> {
-    connect_live_role_impl(server, room, role, auth, force_relay_env(), None)
+    connect_live_role_impl(server, room, role, auth, force_relay_env(), None, false)
 }
 
 /// force-relay（#201）：ICE 只通告 relayed 候选、跳过 host 候选。
@@ -168,6 +170,7 @@ pub fn connect_live_role_forced(
         auth,
         force_relay || force_relay_env(),
         None,
+        false, // with_audio：force-relay 路径（CLI/移动端）不协商音频，避免 SDP 行为变化
     )
 }
 
@@ -188,7 +191,7 @@ pub fn connect_live_role_codec(
     auth: Option<&str>,
     codec: Option<Codec>,
 ) -> Result<LiveSession, String> {
-    connect_live_role_impl(server, room, role, auth, force_relay_env(), codec)
+    connect_live_role_impl(server, room, role, auth, force_relay_env(), codec, true)
 }
 
 fn connect_live_role_impl(
@@ -198,6 +201,8 @@ fn connect_live_role_impl(
     auth: Option<&str>,
     force_relay: bool,
     codec: Option<Codec>,
+    // #216 M6：是否协商音频 track（仅桥接客户端需要，CLI/移动端保持原 SDP）。
+    with_audio: bool,
 ) -> Result<LiveSession, String> {
     let mut signal = WsSignalClient::connect(server).map_err(|e| format!("signal connect: {e}"))?;
     let (peer_id, turn) = signal
@@ -266,12 +271,21 @@ fn connect_live_role_impl(
         }
     }
     // #12：viewer 的 offer 用 recvonly（SFU 拒绝 viewer 发布媒体）。
+    // #216 M6：桥跨 PoP 音频转发需要双腿都协商音频 track（viewer recvonly /
+    // publisher send）；仅 bridge（connect_live_role_codec）开启，CLI/移动端
+    // 保持原 SDP 行为（with_audio=false）。
     if role == Role::Viewer {
         endpoint.add_video_recvonly();
+        if with_audio {
+            endpoint.add_audio_recvonly();
+        }
     } else {
         endpoint.add_video();
+        if with_audio {
+            endpoint.add_audio();
+        }
     }
-    let (offer, pending, video_mid, _audio_mid) = endpoint
+    let (offer, pending, video_mid, audio_mid) = endpoint
         .create_offer()
         .map_err(|e| format!("offer: {e:?}"))?;
     let offer_json = serde_json::to_string(&offer).map_err(|e| e.to_string())?;
@@ -336,6 +350,7 @@ fn connect_live_role_impl(
         endpoint,
         socket,
         video_mid,
+        audio_mid,
         room: room.to_string(),
         peer_id,
         ice_connected,
