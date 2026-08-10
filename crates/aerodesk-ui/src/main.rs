@@ -80,8 +80,7 @@ pub static INPUT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 pub static SESSION_NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// macOS Dock 图标点击：主窗口弱引用（AppWindow::new 后设置，reopen 回调重显用）。
-static MAIN_WINDOW: std::sync::Mutex<Option<slint::Weak<AppWindow>>> =
-    std::sync::Mutex::new(None);
+static MAIN_WINDOW: std::sync::Mutex<Option<slint::Weak<AppWindow>>> = std::sync::Mutex::new(None);
 
 /// macOS：把主窗口带到最前（makeKeyAndOrderFront + deminiaturize + 激活 App）。
 #[cfg(target_os = "macos")]
@@ -133,8 +132,7 @@ pub fn present_frame(
 /// 按 SESSIONS 重建 UI 标签/帧槽（会话加入或移除后调用）。
 pub fn session_refresh_ui(ui: &AppWindow) {
     let sessions = SESSIONS.lock().unwrap();
-    let tabs: Vec<slint::SharedString> =
-        sessions.iter().map(|s| s.room.clone().into()).collect();
+    let tabs: Vec<slint::SharedString> = sessions.iter().map(|s| s.room.clone().into()).collect();
     let old: Vec<slint::Image> = (0..ui.get_session_frames().row_count())
         .filter_map(|i| ui.get_session_frames().row_data(i))
         .collect();
@@ -227,13 +225,7 @@ impl FileDropHandler {
 
     /// 把拖放路径派发到会话 file 通道（活动会话）；返回给用户的状态文案。
     fn dispatch_drop(&self, paths: &[std::path::PathBuf]) -> String {
-        let Some(ui) = self
-            .ui
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|w| w.upgrade())
-        else {
+        let Some(ui) = self.ui.lock().unwrap().as_ref().and_then(|w| w.upgrade()) else {
             return "发送文件：未连接会话".to_string();
         };
         let idx = ui.get_active_session() as usize;
@@ -706,7 +698,9 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             let new: Vec<slint::SharedString> = items.iter().map(|s| s.into()).collect();
             ui.set_addressbook(slint::ModelRc::new(slint::VecModel::from(new.clone())));
-            ui.set_device_groups(slint::ModelRc::new(slint::VecModel::from(build_device_groups(&new))));
+            ui.set_device_groups(slint::ModelRc::new(slint::VecModel::from(
+                build_device_groups(&new),
+            )));
             save_addressbook(&new);
         }
     });
@@ -724,7 +718,9 @@ fn main() -> Result<(), slint::PlatformError> {
             items.retain(|i| i != entry.as_str());
             let new: Vec<slint::SharedString> = items.iter().map(|s| s.into()).collect();
             ui.set_addressbook(slint::ModelRc::new(slint::VecModel::from(new.clone())));
-            ui.set_device_groups(slint::ModelRc::new(slint::VecModel::from(build_device_groups(&new))));
+            ui.set_device_groups(slint::ModelRc::new(slint::VecModel::from(
+                build_device_groups(&new),
+            )));
             save_addressbook(&new);
             ui.set_status("已从地址簿删除".into());
         }
@@ -794,7 +790,9 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             let new: Vec<slint::SharedString> = items.iter().map(|s| s.into()).collect();
             ui.set_addressbook(slint::ModelRc::new(slint::VecModel::from(new.clone())));
-            ui.set_device_groups(slint::ModelRc::new(slint::VecModel::from(build_device_groups(&new))));
+            ui.set_device_groups(slint::ModelRc::new(slint::VecModel::from(
+                build_device_groups(&new),
+            )));
             save_addressbook(&new);
         }
     });
@@ -1351,7 +1349,11 @@ fn build_device_groups(items: &[slint::SharedString]) -> Vec<DeviceGroupEntry> {
     let mut groups: Vec<(String, Vec<String>)> = Vec::new();
     for item in items {
         let (_, _, _, group) = parse_addressbook(item.as_str());
-        let key = if group.is_empty() { UNGROUPED.to_string() } else { group };
+        let key = if group.is_empty() {
+            UNGROUPED.to_string()
+        } else {
+            group
+        };
         if let Some(g) = groups.iter_mut().find(|(k, _)| k == &key) {
             g.1.push(item.to_string());
         } else {
@@ -1830,8 +1832,12 @@ mod multi_session_e2e {
     impl Procs {
         fn spawn(cmd: &mut Command, tag: &str) -> Option<Child> {
             match cmd
-                .stdout(Stdio::from(std::fs::File::create(format!("/tmp/mse2e-{tag}.log")).unwrap()))
-                .stderr(Stdio::from(std::fs::File::create(format!("/tmp/mse2e-{tag}.err.log")).unwrap()))
+                .stdout(Stdio::from(
+                    std::fs::File::create(format!("/tmp/mse2e-{tag}.log")).unwrap(),
+                ))
+                .stderr(Stdio::from(
+                    std::fs::File::create(format!("/tmp/mse2e-{tag}.err.log")).unwrap(),
+                ))
                 .spawn()
             {
                 Ok(c) => Some(c),
@@ -1915,17 +1921,7 @@ mod multi_session_e2e {
         let st = stop.clone();
         std::thread::spawn(move || {
             crate::macos_media::run_viewer(
-                server,
-                room,
-                None,
-                wk,
-                slot,
-                control_rx,
-                input_rx,
-                file_rx,
-                muted,
-                volume,
-                st,
+                server, room, None, wk, slot, control_rx, input_rx, file_rx, muted, volume, st,
             );
         });
         stops.push(stop);
@@ -1969,9 +1965,15 @@ mod multi_session_e2e {
         for room in [ROOM_A, ROOM_B] {
             let mut cmd = Command::new(format!("{bin}/aerodesk-cli"));
             cmd.args([
-                "--role", "publisher", "--encoder", "x264", "--noisy",
-                "--signal", &format!("ws://127.0.0.1:{SIGNAL_PLAIN}"),
-                "--room", room,
+                "--role",
+                "publisher",
+                "--encoder",
+                "x264",
+                "--noisy",
+                "--signal",
+                &format!("ws://127.0.0.1:{SIGNAL_PLAIN}"),
+                "--room",
+                room,
             ]);
             if let Some(c) = Procs::spawn(&mut cmd, &format!("pub-{room}")) {
                 procs.kids.push(c);
@@ -2074,8 +2076,10 @@ mod multi_session_e2e {
                 break;
             }
             if Instant::now() > d {
-                eprintln!("MSE2E 双会话未就绪 ice={ice_flags:?} SESSIONS={}",
-                    SESSIONS.lock().unwrap().len());
+                eprintln!(
+                    "MSE2E 双会话未就绪 ice={ice_flags:?} SESSIONS={}",
+                    SESSIONS.lock().unwrap().len()
+                );
                 return false;
             }
             std::thread::sleep(Duration::from_millis(300));
@@ -2122,7 +2126,10 @@ mod multi_session_e2e {
             std::thread::sleep(Duration::from_millis(300));
         }
         if !removed {
-            eprintln!("MSE2E 断开会话A后未清理 SESSIONS={}", SESSIONS.lock().unwrap().len());
+            eprintln!(
+                "MSE2E 断开会话A后未清理 SESSIONS={}",
+                SESSIONS.lock().unwrap().len()
+            );
             return false;
         }
         // B 仍可收输入（重新发送直到新增 input 计数）
