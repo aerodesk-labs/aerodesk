@@ -1144,6 +1144,10 @@ fn viewer(
     let mut last_cmd_send = Instant::now() - Duration::from_secs(1);
     // #74 解码端验证：FFmpeg 软解全部 codec（H264/H265/VP9/AV1），codec-e2e 断言。
     let mut video_decoder: Option<aerodesk_ffmpeg::decode::FfmpegDecoder> = None;
+    // #136 关键帧请求：首包/不连续/切层时向 SFU 发 PLI（节流 1s）。
+    let mut last_kf_request: Option<Instant> = None;
+    let mut last_kf_rid: Option<str0m::media::Rid> = None;
+    let mut seen_video = false;
     let mut decoded_frames: u64 = 0;
     // #73 Opus 音频：libopus 解码（惰性创建；不可用时降级为仅统计）。
     let mut opus_decoder: Option<aerodesk_ffmpeg::audio::OpusDecoder> = None;
@@ -1259,6 +1263,22 @@ fn viewer(
                             }
                         }
                     } else {
+                        // #136 首包 / 不连续 / 切层 → 请求关键帧（PLI，节流 1s）。
+                        let now = Instant::now();
+                        let rid_changed = last_kf_rid != data.rid;
+                        let due = last_kf_request
+                            .map(|t| now.duration_since(t) >= Duration::from_secs(1))
+                            .unwrap_or(true);
+                        if due && (rid_changed || !data.contiguous || !seen_video) {
+                            let _ = endpoint.request_keyframe(
+                                data.mid,
+                                data.rid,
+                                str0m::media::KeyframeRequestKind::Fir,
+                            );
+                            last_kf_request = Some(now);
+                            last_kf_rid = data.rid;
+                        }
+                        seen_video = true;
                         frames += 1;
                         bytes += data.data.len() as u64;
                         avsync.on_video(data.time.numer(), data.time.denom());
@@ -1837,6 +1857,18 @@ fn publisher_vt(
                     info!("connection closed");
                     return;
                 }
+                // #136 关键帧请求：SFU/新 viewer 请求 IDR。VT 硬编必须显式
+                // force keyframe，否则要等自然 IDR（最长 2s，甚至花屏）。
+                ClientEvent::KeyframeRequest(req) => {
+                    for (rid, enc, _) in layers.iter_mut() {
+                        if req.rid.is_none() || *rid == req.rid {
+                            match enc.force_keyframe() {
+                                Ok(()) => info!("vt keyframe requested (rid={:?})", req.rid),
+                                Err(e) => warn!("vt force keyframe failed: {e}"),
+                            }
+                        }
+                    }
+                }
                 ev => handle_publisher_input(&mut endpoint, ev),
             }
         }
@@ -2257,6 +2289,19 @@ fn publisher_capture(
                 ClientEvent::Closed => {
                     info!("connection closed");
                     return;
+                }
+                // #136 关键帧请求：屏幕采集（VT 硬编）同样必须显式 force keyframe。
+                ClientEvent::KeyframeRequest(req) => {
+                    for (rid, enc, _) in layers.iter_mut() {
+                        if req.rid.is_none() || *rid == req.rid {
+                            match enc.force_keyframe() {
+                                Ok(()) => {
+                                    info!("vt capture keyframe requested (rid={:?})", req.rid)
+                                }
+                                Err(e) => warn!("vt capture force keyframe failed: {e}"),
+                            }
+                        }
+                    }
                 }
                 // #58 显示器切换：viewer 经 control 通道请求，SFU 转发到 publisher。
                 ClientEvent::ChannelData(cid, binary, data) => {

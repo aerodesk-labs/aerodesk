@@ -624,6 +624,39 @@ impl CompressionSession {
         self.finish_encode(status)
     }
 
+    /// Encode a frame and force it to be a keyframe (IDR).
+    /// Passes `kVTEncodeFrameOptionKey_ForceKeyFrame` as a frame option.
+    pub fn encode_force_keyframe(
+        &self,
+        surface: &IOSurface,
+        presentation_time: (i64, i32),
+    ) -> Result<EncodedFrame, VTError> {
+        let pixel_buffer = self.wrap_iosurface(surface)?;
+        let pts = ffi::CMTime::new(presentation_time.0, presentation_time.1);
+        // 帧属性字典：{ kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue }
+        let key: ffi::CFStringRef = unsafe { ffi::kVTEncodeFrameOptionKey_ForceKeyFrame };
+        let value: *mut std::ffi::c_void = unsafe { ffi::kCFBooleanTrue as *mut std::ffi::c_void };
+        let keys = [key as *mut std::ffi::c_void];
+        let values = [value];
+        let frame_props = unsafe { ffi::cf_dictionary_create(keys.as_ptr(), values.as_ptr(), 1) };
+        let status = unsafe {
+            ffi::VTCompressionSessionEncodeFrame(
+                self.session,
+                pixel_buffer,
+                pts,
+                ffi::CMTime::INVALID,
+                frame_props as ffi::CFDictionaryRef,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if !frame_props.is_null() {
+            unsafe { ffi::CFRelease(frame_props as ffi::CFTypeRef) };
+        }
+        unsafe { ffi::CFRelease(pixel_buffer.cast()) };
+        self.finish_encode(status)
+    }
+
     /// Submit `image_buffer` for encoding and await the encoded `CMSampleBuffer`.
     ///
     /// This method requires the crate's `async` feature.

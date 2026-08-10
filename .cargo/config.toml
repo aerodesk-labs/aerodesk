@@ -1,3 +1,9 @@
 # screencapturekit 需要 macOS Swift 运行时
 [target.'cfg(target_os = "macos")']
 rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
+
+# 统一 macOS 部署目标：Xcode 26+ 下 cc 构建的 C 目标默认按新 SDK(26.x) 编译，
+# 与 rustc 默认 min-11.0 链接会报 "built for newer macOS version" 错误；
+# 显式固定 11.0 让 C 目标与链接器一致（修复 CI openh264_sys2 链接失败）。
+[env]
+MACOSX_DEPLOYMENT_TARGET = "11.0"

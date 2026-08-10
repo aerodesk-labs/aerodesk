@@ -194,6 +194,10 @@ pub fn run_viewer(
     let mut audio_buffered: usize = 0;
     let mut last_audio = Instant::now();
     let mut pending_frame: Option<(Vec<u8>, u32, u32, f64)> = None;
+    // #136 关键帧请求：首包/不连续/切层时向 SFU 发 PLI（节流 1s）。
+    let mut last_kf_request: Option<Instant> = None;
+    let mut last_kf_rid: Option<str0m::media::Rid> = None;
+    let mut seen_video = false;
 
     while !stale() {
         // #72 文件传输总开关：关闭时跳过 file 通道事件与收发推进（不落盘）。
@@ -224,8 +228,14 @@ pub fn run_viewer(
         }
         let _ = live.endpoint.handle_timeout(Instant::now());
         while let Some(output) = live.endpoint.poll_output() {
-            if let str0m::Output::Transmit(t) = output {
-                let _ = live.socket.send_to(&t.contents, t.destination);
+            match output {
+                str0m::Output::Transmit(t) => {
+                    let _ = live.socket.send_to(&t.contents, t.destination);
+                }
+                // 必须 break：str0m 无输出时反复返回同一个 Timeout，
+                // 不 break 会 100% CPU 死循环（与 generic_media/CLI/iOS 一致）。
+                str0m::Output::Timeout(_) => break,
+                str0m::Output::Event(_) => {}
             }
         }
         // #75：UI 指针输入 → input 通道 → SFU → 被控端注入。
@@ -336,10 +346,11 @@ pub fn run_viewer(
                             }
                             audio_buffered = jitter.buffered();
                         }
-                    } else if let Some(mid) = live.video_mid
-                        && data.mid == mid
-                    {
+                    } else {
                         // #74 按协商 codec 选解码器（硬解优先，FFmpeg 回退）。
+                        // 注意：不能按 live.video_mid 过滤——SFU 重协商新增的
+                        // 媒体 m-line 用 SFU 本地 mid，与初始 offer 的 mid 不同
+                        // （CLI/iOS/Android 同结论）。非音频即按 codec 识别视频。
                         let codec = match data.params.spec().codec {
                             str0m::format::Codec::H264 => Some(Codec::H264),
                             str0m::format::Codec::H265 => Some(Codec::Hevc),
@@ -348,6 +359,23 @@ pub fn run_viewer(
                             _ => None,
                         };
                         if let Some(cc) = codec {
+                            // #136 首包 / 不连续 / 切层 → 请求关键帧（PLI，节流 1s）。
+                            // SFU 收到后按当前 chosen_rid 转发给发布端强制 IDR。
+                            let now = Instant::now();
+                            let rid_changed = last_kf_rid != data.rid;
+                            let due = last_kf_request
+                                .map(|t| now.duration_since(t) >= Duration::from_secs(1))
+                                .unwrap_or(true);
+                            if due && (rid_changed || !data.contiguous || !seen_video) {
+                                let _ = live.endpoint.request_keyframe(
+                                    data.mid,
+                                    data.rid,
+                                    str0m::media::KeyframeRequestKind::Fir,
+                                );
+                                last_kf_request = Some(now);
+                                last_kf_rid = data.rid;
+                            }
+                            seen_video = true;
                             if decoder.as_ref().map(|d| !d.matches(cc)).unwrap_or(true) {
                                 decoder = UiDecoder::for_codec(cc);
                             }

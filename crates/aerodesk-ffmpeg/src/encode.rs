@@ -177,11 +177,12 @@ impl FfmpegEncoder {
         // 排空所有已产出包（编码器延迟帧会在此补出），按序返回。
         let mut packet = Packet::empty();
         while let Ok(()) = self.encoder.receive_packet(&mut packet) {
+            let pts_ms = (self.pts * 1000 / self.fps.max(1) as i64) as u64;
             self.pending.push_back(EncodedUnit {
                 data: packet.data().unwrap_or(&[]).to_vec(),
                 keyframe: packet.is_key(),
-                pts_ms: 0,
-                rtp_timestamp: 0,
+                pts_ms,
+                rtp_timestamp: (self.pts * 90_000 / self.fps.max(1) as i64) as u32,
             });
         }
         Ok(self.pending.pop_front())
@@ -212,11 +213,12 @@ impl FfmpegEncoder {
         self.pts += 1;
         let mut packet = Packet::empty();
         while let Ok(()) = self.encoder.receive_packet(&mut packet) {
+            let pts_ms = (self.pts * 1000 / self.fps.max(1) as i64) as u64;
             self.pending.push_back(EncodedUnit {
                 data: packet.data().unwrap_or(&[]).to_vec(),
                 keyframe: packet.is_key(),
-                pts_ms: 0,
-                rtp_timestamp: 0,
+                pts_ms,
+                rtp_timestamp: (self.pts * 90_000 / self.fps.max(1) as i64) as u32,
             });
         }
         Ok(self.pending.pop_front())

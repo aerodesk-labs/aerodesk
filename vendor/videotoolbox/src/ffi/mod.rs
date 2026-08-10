@@ -100,6 +100,12 @@ extern "C" {
     pub static kCFTypeDictionaryValueCallBacks: c_void;
 
     pub fn CFRelease(cf: CFTypeRef);
+    /// CFDictionaryCreate 包装（frame properties 用）。
+    pub fn cf_dictionary_create(
+        keys: *const *mut c_void,
+        values: *const *mut c_void,
+        count: usize,
+    ) -> *mut c_void;
     pub fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
 
     pub fn CFArrayGetCount(array: CFArrayRef) -> isize;
