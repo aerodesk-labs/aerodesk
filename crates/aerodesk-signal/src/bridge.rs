@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 
 /// 桥就绪标记（aerodesk-bridge 双腿连接成功时打印）。
 const READY_MARKER: &str = "publisher leg:";
+/// spawn 代数计数器（进程级单调递增，#246：按代数区分桥重建）。
+static EPOCH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// 桥接编排结果（Join 处理分支用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +39,9 @@ struct RunningBridge {
     child: Child,
     ready: Arc<AtomicBool>,
     exited: Arc<AtomicBool>,
+    /// spawn 代数（#246 review）：自然死亡→重建后空闲计时必须重置，防止旧时间戳
+    /// 误杀新桥；monitor 按 (room, epoch) 区分。
+    epoch: u64,
 }
 
 impl RunningBridge {
@@ -91,6 +96,30 @@ impl BridgeManager {
     pub fn is_running(&self, room: &str) -> bool {
         self.reap_dead();
         self.running.lock().unwrap().contains_key(room)
+    }
+
+    /// 当前运行中（含等待就绪）的房间列表 + spawn 代数（生命周期 monitor 用，#246）。
+    pub fn running_rooms(&self) -> Vec<(String, u64)> {
+        self.reap_dead();
+        self.running
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(r, rb)| (r.clone(), rb.epoch))
+            .collect()
+    }
+
+    /// 停止指定房间的桥（kill + 回收 + 移除）。不存在/已退出返回 false。
+    /// 不写失败冷却——运维/空闲回收触发，不应阻塞后续正常重建。
+    pub fn stop(&self, room: &str) -> bool {
+        let mut running = self.running.lock().unwrap();
+        if let Some(mut rb) = running.remove(room) {
+            rb.kill();
+            info!("bridge: stopped for room {room}");
+            true
+        } else {
+            false
+        }
     }
 
     /// 确保房间桥就绪：spawn（如缺）→ 轮询就绪/退出至超时。
@@ -174,9 +203,12 @@ impl BridgeManager {
                     }
                     Some(_) => {}
                     None => {
-                        // 并发清理移除了条目（理论不应发生）→ 按失败处理。
+                        // 条目被并发移除（如 monitor 空闲回收/#246）→ 回退 Redirect，
+                        // 不写失败冷却（stop/回收不应阻塞后续重建）。
                         drop(running);
-                        self.mark_failed(room);
+                        warn!(
+                            "bridge: room {room} bridge removed during readiness wait; fallback redirect"
+                        );
                         return BridgeOutcome::Redirect;
                     }
                 }
@@ -237,6 +269,7 @@ impl BridgeManager {
             child,
             ready,
             exited,
+            epoch: EPOCH_COUNTER.fetch_add(1, Ordering::Relaxed),
         })
     }
 
@@ -264,6 +297,48 @@ pub fn sanitize_room(room: &str) -> bool {
         && room
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// 空闲回收纯函数（#246 review）：给定当前运行房间（含代数）、真实客户端数、
+/// 空闲计时器与上次代数，返回应停桥的房间列表。
+///
+/// 副作用（纯逻辑可测）：
+/// - 修剪不在运行中的 `idle_since`/`last_epoch` 条目；
+/// - 房间代数变化（自然死亡后重建）→ 重置空闲计时，防止旧时间戳误杀新桥；
+/// - 有真实客户端 → 清除空闲计时；
+/// - 空闲超时 → 加入待停列表并清除计时。
+pub fn idle_rooms_to_stop(
+    running: &[(String, u64)],
+    real_peers: &HashMap<String, usize>,
+    idle_since: &mut HashMap<String, Instant>,
+    last_epoch: &mut HashMap<String, u64>,
+    idle: Duration,
+    now: Instant,
+) -> Vec<String> {
+    let running_set: std::collections::HashSet<&str> =
+        running.iter().map(|(r, _)| r.as_str()).collect();
+    idle_since.retain(|r, _| running_set.contains(r.as_str()));
+    last_epoch.retain(|r, _| running_set.contains(r.as_str()));
+    let mut to_stop = Vec::new();
+    for (room, epoch) in running {
+        if last_epoch.get(room) != Some(epoch) {
+            // 新代桥（重启/重建）：本轮重置计时，不立即判定空闲。
+            idle_since.remove(room);
+            last_epoch.insert(room.clone(), *epoch);
+            continue;
+        }
+        let real = real_peers.get(room).copied().unwrap_or(0);
+        if real > 0 {
+            idle_since.remove(room);
+            continue;
+        }
+        let since = idle_since.entry(room.clone()).or_insert(now);
+        if now.duration_since(*since) >= idle {
+            to_stop.push(room.clone());
+            idle_since.remove(room);
+        }
+    }
+    to_stop
 }
 
 /// 渲染实际命令：替换 `{room}`；无占位符时追加 ` --room {room}`。
@@ -383,6 +458,117 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(count, 1, "同房间并发只应 spawn 一次");
         let _ = std::fs::remove_file(&count_file);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn running_rooms_and_stop() {
+        let m = BridgeManager::new(
+            "sh -c 'echo \"publisher leg: up\"; sleep 30'".to_string(),
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+            8,
+        );
+        assert_eq!(m.ensure_ready("room-a"), BridgeOutcome::Ready);
+        assert!(m.running_rooms().iter().any(|(r, _)| r == "room-a"));
+        assert!(m.stop("room-a"), "运行中的桥 stop 应成功");
+        assert!(!m.stop("room-a"), "重复 stop 返回 false");
+        assert!(!m.running_rooms().iter().any(|(r, _)| r == "room-a"));
+        // stop 后再次 ensure_ready 应能重建（stop 不写失败冷却）。
+        assert_eq!(m.ensure_ready("room-a"), BridgeOutcome::Ready);
+    }
+
+    #[test]
+    fn idle_rooms_pure_policy() {
+        use std::collections::HashMap;
+        let idle = Duration::from_secs(300);
+        let t0 = Instant::now();
+        let mut idle_since = HashMap::new();
+        let mut last_epoch = HashMap::new();
+
+        // 首次出现（新代数）：只登记代数不立即停（fresh-spawn 保护），计时从下一 tick 起。
+        let running = vec![("r".to_string(), 1u64)];
+        assert!(
+            idle_rooms_to_stop(
+                &running,
+                &HashMap::new(),
+                &mut idle_since,
+                &mut last_epoch,
+                idle,
+                t0
+            )
+            .is_empty()
+        );
+        assert_eq!(last_epoch.get("r"), Some(&1));
+
+        // 第二个 tick：开始空闲计时；未超时不停。
+        assert!(
+            idle_rooms_to_stop(
+                &running,
+                &HashMap::new(),
+                &mut idle_since,
+                &mut last_epoch,
+                idle,
+                t0 + Duration::from_secs(100)
+            )
+            .is_empty()
+        );
+
+        // 计时起点后 301s：停，且清计时。
+        let to_stop = idle_rooms_to_stop(
+            &running,
+            &HashMap::new(),
+            &mut idle_since,
+            &mut last_epoch,
+            idle,
+            t0 + Duration::from_secs(100 + 301),
+        );
+        assert_eq!(to_stop, vec!["r".to_string()]);
+        assert!(idle_since.is_empty());
+
+        // 有真实客户端：不清算空闲。
+        let mut real = HashMap::new();
+        real.insert("r".to_string(), 1usize);
+        assert!(
+            idle_rooms_to_stop(&running, &real, &mut idle_since, &mut last_epoch, idle, t0)
+                .is_empty()
+        );
+        assert!(idle_since.is_empty());
+
+        // 不在运行中的房间：计时器被修剪（自然死亡后重建不会带旧时间戳）。
+        idle_since.insert("gone".to_string(), t0 - Duration::from_secs(1000));
+        last_epoch.insert("gone".to_string(), 1);
+        assert!(
+            idle_rooms_to_stop(
+                &[],
+                &HashMap::new(),
+                &mut idle_since,
+                &mut last_epoch,
+                idle,
+                t0
+            )
+            .is_empty()
+        );
+        assert!(idle_since.is_empty() && last_epoch.is_empty());
+
+        // 代数变化（重建）：重置旧计时，新桥不会被旧时间戳误杀。
+        idle_since.insert("r".to_string(), t0 - Duration::from_secs(1000));
+        last_epoch.insert("r".to_string(), 1);
+        let rebuilt = vec![("r".to_string(), 2u64)];
+        assert!(
+            idle_rooms_to_stop(
+                &rebuilt,
+                &HashMap::new(),
+                &mut idle_since,
+                &mut last_epoch,
+                idle,
+                t0
+            )
+            .is_empty(),
+            "新代桥必须重置空闲计时"
+        );
+        assert!(idle_since.is_empty());
+        assert_eq!(last_epoch.get("r"), Some(&2));
     }
 
     #[cfg(unix)]

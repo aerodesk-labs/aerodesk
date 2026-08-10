@@ -1,0 +1,46 @@
+# AeroDesk 信令服务 systemd 单元模板（#216 M3 部署自动化，#246）
+# 安装：sudo cp deploy/systemd/aerodesk-signal.service /etc/systemd/system/
+# 副 PoP（有跨 PoP 桥接需求）参考下方 BRIDGE_* 配置。
+[Unit]
+Description=AeroDesk Signaling (WSS: rooms/auth/TURN/SFU proxy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aerodesk
+Group=aerodesk
+StateDirectory=aerodesk
+ExecStart=/opt/aerodesk/aerodesk-signal
+Restart=on-failure
+RestartSec=2
+Environment=SIGNAL_PORT=3001
+# 明文 WS 仅限开发（生产只暴露 WSS:3001；如需关闭请用防火墙限制 3003）
+# Environment=SIGNAL_PLAIN_PORT=3003
+# 认证（生产必设：JWT_SECRET 或 AUTH_TOKENS 至少一个）
+Environment=JWT_SECRET=CHANGE_ME_JWT_SECRET
+# TURN 与 SFU 内部接口
+# Environment=TURN_SECRET=CHANGE_ME_TURN_SECRET
+# Environment=TURN_URLS=turn:sfu.example.com:3479?transport=udp,turn:sfu.example.com:3479?transport=tcp,turns:sfu.example.com:5349?transport=tcp
+Environment=SFU_URL=http://127.0.0.1:3002
+Environment=SFU_TOKEN=CHANGE_ME_SFU_INTERNAL_TOKEN
+# 多 PoP（#146/#154）
+# Environment=POP_ID=pop-b
+# Environment=ROOM_POP_MAP=bridge-=pop-a
+# Environment=POP_URLS=pop-a=wss://pop-a.example.com:443/ws
+# Environment=POP_REGISTRY_FILE=/var/lib/aerodesk/pop-registry.json
+# Environment=POP_REGISTRY_TTL_SECS=3600
+# 跨 PoP 桥接编排（#216 M3，可选；仅副 PoP 需要）：
+# {room} 会被替换；$BRIDGE_AUTH_TOKEN 由下面 Environment 注入并被子进程继承
+# Environment=BRIDGE_CMD=/opt/aerodesk/aerodesk-bridge --remote-signal wss://pop-a.example.com:443/ws --local-signal wss://pop-b.example.com:443/ws --room {room} --auth-token "$BRIDGE_AUTH_TOKEN" --codec h264
+# Environment=BRIDGE_AUTH_TOKEN=CHANGE_ME_BRIDGE_AUTH_TOKEN
+# Environment=BRIDGE_READY_TIMEOUT_SECS=30
+# Environment=BRIDGE_FAIL_COOLDOWN_SECS=30
+# Environment=BRIDGE_MAX_RUNNING=8
+# Environment=BRIDGE_IDLE_SECS=300
+# 证书（可选；缺省用仓库内嵌开发证书，生产必须配）
+# Environment=CERT_FILE=/etc/aerodesk/tls/cer.pem
+# Environment=KEY_FILE=/etc/aerodesk/tls/key.pem
+
+[Install]
+WantedBy=multi-user.target

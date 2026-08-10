@@ -8,6 +8,8 @@
 # 场景 1（桥优先）：PoP-B viewer 加入 → 信令自动 spawn aerodesk-bridge（view pop-a +
 #   publish pop-b）→ 就绪后 viewer 本 PoP 接入（无 Redirect）→ 解码跨 PoP 媒体；
 #   桥 p99 ≤ 直连 p99×4+500ms（SCTP 每跳 ~150ms，见 BRIDGE.md 实测）
+# 场景 3（桥死亡重建，#246）：kill 桥 → 新 viewer 加入 → 信令自动重建桥（spawn=2）
+#   恢复解码，自然死亡不触发失败冷却
 # 场景 2（回退）：PoP-B 信令改用 BRIDGE_CMD=false（桥必失败）→ viewer 加入 →
 #   信令回退 v1 Redirect → viewer 自动跟随到 pop-a 直连解码。
 set -uo pipefail
@@ -139,8 +141,27 @@ echo "  桥路径：samples=${BRIDGE_N} p99=${BRIDGE_P99}ms（直连基线 p99=$
 THRESHOLD=$((DIRECT_P99 * 4 + 500))
 [ "$BRIDGE_P99" -lt "$THRESHOLD" ] || fail "桥延迟 p99=${BRIDGE_P99}ms ≥ 阈值 ${THRESHOLD}ms（直连 ${DIRECT_P99}ms）"
 
-echo "== 场景 2：桥失败回退 v1 Redirect"
+echo "== 场景 3：桥死亡后新 viewer 加入自动重建桥（自然死亡不触发冷却）"
+kill "$VIEW_B" 2>/dev/null || true
+sleep 1
+pkill -f 'aerodesk-bridge' 2>/dev/null || true
+sleep 2
+"$TARGET_DIR/aerodesk-cli" --role viewer --signal "ws://127.0.0.1:${PLAIN_B}" --room "$ROOM" --token "$AUTH" \
+  >/tmp/bfb-view-b3.log 2>&1 &
+VIEW_B=$!
+wait_decoded /tmp/bfb-view-b3.log || fail "场景3：桥死亡后 viewer 未恢复解码（见 /tmp/bfb-view-b3.log）"
+grep -q "signal redirect" /tmp/bfb-view-b3.log && fail "场景3：重建桥不应触发 Redirect"
+SPAWNS=$(grep -c "bridge: spawned" /tmp/bfb-sig-b.log 2>/dev/null || echo 0)
+[ "$SPAWNS" -ge 2 ] || fail "场景3：桥未重建（spawn 次数=${SPAWNS}，应 ≥2）"
+grep -q "bridge: room $ROOM ready" /tmp/bfb-sig-b.log || fail "场景3：新桥未就绪"
+grep -q "fail cooldown" /tmp/bfb-sig-b.log && fail "场景3：自然死亡不应触发失败冷却"
+echo "  场景3 PASS：桥死亡后新 viewer 自动重建桥（spawn=${SPAWNS}）并恢复解码"
 kill "$VIEW_B" "$PUB_A" 2>/dev/null || true
+sleep 1
+pkill -f 'aerodesk-bridge' 2>/dev/null || true
+
+echo "== 场景 2：桥失败回退 v1 Redirect"
+kill "$VIEW_B" 2>/dev/null || true
 sleep 1
 pkill -f 'aerodesk-bridge' 2>/dev/null || true
 kill "$SIG_B_PID" 2>/dev/null || true; wait "$SIG_B_PID" 2>/dev/null || true

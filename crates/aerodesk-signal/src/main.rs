@@ -30,6 +30,8 @@
 //!                              桥失败/超时回退 v1 Redirect
 //!   BRIDGE_READY_TIMEOUT_SECS  桥就绪等待上限（默认 15）
 //!   BRIDGE_FAIL_COOLDOWN_SECS  桥失败冷却（默认 30，期间直接 Redirect 不重试）
+//!   BRIDGE_MAX_RUNNING         并发桥上限（默认 8；防房间名轮换绕过冷却的进程滥用）
+//!   BRIDGE_IDLE_SECS           桥空闲回收阈值（默认 300；房间无真实客户端超时停桥）
 
 #[macro_use]
 extern crate tracing;
@@ -38,7 +40,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aerodesk_protocol::jwt::Claims;
 use aerodesk_protocol::signal::{PeerInfo, Role, SignalMessage, TurnConfig};
@@ -72,6 +74,8 @@ struct Config {
     sfu_token: Option<String>,
     /// 跨 PoP 桥接编排（#216 M3）：BRIDGE_CMD 设置时启用；桥失败回退 Redirect。
     bridge: Option<Arc<BridgeManager>>,
+    /// 桥空闲回收阈值（#246）：房间内无真实客户端超过该时长 → 停止桥。
+    bridge_idle_secs: Duration,
 }
 
 struct Peer {
@@ -80,6 +84,8 @@ struct Peer {
     ws: Arc<Mutex<Websocket>>,
     /// JWT sub（#171 per-user 配额计数用；静态/开发模式为 None）。
     user: Option<String>,
+    /// 桥自身 publisher 腿（#246）：空闲回收/配额豁免按此区分，不计真实客户端。
+    bridge_leg: bool,
 }
 
 type Rooms = Arc<Mutex<HashMap<String, Vec<Peer>>>>;
@@ -242,6 +248,69 @@ fn main() {
     let _ = ROOMS.set(rooms.clone());
     let _ = TOTAL_CLIENTS.set(Arc::new(AtomicUsize::new(0)));
     let _ = USER_CONNS.set(Mutex::new(HashMap::new()));
+
+    // #246 桥生命周期 monitor：房间无真实客户端超过 BRIDGE_IDLE_SECS → 停桥。
+    // 空闲判定用纯函数 idle_rooms_to_stop（按 spawn 代数防旧时间戳误杀新桥）；
+    // 停桥前持 rooms 锁二次确认并执行 stop，避免与并发 Join 的 TOCTOU。
+    if let Some(bridge) = &config.bridge {
+        let bridge = bridge.clone();
+        let rooms = rooms.clone();
+        let idle = config.bridge_idle_secs;
+        std::thread::Builder::new()
+            .name("bridge-monitor".into())
+            .spawn(move || {
+                let mut idle_since: HashMap<String, Instant> = HashMap::new();
+                let mut last_epoch: HashMap<String, u64> = HashMap::new();
+                loop {
+                    std::thread::sleep(Duration::from_secs(15));
+                    let now = Instant::now();
+                    let running = bridge.running_rooms();
+                    let real_peers: HashMap<String, usize> = {
+                        let rooms = rooms.lock().unwrap();
+                        running
+                            .iter()
+                            .map(|(room, _)| {
+                                let n = rooms
+                                    .get(room)
+                                    .map(|peers| peers.iter().filter(|p| !p.bridge_leg).count())
+                                    .unwrap_or(0);
+                                (room.clone(), n)
+                            })
+                            .collect()
+                    };
+                    for room in bridge::idle_rooms_to_stop(
+                        &running,
+                        &real_peers,
+                        &mut idle_since,
+                        &mut last_epoch,
+                        idle,
+                        now,
+                    ) {
+                        // 二次确认 + 停桥：持 rooms 锁（无锁序环：running 锁不反向取 rooms）。
+                        let stop = {
+                            let rooms = rooms.lock().unwrap();
+                            let real = rooms
+                                .get(&room)
+                                .map(|peers| peers.iter().filter(|p| !p.bridge_leg).count())
+                                .unwrap_or(0);
+                            if real == 0 && bridge.is_running(&room) {
+                                info!(
+                                    "bridge monitor: room {room} idle ({idle:?} no real peers), stopping bridge"
+                                );
+                                bridge.stop(&room);
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        if stop {
+                            idle_since.remove(&room);
+                        }
+                    }
+                }
+            })
+            .expect("spawn bridge monitor");
+    }
 
     // 明文 WS（开发用；生产只开 WSS 端口）
     let plain_port: u16 = std::env::var("SIGNAL_PLAIN_PORT")
@@ -412,6 +481,12 @@ fn load_config() -> Config {
         sfu_url: std::env::var("SFU_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into()),
         sfu_token: std::env::var("SFU_TOKEN").ok(),
         bridge,
+        bridge_idle_secs: std::env::var("BRIDGE_IDLE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|v| v.max(15)) // 不低于 monitor 轮询间隔（15s），防误杀
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(300)),
     }
 }
 
@@ -676,12 +751,13 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                     );
                     break;
                 }
-                // #163 配额：房间/全局上限检查（0=不限）。桥自身 publisher 腿是
-                // 内部基础设施，豁免（否则小配额下会把真实 viewer 挤掉）。
+                // 桥自身 publisher 腿判定（#246）：配额豁免 + Peer 标记 + 空闲回收共用。
                 let bridge_leg = config
                     .bridge
                     .as_ref()
                     .is_some_and(|b| role == Role::Publisher && b.is_running(&room));
+                // #163 配额：房间/全局上限检查（0=不限）。桥自身 publisher 腿是
+                // 内部基础设施，豁免（否则小配额下会把真实 viewer 挤掉）。
                 if !bridge_leg {
                     let room_len = rooms
                         .lock()
@@ -757,6 +833,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                         role,
                         ws: ws.clone(),
                         user,
+                        bridge_leg,
                     });
                 TOTAL_CLIENTS
                     .get()
@@ -958,6 +1035,7 @@ mod tests {
             sfu_url: "http://127.0.0.1:3002".into(),
             sfu_token: None,
             bridge: None,
+            bridge_idle_secs: Duration::from_secs(300),
         }
     }
 

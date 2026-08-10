@@ -76,6 +76,8 @@ PoP-B signal（BRIDGE_CMD + ROOM_POP_MAP + POP_URLS）
 | `BRIDGE_READY_TIMEOUT_SECS` | 桥就绪等待上限（默认 15） |
 | `BRIDGE_FAIL_COOLDOWN_SECS` | 桥失败冷却（默认 30；期间直接 Redirect 不反复 spawn） |
 | `BRIDGE_MAX_RUNNING` | 并发桥上限（默认 8；防房间名轮换绕过冷却的进程滥用） |
+| `BRIDGE_IDLE_SECS` | 桥空闲回收阈值（默认 300）：房间内无真实客户端（桥自身
+  publisher 腿不计）超过该时长 → 后台 monitor 停桥并释放进程 |
 
 语义/边界：
 - **认证/配额先行**：桥决策在 `auth_result` 与房间/全局配额通过后执行（未授权
@@ -87,8 +89,19 @@ PoP-B signal（BRIDGE_CMD + ROOM_POP_MAP + POP_URLS）
   注入/选项注入），非法 → 直接 Redirect；
 - 桥就绪后保持运行直到进程退出（主 PoP 媒体消失自然退出）；信令进程被 SIGTERM
   强杀时桥会短暂孤儿化，随后因 WS 腿断开自行退出（不建议依赖 Drop）；
-- 桥中途死亡：已连接的 viewer 不会自动被踢/重定向，重新 Join（或客户端重连）
-  会按冷却逻辑重建桥；生产监控用 SFU 会话 API（#240）巡检桥两端客户端数。
+- **桥死亡恢复（#246，e2e 场景 3）**：桥进程被杀/退出后，下一位 viewer Join 会
+  自动重建桥（自然死亡不触发失败冷却），无需人工干预；已连接的 viewer 由客户端
+  `--reconnect` 重连后走同一条重建/回退逻辑；
+- **空闲回收（#246）**：房间内无真实客户端超过 `BRIDGE_IDLE_SECS` 时，signal
+  后台 monitor 停桥（释放进程与主 PoP 连接）；桥自身 publisher 腿通过 Peer
+  `bridge_leg` 标记排除，不误判为真实客户端；
+- 生产监控用 SFU 会话 API（#240）巡检桥两端客户端数。
+
+## 部署模板（#246）
+
+- `deploy/systemd/aerodesk-signal.service` / `aerodesk-sfu.service`：systemd 单元
+  模板，含 `BRIDGE_CMD`/`BRIDGE_AUTH_TOKEN`/`BRIDGE_IDLE_SECS` 等完整示例；
+- `deploy/prometheus/prometheus.yml`：双 PoP 抓取示例（配合 `sfu-alerts.yml`）。
 
 ### 延迟 p99 验收（本地方法学，`scripts/bridge-fallback-e2e.sh`）
 
@@ -106,7 +119,9 @@ PoP-B signal（BRIDGE_CMD + ROOM_POP_MAP + POP_URLS）
    `BRIDGE_CMD="aerodesk-bridge --remote-signal wss://<pop-a>:443/ws --local-signal wss://<pop-b>:443/ws --room {room}"`
    （桥凭证走信令 JWT/静态 token；生产建议 `BRIDGE_READY_TIMEOUT_SECS=30`）。
 2. **验收**：跨 PoP viewer 加入 → 本 PoP 接入且无 Redirect；`signal` 日志出现
-   `bridge ready`；`/session/clients` 双 PoP 各 +2（publisher+bridge-view / bridge-pub+viewer）。
+   `bridge ready`；`/session/clients` 双 PoP 各 +2（publisher+bridge-view / bridge-pub+viewer）；
+   本地自动化验证 = `scripts/bridge-fallback-e2e.sh`（直连基线 → 桥优先 → 桥死亡
+   重建 → 失败回退 Redirect 四场景）。
 3. **延迟 p99**：按 `#8` 方法在真实链路采集 ≥30 个 `LATENCY` 样本，p99 ≤ 验收阈值
    （预算：直连 p99 + 2×10–30ms 中继预算，按业务 SLA 定）；本地对比
    `scripts/bridge-fallback-e2e.sh`。
