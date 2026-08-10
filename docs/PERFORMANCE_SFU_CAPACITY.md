@@ -1,4 +1,4 @@
-# SFU 容量压测基准（#215/#218/#220/#222/#226/#228，#8 方法论）
+# SFU 容量压测基准（#215/#218/#220/#222/#226/#228/#232，#8 方法论）
 
 ## 方法
 `scripts/sfu-capacity-bench.sh`：起 SFU+signal（独立端口）→ `loadtest.sh` 施压
@@ -121,6 +121,23 @@ played>0、|drift_ms|≤300、视频 DECODED>0。
 - SFU 转发不重写 RTP 时间戳，音频（PCMU/Opus）随视频经直连/TURN 中继均正常到达，
   AVSYNC drift 全部 ≤113ms（阈值 300ms）
 
+## 4K60 压测（#232，#8 本地基线）
+
+`scripts/sfu-capacity-bench.sh 1 1 15 3840 2160 60 12000000`（vt 硬编 + NOISY）。
+
+### 结果（macOS M4，debug 混合，2026-08-10）
+
+| 档位 | 连接 | viewer 帧（15s） | 实测帧率 | tx 吞吐 | tx pps | 错误 |
+|---|---|---|---|---|---|---|
+| 4K60 直连 12Mbps | 1/1 | 147 | ~10fps | 0.92MB/s (7.4Mbps) | 856 | 0 |
+| 4K30 直连 8Mbps | 1/1 | 194 | ~13fps | 0.78MB/s (6.2Mbps) | 734 | 0 |
+| 4K60 TURN 中继 12Mbps | 1/1（relayed 2/2） | 93 | ~6fps | 0.62MB/s (5Mbps) | 587 | 0 |
+
+- 全部连接成功、媒体帧全部送达、0 错误
+- **结论：本机（M4 debug + VT + NOISY 高熵源）4K 编码是瓶颈（6-13fps），SFU
+  转发非瓶颈**（~800pps 无丢）；#8 真机 4K60 验收需先保证编码端 60fps 达标，
+  再验 SFU 转发（方法同上，帧率由编码端决定）
+
 ## 复现
 ```sh
 scripts/sfu-capacity-bench.sh 1 2 15 1280 720 30 2000000        # 单档（直连）
@@ -145,4 +162,5 @@ scripts/sfu-audio-e2e.sh                                       # 音频+音视�
 - 多编码格式（#226）：H.264/H.265/VP9/AV1 四格式经 SFU 端到端转发全 PASS，
   SFU codec-agnostic 成立（AV1 编码延迟 ~1s）
 - 音频同步（#228）：PCMU/Opus 经直连/TURN 中继转发正常，AVSYNC drift ≤113ms
-- 后续 #8 验收按此方法论扩展到真机与 4K60
+- 4K60（#232）：本机编码端瓶颈（6-13fps），SFU 转发非瓶颈（~800pps 无丢、0 错误）；
+  真机 4K60 验收方法已就绪（#8）
