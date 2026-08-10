@@ -1011,9 +1011,7 @@ fn main() -> Result<(), slint::PlatformError> {
             && let Ok(raw) = handle.raw_window_handle()
             && let raw_window_handle::RawWindowHandle::AppKit(appkit) = raw
         {
-            aerodesk_macos::dock::focus_ns_view(
-                appkit.ns_view.as_ptr() as *mut std::ffi::c_void,
-            );
+            aerodesk_macos::dock::focus_ns_view(appkit.ns_view.as_ptr() as *mut std::ffi::c_void);
         }
     }
 
