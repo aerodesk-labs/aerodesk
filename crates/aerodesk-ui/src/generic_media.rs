@@ -50,7 +50,7 @@ pub fn run_generic_viewer(
                 }
             }
             if let Some(ui) = ui_weak.upgrade() {
-                crate::session_cleanup(&ui, session_idx);
+                crate::session_cleanup(&ui, session_idx, Some(format!("连接失败：{e}")));
             }
             return;
         }
@@ -63,14 +63,14 @@ pub fn run_generic_viewer(
                 }
             }
             if let Some(ui) = ui_weak.upgrade() {
-                crate::session_cleanup(&ui, session_idx);
+                crate::session_cleanup(&ui, session_idx, Some("连接超时".into()));
             }
             return;
         }
     };
     if stale() {
         if let Some(ui) = ui_weak.upgrade() {
-            crate::session_cleanup(&ui, session_idx);
+            crate::session_cleanup(&ui, session_idx, None);
         }
         return;
     }
@@ -171,8 +171,9 @@ pub fn run_generic_viewer(
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    // 会话结束（断开置 stop）：清理注册表与 UI 槽位。
+    // 会话结束（断开置 stop）：提示后清理注册表与 UI 槽位。
     if let Some(ui) = ui_weak.upgrade() {
-        crate::session_cleanup(&ui, session_idx);
+        ui.set_status(format!("已断开：{room}").into());
+        crate::session_cleanup(&ui, session_idx, None);
     }
 }

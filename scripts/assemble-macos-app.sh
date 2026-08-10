@@ -20,4 +20,9 @@ chmod +x "$APP/Contents/MacOS/AeroDesk"
 # 未签名/仅 linker-signed 的 bundle 无法被 macOS TCC 识别为独立应用，
 # 屏幕录制/辅助功能授权列表里看不到 AeroDesk.app。
 codesign --force --sign - "$APP" >/dev/null 2>&1
-echo "== 完成: $APP (v$VERSION, ad-hoc signed)"
+if codesign --verify --deep --strict "$APP" >/dev/null 2>&1; then
+  echo "== 完成: $APP (v$VERSION, ad-hoc signed + verified)"
+else
+  echo "!! 警告: $APP codesign 验证失败" >&2
+  exit 1
+fi

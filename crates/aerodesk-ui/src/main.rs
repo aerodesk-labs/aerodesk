@@ -13,7 +13,7 @@ use slint::Model;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 #[cfg(not(target_os = "macos"))]
 use std::time::Duration;
 
@@ -61,6 +61,15 @@ pub fn dispatch_dropped_files(
 /// - 每会话独立 输入/控制/文件 通道、静音/音量、stop 标志；断开只关当前活动会话
 pub const MAX_SESSIONS: usize = 4;
 
+/// 会话最近一帧 RGBA（按稳定 slot 随会话保存：断开中间会话后帧仍归属原会话）。
+#[derive(Clone)]
+pub struct SessionFrame {
+    pub rgba: Arc<Vec<u8>>,
+    pub w: u32,
+    pub h: u32,
+}
+
+#[derive(Clone)]
 pub struct SessionHandle {
     pub slot: usize,
     pub room: String,
@@ -71,6 +80,8 @@ pub struct SessionHandle {
     pub muted: Arc<AtomicBool>,
     pub volume: Arc<AtomicU16>,
     pub stop: Arc<AtomicBool>,
+    /// 最近一帧（未收到帧时为 None，UI 显示空槽）。
+    pub frame: Option<SessionFrame>,
 }
 
 pub static SESSIONS: std::sync::Mutex<Vec<SessionHandle>> = std::sync::Mutex::new(Vec::new());
@@ -80,6 +91,7 @@ pub static INPUT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 pub static SESSION_NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// macOS Dock 图标点击：主窗口弱引用（AppWindow::new 后设置，reopen 回调重显用）。
+#[cfg(target_os = "macos")]
 static MAIN_WINDOW: std::sync::Mutex<Option<slint::Weak<AppWindow>>> = std::sync::Mutex::new(None);
 
 /// macOS：把主窗口带到最前（makeKeyAndOrderFront + deminiaturize + 激活 App）。
@@ -99,7 +111,31 @@ pub fn slot_to_ui_index(slot: usize) -> Option<usize> {
     SESSIONS.lock().unwrap().iter().position(|s| s.slot == slot)
 }
 
-/// 把一帧 RGBA 呈现到会话帧槽 + 当前显示帧（多会话：按 slot 映射稠密槽位）。
+/// 由 SESSIONS 顺序构建 (标签, 帧数组)。
+/// 帧存在各会话句柄里（按稳定 slot 归属）：断开中间会话后剩余会话仍显示自己的帧。
+pub fn build_tabs_frames(
+    sessions: &[SessionHandle],
+) -> (Vec<slint::SharedString>, Vec<slint::Image>) {
+    let tabs = sessions.iter().map(|s| s.room.clone().into()).collect();
+    let frames = sessions
+        .iter()
+        .map(|s| match &s.frame {
+            Some(f) => {
+                let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                    &f.rgba, f.w, f.h,
+                );
+                slint::Image::from_rgba8(buf)
+            }
+            None => slint::Image::default(),
+        })
+        .collect();
+    (tabs, frames)
+}
+
+/// 把一帧 RGBA 呈现到会话帧槽 + 当前显示帧（多会话：按稳定 slot 映射稠密槽位）。
+///
+/// 线程安全：帧写入与模型重建都在 SESSIONS 锁内完成，避免多个 viewer 线程
+/// 并发 get→set 模型导致丢帧/错位。
 pub fn present_frame(
     ui_weak: &slint::Weak<AppWindow>,
     rgba: &[u8],
@@ -107,42 +143,58 @@ pub fn present_frame(
     h: usize,
     slot: usize,
 ) {
-    let buffer =
-        slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(rgba, w as u32, h as u32);
-    let img = slint::Image::from_rgba8(buffer);
     let Some(fui) = ui_weak.upgrade() else { return };
     fui.set_frame_w(w as f32);
     fui.set_frame_h(h as f32);
-    let Some(ui_idx) = slot_to_ui_index(slot) else {
-        return; // 会话已移除（断开清理中），跳过渲染
+    // 读-改-写模型在同一 SESSIONS 临界区内完成（多 viewer 线程串行），
+    // 只重建当前帧，其它会话沿用模型里已有的 Image，避免每帧全量复制。
+    let (ui_idx, img, arr) = {
+        let mut sessions = SESSIONS.lock().unwrap();
+        let Some(ui_idx) = sessions.iter().position(|s| s.slot == slot) else {
+            return; // 会话已移除（断开清理中），跳过渲染
+        };
+        sessions[ui_idx].frame = Some(SessionFrame {
+            rgba: Arc::new(rgba.to_vec()),
+            w: w as u32,
+            h: h as u32,
+        });
+        let img = img_from_session_frame(&sessions[ui_idx]);
+        let mut arr: Vec<slint::Image> = (0..fui.get_session_frames().row_count())
+            .filter_map(|i| fui.get_session_frames().row_data(i))
+            .collect();
+        if arr.len() <= ui_idx {
+            arr.resize(ui_idx + 1, slint::Image::default());
+        }
+        arr[ui_idx] = img.clone();
+        (ui_idx, img, arr)
     };
-    let mut arr: Vec<slint::Image> = (0..fui.get_session_frames().row_count())
-        .filter_map(|i| fui.get_session_frames().row_data(i))
-        .collect();
-    if arr.len() <= ui_idx {
-        arr.resize(ui_idx + 1, slint::Image::default());
-    }
-    arr[ui_idx] = img.clone();
     fui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(arr)));
     if fui.get_active_session() == ui_idx as i32 {
         fui.set_video_frame(img);
     }
 }
 
-/// 按 SESSIONS 重建 UI 标签/帧槽（会话加入或移除后调用）。
-pub fn session_refresh_ui(ui: &AppWindow) {
-    let sessions = SESSIONS.lock().unwrap();
-    let tabs: Vec<slint::SharedString> = sessions.iter().map(|s| s.room.clone().into()).collect();
-    let old: Vec<slint::Image> = (0..ui.get_session_frames().row_count())
-        .filter_map(|i| ui.get_session_frames().row_data(i))
-        .collect();
-    let mut frames: Vec<slint::Image> = Vec::with_capacity(sessions.len());
-    for i in 0..sessions.len() {
-        frames.push(old.get(i).cloned().unwrap_or_default());
+fn img_from_session_frame(s: &SessionHandle) -> slint::Image {
+    match &s.frame {
+        Some(f) => {
+            let buf =
+                slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&f.rgba, f.w, f.h);
+            slint::Image::from_rgba8(buf)
+        }
+        None => slint::Image::default(),
     }
+}
+
+/// 按 SESSIONS 重建 UI 标签/帧槽（会话加入或移除后调用；帧按 slot 归属）。
+pub fn session_refresh_ui(ui: &AppWindow) {
+    let (tabs, frames, is_empty) = {
+        let sessions = SESSIONS.lock().unwrap();
+        let (tabs, frames) = build_tabs_frames(&sessions);
+        (tabs, frames, sessions.is_empty())
+    };
     ui.set_session_tabs(slint::ModelRc::new(slint::VecModel::from(tabs)));
     ui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(frames.clone())));
-    if sessions.is_empty() {
+    if is_empty {
         ui.set_active_session(0);
         ui.set_in_session(false);
         ui.set_conn_state(0);
@@ -155,7 +207,7 @@ pub fn session_refresh_ui(ui: &AppWindow) {
         ui.set_connecting(false);
     } else {
         let cur = ui.get_active_session() as usize;
-        let new_active = cur.min(sessions.len() - 1);
+        let new_active = cur.min(frames.len() - 1);
         ui.set_active_session(new_active as i32);
         if let Some(f) = frames.get(new_active) {
             ui.set_video_frame(f.clone());
@@ -172,10 +224,20 @@ pub fn session_joined(ui: &AppWindow, slot: usize) {
     }
 }
 
-/// 会话结束（断开/连接失败/连接关闭）：从注册表移除并刷新 UI。
-pub fn session_cleanup(ui: &AppWindow, slot: usize) {
-    SESSIONS.lock().unwrap().retain(|s| s.slot != slot);
+/// 会话结束（断开/连接失败/连接关闭）：从注册表移除并刷新 UI（帧随会话丢弃）。
+/// `terminal`：会话全部结束后要保留给用户的终态文案（如“连接失败：…”）；
+/// 为 None 时显示默认“已断开”。
+pub fn session_cleanup(ui: &AppWindow, slot: usize, terminal: Option<String>) {
+    {
+        let mut sessions = SESSIONS.lock().unwrap();
+        sessions.retain(|s| s.slot != slot);
+    }
     session_refresh_ui(ui);
+    if let Some(msg) = terminal {
+        if SESSIONS.lock().unwrap().is_empty() {
+            ui.set_status(msg.into());
+        }
+    }
 }
 
 /// #72 UI 拖拽发送：在 winit 事件进入 Slint 前拦截外部文件拖放。
@@ -424,8 +486,11 @@ fn main() -> Result<(), slint::PlatformError> {
                     muted: muted.clone(),
                     volume: volume.clone(),
                     stop: stop.clone(),
+                    frame: None,
                 });
             }
+            // 连接中的会话立即显示为标签：可看到“连接中”状态，也可直接断开取消。
+            session_refresh_ui(&ui);
             let weak2 = weak.clone();
             std::thread::spawn(move || {
                 #[cfg(target_os = "macos")]
@@ -833,13 +898,16 @@ fn main() -> Result<(), slint::PlatformError> {
         move || {
             let ui = weak.unwrap();
             let idx = ui.get_active_session() as usize;
-            let sessions = SESSIONS.lock().unwrap();
-            let Some(s) = sessions.get(idx) else {
-                ui.set_session_status("没有活动会话".into());
-                return;
+            let m = {
+                let sessions = SESSIONS.lock().unwrap();
+                let Some(s) = sessions.get(idx) else {
+                    ui.set_session_status("没有活动会话".into());
+                    return;
+                };
+                let m = !s.muted.fetch_xor(true, Ordering::SeqCst);
+                let _ = s.control_tx.send(format!("{{\"audio_mute\":{m}}}"));
+                m
             };
-            let m = !s.muted.fetch_xor(true, Ordering::SeqCst);
-            let _ = s.control_tx.send(format!("{{\"audio_mute\":{m}}}"));
             ui.set_session_status(
                 format!(
                     "音频：{}（静音指令已下发）",
@@ -856,9 +924,11 @@ fn main() -> Result<(), slint::PlatformError> {
             let ui = weak.unwrap();
             let pct = (v.clamp(0.0, 1.0) * 100.0).round() as u16;
             let idx = ui.get_active_session() as usize;
-            let sessions = SESSIONS.lock().unwrap();
-            if let Some(s) = sessions.get(idx) {
-                s.volume.store(pct, Ordering::SeqCst);
+            {
+                let sessions = SESSIONS.lock().unwrap();
+                if let Some(s) = sessions.get(idx) {
+                    s.volume.store(pct, Ordering::SeqCst);
+                }
             }
             ui.set_session_status(format!("音量：{pct}%").into());
         }
@@ -930,9 +1000,11 @@ fn main() -> Result<(), slint::PlatformError> {
             let ui = ui.unwrap();
             let n = display_idx2.fetch_add(1, Ordering::SeqCst) % 3;
             let idx = ui.get_active_session() as usize;
-            let sessions = SESSIONS.lock().unwrap();
-            if let Some(s) = sessions.get(idx) {
-                let _ = s.control_tx.send(format!("{{\"display\":{n}}}"));
+            {
+                let sessions = SESSIONS.lock().unwrap();
+                if let Some(s) = sessions.get(idx) {
+                    let _ = s.control_tx.send(format!("{{\"display\":{n}}}"));
+                }
             }
             ui.set_session_status(format!("显示器：{n}（切换指令已下发）").into());
         }
@@ -949,9 +1021,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 _ => "q",
             };
             let idx = ui.get_active_session() as usize;
-            let sessions = SESSIONS.lock().unwrap();
-            if let Some(s) = sessions.get(idx) {
-                let _ = s.control_tx.send(format!("{{\"layer\":\"{layer}\"}}"));
+            {
+                let sessions = SESSIONS.lock().unwrap();
+                if let Some(s) = sessions.get(idx) {
+                    let _ = s.control_tx.send(format!("{{\"layer\":\"{layer}\"}}"));
+                }
             }
             ui.set_session_status(
                 format!(
@@ -1156,9 +1230,11 @@ fn main() -> Result<(), slint::PlatformError> {
         move || {
             #[cfg(target_os = "macos")]
             {
-                // 先尝试一次采集，让系统把本应用登记进「屏幕录制」授权列表，
-                // 否则系统设置里看不到本应用、无法勾选授权。
-                aerodesk_macos::permissions::trigger_screen_capture_registration();
+                // 先尝试一次采集（后台线程），让系统把本应用登记进「屏幕录制」
+                // 授权列表，否则系统设置里看不到本应用、无法勾选授权。
+                std::thread::spawn(|| {
+                    aerodesk_macos::permissions::trigger_screen_capture_registration();
+                });
                 aerodesk_macos::permissions::open_system_settings(
                     aerodesk_macos::permissions::SettingsPane::ScreenCapture,
                 );
@@ -1185,8 +1261,11 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // 启动时先尝试一次采集，把应用登记进「屏幕录制」授权列表
     // （macOS TCC 只列出尝试过受保护资源的应用，否则系统设置里看不到本应用）。
+    // 放后台线程避免 SCShareableContent 首调阻塞首屏。
     #[cfg(target_os = "macos")]
-    aerodesk_macos::permissions::trigger_screen_capture_registration();
+    std::thread::spawn(|| {
+        aerodesk_macos::permissions::trigger_screen_capture_registration();
+    });
     // 启动时刷一次权限状态
     ui.invoke_refresh_perms();
 
@@ -1585,6 +1664,70 @@ mod tests {
         assert_eq!(rows[1].text.to_string(), "x");
     }
 
+    fn session_handle(slot: usize, room: &str) -> SessionHandle {
+        let (input_tx, _) = std::sync::mpsc::channel();
+        let (control_tx, _) = std::sync::mpsc::channel();
+        let (file_tx, _) = std::sync::mpsc::channel();
+        SessionHandle {
+            slot,
+            room: room.into(),
+            server: "127.0.0.1:3003".into(),
+            input_tx,
+            control_tx,
+            file_tx,
+            muted: Arc::new(AtomicBool::new(false)),
+            volume: Arc::new(AtomicU16::new(100)),
+            stop: Arc::new(AtomicBool::new(false)),
+            frame: None,
+        }
+    }
+
+    fn frame_image(w: u32, h: u32) -> slint::Image {
+        let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(w, h);
+        slint::Image::from_rgba8(buf)
+    }
+
+    fn with_frame(mut h: SessionHandle, rgba: Vec<u8>, w: u32, hh: u32) -> SessionHandle {
+        h.frame = Some(SessionFrame {
+            rgba: Arc::new(rgba),
+            w,
+            h: hh,
+        });
+        h
+    }
+
+    #[test]
+    fn session_frames_keyed_by_slot_not_position() {
+        let a = with_frame(session_handle(0, "A"), vec![0u8; 2 * 1 * 4], 2, 1);
+        let b = with_frame(session_handle(1, "B"), vec![0u8; 3 * 1 * 4], 3, 1);
+
+        // 双会话并存：帧按各自 slot 归属
+        let (tabs, arr) = build_tabs_frames(&[a.clone(), b.clone()]);
+        assert_eq!(tabs, vec![slint::SharedString::from("A"), "B".into()]);
+        assert_eq!(arr[0].size().width, 2);
+        assert_eq!(arr[1].size().width, 3);
+
+        // 断开 A（首位会话）：剩余 B 必须显示 B 自己的帧，而不是 A 的旧帧
+        let (tabs, arr) = build_tabs_frames(&[b.clone()]);
+        assert_eq!(tabs, vec![slint::SharedString::from("B")]);
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0].size().width, 3, "B 的帧被错位成了 A 的帧");
+
+        // 断开 B：A 仍显示自己的帧
+        let (tabs, arr) = build_tabs_frames(&[a.clone()]);
+        assert_eq!(tabs, vec![slint::SharedString::from("A")]);
+        assert_eq!(arr[0].size().width, 2);
+    }
+
+    #[test]
+    fn session_frames_missing_slot_defaults_to_empty() {
+        // 会话在册但尚未收到帧：帧槽为默认空图，不 panic
+        let a = session_handle(0, "A");
+        let (_, arr) = build_tabs_frames(&[a]);
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0].size().width, 0);
+    }
+
     #[test]
     fn addressbook_roundtrip() {
         // 构造条目 -> save -> load -> 一致
@@ -1827,7 +1970,6 @@ fn set_private_perms(path: &Path) {
 #[cfg(all(test, target_os = "macos"))]
 mod multi_session_e2e {
     use super::*;
-    use std::io::Write;
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
@@ -1843,10 +1985,15 @@ mod multi_session_e2e {
         fn spawn(cmd: &mut Command, tag: &str) -> Option<Child> {
             match cmd
                 .stdout(Stdio::from(
-                    std::fs::File::create(format!("/tmp/mse2e-{tag}.log")).unwrap(),
+                    std::fs::File::create(format!("/tmp/mse2e-{}-{tag}.log", std::process::id()))
+                        .unwrap(),
                 ))
                 .stderr(Stdio::from(
-                    std::fs::File::create(format!("/tmp/mse2e-{tag}.err.log")).unwrap(),
+                    std::fs::File::create(format!(
+                        "/tmp/mse2e-{}-{tag}.err.log",
+                        std::process::id()
+                    ))
+                    .unwrap(),
                 ))
                 .spawn()
             {
@@ -1897,44 +2044,12 @@ mod multi_session_e2e {
 
     fn publisher_log_has(room: &str, needle: &str) -> bool {
         // CLI tracing 写 stderr（Procs::spawn 把 stderr 落 .err.log）。
-        std::fs::read_to_string(format!("/tmp/mse2e-pub-{room}.err.log"))
-            .map(|t| t.contains(needle))
-            .unwrap_or(false)
-    }
-
-    /// 启动一个观看会话（每会话独立通道/状态），并登记到 SESSIONS。
-    fn start_session(
-        weak: &slint::Weak<AppWindow>,
-        server: String,
-        room: String,
-        stops: &mut Vec<Arc<AtomicBool>>,
-    ) {
-        let (control_tx, control_rx) = std::sync::mpsc::channel();
-        let (input_tx, input_rx) = std::sync::mpsc::channel();
-        let (file_tx, file_rx) = std::sync::mpsc::channel();
-        let muted = Arc::new(AtomicBool::new(false));
-        let volume = Arc::new(AtomicU16::new(100));
-        let stop = Arc::new(AtomicBool::new(false));
-        let slot = SESSION_NEXT.fetch_add(1, Ordering::SeqCst);
-        let wk = weak.clone();
-        SESSIONS.lock().unwrap().push(SessionHandle {
-            slot,
-            room: room.clone(),
-            server: server.clone(),
-            input_tx: input_tx.clone(),
-            control_tx: control_tx.clone(),
-            file_tx: file_tx.clone(),
-            muted: muted.clone(),
-            volume: volume.clone(),
-            stop: stop.clone(),
-        });
-        let st = stop.clone();
-        std::thread::spawn(move || {
-            crate::macos_media::run_viewer(
-                server, room, None, wk, slot, control_rx, input_rx, file_rx, muted, volume, st,
-            );
-        });
-        stops.push(stop);
+        std::fs::read_to_string(format!(
+            "/tmp/mse2e-{}-pub-{room}.err.log",
+            std::process::id()
+        ))
+        .map(|t| t.contains(needle))
+        .unwrap_or(false)
     }
 
     #[test]
@@ -1985,8 +2100,12 @@ mod multi_session_e2e {
                 "--room",
                 room,
             ]);
-            if let Some(c) = Procs::spawn(&mut cmd, &format!("pub-{room}")) {
-                procs.kids.push(c);
+            match Procs::spawn(&mut cmd, &format!("pub-{room}")) {
+                Some(c) => procs.kids.push(c),
+                None => {
+                    eprintln!("SKIP multi-session e2e: 被控端 {room} 二进制未构建");
+                    return true;
+                }
             }
         }
         std::thread::sleep(Duration::from_secs(3));
@@ -2024,6 +2143,7 @@ mod multi_session_e2e {
                 muted: Arc::new(AtomicBool::new(false)),
                 volume: Arc::new(AtomicU16::new(100)),
                 stop: stop.clone(),
+                frame: None,
             });
             let st = stop.clone();
             std::thread::spawn(move || {
