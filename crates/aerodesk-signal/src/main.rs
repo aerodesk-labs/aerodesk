@@ -231,6 +231,22 @@ fn reload_tls(
     }
 }
 
+/// 调 SFU 内部接口踢掉房间全部客户端（#249：桥死亡后触发 viewer --reconnect 恢复）。
+fn kick_sfu_room(sfu_url: &str, token: Option<&str>, room: &str) {
+    let url = format!("{sfu_url}/session/kick?room={room}");
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(5))
+        .build();
+    let mut req = agent.post(&url);
+    if let Some(token) = token {
+        req = req.set("X-Internal-Token", token);
+    }
+    match req.call() {
+        Ok(resp) => info!("bridge monitor: SFU kick room {room} -> {}", resp.status()),
+        Err(e) => warn!("bridge monitor: SFU kick room {room} failed: {e}"),
+    }
+}
+
 fn main() {
     init_log();
     let config = Arc::new(load_config());
@@ -256,15 +272,23 @@ fn main() {
         let bridge = bridge.clone();
         let rooms = rooms.clone();
         let idle = config.bridge_idle_secs;
+        let sfu_url = config.sfu_url.clone();
+        let sfu_token = config.sfu_token.clone();
         std::thread::Builder::new()
             .name("bridge-monitor".into())
             .spawn(move || {
                 let mut idle_since: HashMap<String, Instant> = HashMap::new();
                 let mut last_epoch: HashMap<String, u64> = HashMap::new();
+                let mut alive_prev: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                let mut monitor_stopped: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 loop {
                     std::thread::sleep(Duration::from_secs(15));
                     let now = Instant::now();
                     let running = bridge.running_rooms();
+                    let alive_now: std::collections::HashSet<String> =
+                        running.iter().map(|(r, _)| r.clone()).collect();
                     let real_peers: HashMap<String, usize> = {
                         let rooms = rooms.lock().unwrap();
                         running
@@ -286,7 +310,8 @@ fn main() {
                         idle,
                         now,
                     ) {
-                        // 二次确认 + 停桥：持 rooms 锁（无锁序环：running 锁不反向取 rooms）。
+                        // 记录为 monitor 主动停止（死亡检测排除），再二次确认 + 停桥。
+                        monitor_stopped.insert(room.clone());
                         let stop = {
                             let rooms = rooms.lock().unwrap();
                             let real = rooms
@@ -307,6 +332,20 @@ fn main() {
                             idle_since.remove(&room);
                         }
                     }
+                    // #249 桥死亡检测：自然死亡（消失且非 monitor 停止）→ 踢本地
+                    // SFU 房间，断开已连接 viewer 的 WebRTC，触发 --reconnect 恢复。
+                    for room in bridge::died_rooms(&alive_prev, &alive_now, &monitor_stopped) {
+                        if !bridge.is_running(&room) {
+                            info!(
+                                "bridge monitor: bridge died for room {room}; kicking SFU room to trigger client recovery"
+                            );
+                            kick_sfu_room(&sfu_url, sfu_token.as_deref(), &room);
+                        } else {
+                            debug!("bridge monitor: room {room} died but already rebuilt; skip kick");
+                        }
+                    }
+                    alive_prev = alive_now;
+                    monitor_stopped.clear();
                 }
             })
             .expect("spawn bridge monitor");

@@ -341,6 +341,19 @@ pub fn idle_rooms_to_stop(
     to_stop
 }
 
+/// 桥死亡检测纯函数（#249）：上轮存活集合与本轮存活集合的差集，排除 monitor
+/// 本轮自己停掉的房间，即「自然死亡」的房间——应触发已连接 viewer 的恢复（kick）。
+pub fn died_rooms(
+    alive_prev: &std::collections::HashSet<String>,
+    alive_now: &std::collections::HashSet<String>,
+    stopped_by_monitor: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut died: Vec<String> = alive_prev.difference(alive_now).cloned().collect();
+    died.retain(|r| !stopped_by_monitor.contains(r));
+    died.sort();
+    died
+}
+
 /// 渲染实际命令：替换 `{room}`；无占位符时追加 ` --room {room}`。
 pub fn render_command(cmd: &str, room: &str) -> String {
     if cmd.contains("{room}") {
@@ -569,6 +582,35 @@ mod tests {
         );
         assert!(idle_since.is_empty());
         assert_eq!(last_epoch.get("r"), Some(&2));
+    }
+
+    #[test]
+    fn died_rooms_pure_policy() {
+        use std::collections::HashSet;
+        let hs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
+        let stopped = HashSet::new();
+
+        // 正常死亡：上轮有、本轮无 → 检出。
+        let prev = hs(&["a", "b"]);
+        let now = hs(&["a"]);
+        assert_eq!(died_rooms(&prev, &now, &stopped), vec!["b".to_string()]);
+
+        // monitor 自己停的：不视为死亡（避免误踢）。
+        let mut stopped2 = HashSet::new();
+        stopped2.insert("b".to_string());
+        assert!(died_rooms(&prev, &now, &stopped2).is_empty());
+
+        // 无变化 / 重建（两轮都有）：不检出。
+        assert!(died_rooms(&prev, &prev, &stopped).is_empty());
+        assert!(died_rooms(&now, &now, &stopped).is_empty());
+
+        // 多房间死亡：排序稳定。
+        let prev3 = hs(&["c", "a", "b"]);
+        let now3 = hs(&["a"]);
+        assert_eq!(
+            died_rooms(&prev3, &now3, &stopped),
+            vec!["b".to_string(), "c".to_string()]
+        );
     }
 
     #[cfg(unix)]

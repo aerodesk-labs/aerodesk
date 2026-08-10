@@ -10,6 +10,8 @@
 #   桥 p99 ≤ 直连 p99×4+500ms（SCTP 每跳 ~150ms，见 BRIDGE.md 实测）
 # 场景 3（桥死亡重建，#246）：kill 桥 → 新 viewer 加入 → 信令自动重建桥（spawn=2）
 #   恢复解码，自然死亡不触发失败冷却
+# 场景 4（连接中 viewer 自动恢复，#249）：kill 桥 → signal monitor 检测死亡 →
+#   SFU room-kick 断开已连接 viewer → 客户端 --reconnect 重连 → 自动重建桥恢复解码
 # 场景 2（回退）：PoP-B 信令改用 BRIDGE_CMD=false（桥必失败）→ viewer 加入 →
 #   信令回退 v1 Redirect → viewer 自动跟随到 pop-a 直连解码。
 set -uo pipefail
@@ -146,7 +148,8 @@ kill "$VIEW_B" 2>/dev/null || true
 sleep 1
 pkill -f 'aerodesk-bridge' 2>/dev/null || true
 sleep 2
-"$TARGET_DIR/aerodesk-cli" --role viewer --signal "ws://127.0.0.1:${PLAIN_B}" --room "$ROOM" --token "$AUTH" \
+# --reconnect：场景 4 需要连接中 viewer 在 kick 后自动重连。
+"$TARGET_DIR/aerodesk-cli" --role viewer --signal "ws://127.0.0.1:${PLAIN_B}" --room "$ROOM" --token "$AUTH" --reconnect \
   >/tmp/bfb-view-b3.log 2>&1 &
 VIEW_B=$!
 wait_decoded /tmp/bfb-view-b3.log || fail "场景3：桥死亡后 viewer 未恢复解码（见 /tmp/bfb-view-b3.log）"
@@ -156,6 +159,36 @@ SPAWNS=$(grep -c "bridge: spawned" /tmp/bfb-sig-b.log 2>/dev/null || echo 0)
 grep -q "bridge: room $ROOM ready" /tmp/bfb-sig-b.log || fail "场景3：新桥未就绪"
 grep -q "fail cooldown" /tmp/bfb-sig-b.log && fail "场景3：自然死亡不应触发失败冷却"
 echo "  场景3 PASS：桥死亡后新 viewer 自动重建桥（spawn=${SPAWNS}）并恢复解码"
+
+echo "== 场景 4：连接中 viewer 自动恢复（桥死亡 → SFU room-kick → --reconnect → 重建桥）"
+BEFORE=$(grep -c "DECODED:" /tmp/bfb-view-b3.log 2>/dev/null || echo 0)
+pkill -f 'aerodesk-bridge' 2>/dev/null || true
+ok=0
+for _ in $(seq 1 240); do
+  if grep -q "reconnecting" /tmp/bfb-view-b3.log 2>/dev/null; then ok=1; break; fi
+  sleep 0.5
+done
+[ "$ok" = "1" ] || fail "场景4：viewer 未触发重连（见 /tmp/bfb-view-b3.log）"
+# 先等信令重建桥（spawn≥3），再等 viewer 出现新的解码统计行（重连后会话计数重置）。
+ok=0
+for _ in $(seq 1 240); do
+  N=$(grep -c "bridge: spawned" /tmp/bfb-sig-b.log 2>/dev/null || echo 0)
+  [ "${N:-0}" -ge 3 ] && ok=1 && break
+  sleep 0.5
+done
+[ "$ok" = "1" ] || fail "场景4：恢复后桥未重建（见 /tmp/bfb-sig-b.log）"
+ok=0
+for _ in $(seq 1 240); do
+  AFTER=$(grep -c "DECODED:" /tmp/bfb-view-b3.log 2>/dev/null || echo 0)
+  [ "${AFTER:-0}" -gt "${BEFORE:-0}" ] && ok=1 && break
+  sleep 0.5
+done
+[ "$ok" = "1" ] || fail "场景4：viewer 重连后未恢复解码"
+grep -q "bridge died for room $ROOM" /tmp/bfb-sig-b.log || fail "场景4：signal 未检测到桥死亡"
+grep -q "kicking SFU room" /tmp/bfb-sig-b.log || fail "场景4：signal 未执行 SFU room-kick"
+SPAWNS4=$(grep -c "bridge: spawned" /tmp/bfb-sig-b.log 2>/dev/null || echo 0)
+grep -q "fail cooldown" /tmp/bfb-sig-b.log && fail "场景4：恢复过程不应触发失败冷却"
+echo "  场景4 PASS：桥死亡 → kick → viewer 自动重连 → 重建桥（spawn=${SPAWNS4}）恢复解码"
 kill "$VIEW_B" "$PUB_A" 2>/dev/null || true
 sleep 1
 pkill -f 'aerodesk-bridge' 2>/dev/null || true
