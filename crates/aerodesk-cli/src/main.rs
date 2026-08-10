@@ -1128,7 +1128,7 @@ fn viewer(
     let mut display_sent = display.is_none();
     // #75 远程光标：cursor 通道日志（节流 1s，e2e 断言用）。
     let mut last_cursor_log = Instant::now();
-    // #8 端到端延迟：cursor 带发送时间戳，viewer 计算 one-way latency（节流 1s）。
+    // #8 端到端延迟：cursor 带发送时间戳，viewer 计算 one-way latency（节流 200ms，#253）。
     let mut last_latency_log = Instant::now();
     // #75/#109 单次输入（MCP 键鼠）：input 通道打开后发送一次/序列，500ms 后退出。
     let mut input_sent = send_input.is_none() && type_text.is_none();
@@ -1382,10 +1382,12 @@ fn viewer(
                             last_cursor_log = Instant::now();
                         }
                         // #8 端到端延迟：本地墙钟 - 发送墙钟（同机/同一时钟域有效）。
+                        // #253：节流 200ms（30Hz cursor 下 ~5 样本/s），p99 更快收敛；
+                        // 真实验收需 ≥30 样本（runbook）。
                         let now = now_ms();
                         if pos.sent_ms > 0
                             && now >= pos.sent_ms
-                            && last_latency_log.elapsed() >= Duration::from_secs(1)
+                            && last_latency_log.elapsed() >= Duration::from_millis(200)
                         {
                             info!("LATENCY: {} ms", now - pos.sent_ms);
                             last_latency_log = Instant::now();
