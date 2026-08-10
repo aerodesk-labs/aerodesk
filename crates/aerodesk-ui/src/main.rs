@@ -1031,6 +1031,8 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(ui) = win.upgrade() {
                 let _ = ui.show();
                 // “显示主窗口”：已打开时也要把窗口带到最前（含最小化还原）。
+                // 非 macOS 无此函数（托盘为 None），调用必须 cfg 门控（CI Linux/Windows 编译失败）。
+                #[cfg(target_os = "macos")]
                 focus_window_to_front(ui.window());
             }
         });
