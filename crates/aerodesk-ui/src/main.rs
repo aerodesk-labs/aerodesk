@@ -319,6 +319,9 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_addressbook(slint::ModelRc::new(slint::VecModel::from(
         load_addressbook(),
     )));
+    ui.set_device_groups(slint::ModelRc::new(slint::VecModel::from(
+        build_device_groups(&load_addressbook()),
+    )));
 
     // 设置（本地持久化）
     let mut settings = load_settings();
@@ -703,6 +706,7 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             let new: Vec<slint::SharedString> = items.iter().map(|s| s.into()).collect();
             ui.set_addressbook(slint::ModelRc::new(slint::VecModel::from(new.clone())));
+            ui.set_device_groups(slint::ModelRc::new(slint::VecModel::from(build_device_groups(&new))));
             save_addressbook(&new);
         }
     });
@@ -720,6 +724,7 @@ fn main() -> Result<(), slint::PlatformError> {
             items.retain(|i| i != entry.as_str());
             let new: Vec<slint::SharedString> = items.iter().map(|s| s.into()).collect();
             ui.set_addressbook(slint::ModelRc::new(slint::VecModel::from(new.clone())));
+            ui.set_device_groups(slint::ModelRc::new(slint::VecModel::from(build_device_groups(&new))));
             save_addressbook(&new);
             ui.set_status("已从地址簿删除".into());
         }
@@ -789,6 +794,7 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             let new: Vec<slint::SharedString> = items.iter().map(|s| s.into()).collect();
             ui.set_addressbook(slint::ModelRc::new(slint::VecModel::from(new.clone())));
+            ui.set_device_groups(slint::ModelRc::new(slint::VecModel::from(build_device_groups(&new))));
             save_addressbook(&new);
         }
     });
@@ -1337,6 +1343,49 @@ fn parse_addressbook(entry: &str) -> (String, String, String, String) {
     (name, room, server, group)
 }
 
+/// 按“分组”字段把地址簿聚合成设备组展示行：组标题行 + 组内设备行。
+/// 未分组始终排最前，其余组按组名排序；组内保持地址簿原有顺序。
+fn build_device_groups(items: &[slint::SharedString]) -> Vec<DeviceGroupEntry> {
+    const UNGROUPED: &str = "未分组";
+    // (组名, 组内原始条目)，保持首见顺序。
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for item in items {
+        let (_, _, _, group) = parse_addressbook(item.as_str());
+        let key = if group.is_empty() { UNGROUPED.to_string() } else { group };
+        if let Some(g) = groups.iter_mut().find(|(k, _)| k == &key) {
+            g.1.push(item.to_string());
+        } else {
+            groups.push((key, vec![item.to_string()]));
+        }
+    }
+    groups.sort_by(|a, b| {
+        let a_ug = a.0 == UNGROUPED;
+        let b_ug = b.0 == UNGROUPED;
+        match (a_ug, b_ug) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.0.cmp(&b.0),
+        }
+    });
+    let mut rows = Vec::new();
+    for (group, entries) in groups {
+        rows.push(DeviceGroupEntry {
+            is_header: true,
+            text: group.into(),
+            entry: Default::default(),
+        });
+        for entry in entries {
+            let (name, _, _, _) = parse_addressbook(&entry);
+            rows.push(DeviceGroupEntry {
+                is_header: false,
+                text: name.into(),
+                entry: entry.into(),
+            });
+        }
+    }
+    rows
+}
+
 /// 局域网扫描：取本机 IPv4，扫同 /24 网段的信令端口（默认 3003）。
 fn scan_lan() -> Vec<String> {
     use std::net::{TcpStream, UdpSocket};
@@ -1476,6 +1525,52 @@ mod tests {
         // 空/乱输入不 panic
         let (name, room, server, group) = parse_addressbook("");
         assert!(name.is_empty() && room.is_empty() && server.is_empty() && group.is_empty());
+    }
+
+    #[test]
+    fn device_groups_grouped_and_sorted() {
+        let items: Vec<slint::SharedString> = vec![
+            "NAS2 · demo · 10.0.0.2:3003 · 家庭".into(),
+            "办公室A · demo · 10.0.0.3:3003 · 办公室".into(),
+            "单机 · demo · 10.0.0.4:3003".into(),
+            "NAS1 · demo · 10.0.0.1:3003 · 家庭".into(),
+        ];
+        let rows = build_device_groups(&items);
+        // 未分组 -> 办公室 -> 家庭（组名排序）
+        let headers: Vec<String> = rows
+            .iter()
+            .filter(|r| r.is_header)
+            .map(|r| r.text.to_string())
+            .collect();
+        assert_eq!(headers, vec!["未分组", "办公室", "家庭"]);
+        // 组内设备行按地址簿顺序，设备行 text=别名、entry=原始条目
+        let group_rows: Vec<(&str, &str)> = rows
+            .iter()
+            .filter(|r| !r.is_header)
+            .map(|r| (r.text.as_str(), r.entry.as_str()))
+            .collect();
+        assert_eq!(
+            group_rows,
+            vec![
+                ("单机", "单机 · demo · 10.0.0.4:3003"),
+                ("办公室A", "办公室A · demo · 10.0.0.3:3003 · 办公室"),
+                ("NAS2", "NAS2 · demo · 10.0.0.2:3003 · 家庭"),
+                ("NAS1", "NAS1 · demo · 10.0.0.1:3003 · 家庭"),
+            ]
+        );
+    }
+
+    #[test]
+    fn device_groups_empty() {
+        assert!(build_device_groups(&[]).is_empty());
+        // 全部未分组 -> 单个“未分组”标题 + 设备行
+        let items: Vec<slint::SharedString> = vec!["x · demo · h:3003".into()];
+        let rows = build_device_groups(&items);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].is_header);
+        assert_eq!(rows[0].text.to_string(), "未分组");
+        assert!(!rows[1].is_header);
+        assert_eq!(rows[1].text.to_string(), "x");
     }
 
     #[test]
