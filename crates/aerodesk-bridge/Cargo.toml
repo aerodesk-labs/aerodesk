@@ -8,6 +8,7 @@ description = "Cross-PoP media bridge client (#216 M1): viewer on remote PoP + p
 [dependencies]
 aerodesk-core = { path = "../aerodesk-core" }
 aerodesk-protocol = { path = "../aerodesk-protocol" }
+serde_json.workspace = true
 str0m = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "std"] }

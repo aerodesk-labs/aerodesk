@@ -8,9 +8,13 @@
 //! 关键帧：本 PoP viewer 的 KeyframeRequest 回传到主 PoP publisher（viewer leg
 //! `Writer::request_keyframe`），保证跨 PoP 加入后能拿到 IDR 解码。
 //!
-//! M2（data channel 桥）：按 label 白名单（input/file/cursor/cmd，跳过
-//! offer/answer 与 control）双向转发 ChannelData——本 PoP viewer 的输入/文件
-//! 经 bridge 到主 PoP publisher，主 PoP 的剪贴板/文件/光标反向到本 PoP viewer。
+//! M2（data channel 桥）：按 label+内容白名单（input/file/cursor/cmd + control
+//! 的显示器切换 {"display":N}，跳过 offer/answer 与 control 的选层请求）双向转发
+//! ChannelData——本 PoP viewer 的输入/文件/显示器切换经 bridge 到主 PoP publisher，
+//! 主 PoP 的剪贴板/文件/光标反向到本 PoP viewer。
+//!
+//! M6（#260）：媒体按 kind 转发（视频+音频），connect_live_role_codec 双腿协商
+//! 音频 track。
 //!
 //! 用法：
 //! ```sh
@@ -32,9 +36,19 @@ use str0m::media::{KeyframeRequestKind, MediaData};
 use str0m::net::{Protocol, Receive};
 use str0m::{Input, Output};
 
-/// M2 转发白名单：跳过 offer/answer（信令 SDP）与 control（viewer→SFU 选层）。
-fn is_forwardable_label(label: &str) -> bool {
-    matches!(label, "input" | "file" | "cursor" | "cmd")
+/// M2/M6 转发判定：按 label + 内容。
+/// - input/file/cursor/cmd：直接放行；
+/// - control：仅放行显示器切换 `{"display":N}`（#260），跳过选层（layer）请求
+///   （由本 PoP SFU 处理）；
+/// - offer/answer 等其它 label：不放行。
+fn should_forward(label: &str, data: &[u8]) -> bool {
+    match label {
+        "input" | "file" | "cursor" | "cmd" => true,
+        "control" => serde_json::from_slice::<serde_json::Value>(data)
+            .ok()
+            .is_some_and(|v| v.get("display").is_some()),
+        _ => false,
+    }
 }
 
 fn arg(args: &[String], key: &str) -> Option<String> {
@@ -128,7 +142,7 @@ fn run_viewer(
                 // M2：主 PoP publisher → 本 PoP viewer（剪贴板/文件/光标等）。
                 ClientEvent::ChannelData(cid, binary, data) => {
                     if let Some(label) = view.endpoint.channel_label(cid) {
-                        if is_forwardable_label(&label)
+                        if should_forward(&label, &data)
                             && data_to_local.send((label, binary, data)).is_err()
                         {
                             tracing::warn!("viewer: data channel closed, exiting");
@@ -198,6 +212,9 @@ fn main() {
         std::process::exit(1);
     };
     tracing::info!("viewer video mid: {view_mid:?}");
+    // #260：音频 mid（可能为 None，仅转发有音频的发布流）。
+    let view_audio_mid = view.audio_mid;
+    tracing::info!("viewer audio mid: {view_audio_mid:?}");
 
     // publisher leg（本 PoP，转发）
     let mut local = connect_live_role_codec(
@@ -239,6 +256,7 @@ fn main() {
 
     let mut forwarded = 0u64;
     let mut forwarded_kf = 0u64;
+    let mut forwarded_audio = 0u64;
     let mut data_forwarded = 0u64;
     let mut data_forwarded_bytes = 0u64;
     let mut last_stats = Instant::now();
@@ -255,7 +273,7 @@ fn main() {
             match ev {
                 ClientEvent::ChannelData(cid, binary, data) => {
                     if let Some(label) = local.endpoint.channel_label(cid) {
-                        if is_forwardable_label(&label) {
+                        if should_forward(&label, &data) {
                             data_forwarded += 1;
                             data_forwarded_bytes += data.len() as u64;
                             if data_to_remote_tx.send((label, binary, data)).is_err() {
@@ -297,19 +315,30 @@ fn main() {
             next_kf_at = Some(Instant::now() + Duration::from_secs(1));
         }
 
-        // 转发媒体：原样重打包（不重编码）
+        // 转发媒体：原样重打包（不重编码）。#260：按 kind 选 writer——
+        // viewer leg 的 audio mid 对应 local leg 的 audio mid，其余按 video。
+        let local_audio_mid = local.audio_mid;
         while let Ok(md) = media_rx.try_recv() {
-            let Some(w) = local.endpoint.writer(local_mid) else {
-                tracing::debug!("publisher: no writer for mid {local_mid:?}");
+            let target_mid = if view_audio_mid == Some(md.mid) {
+                local_audio_mid
+            } else {
+                Some(local_mid)
+            };
+            let Some(w) = target_mid.and_then(|mid| local.endpoint.writer(mid)) else {
+                tracing::debug!("publisher: no writer for mid {target_mid:?}");
                 break;
             };
             let pt = w.match_params(md.params.clone()).unwrap_or(md.pt);
             match w.write(pt, Instant::now(), md.time, md.data.clone()) {
                 Ok(()) => {
-                    forwarded += 1;
-                    if md.is_keyframe() {
-                        forwarded_kf += 1;
-                        tracing::info!("publisher: forwarded keyframe #{forwarded_kf}");
+                    if view_audio_mid == Some(md.mid) {
+                        forwarded_audio += 1;
+                    } else {
+                        forwarded += 1;
+                        if md.is_keyframe() {
+                            forwarded_kf += 1;
+                            tracing::info!("publisher: forwarded keyframe #{forwarded_kf}");
+                        }
                     }
                 }
                 Err(e) => tracing::debug!("publisher: write {e:?}"),
@@ -319,10 +348,42 @@ fn main() {
         if last_stats.elapsed() >= Duration::from_secs(5) {
             let (vm, vk) = stats_rx.try_recv().unwrap_or((0, 0));
             tracing::info!(
-                "bridge stats: viewer_media={vm} viewer_kf={vk} forwarded={forwarded} forwarded_kf={forwarded_kf} data_forwarded={data_forwarded} data_bytes={data_forwarded_bytes}"
+                "bridge stats: viewer_media={vm} viewer_kf={vk} forwarded={forwarded} forwarded_kf={forwarded_kf} forwarded_audio={forwarded_audio} data_forwarded={data_forwarded} data_bytes={data_forwarded_bytes}"
             );
             last_stats = Instant::now();
         }
         std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_forward;
+
+    #[test]
+    fn whitelist_labels_forwarded() {
+        for label in ["input", "file", "cursor", "cmd"] {
+            assert!(should_forward(label, b"{}"), "{label} 应放行");
+        }
+    }
+
+    #[test]
+    fn control_display_forwarded_layer_skipped() {
+        assert!(should_forward("control", br#"{"display":1}"#));
+        assert!(should_forward("control", br#"{"display":0}"#));
+        assert!(
+            !should_forward("control", br#"{"layer":"f"}"#),
+            "选层请求由本 PoP SFU 处理"
+        );
+        assert!(!should_forward("control", b"not-json"), "非法 JSON 不放行");
+        assert!(!should_forward("control", b"{}"), "空对象不放行");
+    }
+
+    #[test]
+    fn signaling_labels_never_forwarded() {
+        assert!(!should_forward("offer/answer", b"{}"));
+        assert!(!should_forward("control", br#"{"display":1,"layer":"f"}"#) == false);
+        // 混合消息含 display 也放行（display 优先）。
+        assert!(should_forward("control", br#"{"display":1,"layer":"f"}"#));
     }
 }

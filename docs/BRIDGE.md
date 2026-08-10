@@ -20,9 +20,13 @@ PoP-A (14600 系)                        PoP-B (14700 系)
 - **关键帧**：bridge 初次加入会错过首帧 IDR，主动向主 PoP publisher 连发 3 次 PLI
   （0/1/2s）；本 PoP viewer 的 KeyframeRequest 也会实时回传到主 PoP publisher
   （`Writer::request_keyframe`）。
-- **M2（data channel 桥）**：按 label 白名单（input/file/cursor/cmd，跳过
-  offer/answer 与 control）双向转发 `ChannelData`——本 PoP viewer 的 input 经 bridge
-  到主 PoP publisher（`inject` 生效），主 PoP 的剪贴板/文件/光标反向。
+- **M2（data channel 桥）**：按 label+内容白名单（input/file/cursor/cmd + control
+  的显示器切换 `{"display":N}`，跳过 offer/answer 与 control 选层请求）双向转发
+  `ChannelData`——本 PoP viewer 的 input/显示器切换经 bridge 到主 PoP publisher
+  （`inject` 生效），主 PoP 的剪贴板/文件/光标反向。
+- **M6（#260）**：媒体按 kind 转发（视频+音频）——`connect_live_role_codec` 双腿
+  协商音频 track（viewer recvonly / publisher send），bridge 按 md.mid 选 video/
+  audio writer 原样重打包；control 白名单放行显示器切换。
 - **M3（文件，#230）**：跨 PoP 文件传输——PoP-B viewer `--send-file` → SFU-B →
   bridge（file 白名单）→ SFU-A → PoP-A publisher `--recv-dir`，落盘 sha256 与源一致。
   bridge 线程 16MB 栈（数据通道大块发送在默认 2MB 栈会溢出，见 RULE）。
@@ -46,6 +50,8 @@ aerodesk-bridge --remote-signal ws://127.0.0.1:14603 --local-signal ws://127.0.0
 | PoP-B viewer 跨 PoP 收流 | RECEIVED 31-75 帧 / DECODED 6-32 |
 | bridge 转发 | ~32-73 包/次，关键帧 1-2（初始 PLI 生效） |
 | M2 input 跨 PoP | PoP-A publisher 收到 `inject: seq=0 MouseMove`，data_forwarded=32/次 |
+| M6 音频跨 PoP | PoP-B viewer AUDIO>0（PCMU，bridge 按 kind 转发，#260） |
+| M6 显示器切换跨 PoP | PoP-B viewer `--display 1` → PoP-A publisher 收到 `control: display switch request -> display 1` |
 | M3 文件跨 PoP | 512KB sha256 一致（连跑 2 次） |
 | 双 SFU 客户端 | PoP-A=2（publisher+bridge-view），PoP-B=2（bridge-pub+viewer） |
 | 无重编码 | bridge 无编码器依赖，载荷原样重打包 |

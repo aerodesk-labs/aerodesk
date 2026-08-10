@@ -42,6 +42,8 @@ pub struct LiveSession {
     pub endpoint: crate::Endpoint,
     pub socket: MediaSocket,
     pub video_mid: Option<str0m::media::Mid>,
+    /// #216 M6：音频 mid（桥跨 PoP 转发用；CLI 不用此字段）。
+    pub audio_mid: Option<str0m::media::Mid>,
     pub room: String,
     pub peer_id: String,
     pub ice_connected: bool,
@@ -266,12 +268,16 @@ fn connect_live_role_impl(
         }
     }
     // #12：viewer 的 offer 用 recvonly（SFU 拒绝 viewer 发布媒体）。
+    // #216 M6：桥跨 PoP 音频转发需要双腿都协商音频 track（viewer recvonly /
+    // publisher send）；仅 bridge 走 connect_live_role_codec，CLI 不受影响。
     if role == Role::Viewer {
         endpoint.add_video_recvonly();
+        endpoint.add_audio_recvonly();
     } else {
         endpoint.add_video();
+        endpoint.add_audio();
     }
-    let (offer, pending, video_mid, _audio_mid) = endpoint
+    let (offer, pending, video_mid, audio_mid) = endpoint
         .create_offer()
         .map_err(|e| format!("offer: {e:?}"))?;
     let offer_json = serde_json::to_string(&offer).map_err(|e| e.to_string())?;
@@ -336,6 +342,7 @@ fn connect_live_role_impl(
         endpoint,
         socket,
         video_mid,
+        audio_mid,
         room: room.to_string(),
         peer_id,
         ice_connected,
