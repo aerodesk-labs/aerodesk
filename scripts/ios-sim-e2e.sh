@@ -55,7 +55,10 @@ for _ in $(seq 1 50); do
        && nc -z 127.0.0.1 "${SIGNAL_PLAIN_PORT:-3003}" 2>/dev/null; then break; fi
     sleep 0.2
 done
-./target/debug/aerodesk-cli --role publisher --signal "ws://127.0.0.1:${SIGNAL_PLAIN_PORT:-3003}" --room "$ROOM" --encoder x264 >/tmp/iossim-pub.log 2>&1 &
+# 发布端编码：CI 默认 x264（合成源，无采集权限）；本地可 PUBLISHER_ENCODER=screen
+# 验证默认 h265（HEVC）真实屏幕硬编 → iOS 硬解链路。
+PUBLISHER_ENCODER="${PUBLISHER_ENCODER:-x264}"
+./target/debug/aerodesk-cli --role publisher --signal "ws://127.0.0.1:${SIGNAL_PLAIN_PORT:-3003}" --room "$ROOM" --encoder "$PUBLISHER_ENCODER" >/tmp/iossim-pub.log 2>&1 &
 PUB=$!
 sleep 2
 

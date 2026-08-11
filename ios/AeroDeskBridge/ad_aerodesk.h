@@ -42,6 +42,9 @@ int ad_viewer_take_frame(void *viewer, void **out);
 /// 发送输入事件（JSON InputFrame）到 input 数据通道。返回 0=入队，<0=错误。
 int ad_viewer_send_input(void *viewer, const char *json);
 
+/// 取解码后的 PCM i16 音频样本（8kHz 单声道）。返回拷贝样本数（0=暂无，<0=错误）。
+int ad_viewer_take_audio(void *viewer, int16_t *dst, size_t max);
+
 
 
 #ifdef __cplusplus
