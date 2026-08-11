@@ -145,10 +145,28 @@ fn run() {
         .and_then(|v| v.parse::<u64>().ok())
         .map(std::time::Duration::from_secs);
     // #74 视频编码：--codec h264|h265|vp9|av1（配 --encoder ffmpeg）。
-    let video_codec: Codec = match arg(&args, "--codec").as_deref() {
+    // 默认：macOS 支持硬编 HEVC 时优先 h265（同画质码率低 30-50%），
+    // 否则回退 h264（全兼容）。显式 --codec 时尊重用户选择。
+    let codec_arg = arg(&args, "--codec").map(|s| s.to_string());
+    let video_codec: Codec = match codec_arg.as_deref() {
         Some("h265") | Some("hevc") => Codec::Hevc,
         Some("vp9") => Codec::Vp9,
         Some("av1") => Codec::Av1,
+        Some("h264") => Codec::H264,
+        None => {
+            #[cfg(target_os = "macos")]
+            {
+                if aerodesk_macos::vt_encoder::VtEncoder::hevc_encoder_available() {
+                    Codec::Hevc
+                } else {
+                    Codec::H264
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Codec::H264
+            }
+        }
         _ => Codec::H264,
     };
 
