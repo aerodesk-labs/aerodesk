@@ -5,6 +5,7 @@
 slint::include_modules!();
 #[cfg(not(target_os = "macos"))]
 mod generic_media;
+mod generic_viewer;
 mod keymap;
 #[cfg(target_os = "macos")]
 mod macos_media;
