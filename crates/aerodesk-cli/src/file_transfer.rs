@@ -102,7 +102,7 @@ fn maybe_poll_clipboard(
     ft: &mut aerodesk_core::file_transfer::FileTransfer,
     endpoint: &mut Endpoint,
 ) {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let mut last = LAST_CLIP_POLL.lock().unwrap();
         if last
@@ -124,7 +124,7 @@ fn maybe_poll_clipboard(
             tracing::info!("clipboard: sent {} chars", text.chars().count());
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (ft, endpoint);
     }

@@ -89,6 +89,7 @@ name = "aerodesk-core"
 version = "0.1.0"
 dependencies = [
  "aerodesk-protocol",
+ "base64ct",
  "libc",
  "md-5",
  "pcap-file",
