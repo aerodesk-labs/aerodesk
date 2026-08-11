@@ -9,6 +9,7 @@
 
 #[cfg(target_os = "macos")]
 pub mod audio;
+pub mod audio_capture;
 pub mod capture;
 pub mod cursor;
 pub mod decode;
