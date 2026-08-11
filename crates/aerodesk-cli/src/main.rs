@@ -2268,7 +2268,10 @@ fn publisher_capture(
         };
         // 编码分辨率 = 采集实际尺寸（保持显示器宽高比）。
         let (cw, ch) = (capture.width(), capture.height());
-        info!("screen capture started at {cw}x{ch} (display {})", capture.display_id());
+        info!(
+            "screen capture started at {cw}x{ch} (display {}), codec={codec:?}",
+            capture.display_id()
+        );
         layers.push((
             None,
             VtEncoder::new_with_codec(cw, ch, FPS, 8_000_000, vt_codec).expect("vt encoder"),
