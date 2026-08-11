@@ -137,4 +137,8 @@ impl aerodesk_core::platform::MediaSource for ScreenCapture {
     }
 
     fn stop(&mut self) {}
+
+    fn display_id(&self) -> Option<u32> {
+        Some(ScreenCapture::display_id(self))
+    }
 }

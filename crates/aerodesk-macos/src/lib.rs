@@ -9,11 +9,13 @@
 
 #[cfg(target_os = "macos")]
 pub mod audio;
+pub mod camera;
 pub mod capture;
 pub mod cursor;
 pub mod decode;
 pub mod dock;
 pub mod encoder;
+pub mod file_picker;
 pub mod inject;
 pub mod permissions;
 pub mod synthetic;

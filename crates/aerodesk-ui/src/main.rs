@@ -10,6 +10,7 @@ mod keymap;
 mod macos_media;
 use slint::Model;
 
+use aerodesk_core::platform::{FilePicker, Permissions};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1266,22 +1267,17 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             #[cfg(target_os = "macos")]
             {
-                // 文件选择器会阻塞等待用户选择，放后台线程避免卡 UI 事件循环。
+                // #277 平台抽象：文件选择器走 core `FilePicker` trait。
+                // 选择器会阻塞等待用户选择，放后台线程避免卡 UI 事件循环。
                 let ui = ui.as_weak();
                 std::thread::spawn(move || {
-                    let out = std::process::Command::new("osascript")
-                        .args(["-e", "POSIX path of (choose file)"])
-                        .output();
+                    let picked = aerodesk_macos::file_picker::MacFilePicker.pick_file();
                     let Some(ui) = ui.upgrade() else {
                         return;
                     };
-                    match out {
-                        Ok(o) if o.status.success() => {
-                            let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                            if path.is_empty() {
-                                ui.set_session_status("已取消选择文件".into());
-                                return;
-                            }
+                    match picked {
+                        Ok(Some(path)) => {
+                            let path = path.clone();
                             let idx = ui.get_active_session() as usize;
                             let sessions = SESSIONS.lock().unwrap();
                             if let Some(s) = sessions.get(idx) {
@@ -1293,8 +1289,13 @@ fn main() -> Result<(), slint::PlatformError> {
                                 ui.set_session_status("发送文件：未连接会话".into());
                             }
                         }
-                        _ => {
-                            ui.set_session_status("发送文件：无法打开文件选择器".into());
+                        Ok(None) => {
+                            ui.set_session_status("已取消选择文件".into());
+                        }
+                        Err(e) => {
+                            ui.set_session_status(
+                                format!("发送文件：无法打开文件选择器（{e}）").into(),
+                            );
                         }
                     }
                 });
@@ -1421,10 +1422,9 @@ fn main() -> Result<(), slint::PlatformError> {
             let ui = ui.unwrap();
             #[cfg(target_os = "macos")]
             {
-                let (sc, ax) = (
-                    aerodesk_macos::permissions::screen_capture_authorized(),
-                    aerodesk_macos::permissions::accessibility_authorized(),
-                );
+                // #277 平台抽象：权限查询走 core `Permissions` trait。
+                let p = aerodesk_macos::permissions::MacPermissions;
+                let (sc, ax) = (p.screen_capture_authorized(), p.accessibility_authorized());
                 ui.set_perm_screen(if sc {
                     "已授权".into()
                 } else {
@@ -1451,12 +1451,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 // 显式请求屏幕录制：CGRequestScreenCaptureAccess 会把本应用
                 // 登记进「屏幕录制」授权列表（不在列表时打开设置窗口），
                 // 后台线程避免阻塞 UI；随后再打开系统设置对应面板。
-                std::thread::spawn(|| {
-                    let _ = aerodesk_macos::permissions::request_screen_capture();
+                // #277 平台抽象：权限请求/引导走 core `Permissions` trait。
+                let p = aerodesk_macos::permissions::MacPermissions;
+                std::thread::spawn(move || {
+                    let _ = p.request_screen_capture();
                 });
-                aerodesk_macos::permissions::open_system_settings(
-                    aerodesk_macos::permissions::SettingsPane::ScreenCapture,
-                );
+                let p2 = aerodesk_macos::permissions::MacPermissions;
+                p2.open_screen_capture_settings();
             }
             #[cfg(not(target_os = "macos"))]
             if let Some(ui) = ui.upgrade() {
@@ -1468,9 +1469,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui = ui.as_weak();
         move || {
             #[cfg(target_os = "macos")]
-            aerodesk_macos::permissions::open_system_settings(
-                aerodesk_macos::permissions::SettingsPane::Accessibility,
-            );
+            aerodesk_macos::permissions::MacPermissions.open_accessibility_settings();
             #[cfg(not(target_os = "macos"))]
             if let Some(ui) = ui.upgrade() {
                 ui.set_settings_status("被控端权限引导仅 macOS 实现".into());
@@ -1483,7 +1482,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // 放后台线程避免 SCShareableContent 首调阻塞首屏。
     #[cfg(target_os = "macos")]
     std::thread::spawn(|| {
-        aerodesk_macos::permissions::trigger_screen_capture_registration();
+        aerodesk_macos::permissions::MacPermissions.trigger_screen_capture_registration();
     });
     // 启动时刷一次权限状态
     ui.invoke_refresh_perms();

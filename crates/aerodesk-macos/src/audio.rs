@@ -327,4 +327,8 @@ impl aerodesk_core::platform::AudioSink for AudioSink {
     fn set_muted(&mut self, muted: bool) {
         self.set_muted(muted);
     }
+
+    fn set_volume(&mut self, volume: u16) {
+        self.set_volume(volume);
+    }
 }

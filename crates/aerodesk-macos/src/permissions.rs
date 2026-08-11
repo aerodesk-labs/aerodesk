@@ -73,3 +73,32 @@ pub fn trigger_screen_capture_registration() {
 pub fn request_screen_capture() -> bool {
     ScreenCaptureAccess.request()
 }
+
+/// 核心 `Permissions` trait 实现（macOS TCC）。
+pub struct MacPermissions;
+
+impl aerodesk_core::platform::Permissions for MacPermissions {
+    fn screen_capture_authorized(&self) -> bool {
+        screen_capture_authorized()
+    }
+
+    fn accessibility_authorized(&self) -> bool {
+        accessibility_authorized()
+    }
+
+    fn request_screen_capture(&self) -> bool {
+        request_screen_capture()
+    }
+
+    fn open_screen_capture_settings(&self) {
+        open_system_settings(SettingsPane::ScreenCapture);
+    }
+
+    fn open_accessibility_settings(&self) {
+        open_system_settings(SettingsPane::Accessibility);
+    }
+
+    fn trigger_screen_capture_registration(&self) {
+        trigger_screen_capture_registration();
+    }
+}

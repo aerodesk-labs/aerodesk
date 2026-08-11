@@ -41,6 +41,10 @@ pub trait MediaSource {
     /// 取下一帧（阻塞或回调）。
     fn next_frame(&mut self) -> Result<Option<VideoFrame>, Self::Error>;
     fn stop(&mut self);
+    /// 当前采集的显示器标识（多显示器坐标基准；单显示器/未知返回 None）。
+    fn display_id(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// 硬件/软件编码器（H.264 / HEVC / AV1，按平台能力选择）。
@@ -78,12 +82,16 @@ pub trait Renderer {
 pub trait InputInjector {
     type Error: std::fmt::Display + std::fmt::Debug;
     fn inject(&mut self, event: &aerodesk_protocol::input::InputEvent) -> Result<(), Self::Error>;
+    /// 设置输入注入的坐标基准显示器（多显示器切换时由宿主调用）。
+    fn set_active_display(&mut self, _display_id: Option<u32>) {}
 }
 
 /// 音频播放（观看端）。
 pub trait AudioSink {
     fn push_pcm(&mut self, samples: &[i16]);
     fn set_muted(&mut self, muted: bool);
+    /// 音量 0..=100。
+    fn set_volume(&mut self, volume: u16);
 }
 
 /// 音频采集（被控端：系统音频 / 麦克风，输出单声道 f32 样本流）。
@@ -105,5 +113,78 @@ pub trait CursorSource {
     fn position_normalized(&mut self) -> Option<(f64, f64)>;
 }
 
+/// 系统权限能力（屏幕录制 / 辅助功能等；各平台实现）。
+pub trait Permissions {
+    fn screen_capture_authorized(&self) -> bool;
+    fn accessibility_authorized(&self) -> bool;
+    fn request_screen_capture(&self) -> bool;
+    fn open_screen_capture_settings(&self);
+    fn open_accessibility_settings(&self);
+    /// 触发系统权限登记（如 macOS TCC 采集注册）。
+    fn trigger_screen_capture_registration(&self);
+}
+
+/// 摄像头帧（远端摄像头转发；YUV 或 raw 由实现决定）。
+#[derive(Debug, Clone)]
+pub struct CameraFrame {
+    pub raw: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub pts_ms: u64,
+}
+
+/// 摄像头源（远端摄像头转发；前瞻抽象，各平台批次实现）。
+pub trait CameraSource {
+    type Error: std::fmt::Display + std::fmt::Debug;
+    fn start(&mut self, width: u32, height: u32, fps: u32) -> Result<(), Self::Error>;
+    fn next_frame(&mut self) -> Result<Option<CameraFrame>, Self::Error>;
+    fn stop(&mut self);
+}
+
+/// 文件选择器（观看端「发送文件」选择本地文件路径）。
+pub trait FilePicker {
+    type Error: std::fmt::Display + std::fmt::Debug;
+    /// 弹出系统文件选择器；返回所选文件路径（取消返回 None）。
+    fn pick_file(&self) -> Result<Option<String>, Self::Error>;
+}
+
 /// 便捷 re-export：`use aerodesk_core::platform::*` 同时拿到 Codec/EncodedUnit。
 pub use crate::media_pipeline::{Codec, EncodedUnit};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DummySource;
+    impl MediaSource for DummySource {
+        type Error = String;
+        fn start(&mut self, _fps: u32, _with_cursor: bool) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn next_frame(&mut self) -> Result<Option<VideoFrame>, Self::Error> {
+            Ok(None)
+        }
+        fn stop(&mut self) {}
+    }
+
+    struct DummyInjector;
+    impl InputInjector for DummyInjector {
+        type Error = String;
+        fn inject(
+            &mut self,
+            _event: &aerodesk_protocol::input::InputEvent,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    /// #277 默认方法平台中立：未知显示器返回 None、坐标基准切换无副作用。
+    #[test]
+    fn trait_defaults_are_platform_neutral() {
+        let mut src = DummySource;
+        assert_eq!(MediaSource::display_id(&src), None);
+        let mut inj = DummyInjector;
+        InputInjector::set_active_display(&mut inj, Some(1));
+        InputInjector::set_active_display(&mut inj, None);
+    }
+}
