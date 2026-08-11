@@ -2,15 +2,19 @@
 //!
 //! 角色：被控端 + 观看端。
 //! - 采集：PipeWire Portal（Wayland）/ XRandR+XShm（X11 回退）
-//! - 编码：VAAPI（H.264/AV1）硬编；解码：VAAPI/VDPAU
+//! - 编码：VAAPI 硬编（`vaapi` 模块；软编 x264 回退）
+//! - 解码：VAAPI 硬解（`vaapi` 模块；软解 OpenH264 回退）
 //! - 注入：XTest（X11）/ uinput（Wayland）
 //!
-//! 平台 API 通过 FFI（libpipewire / libva / libX11 / libevdev），
-//! 本骨架先定 trait 与数据流，Linux 真机阶段补齐实现。
+//! 平台 API 通过 FFI（libpipewire / libva / libX11 / libevdev）；VAAPI 走
+//! FFmpeg `AVHWDeviceContext`（libavutil），uinput 走 `/dev/uinput` ioctl。
 
 pub mod capture;
 pub mod encode;
 pub mod inject;
+/// VAAPI 硬编/硬解（仅 Linux；设备不可用时上层回退软编/软解）。
+#[cfg(target_os = "linux")]
+pub mod vaapi;
 
 /// 采集帧（RGBA，与编码器输入对齐）。
 #[derive(Debug, Clone)]

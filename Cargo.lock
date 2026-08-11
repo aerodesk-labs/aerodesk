@@ -134,6 +134,8 @@ dependencies = [
  "aerodesk-core",
  "aerodesk-protocol",
  "aerodesk-softenc",
+ "ffmpeg-next",
+ "libc",
  "tracing",
  "x11rb",
 ]

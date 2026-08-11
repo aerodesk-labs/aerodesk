@@ -10,7 +10,7 @@
 |---|---|---|---|---|---|---|---|
 | macOS | ✅（web-e2e：观看/发布/文件/重连） | ✅（smoke + UI e2e） | ⬜ 待 iPhone | ⬜ 待 Android | ⬜ 待 Win | ⬜ 待 Linux | ⬜ 待鸿蒙 |
 | Windows | ⬜（DXGI 采集 + SendInput 注入代码就绪，CI 编译/e2e 守护） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
-| Linux | ⬜（X11 采集 + XTest 注入代码就绪，CI 编译/e2e 守护） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
+| Linux | ⬜（X11 采集 + XTest 注入 + VAAPI 硬编/硬解 + uinput 注入代码就绪，CI 编译/e2e 守护；Wayland/PipeWire 采集待接入） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 | Android | ⬜（MediaProjection + MediaCodec + 无障碍注入代码就绪；**模拟器经 TURN relay 已出帧解码（#201/#203）**，真机验收待设备） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 
 ## 各 issue 验收门槛
@@ -20,7 +20,7 @@
 | #1 iOS 壳层 | 壳 + H.264 硬解 + 模拟器 e2e（#31/#32/#39/#189） | iPhone 真机（A12+）：观看 macOS 流 |
 | #2 Android 真机 | 观看端 MediaCodec 渲染 + 被控端 MediaProjection/硬编/无障碍注入 + Android 14 前台服务（#156/#165/#187）；APK CI 守护 | Android 真机（API 26+）：端到端画面 + 输入 |
 | #3 Windows | DXGI 采集 + SendInput 注入 + OpenH264 软编/软解 + VDD（#159/#188）；Windows UI e2e CI 守护 | Win10/11 真机：端到端 + 真机编解码器记录 |
-| #4 Linux | X11 采集 + XTest 注入 + x264 软编 + OpenH264 软解 + 运行级自测（#179/#188/#190）；Linux UI e2e CI 守护 | Linux 真机：X11 端到端（Wayland/PipeWire、VAAPI 为后续） |
+| #4 Linux | X11 采集 + XTest 注入 + x264 软编 + OpenH264 软解 + VAAPI 硬编/硬解 + uinput 注入 + 运行级自测（#179/#188/#190）；Linux UI e2e CI 守护 | Linux 真机：X11/Wayland 端到端 + VAAPI/uinput 真机验收（Wayland/PipeWire 采集待接入） |
 | #6 HarmonyOS | NAPI 规约 ✅（docs/HARMONYOS.md，tmp/ohos-check） | DevEco + OHOS NDK + 鸿蒙真机（ring 交叉编译） |
 | #75 鼠标控制 | 远程光标渲染 ✅（#86）、输入全事件 e2e ✅（#95）、高 DPI/多显示器坐标映射 ✅（#105） | 多显示器真机高 DPI 验证 + Windows/Linux/Android 注入真机验收 |
 | #8 压测 | 工具链/报告 ✅（#38）、netem ✅ | 干净环境 4K60 基线 + 真机矩阵 |
