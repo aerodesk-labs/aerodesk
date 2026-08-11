@@ -189,10 +189,28 @@ fn run() {
         .and_then(|v| v.parse::<u64>().ok())
         .map(std::time::Duration::from_secs);
     // #74 视频编码：--codec h264|h265|vp9|av1（配 --encoder ffmpeg）。
-    let video_codec: Codec = match arg(&args, "--codec").as_deref() {
+    // 默认：macOS 支持硬编 HEVC 时优先 h265（同画质码率低 30-50%），
+    // 否则回退 h264（全兼容）。显式 --codec 时尊重用户选择。
+    let codec_arg = arg(&args, "--codec").map(|s| s.to_string());
+    let video_codec: Codec = match codec_arg.as_deref() {
         Some("h265") | Some("hevc") => Codec::Hevc,
         Some("vp9") => Codec::Vp9,
         Some("av1") => Codec::Av1,
+        Some("h264") => Codec::H264,
+        None => {
+            #[cfg(target_os = "macos")]
+            {
+                if aerodesk_macos::vt_encoder::VtEncoder::hevc_encoder_available() {
+                    Codec::Hevc
+                } else {
+                    Codec::H264
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Codec::H264
+            }
+        }
         _ => Codec::H264,
     };
 
@@ -2306,9 +2324,11 @@ fn publisher_capture(
     use str0m::media::Rid;
 
     const FPS: u32 = 30;
-    const W: u32 = 1920;
-    const H: u32 = 1080;
-    // core Codec -> videotoolbox Codec（仅 H264/HEVC 走此路径）。
+    // 采集分辨率：0,0 = 按显示器原生宽高比等比缩放（见 capture::build_capture）。
+    // 保持与显示器同宽高比，避免画面拉伸导致输入坐标错位。
+    const W: u32 = 0;
+    const H: u32 = 0;
+    // core Codec -> videotoolbox Codec（仅 H264/HEVC 走此路径；vp9/av1 走 ffmpeg 路径）。
     use videotoolbox::Codec as VtCodec;
     let vt_codec = match codec {
         Codec::Hevc => VtCodec::HEVC,
@@ -2393,9 +2413,15 @@ fn publisher_capture(
                 return;
             }
         };
+        // 编码分辨率 = 采集实际尺寸（保持显示器宽高比）。
+        let (cw, ch) = (capture.width(), capture.height());
+        info!(
+            "screen capture started at {cw}x{ch} (display {}), codec={codec:?}",
+            capture.display_id()
+        );
         layers.push((
             None,
-            VtEncoder::new_with_codec(W, H, FPS, 8_000_000, vt_codec).expect("vt encoder"),
+            VtEncoder::new_with_codec(cw, ch, FPS, 8_000_000, vt_codec).expect("vt encoder"),
             capture,
         ));
         aerodesk_macos::inject::set_active_display(Some(layers[0].2.display_id()));
