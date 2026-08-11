@@ -11,12 +11,14 @@ use apple_cf::cv::CVPixelBuffer;
 use apple_cf::raw::{
     CMBlockBufferCreateWithMemoryBlock, CMBlockBufferRef, CMFormatDescriptionRef,
     CMSampleBufferCreate, CMSampleBufferRef, CMVideoFormatDescriptionCreateFromH264ParameterSets,
+    CMVideoFormatDescriptionCreateFromHEVCParameterSets,
 };
 use videotoolbox::Codec;
 use videotoolbox::decompression::{DecodedFrame, DecompressionSession};
 
-/// 从 AnnexB 数据解析 NAL 单元，返回 (type, payload)。
-fn parse_annexb_nal(data: &[u8]) -> Vec<(u8, &[u8])> {
+/// 从 AnnexB 数据切分 NAL 单元，返回**含 NAL 头**的完整单元。
+/// H.264 头 1 字节；HEVC 头 2 字节——类型解析交给调用方按 codec 处理。
+fn split_annexb(data: &[u8]) -> Vec<&[u8]> {
     let mut out = Vec::new();
     let mut i = 0;
     while i + 3 <= data.len() {
@@ -35,9 +37,8 @@ fn parse_annexb_nal(data: &[u8]) -> Vec<(u8, &[u8])> {
             if j + 3 > data.len() {
                 j = data.len();
             }
-            let payload = &data[start..j];
-            if !payload.is_empty() {
-                out.push((payload[0] & 0x1F, payload));
+            if j > start {
+                out.push(&data[start..j]);
             }
             i = j;
         } else {
@@ -45,6 +46,50 @@ fn parse_annexb_nal(data: &[u8]) -> Vec<(u8, &[u8])> {
         }
     }
     out
+}
+
+/// H.264 NAL 类型（低 5 位）。
+fn h264_type(nal: &[u8]) -> u8 {
+    nal.first().copied().unwrap_or(0) & 0x1F
+}
+
+/// HEVC NAL 类型（2 字节头：forbidden_zero_bit(1) + type(6) + layer/tid(9)）。
+fn hevc_type(nal: &[u8]) -> u8 {
+    (nal.first().copied().unwrap_or(0) >> 1) & 0x3F
+}
+
+/// 从 AnnexB 数据解析 H.264 NAL 单元，返回 (type, payload)。
+fn parse_annexb_nal(data: &[u8]) -> Vec<(u8, &[u8])> {
+    split_annexb(data)
+        .into_iter()
+        .filter(|nal| !nal.is_empty())
+        .map(|nal| (h264_type(nal), nal))
+        .collect()
+}
+
+/// 视频 codec 识别（按关键帧参数集 NAL 类型，H264 7/8，HEVC 32/33/34）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecoderKind {
+    H264,
+    Hevc,
+}
+
+/// 从首帧/关键帧 AnnexB 数据自动识别 codec；无参数集时返回 None（等关键帧）。
+pub fn detect_codec(data: &[u8]) -> Option<DecoderKind> {
+    for nal in split_annexb(data) {
+        if nal.is_empty() {
+            continue;
+        }
+        match h264_type(nal) {
+            7 | 8 => return Some(DecoderKind::H264),
+            _ => {}
+        }
+        match hevc_type(nal) {
+            32 | 33 | 34 => return Some(DecoderKind::Hevc),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// 从 SPS/PPS 构造 CMVideoFormatDescription（用 apple_cf 包装，retain 生命周期手动管理）。
@@ -223,6 +268,137 @@ impl H264Decoder {
     }
 }
 
+/// 从 VPS/SPS/PPS 构造 HEVC CMVideoFormatDescription。
+/// HEVC 参数集必须**含 2 字节 NAL 头**（与 H.264 不同）。
+fn build_hevc_format_description(
+    vps: &[u8],
+    sps: &[u8],
+    pps: &[u8],
+) -> Result<CMFormatDescription, String> {
+    let mut fmt_out: CMFormatDescriptionRef = std::ptr::null();
+    let sets = [vps.as_ptr(), sps.as_ptr(), pps.as_ptr()];
+    let sizes = [vps.len(), sps.len(), pps.len()];
+    let status = unsafe {
+        CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+            std::ptr::null_mut(),
+            3,
+            sets.as_ptr(),
+            sizes.as_ptr(),
+            4,                // NAL 长度前缀（AVCC 风格样本）
+            std::ptr::null(), // extensions（无）
+            &mut fmt_out,
+        )
+    };
+    if status != 0 || fmt_out.is_null() {
+        return Err(format!("hevc format description: {status}"));
+    }
+    CMFormatDescription::from_raw(fmt_out.cast_mut().cast::<std::ffi::c_void>())
+        .ok_or_else(|| "hevc fmt desc null".to_string())
+}
+
+/// H.265/HEVC 硬件解码器（iOS 11+，VideoToolbox）。
+///
+/// 输入 AnnexB HEVC（VPS/SPS/PPS + VCL），输出 CVPixelBuffer。
+/// 与 [`H264Decoder`] 同构：关键帧重建 format description + session。
+pub struct HevcDecoder {
+    session: Option<DecompressionSession>,
+    format: Option<CMFormatDescription>,
+    rx: mpsc::Receiver<DecodedFrame>,
+    /// 解码是异步的：sample buffer 引用的内存必须活到回调后。
+    pending: Option<(CMSampleBuffer, Vec<u8>)>,
+}
+
+impl Default for HevcDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HevcDecoder {
+    pub fn new() -> Self {
+        let (tx, _rx) = mpsc::channel();
+        let _ = tx;
+        Self {
+            session: None,
+            format: None,
+            rx: _rx,
+            pending: None,
+        }
+    }
+
+    pub fn is_hardware_supported() -> bool {
+        DecompressionSession::is_hardware_decode_supported(Codec::HEVC)
+    }
+
+    /// 解码一帧 AnnexB HEVC。关键帧（含 VPS/SPS/PPS）触发 format description 重建。
+    pub fn decode_annexb(
+        &mut self,
+        data: &[u8],
+        _pts: i64,
+    ) -> Result<Option<CVPixelBuffer>, String> {
+        let nals = split_annexb(data);
+        if nals.is_empty() {
+            return Ok(None);
+        }
+
+        let mut vps: Option<&[u8]> = None;
+        let mut sps: Option<&[u8]> = None;
+        let mut pps: Option<&[u8]> = None;
+        for nal in &nals {
+            match hevc_type(nal) {
+                32 => vps = Some(nal),
+                33 => sps = Some(nal),
+                34 => pps = Some(nal),
+                _ => {}
+            }
+        }
+
+        // 关键帧（含参数集）：重建 format description + session
+        if let (Some(vps), Some(sps), Some(pps)) = (vps, sps, pps) {
+            let fmt = build_hevc_format_description(vps, sps, pps)?;
+            let (tx, rx) = mpsc::channel();
+            let session = DecompressionSession::new(&fmt, move |frame: DecodedFrame| {
+                let _ = tx.send(frame);
+            })
+            .map_err(|e| format!("hevc decompress session: {e:?}"))?;
+            self.format = Some(fmt);
+            self.session = Some(session);
+            self.rx = rx;
+        }
+
+        // AVCC 化 VCL NAL（HEVC VCL 类型 0..=31；参数集/SEI/AUD 等剔除）。
+        // 注意：HEVC NAL 必须**含 2 字节头**（长度前缀 + 完整 NAL 单元）。
+        let mut avcc = Vec::with_capacity(data.len() + 8);
+        for nal in &nals {
+            if hevc_type(nal) > 31 {
+                continue;
+            }
+            let len = (nal.len() as u32).to_be_bytes();
+            avcc.extend_from_slice(&len);
+            avcc.extend_from_slice(nal);
+        }
+
+        let Some(session) = &self.session else {
+            return Ok(None); // 等关键帧
+        };
+        let Some(format) = &self.format else {
+            return Ok(None);
+        };
+
+        let sample = build_sample_buffer(format, &avcc, _pts)?;
+        self.pending = Some((sample, avcc));
+        let (sample, _) = self.pending.as_ref().unwrap();
+        session
+            .decode(sample)
+            .map_err(|e| format!("hevc decode: {e:?}"))?;
+
+        match self.rx.recv_timeout(std::time::Duration::from_millis(2000)) {
+            Ok(frame) => Ok(frame.image_buffer),
+            Err(_) => Ok(None),
+        }
+    }
+}
+
 /// YUV → RGB（BT.601；full_range=true 时 Y 全 0..255，否则 16..235 映射）。
 fn yuv_to_rgb(yv: f32, u: f32, v: f32, full_range: bool) -> (u8, u8, u8) {
     let (mut yy, mut uu, mut vv) = (yv, u - 128.0, v - 128.0);
@@ -340,6 +516,43 @@ impl aerodesk_core::platform::Decoder for H264Decoder {
     }
 }
 
+/// 核心 `Decoder` 实现：HEVC/H.265 硬解（trait 路径输出 RGBA raw）。
+impl aerodesk_core::platform::Decoder for HevcDecoder {
+    type Error = String;
+
+    fn configure(
+        &mut self,
+        _codec: aerodesk_core::media_pipeline::Codec,
+        _w: u32,
+        _h: u32,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn decode(
+        &mut self,
+        unit: &aerodesk_core::media_pipeline::EncodedUnit,
+    ) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        let pts_us = unit.pts_ms.saturating_mul(1000) as i64;
+        match self.decode_annexb(&unit.data, pts_us) {
+            Ok(Some(buf)) => {
+                Ok(
+                    to_rgba(&buf).map(|(raw, w, h)| aerodesk_core::platform::VideoFrame {
+                        platform: None,
+                        handle: None,
+                        raw: Some(raw),
+                        width: w as u32,
+                        height: h as u32,
+                        pts_ms: unit.pts_ms,
+                    }),
+                )
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,6 +570,20 @@ mod tests {
         assert_eq!(nals[1].0, 5);
         // 最后一个 NAL 必须完整（含末尾 2 字节）
         assert_eq!(nals[1].1, &[0x65, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
+    }
+
+    #[test]
+    fn detect_codec_from_parameter_sets() {
+        // H.264 SPS/PPS 关键帧头
+        let h264 = [0, 0, 0, 1, 0x67, 0x64, 1, 2, 3, 0, 0, 1, 0x68, 0xee, 0x00];
+        assert_eq!(detect_codec(&h264), Some(DecoderKind::H264));
+        // HEVC VPS/SPS/PPS 关键帧头（2 字节 NAL 头：40 01 = VPS）
+        let hevc = [
+            0, 0, 0, 1, 0x40, 0x01, 0x42, 0x01, 0x44, 0x01, 0x00, 0, 0, 1, 0x26, 0x01,
+        ];
+        assert_eq!(detect_codec(&hevc), Some(DecoderKind::Hevc));
+        // 纯 P 帧无参数集 → None（等关键帧）
+        assert_eq!(detect_codec(&[0, 0, 0, 1, 0x02, 0xaa]), None);
     }
 
     /// #277 跨平台抽象：泛型 Decoder 驱动 iOS VideoToolbox H.264 硬解。
@@ -394,6 +621,46 @@ mod tests {
         }
         let n = count_frames(&mut dec, &units);
         assert!(n >= 1, "泛型 Decoder 应解出帧，got {n}");
+    }
+
+    #[test]
+    fn decodes_hevc_frames() {
+        // libx265/hevc_videotoolbox 关键帧 + P 帧 → VideoToolbox HEVC 硬解。
+        // macOS 宿主机上 videotoolbox 可解 HEVC（iOS 同 API）。
+        use aerodesk_core::media_pipeline::Codec;
+        use aerodesk_ffmpeg::encode::FfmpegEncoder;
+        let mut enc =
+            FfmpegEncoder::new(320, 180, 30, 1_000_000, Codec::Hevc).expect("hevc encoder");
+        enc.request_keyframe();
+        let mut decoder = HevcDecoder::new();
+        let mut frame = vec![0u8; 320 * 180 * 4];
+        let mut decoded_frames = 0;
+        let mut saw_keyframe = false;
+
+        for i in 0..8 {
+            for (j, px) in frame.iter_mut().enumerate() {
+                *px = (i * 30 + j / 100) as u8;
+            }
+            let Some(unit) = enc.encode_bgra(&frame).expect("encode") else {
+                continue;
+            };
+            if unit.keyframe {
+                saw_keyframe = true;
+            }
+            match decoder.decode_annexb(&unit.data, (i * 3000) as i64) {
+                Ok(Some(pb)) => {
+                    decoded_frames += 1;
+                    assert!(pb.width() > 0 && pb.height() > 0, "decoded buffer has size");
+                }
+                Ok(None) => {}
+                Err(e) => panic!("hevc decode error: {e}"),
+            }
+        }
+        assert!(saw_keyframe, "expected at least one HEVC keyframe");
+        assert!(
+            decoded_frames >= 1,
+            "expected HEVC frames decoded, got {decoded_frames}"
+        );
     }
 
     #[test]

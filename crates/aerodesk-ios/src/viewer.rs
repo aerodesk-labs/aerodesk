@@ -12,12 +12,32 @@ use aerodesk_core::access_unit::AccessUnitAssembler;
 use aerodesk_core::connect::LiveSession;
 use aerodesk_core::endpoint::ClientEvent;
 use apple_cf::cv::CVPixelBuffer;
+use str0m::format::Codec as SCodec;
 use str0m::net::Protocol;
 
-use crate::decode::H264Decoder;
+use crate::decode::{DecoderKind, H264Decoder, HevcDecoder, detect_codec};
 
 unsafe extern "C" {
     fn CFRetain(cf: *const std::ffi::c_void) -> *const std::ffi::c_void;
+}
+
+/// 观看端解码器（H264/HEVC 按关键帧参数集自动选择）。
+enum UiDecoder {
+    H264(H264Decoder),
+    Hevc(HevcDecoder),
+}
+
+impl UiDecoder {
+    fn feed(
+        &mut self,
+        data: &[u8],
+        pts_us: u64,
+    ) -> Result<Option<apple_cf::cv::CVPixelBuffer>, String> {
+        match self {
+            UiDecoder::H264(d) => d.decode_annexb(data, pts_us as i64),
+            UiDecoder::Hevc(d) => d.decode_annexb(data, pts_us as i64),
+        }
+    }
 }
 
 /// 观看会话（FFI 句柄 = *mut ViewerSession）。
@@ -27,6 +47,8 @@ pub struct ViewerSession {
     latest: Arc<Mutex<Option<CVPixelBuffer>>>,
     /// 输入事件发送通道（viewer → publisher，经 input 数据通道）。
     input_tx: mpsc::Sender<Vec<u8>>,
+    /// 解码后的 PCM i16 音频样本（8kHz 单声道；Swift 侧轮询取走播放）。
+    audio_rx: mpsc::Receiver<Vec<i16>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -38,14 +60,16 @@ impl ViewerSession {
         let latest = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let (input_tx, input_rx) = mpsc::channel();
+        let (audio_tx, audio_rx) = mpsc::channel();
         let pump = {
             let latest = latest.clone();
             let stop = stop.clone();
-            thread::spawn(move || pump_media(session, latest, stop, input_rx))
+            thread::spawn(move || pump_media(session, latest, stop, input_rx, audio_tx))
         };
         Ok(ViewerSession {
             latest,
             input_tx,
+            audio_rx,
             stop,
             thread: Some(pump),
         })
@@ -74,8 +98,13 @@ fn pump_media(
     latest: Arc<Mutex<Option<CVPixelBuffer>>>,
     stop: Arc<AtomicBool>,
     input_rx: mpsc::Receiver<Vec<u8>>,
+    audio_tx: mpsc::Sender<Vec<i16>>,
 ) {
-    let mut decoder = H264Decoder::new();
+    // H264/HEVC 自动识别：首关键帧含参数集后创建对应硬解器。
+    let mut decoder: Option<UiDecoder> = None;
+    let mut decoder_kind: Option<DecoderKind> = None;
+    // 音频帧统计（本轮：音视频分流，音频暂不入视频组装器）。
+    let mut audio_pkts = 0u64;
     // str0m 输出单条 AnnexB NAL；按 RTP 时间戳聚合为完整访问单元后再解码
     // （SPS/PPS 与 VCL 同帧，VideoToolbox 才能建 format description）。
     let mut assembler = AccessUnitAssembler::new();
@@ -138,9 +167,38 @@ fn pump_media(
                             data.data.len()
                         );
                     }
-                    // #1：不能按 session.video_mid 过滤——SFU 转发时 RTP mid 扩展
-                    // 用 SFU 本地 mid（与 viewer 协商的 mid 不同，CLI 同款处理，
-                    // 见 main.rs #58/#73 注释）。iOS 仅订阅视频，直接喂组装器。
+                    // 音视频分流：#1 不能按 session.video_mid 过滤（SFU 转发用本地
+                    // mid），按 RTP payload codec 识别。音频帧不进视频组装器
+                    // （否则会污染 AccessUnit 重组，画面花屏/黑屏）。
+                    let spec = data.params.spec().codec;
+                    let is_audio = matches!(spec, SCodec::PCMU | SCodec::PCMA | SCodec::Opus);
+                    if is_audio {
+                        audio_pkts += 1;
+                        if audio_pkts % 200 == 0 {
+                            eprintln!("pump: audio pkts={audio_pkts} codec={spec:?}");
+                        }
+                        // PCMU（8kHz μ-law）→ i16 样本 → Swift 播放。Opus 暂不播
+                        // （iOS 无内置 Opus 解码，需 libopus/ffmpeg，后续再加）。
+                        if spec == SCodec::PCMU {
+                            let pcm = aerodesk_core::pcmu::pcmu_decode(data.data.as_ref());
+                            let _ = audio_tx.send(pcm);
+                        }
+                        continue;
+                    }
+                    // 视频：先按参数集确认 codec，再组装 + 解码。
+                    if let Some(kind) = detect_codec(data.data.as_ref()) {
+                        if decoder_kind != Some(kind) || decoder.is_none() {
+                            decoder = Some(match kind {
+                                DecoderKind::H264 => UiDecoder::H264(H264Decoder::new()),
+                                DecoderKind::Hevc => UiDecoder::Hevc(HevcDecoder::new()),
+                            });
+                            decoder_kind = Some(kind);
+                            eprintln!("pump: using decoder {kind:?}");
+                        }
+                    }
+                    let Some(dec) = &mut decoder else {
+                        continue; // 等关键帧
+                    };
                     if let Some(au) = assembler.push(
                         data.data.as_ref(),
                         data.time.as_micros(),
@@ -153,7 +211,7 @@ fn pump_media(
                                 au.data.len()
                             );
                         }
-                        feed_frame(&mut decoder, &au.data, au.pts_us, &latest);
+                        feed_frame(dec, &au.data, au.pts_us, &latest);
                     }
                 }
                 ClientEvent::IceConnected => {
@@ -172,23 +230,44 @@ fn pump_media(
 
 /// 解码一帧并更新最新帧槽（槽内 +1 retained）。
 fn feed_frame(
-    decoder: &mut H264Decoder,
+    decoder: &mut UiDecoder,
     annexb: &[u8],
     pts_us: u64,
     latest: &Arc<Mutex<Option<CVPixelBuffer>>>,
 ) {
-    let Ok(Some(buf)) = decoder.decode_annexb(annexb, pts_us as i64) else {
+    let Ok(Some(buf)) = decoder.feed(annexb, pts_us) else {
         return;
     };
     let raw = buf.as_ptr();
     unsafe { CFRetain(raw) }; // +1 → 2
     drop(buf); // -1 → 1（槽持有）
     let mut slot = latest.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(buf2) = unsafe { CVPixelBuffer::from_raw(raw) } {
+    if let Some(buf2) = CVPixelBuffer::from_raw(raw) {
         if let Some(old) = slot.replace(buf2) {
             drop(old); // -1 → 0
         }
     }
+}
+
+/// 取解码后的 PCM i16 音频样本（8kHz 单声道）：拷贝到 `dst`，返回拷贝样本数。
+/// 0=暂无新样本；-1=参数错误。
+///
+/// # Safety
+/// `dst` 必须指向至少 `max` 个 i16 的有效空间。
+pub unsafe fn take_audio(session: &ViewerSession, dst: *mut i16, max: usize) -> i32 {
+    if dst.is_null() || max == 0 {
+        return -1;
+    }
+    let mut copied = 0i32;
+    while copied as usize + 320 <= max {
+        let Ok(samples) = session.audio_rx.try_recv() else {
+            break;
+        };
+        let n = samples.len().min(max - copied as usize);
+        unsafe { std::ptr::copy_nonoverlapping(samples.as_ptr(), dst.add(copied as usize), n) };
+        copied += n as i32;
+    }
+    copied
 }
 
 /// 取最新帧：有则转移 +1 引用给调用方（返回 0），无则返回 1。

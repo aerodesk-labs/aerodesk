@@ -118,6 +118,7 @@ name = "aerodesk-ios"
 version = "0.1.0"
 dependencies = [
  "aerodesk-core",
+ "aerodesk-ffmpeg",
  "aerodesk-softenc",
  "apple-cf",
  "str0m",
