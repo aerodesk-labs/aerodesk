@@ -250,3 +250,20 @@ mod tests {
         assert!(matches!(manager, Err(VddError::Unsupported)));
     }
 }
+
+/// 核心 `VirtualDisplay` trait 实现（Windows Parsec VDD；非 Windows 骨架返回 0）。
+impl aerodesk_core::platform::VirtualDisplay for VirtualDisplayManager {
+    type Error = VddError;
+
+    fn add_display(&mut self, width: u32, height: u32, hz: u32) -> Result<i32, Self::Error> {
+        self.add_display(width, height, hz)
+    }
+
+    fn remove_display(&mut self, index: i32) -> Result<(), Self::Error> {
+        self.remove_display(index)
+    }
+
+    fn display_count(&self) -> usize {
+        self.display_count()
+    }
+}

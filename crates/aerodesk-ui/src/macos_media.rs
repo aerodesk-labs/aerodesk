@@ -717,6 +717,61 @@ mod tests {
         }
     }
 
+    /// #277 观看端泛型链路：`Decoder + Renderer` trait 驱动解码并渲染。
+    #[test]
+    fn generic_decoder_renderer_chain() {
+        struct CountingRenderer {
+            frames: usize,
+        }
+        impl aerodesk_core::platform::Renderer for CountingRenderer {
+            type Error = String;
+            fn render(
+                &mut self,
+                frame: &aerodesk_core::platform::VideoFrame,
+            ) -> Result<(), Self::Error> {
+                assert!(!frame.raw.as_deref().unwrap_or_default().is_empty());
+                self.frames += 1;
+                Ok(())
+            }
+        }
+
+        fn pump<D: aerodesk_core::platform::Decoder, R: aerodesk_core::platform::Renderer>(
+            dec: &mut D,
+            ren: &mut R,
+            units: &[aerodesk_core::media_pipeline::EncodedUnit],
+        ) -> usize {
+            let mut rendered = 0;
+            for u in units {
+                if let Ok(Some(frame)) = dec.decode(u) {
+                    if ren.render(&frame).is_ok() {
+                        rendered += 1;
+                    }
+                }
+            }
+            rendered
+        }
+
+        use aerodesk_ffmpeg::encode::FfmpegEncoder;
+        for codec in [Codec::H264, Codec::Hevc] {
+            let mut enc = FfmpegEncoder::new(320, 180, 30, 1_000_000, codec).expect("encoder");
+            enc.request_keyframe();
+            let mut dec = UiDecoder::for_codec(codec).expect("decoder");
+            let mut ren = CountingRenderer { frames: 0 };
+            let mut frame = vec![0u8; 320 * 180 * 4];
+            let mut units = Vec::new();
+            for i in 0..8u32 {
+                for (j, px) in frame.iter_mut().enumerate() {
+                    *px = (i * 30 + (j as u32 / 100)) as u8;
+                }
+                if let Some(u) = enc.encode_bgra(&frame).expect("encode") {
+                    units.push(u);
+                }
+            }
+            let n = pump(&mut dec, &mut ren, &units);
+            assert!(n >= 1, "{codec:?} 泛型 Decoder+Renderer 应渲染，got {n}");
+        }
+    }
+
     /// #74 UI 解码器（硬解优先 + FFmpeg 回退）对全部 codec 回环出 RGBA。
     #[test]
     fn ui_decoder_decodes_all_codecs() {

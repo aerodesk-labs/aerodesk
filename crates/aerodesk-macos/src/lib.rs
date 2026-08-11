@@ -17,6 +17,7 @@ pub mod dock;
 pub mod encoder;
 pub mod file_picker;
 pub mod inject;
+pub mod notifier;
 pub mod permissions;
 pub mod synthetic;
 pub mod vt_encoder;

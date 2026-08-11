@@ -148,6 +148,31 @@ pub trait FilePicker {
     fn pick_file(&self) -> Result<Option<String>, Self::Error>;
 }
 
+/// 应用壳层（窗口激活 / Dock-任务栏重开等平台外壳集成）。
+pub trait AppShell {
+    /// 把应用/主窗口带到前台。
+    fn activate(&self);
+    /// 聚焦指定原生视图（平台句柄；非本平台可忽略）。
+    fn focus_view(&self, view: *mut std::ffi::c_void);
+    /// 安装「点击 Dock/任务栏图标恢复窗口」处理器。
+    fn install_reopen_handler(&self);
+    /// 注册重开回调（点击 Dock/任务栏图标时触发）。
+    fn set_reopen_callback(&self, callback: Box<dyn Fn() + Send + Sync>);
+}
+
+/// 虚拟显示器（被控端扩展桌面；Windows Parsec VDD，macOS/Linux 批次）。
+pub trait VirtualDisplay {
+    type Error: std::fmt::Display + std::fmt::Debug;
+    fn add_display(&mut self, width: u32, height: u32, hz: u32) -> Result<i32, Self::Error>;
+    fn remove_display(&mut self, index: i32) -> Result<(), Self::Error>;
+    fn display_count(&self) -> usize;
+}
+
+/// 系统通知（收到连接/文件等事件时提示用户）。
+pub trait Notifier {
+    fn notify(&self, title: &str, body: &str);
+}
+
 /// 便捷 re-export：`use aerodesk_core::platform::*` 同时拿到 Codec/EncodedUnit。
 pub use crate::media_pipeline::{Codec, EncodedUnit};
 

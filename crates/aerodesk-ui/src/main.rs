@@ -10,7 +10,7 @@ mod keymap;
 mod macos_media;
 use slint::Model;
 
-use aerodesk_core::platform::{FilePicker, Permissions};
+use aerodesk_core::platform::{AppShell, FilePicker, Permissions, Renderer};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -158,7 +158,9 @@ pub fn focus_window_to_front(window: &slint::Window) {
         && let Ok(raw) = handle.raw_window_handle()
         && let raw_window_handle::RawWindowHandle::AppKit(appkit) = raw
     {
-        aerodesk_macos::dock::focus_ns_view(appkit.ns_view.as_ptr() as *mut std::ffi::c_void);
+        // #277 平台抽象：窗口聚焦走 core `AppShell` trait。
+        aerodesk_macos::dock::MacAppShell
+            .focus_view(appkit.ns_view.as_ptr() as *mut std::ffi::c_void);
     }
 }
 
@@ -253,6 +255,35 @@ pub fn present_frame(
             }
         }
     });
+}
+
+/// 核心 `Renderer` trait 实现：Slint 渲染适配器（#277）。
+/// 包装 `present_frame`，让观看端管线可以按 `Decoder + Renderer` 泛型驱动。
+pub struct SlintRenderer {
+    ui: slint::Weak<AppWindow>,
+    slot: usize,
+}
+
+impl SlintRenderer {
+    pub fn new(ui: slint::Weak<AppWindow>, slot: usize) -> Self {
+        Self { ui, slot }
+    }
+}
+
+impl Renderer for SlintRenderer {
+    type Error = String;
+
+    fn render(&mut self, frame: &aerodesk_core::platform::VideoFrame) -> Result<(), Self::Error> {
+        let raw = frame.raw.as_deref().unwrap_or_default();
+        present_frame(
+            &self.ui,
+            raw,
+            frame.width as usize,
+            frame.height as usize,
+            self.slot,
+        );
+        Ok(())
+    }
 }
 
 fn img_from_session_frame(s: &SessionHandle) -> slint::Image {
@@ -508,7 +539,8 @@ fn main() -> Result<(), slint::PlatformError> {
     #[cfg(target_os = "macos")]
     {
         *MAIN_WINDOW.lock().unwrap() = Some(ui.as_weak());
-        aerodesk_macos::dock::set_reopen_callback(|| {
+        // #277 平台抽象：Dock 重开回调走 core `AppShell` trait。
+        aerodesk_macos::dock::MacAppShell.set_reopen_callback(Box::new(|| {
             let weak = MAIN_WINDOW.lock().unwrap().clone();
             if let Some(weak) = weak {
                 let _ = weak.upgrade_in_event_loop(|ui| {
@@ -516,7 +548,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     focus_window_to_front(ui.window());
                 });
             }
-        });
+        }));
     }
     // #72 拖放发送：填充会话 UI 弱引用（非 macOS 无 handler，仅写入无副作用）。
     *drop_ui.lock().unwrap() = Some(ui.as_weak());
@@ -1489,7 +1521,8 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // macOS：点击 Dock 图标恢复隐藏窗口（配合托盘隐藏）。
     #[cfg(target_os = "macos")]
-    aerodesk_macos::dock::install_reopen_handler();
+    // #277 平台抽象：Dock 重开处理器走 core `AppShell` trait。
+    aerodesk_macos::dock::MacAppShell.install_reopen_handler();
 
     // 系统托盘（Slint 1.17 SystemTrayIcon）：仅 macOS 创建；Linux/Windows 下
     // Slint 托盘创建失败会 abort（Xvfb/CI 无 StatusNotifier），故非 macOS 不创建。
