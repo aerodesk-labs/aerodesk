@@ -7,6 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+aerodesk-core = { path = "../aerodesk-core" }
 openh264 = "0.9.7"
 
 # x264 软编需要系统库（pkg-config），Windows 无 → 仅非 Windows 启用；

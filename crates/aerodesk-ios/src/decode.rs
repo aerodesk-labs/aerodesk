@@ -223,6 +223,123 @@ impl H264Decoder {
     }
 }
 
+/// YUV → RGB（BT.601；full_range=true 时 Y 全 0..255，否则 16..235 映射）。
+fn yuv_to_rgb(yv: f32, u: f32, v: f32, full_range: bool) -> (u8, u8, u8) {
+    let (mut yy, mut uu, mut vv) = (yv, u - 128.0, v - 128.0);
+    if !full_range {
+        yy = (yy - 16.0) * (255.0 / 219.0);
+    }
+    let r = (yy + 1.402 * vv).clamp(0.0, 255.0) as u8;
+    let g = (yy - 0.344136 * uu - 0.714136 * vv).clamp(0.0, 255.0) as u8;
+    let b = (yy + 1.772 * uu).clamp(0.0, 255.0) as u8;
+    (r, g, b)
+}
+
+/// CVPixelBuffer → RGBA（供核心 `Decoder` trait 路径输出 raw 帧；
+/// Swift 壳层仍走 FFI 零拷贝 CVPixelBuffer 路径）。
+pub fn to_rgba(buf: &CVPixelBuffer) -> Option<(Vec<u8>, usize, usize)> {
+    let w = buf.width();
+    let h = buf.height();
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let guard = buf.lock_read_only().ok()?;
+    let base = guard.base_address();
+    if base.is_null() {
+        return None;
+    }
+    let fmt = buf.pixel_format();
+    const BGRA: u32 = 0x42475241;
+    const NV12_F: u32 = 0x32342066;
+    const NV12_V: u32 = 0x34323076;
+    match fmt {
+        BGRA => {
+            let stride = buf.bytes_per_row();
+            let mut rgba = vec![0u8; w * h * 4];
+            for y in 0..h {
+                let row = unsafe { std::slice::from_raw_parts(base.add(y * stride), w * 4) };
+                let out = &mut rgba[y * w * 4..(y + 1) * w * 4];
+                for x in 0..w {
+                    out[x * 4] = row[x * 4 + 2];
+                    out[x * 4 + 1] = row[x * 4 + 1];
+                    out[x * 4 + 2] = row[x * 4];
+                    out[x * 4 + 3] = 255;
+                }
+            }
+            Some((rgba, w, h))
+        }
+        NV12_F | NV12_V => {
+            let y_stride = buf.bytes_per_row_of_plane(0);
+            let uv_stride = buf.bytes_per_row_of_plane(1);
+            let y_plane = unsafe {
+                std::slice::from_raw_parts(guard.base_address_of_plane(0)?, y_stride * h)
+            };
+            let uv_plane = unsafe {
+                let uv_base = guard.base_address_of_plane(1)?;
+                std::slice::from_raw_parts(uv_base, uv_stride * buf.height_of_plane(1))
+            };
+            let mut rgba = vec![0u8; w * h * 4];
+            let full_range = fmt == NV12_F;
+            for y in 0..h {
+                for x in 0..w {
+                    let yv = y_plane[y * y_stride + x] as f32;
+                    let uv_off = (y / 2) * uv_stride + (x / 2) * 2;
+                    let (r, g, b) = yuv_to_rgb(
+                        yv,
+                        uv_plane[uv_off] as f32,
+                        uv_plane[uv_off + 1] as f32,
+                        full_range,
+                    );
+                    let o = (y * w + x) * 4;
+                    rgba[o] = r;
+                    rgba[o + 1] = g;
+                    rgba[o + 2] = b;
+                    rgba[o + 3] = 255;
+                }
+            }
+            Some((rgba, w, h))
+        }
+        _ => None,
+    }
+}
+
+/// 核心 `Decoder` 实现：H.264 硬解（trait 路径输出 RGBA raw；Swift 仍走 FFI）。
+impl aerodesk_core::platform::Decoder for H264Decoder {
+    type Error = String;
+
+    fn configure(
+        &mut self,
+        _codec: aerodesk_core::media_pipeline::Codec,
+        _w: u32,
+        _h: u32,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn decode(
+        &mut self,
+        unit: &aerodesk_core::media_pipeline::EncodedUnit,
+    ) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        let pts_us = unit.pts_ms.saturating_mul(1000) as i64;
+        match self.decode_annexb(&unit.data, pts_us) {
+            Ok(Some(buf)) => {
+                Ok(
+                    to_rgba(&buf).map(|(raw, w, h)| aerodesk_core::platform::VideoFrame {
+                        platform: None,
+                        handle: None,
+                        raw: Some(raw),
+                        width: w as u32,
+                        height: h as u32,
+                        pts_ms: unit.pts_ms,
+                    }),
+                )
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +357,43 @@ mod tests {
         assert_eq!(nals[1].0, 5);
         // 最后一个 NAL 必须完整（含末尾 2 字节）
         assert_eq!(nals[1].1, &[0x65, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
+    }
+
+    /// #277 跨平台抽象：泛型 Decoder 驱动 iOS VideoToolbox H.264 硬解。
+    #[test]
+    fn generic_decoder_trait_decodes_h264() {
+        fn count_frames<D: aerodesk_core::platform::Decoder>(
+            dec: &mut D,
+            units: &[aerodesk_core::media_pipeline::EncodedUnit],
+        ) -> usize {
+            let mut n = 0;
+            for u in units {
+                if let Ok(Some(_)) = dec.decode(u) {
+                    n += 1;
+                }
+            }
+            n
+        }
+
+        let mut enc = X264Encoder::new(320, 180, 30, 500).expect("x264");
+        let mut dec = H264Decoder::new();
+        let mut frame = vec![0u8; 320 * 180 * 3];
+        let mut units = Vec::new();
+        for i in 0..8u32 {
+            for (j, px) in frame.iter_mut().enumerate() {
+                *px = (i * 30 + (j as u32 / 100)) as u8;
+            }
+            if let Some(out) = enc.encode(&frame).expect("encode") {
+                units.push(aerodesk_core::media_pipeline::EncodedUnit {
+                    data: out.data,
+                    keyframe: out.keyframe,
+                    pts_ms: (i * 33) as u64,
+                    rtp_timestamp: 0,
+                });
+            }
+        }
+        let n = count_frames(&mut dec, &units);
+        assert!(n >= 1, "泛型 Decoder 应解出帧，got {n}");
     }
 
     #[test]

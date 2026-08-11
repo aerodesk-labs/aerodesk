@@ -226,6 +226,7 @@ dependencies = [
 name = "aerodesk-softenc"
 version = "0.1.0"
 dependencies = [
+ "aerodesk-core",
  "openh264",
  "x264",
 ]

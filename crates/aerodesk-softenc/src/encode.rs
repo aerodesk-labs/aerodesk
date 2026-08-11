@@ -159,3 +159,48 @@ mod tests {
         assert!(u[0] < 128);
     }
 }
+
+/// 核心 `Encoder` 实现（x264 软编，H.264；非 Windows 全平台回退）。
+/// `VideoFrame.raw` 按 core 约定为 BGRA32，此处转 RGB24 后编码。
+impl aerodesk_core::platform::Encoder for X264Encoder {
+    type Error = String;
+
+    fn configure(
+        &mut self,
+        codec: aerodesk_core::media_pipeline::Codec,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> Result<(), Self::Error> {
+        if codec != aerodesk_core::media_pipeline::Codec::H264 {
+            return Err(format!("x264 仅支持 H.264，收到 {codec:?}"));
+        }
+        *self = Self::new(width, height, fps, 800)?;
+        Ok(())
+    }
+
+    fn encode(
+        &mut self,
+        frame: &aerodesk_core::platform::VideoFrame,
+    ) -> Result<Option<aerodesk_core::media_pipeline::EncodedUnit>, Self::Error> {
+        let Some(raw) = &frame.raw else {
+            return Err("x264 encoder requires raw BGRA frame".into());
+        };
+        let rgb = crate::bgra_to_rgb(raw);
+        let Some(out) = self.encode(&rgb)? else {
+            return Ok(None);
+        };
+        Ok(Some(aerodesk_core::media_pipeline::EncodedUnit {
+            data: out.data,
+            keyframe: out.keyframe,
+            pts_ms: frame.pts_ms,
+            rtp_timestamp: 0,
+        }))
+    }
+
+    fn request_keyframe(&mut self) {
+        self.force_idr();
+    }
+
+    fn set_bitrate(&mut self, _bitrate_bps: u64, _fps: u32) {}
+}

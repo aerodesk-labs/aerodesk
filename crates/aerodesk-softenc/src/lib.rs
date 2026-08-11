@@ -28,6 +28,32 @@ pub fn bgra_to_rgb(bgra: &[u8]) -> Vec<u8> {
     rgb
 }
 
+/// BGRA → RGBA（OpenH264 软编输入；core `VideoFrame.raw` 统一为 BGRA）。
+pub fn bgra_to_rgba(bgra: &[u8]) -> Vec<u8> {
+    let n = bgra.len() / 4;
+    let mut rgba = vec![0u8; n * 4];
+    for i in 0..n {
+        rgba[i * 4] = bgra[i * 4 + 2];
+        rgba[i * 4 + 1] = bgra[i * 4 + 1];
+        rgba[i * 4 + 2] = bgra[i * 4];
+        rgba[i * 4 + 3] = bgra[i * 4 + 3];
+    }
+    rgba
+}
+
+/// RGBA → BGRA（平台采集统一为 core `VideoFrame.raw` 的 BGRA 约定）。
+pub fn rgba_to_bgra(rgba: &[u8]) -> Vec<u8> {
+    let n = rgba.len() / 4;
+    let mut bgra = vec![0u8; n * 4];
+    for i in 0..n {
+        bgra[i * 4] = rgba[i * 4 + 2];
+        bgra[i * 4 + 1] = rgba[i * 4 + 1];
+        bgra[i * 4 + 2] = rgba[i * 4];
+        bgra[i * 4 + 3] = rgba[i * 4 + 3];
+    }
+    bgra
+}
+
 /// RGBA → RGB24（x264 输入；X11 GetImage 读回 RGBA）。
 pub fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
     let n = rgba.len() / 4;

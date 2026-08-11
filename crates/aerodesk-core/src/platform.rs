@@ -18,7 +18,8 @@ use std::sync::Arc;
 /// 三通道并存，按平台能力选一：
 /// - `platform`：零拷贝平台帧对象（macOS IOSurface，编码器直接下转使用，不拷贝）
 /// - `handle`：平台私有帧句柄（如 NVENC 输入纹理 / MediaCodec buffer id）
-/// - `raw`：原始像素（BGRA/RGB24，无零拷贝通道时使用）
+/// - `raw`：原始像素，**统一 BGRA32 约定**（无零拷贝通道时使用；
+///   macOS/Win DXGI/合成源均 BGRA，Linux 采集在适配器内转 BGRA）
 #[derive(Clone)]
 pub struct VideoFrame {
     /// 平台零拷贝帧对象（实现方负责 downcast；无则 None）。
