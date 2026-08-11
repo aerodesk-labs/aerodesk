@@ -130,6 +130,7 @@ name = "aerodesk-linux"
 version = "0.1.0"
 dependencies = [
  "aerodesk-core",
+ "aerodesk-protocol",
  "aerodesk-softenc",
  "tracing",
  "x11rb",
@@ -257,6 +258,7 @@ name = "aerodesk-windows"
 version = "0.1.0"
 dependencies = [
  "aerodesk-core",
+ "aerodesk-protocol",
  "aerodesk-softenc",
  "parsec-vdd-rust",
  "tracing",

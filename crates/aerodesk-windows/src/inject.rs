@@ -1,57 +1,46 @@
 //! 输入注入：SendInput（鼠标绝对坐标/按键/滚轮）。
 
-/// 输入事件（与 aerodesk-protocol::input 对齐）。
-#[derive(Debug, Clone)]
-pub enum InputEvent {
-    MouseMove {
-        x: f32,
-        y: f32,
-    },
-    MouseButton {
-        x: f32,
-        y: f32,
-        button: u8,
-        down: bool,
-    },
-    Wheel {
-        dx: f32,
-        dy: f32,
-    },
-    Key {
-        code: u32,
-        down: bool,
-    },
-}
-
-/// 注入抽象（被控端）。
-pub trait InputInjector {
-    fn inject(&mut self, event: &InputEvent) -> Result<(), String>;
-}
+use aerodesk_protocol::input::{ButtonState, InputEvent, MouseButton};
 
 /// SendInput 注入器（普通桌面会话可用）。
 #[cfg(windows)]
 pub struct SendInputInjector;
 
 #[cfg(windows)]
-impl InputInjector for SendInputInjector {
+impl aerodesk_core::platform::InputInjector for SendInputInjector {
+    type Error = String;
+
     fn inject(&mut self, event: &InputEvent) -> Result<(), String> {
         use std::mem::size_of;
         use windows::Win32::UI::Input::KeyboardAndMouse::SendInput;
 
         unsafe {
             let inputs = match event {
-                InputEvent::MouseMove { x, y } => vec![mouse_move(*x, *y)],
+                InputEvent::MouseMove { x, y } => vec![mouse_move(*x as f32, *y as f32)],
                 InputEvent::MouseButton {
+                    button: MouseButton::Left,
+                    state,
                     x,
                     y,
-                    button: 0,
-                    down,
-                } => vec![mouse_move(*x, *y), mouse_button(*down)],
+                } => vec![
+                    mouse_move(*x as f32, *y as f32),
+                    mouse_button(*state == ButtonState::Pressed),
+                ],
                 InputEvent::MouseButton { .. } => {
                     return Err("unsupported button (only left supported)".into());
                 }
-                InputEvent::Wheel { dy, .. } => vec![wheel(*dy)],
-                InputEvent::Key { code, down } => vec![key(*code, *down)],
+                InputEvent::Wheel { delta_y, .. } => vec![wheel(*delta_y as f32)],
+                // TODO(P4)：协议键码（String）→ Windows VK 映射表，随 Windows
+                // 适配器真机批次实现；macOS 已有完整键码映射（inject.rs）。
+                InputEvent::Key { .. } => {
+                    return Err("windows: key code mapping not implemented yet (P4)".into());
+                }
+                InputEvent::Touch { .. } => {
+                    return Err("windows: touch injection not implemented".into());
+                }
+                InputEvent::ClipboardText(_) => {
+                    return Err("windows: clipboard inject not implemented".into());
+                }
             };
             let sent = SendInput(
                 &inputs,
@@ -70,7 +59,9 @@ impl InputInjector for SendInputInjector {
 pub struct SendInputInjector;
 
 #[cfg(not(windows))]
-impl InputInjector for SendInputInjector {
+impl aerodesk_core::platform::InputInjector for SendInputInjector {
+    type Error = String;
+
     fn inject(&mut self, _event: &InputEvent) -> Result<(), String> {
         Err("windows: SendInput injection only available on Windows".into())
     }

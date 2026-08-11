@@ -63,7 +63,7 @@ mod tests {
 pub fn trigger_screen_capture_registration() {
     use std::time::Duration;
     if let Ok(mut cap) = crate::capture::ScreenCapture::start(0, 5, 320, 200) {
-        let _ = cap.next_frame(Duration::from_millis(250));
+        let _ = cap.capture_frame(Duration::from_millis(250));
     }
 }
 

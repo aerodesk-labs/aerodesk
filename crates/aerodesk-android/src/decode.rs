@@ -5,15 +5,9 @@
 //! 2. RTP 帧（str0m MediaData，AnnexB）→ `queueInputBuffer`
 //! 3. 输出 Surface 直接渲染，或 `getOutputImage` 读回 RGBA
 //!
-//! 本骨架暴露 trait，供 aerodesk-core 观看端管线调用。
+//! 本骨架实现 aerodesk-core 的 [`Decoder`] trait，平台差异收敛在适配器。
 
-use crate::DecodedFrame;
-
-/// 解码器抽象：Core 只依赖该 trait，平台差异收敛在适配器。
-pub trait H264Decoder {
-    /// 解码一帧 AnnexB H.264。
-    fn decode_annexb(&mut self, data: &[u8], pts_us: i64) -> Option<DecodedFrame>;
-}
+use aerodesk_core::media_pipeline::Codec;
 
 /// TODO(P3): JNI 桥接到 android.media.MediaCodec。
 /// 前置条件：Android SDK/NDK + `aarch64-linux-android`/`armv7-linux-androideabi` target。
@@ -30,17 +24,18 @@ impl MediaCodecDecoder {
     }
 }
 
-/// 编码格式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Codec {
-    H264,
-    Hevc,
-}
+impl aerodesk_core::platform::Decoder for MediaCodecDecoder {
+    type Error = String;
 
-impl H264Decoder for MediaCodecDecoder {
-    fn decode_annexb(&mut self, data: &[u8], pts_us: i64) -> Option<DecodedFrame> {
-        let _ = (data, pts_us);
-        None
+    fn configure(&mut self, _codec: Codec, _width: u32, _height: u32) -> Result<(), Self::Error> {
+        Err("android: MediaCodec JNI bridge not implemented yet (P3)".into())
+    }
+
+    fn decode(
+        &mut self,
+        _unit: &aerodesk_core::media_pipeline::EncodedUnit,
+    ) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        Ok(None)
     }
 }
 
@@ -49,7 +44,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codec_enum_is_stable() {
+    fn core_codec_is_shared() {
+        // 平台不再重复定义 Codec：直接使用 core 枚举。
         assert_ne!(Codec::H264, Codec::Hevc);
     }
 }

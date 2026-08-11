@@ -335,3 +335,14 @@ mod tests {
         let _ = inject(&ev);
     }
 }
+
+/// 核心 `InputInjector` 实现（被控端输入注入，CGEvent）。
+pub struct MacInjector;
+
+impl aerodesk_core::platform::InputInjector for MacInjector {
+    type Error = String;
+
+    fn inject(&mut self, event: &aerodesk_protocol::input::InputEvent) -> Result<(), Self::Error> {
+        crate::inject::inject(event)
+    }
+}

@@ -5,11 +5,6 @@
 
 use crate::CapturedFrame;
 
-/// 采集器抽象（被控端）。
-pub trait ScreenCapturer {
-    fn next_frame(&mut self) -> Option<CapturedFrame>;
-}
-
 /// DXGI Desktop Duplication 采集器（被控端，Windows）。
 #[cfg(windows)]
 pub struct DxgiCapturer {
@@ -113,7 +108,7 @@ impl DxgiCapturer {
     }
 
     /// 取下一帧（阻塞最多 16ms）。无新帧/错误返回 None。
-    pub fn next_frame(&mut self) -> Option<CapturedFrame> {
+    pub fn capture_frame(&mut self) -> Option<CapturedFrame> {
         use std::time::{SystemTime, UNIX_EPOCH};
         use windows::Win32::Graphics::Direct3D11::{D3D11_MAP_READ, ID3D11Texture2D};
         use windows::Win32::Graphics::Dxgi::IDXGIResource;
@@ -189,10 +184,27 @@ impl Drop for DxgiCapturer {
 }
 
 #[cfg(windows)]
-impl ScreenCapturer for DxgiCapturer {
-    fn next_frame(&mut self) -> Option<CapturedFrame> {
-        self.next_frame()
+impl aerodesk_core::platform::MediaSource for DxgiCapturer {
+    type Error = String;
+
+    fn start(&mut self, _fps: u32, _with_cursor: bool) -> Result<(), Self::Error> {
+        Ok(())
     }
+
+    fn next_frame(&mut self) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        Ok(self
+            .capture_frame()
+            .map(|f| aerodesk_core::platform::VideoFrame {
+                platform: None,
+                handle: None,
+                raw: Some(f.bgra),
+                width: f.width,
+                height: f.height,
+                pts_ms: f.pts_us.max(0) as u64 / 1000,
+            }))
+    }
+
+    fn stop(&mut self) {}
 }
 
 /// 非 Windows 主机上的编译期骨架（保证 workspace 全平台可编译）。
@@ -211,8 +223,16 @@ impl DxgiCapturer {
 }
 
 #[cfg(not(windows))]
-impl ScreenCapturer for DxgiCapturer {
-    fn next_frame(&mut self) -> Option<CapturedFrame> {
-        None
+impl aerodesk_core::platform::MediaSource for DxgiCapturer {
+    type Error = String;
+
+    fn start(&mut self, _fps: u32, _with_cursor: bool) -> Result<(), Self::Error> {
+        Ok(())
     }
+
+    fn next_frame(&mut self) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        Ok(None)
+    }
+
+    fn stop(&mut self) {}
 }

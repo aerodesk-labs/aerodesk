@@ -5,12 +5,6 @@
 
 use crate::CapturedFrame;
 
-/// 采集器抽象（被控端）。
-pub trait ScreenCapturer {
-    /// 返回下一帧（阻塞或按帧率回调由实现决定）。
-    fn next_frame(&mut self) -> Option<CapturedFrame>;
-}
-
 /// TODO(P3): MediaProjection + ImageReader 实现。
 pub struct MediaProjectionCapturer;
 
@@ -20,8 +14,16 @@ impl MediaProjectionCapturer {
     }
 }
 
-impl ScreenCapturer for MediaProjectionCapturer {
-    fn next_frame(&mut self) -> Option<CapturedFrame> {
-        None
+impl aerodesk_core::platform::MediaSource for MediaProjectionCapturer {
+    type Error = String;
+
+    fn start(&mut self, _fps: u32, _with_cursor: bool) -> Result<(), Self::Error> {
+        Ok(())
     }
+
+    fn next_frame(&mut self) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        Ok(None)
+    }
+
+    fn stop(&mut self) {}
 }

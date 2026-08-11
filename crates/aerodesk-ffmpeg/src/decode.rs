@@ -103,6 +103,7 @@ impl FfmpegDecoder {
                 self.width = w as u32;
                 self.height = h as u32;
                 Ok(Some(VideoFrame {
+                    platform: None,
                     handle: None,
                     raw: Some(raw),
                     width: w as u32,

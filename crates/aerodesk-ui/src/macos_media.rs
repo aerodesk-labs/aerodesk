@@ -91,6 +91,56 @@ impl UiDecoder {
     }
 }
 
+/// 核心 `Decoder` trait 实现：`UiDecoder` 已按 codec 收敛 H264/HEVC 硬解 +
+/// FFmpeg 回退，直接对接 `EncodedUnit`（跨平台观看管线可泛型调用）。
+impl aerodesk_core::platform::Decoder for UiDecoder {
+    type Error = String;
+
+    fn configure(&mut self, _codec: Codec, _width: u32, _height: u32) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn decode(
+        &mut self,
+        unit: &aerodesk_core::media_pipeline::EncodedUnit,
+    ) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        let pts_us = unit.pts_ms.saturating_mul(1000) as i64;
+        match self {
+            UiDecoder::H264(d) => d
+                .decode_annexb(&unit.data, pts_us)
+                .map_err(|e| e.to_string())
+                .map(|pb| {
+                    pb.and_then(|pb| {
+                        to_rgba(&pb).map(|(raw, w, h)| aerodesk_core::platform::VideoFrame {
+                            platform: None,
+                            handle: None,
+                            raw: Some(raw),
+                            width: w as u32,
+                            height: h as u32,
+                            pts_ms: unit.pts_ms,
+                        })
+                    })
+                }),
+            UiDecoder::Hevc(d) => d
+                .decode_annexb(&unit.data, pts_us)
+                .map_err(|e| e.to_string())
+                .map(|pb| {
+                    pb.and_then(|pb| {
+                        to_rgba(&pb).map(|(raw, w, h)| aerodesk_core::platform::VideoFrame {
+                            platform: None,
+                            handle: None,
+                            raw: Some(raw),
+                            width: w as u32,
+                            height: h as u32,
+                            pts_ms: unit.pts_ms,
+                        })
+                    })
+                }),
+            UiDecoder::Ffmpeg(d) => d.decode_unit(unit).map_err(|e| e.to_string()),
+        }
+    }
+}
+
 /// 运行 macOS 观看会话（阻塞直到断开/代际失效）。
 pub fn run_viewer(
     server: String,
@@ -629,6 +679,42 @@ mod tests {
             rgba.chunks_exact(4).any(|p| p[3] == 255),
             "alpha 应全不透明"
         );
+    }
+
+    /// #277 跨平台抽象：泛型消费者只依赖 core `Decoder` trait 即可解码。
+    #[test]
+    fn generic_decoder_trait_drives_macos_decoder() {
+        fn count_frames<D: aerodesk_core::platform::Decoder>(
+            dec: &mut D,
+            units: &[aerodesk_core::media_pipeline::EncodedUnit],
+        ) -> usize {
+            let mut n = 0;
+            for u in units {
+                if let Ok(Some(_)) = dec.decode(u) {
+                    n += 1;
+                }
+            }
+            n
+        }
+
+        use aerodesk_ffmpeg::encode::FfmpegEncoder;
+        for codec in [Codec::H264, Codec::Hevc] {
+            let mut enc = FfmpegEncoder::new(320, 180, 30, 1_000_000, codec).expect("encoder");
+            enc.request_keyframe();
+            let mut dec = UiDecoder::for_codec(codec).expect("decoder");
+            let mut frame = vec![0u8; 320 * 180 * 4];
+            let mut units = Vec::new();
+            for i in 0..8u32 {
+                for (j, px) in frame.iter_mut().enumerate() {
+                    *px = (i * 30 + j as u32 / 100) as u8;
+                }
+                if let Some(u) = enc.encode_bgra(&frame).expect("encode") {
+                    units.push(u);
+                }
+            }
+            let n = count_frames(&mut dec, &units);
+            assert!(n >= 1, "{codec:?} 泛型 Decoder 应解出帧，got {n}");
+        }
     }
 
     /// #74 UI 解码器（硬解优先 + FFmpeg 回退）对全部 codec 回环出 RGBA。

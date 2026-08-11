@@ -256,3 +256,39 @@ impl std::fmt::Debug for FfmpegEncoder {
             .finish()
     }
 }
+
+/// 核心 `Encoder` 实现（软编路径：VideoFrame.raw BGRA → 编码包）。
+impl aerodesk_core::platform::Encoder for FfmpegEncoder {
+    type Error = String;
+
+    fn configure(
+        &mut self,
+        codec: Codec,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> Result<(), Self::Error> {
+        // 重建编码器（FFmpeg 软编参数不可原地变更；默认 1.5Mbps 与合成源一致）。
+        *self = FfmpegEncoder::new(width, height, fps, 1_500_000, codec)?;
+        Ok(())
+    }
+
+    fn encode(
+        &mut self,
+        frame: &aerodesk_core::platform::VideoFrame,
+    ) -> Result<Option<aerodesk_core::media_pipeline::EncodedUnit>, Self::Error> {
+        let Some(raw) = &frame.raw else {
+            return Err("ffmpeg encoder requires raw BGRA frame".into());
+        };
+        self.encode_bgra(raw).map_err(|e| e.to_string())
+    }
+
+    fn request_keyframe(&mut self) {
+        self.request_keyframe();
+    }
+
+    fn set_bitrate(&mut self, bitrate_bps: u64, _fps: u32) {
+        // FFmpeg 软编码率在 open 时固定；宿主可用 configure 重建。
+        let _ = bitrate_bps;
+    }
+}

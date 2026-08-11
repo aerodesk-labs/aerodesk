@@ -2,33 +2,7 @@
 //!
 //! X11：XTestFakeInput（x11rb XTEST 扩展）；Wayland：/dev/uinput（真机阶段）。
 
-/// 输入事件（与 aerodesk-protocol::input 对齐）。
-#[derive(Debug, Clone)]
-pub enum InputEvent {
-    MouseMove {
-        x: f32,
-        y: f32,
-    },
-    MouseButton {
-        x: f32,
-        y: f32,
-        button: u8,
-        down: bool,
-    },
-    Wheel {
-        dx: f32,
-        dy: f32,
-    },
-    Key {
-        code: u32,
-        down: bool,
-    },
-}
-
-/// 注入抽象（被控端）。
-pub trait InputInjector {
-    fn inject(&mut self, event: &InputEvent) -> Result<(), String>;
-}
+use aerodesk_protocol::input::{ButtonState, InputEvent, MouseButton};
 
 /// XTest fake input 类型码（X11 核心事件码）。
 #[cfg(target_os = "linux")]
@@ -93,22 +67,24 @@ impl XTestInjector {
 }
 
 #[cfg(target_os = "linux")]
-impl InputInjector for XTestInjector {
+impl aerodesk_core::platform::InputInjector for XTestInjector {
+    type Error = String;
+
     fn inject(&mut self, event: &InputEvent) -> Result<(), String> {
-        let to_px = |v: f32| (v.clamp(0.0, 1.0) * self.width as f32) as i16;
-        let to_py = |v: f32| (v.clamp(0.0, 1.0) * self.height as f32) as i16;
+        let to_px = |v: f64| (v.clamp(0.0, 1.0) * self.width as f64) as i16;
+        let to_py = |v: f64| (v.clamp(0.0, 1.0) * self.height as f64) as i16;
         match event {
             InputEvent::MouseMove { x, y } => {
                 self.fake(fake_input::MOTION_NOTIFY, 0, to_px(*x), to_py(*y))?;
             }
             InputEvent::MouseButton {
+                button: MouseButton::Left,
+                state,
                 x,
                 y,
-                button: 0,
-                down,
             } => {
                 self.fake(fake_input::MOTION_NOTIFY, 0, to_px(*x), to_py(*y))?;
-                let kind = if *down {
+                let kind = if *state == ButtonState::Pressed {
                     fake_input::BUTTON_PRESS
                 } else {
                     fake_input::BUTTON_RELEASE
@@ -118,19 +94,22 @@ impl InputInjector for XTestInjector {
             InputEvent::MouseButton { .. } => {
                 return Err("unsupported button (only left supported)".into());
             }
-            InputEvent::Wheel { dy, .. } => {
+            InputEvent::Wheel { delta_y, .. } => {
                 // X11 滚轮：按钮 4=上 / 5=下。
-                let btn = if *dy > 0.0 { 4u8 } else { 5u8 };
+                let btn = if *delta_y > 0.0 { 4u8 } else { 5u8 };
                 self.fake(fake_input::BUTTON_PRESS, btn, 0, 0)?;
                 self.fake(fake_input::BUTTON_RELEASE, btn, 0, 0)?;
             }
-            InputEvent::Key { code, down } => {
-                let kind = if *down {
-                    fake_input::KEY_PRESS
-                } else {
-                    fake_input::KEY_RELEASE
-                };
-                self.fake(kind, *code as u8, 0, 0)?;
+            // TODO(P4)：协议键码（String）→ X11 keysym 映射表，随 Linux
+            // 适配器真机批次实现；macOS 已有完整键码映射（inject.rs）。
+            InputEvent::Key { .. } => {
+                return Err("linux: key code mapping not implemented yet (P4)".into());
+            }
+            InputEvent::Touch { .. } => {
+                return Err("linux: touch injection not implemented".into());
+            }
+            InputEvent::ClipboardText(_) => {
+                return Err("linux: clipboard inject not implemented".into());
             }
         }
         Ok(())
@@ -142,7 +121,9 @@ impl InputInjector for XTestInjector {
 pub struct XTestInjector;
 
 #[cfg(not(target_os = "linux"))]
-impl InputInjector for XTestInjector {
+impl aerodesk_core::platform::InputInjector for XTestInjector {
+    type Error = String;
+
     fn inject(&mut self, _event: &InputEvent) -> Result<(), String> {
         Err("linux: XTest injection only available on Linux".into())
     }

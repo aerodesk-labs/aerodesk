@@ -28,3 +28,12 @@ mod tests {
         }
     }
 }
+
+/// 核心 `CursorSource` 实现（被控端真实光标位置，归一化 0..1）。
+pub struct MacCursor;
+
+impl aerodesk_core::platform::CursorSource for MacCursor {
+    fn position_normalized(&mut self) -> Option<(f64, f64)> {
+        cursor_position_normalized()
+    }
+}

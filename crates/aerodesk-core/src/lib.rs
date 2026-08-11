@@ -19,6 +19,7 @@ pub mod media;
 pub mod media_pipeline;
 pub mod media_socket;
 pub mod pcmu;
+pub mod platform;
 pub mod signaling;
 
 pub use endpoint::{ClientEvent, Endpoint};
