@@ -14,35 +14,117 @@ use screencapturekit::prelude::*;
 use screencapturekit::screenshot_manager::SCScreenshotManager;
 
 /// ScreenCaptureKit 屏幕采集器。
+///
+/// macOS 26 上 `SCScreenshotManager::capture_sample_buffer` 的同步等待可能
+/// 永久挂起（replayd 回调不再返回，实测 ~600 帧后出现）。因此采集放到
+/// 专用线程 + mpsc：主线程 `recv_timeout` 等待，挂起时超时返回；连续超时
+/// 3s 判定会话卡死，自动重建 filter/config 并重启采集线程（自愈）。
 pub struct ScreenCapture {
-    filter: SCContentFilter,
-    config: SCStreamConfiguration,
+    rx: std::sync::mpsc::Receiver<Result<IOSurface, String>>,
+    display_idx: usize,
+    fps: u32,
+    width: u32,
+    height: u32,
     seq: i64,
     /// CGDirectDisplayID（#75：输入注入按被控显示器换算坐标，不只主屏）。
     display_id: u32,
+    /// 连续无帧计数（达到阈值重建采集会话）。
+    stale: u32,
+}
+
+/// 显示器原生像素尺寸按上限等比缩放（默认高 ≤1080、宽 ≤1920）。
+/// 关键：必须保持与显示器相同的宽高比，否则画面被拉伸、输入坐标错位。
+pub const MAX_CAPTURE_W: u32 = 1920;
+pub const MAX_CAPTURE_H: u32 = 1080;
+
+/// 构建 SCContentFilter + SCStreamConfiguration（重建会话时复用）。
+/// width/height 传 0 表示按显示器原生尺寸等比缩放（保持宽高比）。
+fn build_capture(
+    display_idx: usize,
+    fps: u32,
+    width: u32,
+    height: u32,
+) -> Result<(SCContentFilter, SCStreamConfiguration, u32, u32, u32), String> {
+    let content = SCShareableContent::get().map_err(|e| format!("SCK content: {e}"))?;
+    let displays = content.displays();
+    let display = displays.get(display_idx).ok_or("display not found")?;
+    let display_id = display.display_id();
+    let (dw, dh) = (display.width().max(1), display.height().max(1));
+    let (w, h) = if width == 0 || height == 0 {
+        let scale = (MAX_CAPTURE_W as f32 / dw as f32)
+            .min(MAX_CAPTURE_H as f32 / dh as f32)
+            .min(1.0);
+        (
+            ((dw as f32 * scale) as u32).max(2),
+            ((dh as f32 * scale) as u32).max(2),
+        )
+    } else {
+        (width, height)
+    };
+
+    let filter = SCContentFilter::create().with_display(display).build();
+
+    let mut config = SCStreamConfiguration::default();
+    config.set_width(w).set_height(h);
+    config.set_pixel_format(PixelFormat::BGRA);
+    // 光标不进画面：观看端用 cursor 通道 + 叠加层渲染（#75），
+    // 避免视频里烤进光标与叠加层重影/错位。
+    config.set_shows_cursor(false);
+    config.set_minimum_frame_interval(&CMTime::new(1, fps as i32));
+    Ok((filter, config, display_id, w, h))
+}
+
+/// 采集线程：循环调用 capture_sample_buffer，成功把 IOSurface 发回主线程。
+/// SCK 挂起时线程阻塞在等待回调，主线程 recv_timeout 超时后重建会话。
+fn spawn_capture_thread(
+    filter: SCContentFilter,
+    config: SCStreamConfiguration,
+) -> std::sync::mpsc::Receiver<Result<IOSurface, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            loop {
+                match SCScreenshotManager::capture_sample_buffer(&filter, &config) {
+                    Ok(sample) => match sample.image_buffer().and_then(|pb| pb.io_surface()) {
+                        Some(surface) => {
+                            if tx.send(Ok(surface)).is_err() {
+                                return;
+                            }
+                            // 节流：无间隔狂轮询会压垮 replayd 导致 SCK 挂起
+                            // （macOS 26 实测），按 ~30fps 节奏采集。
+                            std::thread::sleep(Duration::from_millis(33));
+                        }
+                        None => {
+                            let _ = tx.send(Err("sample without surface".into()));
+                            std::thread::sleep(Duration::from_millis(33));
+                        }
+                    },
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("SCK error: {e:?}")));
+                        std::thread::sleep(Duration::from_millis(16));
+                    }
+                }
+            }
+        })
+        .expect("spawn capture thread");
+    rx
 }
 
 impl ScreenCapture {
-    /// 启动采集（display_idx：0 = 主显示器）。
+    /// 启动采集（display_idx：0 = 主显示器；width/height=0 按显示器原生等比缩放）。
     pub fn start(display_idx: usize, fps: u32, width: u32, height: u32) -> Result<Self, String> {
-        let content = SCShareableContent::get().map_err(|e| format!("SCK content: {e}"))?;
-        let displays = content.displays();
-        let display = displays.get(display_idx).ok_or("display not found")?;
-        let display_id = display.display_id();
-
-        let filter = SCContentFilter::create().with_display(display).build();
-
-        let mut config = SCStreamConfiguration::default();
-        config.set_width(width).set_height(height);
-        config.set_pixel_format(PixelFormat::BGRA);
-        config.set_shows_cursor(true);
-        config.set_minimum_frame_interval(&CMTime::new(1, fps as i32));
-
+        let (filter, config, display_id, w, h) = build_capture(display_idx, fps, width, height)?;
+        let rx = spawn_capture_thread(filter, config);
         Ok(Self {
-            filter,
-            config,
+            rx,
+            display_idx,
+            fps,
+            width: w,
+            height: h,
             seq: 0,
             display_id,
+            stale: 0,
         })
     }
 
@@ -52,24 +134,33 @@ impl ScreenCapture {
     }
 
     /// 采集一帧，返回 IOSurface（零拷贝，可直接进 VideoToolbox）。
-    /// 失败（如无权限）返回 None。
+    /// 采集一帧，返回 IOSurface（零拷贝，可直接进 VideoToolbox）。
+    /// 失败（如无权限）返回 None；SCK 挂起时连续超时自动重建会话（#274）。
+    /// 命名为 capture_frame 以区别于 core `MediaSource::next_frame`（#277）。
     pub fn capture_frame(&mut self, timeout: Duration) -> Option<IOSurface> {
-        let deadline = std::time::Instant::now() + timeout;
-        loop {
-            match SCScreenshotManager::capture_sample_buffer(&self.filter, &self.config) {
-                Ok(sample) => {
-                    let pb = sample.image_buffer()?;
-                    let surface = pb.io_surface()?;
-                    self.seq += 1;
-                    return Some(surface);
-                }
-                Err(e) => {
-                    if std::time::Instant::now() >= deadline {
-                        return None;
+        match self.rx.recv_timeout(timeout) {
+            Ok(Ok(surface)) => {
+                self.seq += 1;
+                self.stale = 0;
+                Some(surface)
+            }
+            Ok(Err(_)) => None,
+            Err(_) => {
+                // 超时：SCK 可能挂起。连续 ~3s（60×50ms）无帧则重建会话自愈。
+                self.stale += 1;
+                if self.stale >= 60 {
+                    self.stale = 0;
+                    eprintln!("SCK capture stalled, recreating session");
+                    if let Ok((f, c, id, w, h)) =
+                        build_capture(self.display_idx, self.fps, self.width, self.height)
+                    {
+                        self.display_id = id;
+                        self.width = w;
+                        self.height = h;
+                        self.rx = spawn_capture_thread(f, c);
                     }
-                    std::thread::sleep(Duration::from_millis(16));
-                    let _ = e;
                 }
+                None
             }
         }
     }
@@ -80,12 +171,12 @@ impl ScreenCapture {
 
     /// 采集分辨率宽。
     pub fn width(&self) -> u32 {
-        self.config.width()
+        self.width
     }
 
     /// 采集分辨率高。
     pub fn height(&self) -> u32 {
-        self.config.height()
+        self.height
     }
 }
 

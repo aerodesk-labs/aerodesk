@@ -438,6 +438,10 @@ export component AppWindow inherits Window {
     in-out property <float> remote-cursor-x: 0;
     in-out property <float> remote-cursor-y: 0;
     in-out property <bool> remote-cursor-visible: false;
+    // #75 是否显示远端光标叠加层（设置-显示 可开）。
+    // 默认关：对齐 RustDesk(show-remote-cursor=N)/TeamViewer(Show partner's cursor)
+    // 主流默认，避免叠加箭头被误认为“光标被采集进视频”。
+    in-out property <bool> show-remote-cursor: false;
     in-out property <float> frame-w: 0;
     in-out property <float> frame-h: 0;
     // ---- 设置 ----
@@ -1084,6 +1088,7 @@ export component AppWindow inherits Window {
                         RdButton { text: "流畅（1.5Mbps）"; width: 120px; checked: root.quality == 2; clicked => { root.set-quality(2); root.auto-save(); } }
                     }
                     Text { text: "质量 → 目标码率：清晰 8Mbps / 平衡 4Mbps / 流畅 1.5Mbps（对接 SFU 选层）"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                    Switch { text: "显示远端光标（蓝色叠加层，表示被控端鼠标位置）"; checked <=> root.show-remote-cursor; toggled => { root.auto-save(); } }
                 }
                 if root.settings-tab == 1: VerticalLayout {
                     spacing: 12px;
@@ -1276,16 +1281,17 @@ export component AppWindow inherits Window {
                         height: 100%;
                         image-fit: contain;
                     }
-                    // #75 远程光标叠加（箭头形，随被控端光标移动）。
-                    if root.remote-cursor-visible && root.frame-w > 0: Path {
+                    // #75 远程光标叠加（蓝色半透明箭头，随被控端光标移动）。
+                    // 样式刻意区别于被控端真实鼠标（黑箭头），避免误认为光标被采集进视频。
+                    if root.show-remote-cursor && root.remote-cursor-visible && root.frame-w > 0: Path {
                         x: root.cursor-pos(parent.width, parent.height, root.frame-w, root.frame-h, root.remote-cursor-x, false);
                         y: root.cursor-pos(parent.width, parent.height, root.frame-w, root.frame-h, root.remote-cursor-y, true);
-                        width: 14px;
-                        height: 18px;
-                        commands: "M 0 0 L 0 18 L 4 14 L 7 17 L 9 15 L 6 12 L 11 12 Z";
-                        fill: #000000;
+                        width: 16px;
+                        height: 20px;
+                        commands: "M 0 0 L 0 20 L 5 15 L 8 19 L 10 17 L 7 13 L 12 13 Z";
+                        fill: #0a84ffb3;
                         stroke: #ffffff;
-                        stroke-width: 1px;
+                        stroke-width: 1.5px;
                     }
                     // #72 文件传输进度条（发送/接收中显示）。
                     if root.file-progress >= 0: Rectangle {

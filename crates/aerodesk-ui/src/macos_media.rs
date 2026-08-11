@@ -141,6 +141,16 @@ impl aerodesk_core::platform::Decoder for UiDecoder {
     }
 }
 
+/// 状态栏 codec 显示名（首包前未知 → H.264 兼容占位，收到首包后更新）。
+fn codec_label(codec: Option<Codec>) -> &'static str {
+    match codec {
+        Some(Codec::Hevc) => "H.265",
+        Some(Codec::Vp9) => "VP9",
+        Some(Codec::Av1) => "AV1",
+        _ => "H.264",
+    }
+}
+
 /// 运行 macOS 观看会话（阻塞直到断开/代际失效）。
 pub fn run_viewer(
     server: String,
@@ -234,6 +244,8 @@ pub fn run_viewer(
 
     let mut assembler = AccessUnitAssembler::new();
     let mut decoder: Option<UiDecoder> = None;
+    // 实际协商/正在解码的视频 codec（状态栏显示用；首包后才有值）。
+    let mut current_codec: Option<Codec> = None;
     let mut frames: u64 = 0;
     let mut last_stat = Instant::now();
     // #72 文件传输 + 剪贴板（接收落盘到 ~/Downloads/AeroDesk）。
@@ -413,6 +425,7 @@ pub fn run_viewer(
                             _ => None,
                         };
                         if let Some(cc) = codec {
+                            current_codec = Some(cc);
                             // #136 首包 / 不连续 / 切层 → 请求关键帧（PLI，节流 1s）。
                             // SFU 收到后按当前 chosen_rid 转发给发布端强制 IDR。
                             let now = Instant::now();
@@ -570,7 +583,10 @@ pub fn run_viewer(
             } else {
                 format!("音频 {audio_played}帧 缓存{audio_buffered} 丢{audio_dropped}")
             };
-            let stat = format!("会话中 · H.264 {frames}帧/2s · {audio}");
+            let stat = format!(
+                "会话中 · {} {frames}帧/2s · {audio}",
+                codec_label(current_codec)
+            );
             with_ui(&ui_weak, move |ui| ui.set_session_status(stat.into()));
             frames = 0;
             audio_played = 0;
@@ -770,6 +786,16 @@ mod tests {
             let n = pump(&mut dec, &mut ren, &units);
             assert!(n >= 1, "{codec:?} 泛型 Decoder+Renderer 应渲染，got {n}");
         }
+    }
+
+    /// 状态栏 codec 显示名与协商 codec 一致（H.265 不再误显示 H.264）。
+    #[test]
+    fn codec_label_matches_negotiated() {
+        assert_eq!(codec_label(None), "H.264");
+        assert_eq!(codec_label(Some(Codec::H264)), "H.264");
+        assert_eq!(codec_label(Some(Codec::Hevc)), "H.265");
+        assert_eq!(codec_label(Some(Codec::Vp9)), "VP9");
+        assert_eq!(codec_label(Some(Codec::Av1)), "AV1");
     }
 
     /// #74 UI 解码器（硬解优先 + FFmpeg 回退）对全部 codec 回环出 RGBA。
