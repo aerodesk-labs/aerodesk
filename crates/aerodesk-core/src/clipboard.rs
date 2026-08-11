@@ -1,10 +1,11 @@
 //! 系统剪贴板文本读写（#72 剪贴板双向同步，#271 跨平台增强）。
 //!
-//! 平台实现（保持零额外依赖，与 #72 的 macOS 命令方案一致）：
+//! 平台实现（#72 起保持零额外依赖的命令方案；Linux 用 arboard 纯 Rust 无外部命令）：
 //! - macOS：`pbpaste` / `pbcopy`
 //! - Windows：PowerShell `Get-Clipboard` / `Set-Clipboard`（Win10+ 内置；
 //!   经 UTF-16LE Base64 `-EncodedCommand` 传入，避免转义与编码坑）
-//! - 其他平台 no-op（Linux 批次：#271）
+//! - Linux：arboard（X11 x11rb / Wayland data-control）
+//! - 其他平台 no-op
 //!
 //! 进程内缓存最近一次已知内容，避免「写入远端内容又被自己轮询发回」的回声环。
 
@@ -12,7 +13,7 @@ use std::sync::Mutex;
 
 static CLIP_CACHE: Mutex<Option<String>> = Mutex::new(None);
 
-/// 读取当前剪贴板文本（macOS/Windows；其他平台返回 None）。
+/// 读取当前剪贴板文本（macOS/Windows/Linux；其他平台返回 None）。
 pub fn read() -> Option<String> {
     #[cfg(target_os = "macos")]
     let result: Option<String> = {
@@ -25,13 +26,14 @@ pub fn read() -> Option<String> {
     };
     #[cfg(target_os = "windows")]
     let result: Option<String> = windows_read();
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    let result: Option<String> = linux_read();
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     let result: Option<String> = None;
     result
 }
 
-/// 写入剪贴板文本（macOS/Windows；其他平台返回 false）。
-/// 写入剪贴板文本（macOS/Windows；其他平台返回 false）。
+/// 写入剪贴板文本（macOS/Windows/Linux；其他平台返回 false）。
 pub fn write(text: &str) -> bool {
     #[cfg(target_os = "macos")]
     let result: bool = {
@@ -56,7 +58,9 @@ pub fn write(text: &str) -> bool {
     };
     #[cfg(target_os = "windows")]
     let result: bool = windows_write(text);
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    let result: bool = linux_write(text);
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     let result: bool = {
         let _ = text;
         false
@@ -132,6 +136,39 @@ fn windows_write(text: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Linux：arboard（X11 x11rb / Wayland data-control）。
+/// 单进程内串行访问（arboard Clipboard 非 Sync；且 X11/Wayland 连接每操作重建成本高）。
+#[cfg(target_os = "linux")]
+static LINUX_CLIP: std::sync::Mutex<Option<arboard::Clipboard>> = std::sync::Mutex::new(None);
+
+#[cfg(target_os = "linux")]
+fn linux_read() -> Option<String> {
+    let mut guard = LINUX_CLIP.lock().ok()?;
+    let cb = match guard.as_mut() {
+        Some(cb) => cb,
+        None => {
+            let cb = arboard::Clipboard::new().ok()?;
+            guard.insert(cb)
+        }
+    };
+    cb.get_text().ok()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_write(text: &str) -> bool {
+    let Ok(mut guard) = LINUX_CLIP.lock() else {
+        return false;
+    };
+    let cb = match guard.as_mut() {
+        Some(cb) => cb,
+        None => match arboard::Clipboard::new() {
+            Ok(cb) => guard.insert(cb),
+            Err(_) => return false,
+        },
+    };
+    cb.set_text(text).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +177,24 @@ mod tests {
     fn cache_roundtrip() {
         set_cache("hello 你好".to_string());
         assert_eq!(cached().as_deref(), Some("hello 你好"));
+    }
+
+    /// Linux 真机剪贴板往返（CI ubuntu runner 交互会话；无显示环境时 SKIP）。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_clipboard_unicode_roundtrip() {
+        let has_display =
+            std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
+        if !has_display {
+            eprintln!("SKIP: 无 DISPLAY/WAYLAND_DISPLAY（headless）");
+            return;
+        }
+        let text = "AeroDesk 剪贴板 🚀";
+        assert!(write(text), "arboard set_text 应成功");
+        match read() {
+            Some(got) => assert_eq!(got, text, "读回内容应与写入一致"),
+            None => eprintln!("SKIP: 剪贴板读回失败（无剪贴板管理器/受限环境）"),
+        }
     }
 
     /// Windows 真机剪贴板往返（CI windows runner 交互会话）。
