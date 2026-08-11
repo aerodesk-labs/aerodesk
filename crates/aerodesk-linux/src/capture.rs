@@ -155,10 +155,20 @@ impl aerodesk_core::platform::MediaSource for X11Capturer {
 ///
 /// 依赖：Wayland 桌面 + `xdg-desktop-portal` + 对应后端 + PipeWire 运行；
 /// 无这些环境时 `start()` 返回明确错误（CI/无头环境跳过，不 panic）。
+/// 线程安全采集帧（core `VideoFrame` 含 `Arc<dyn Any + Send>` 非 Send，
+/// 不能直接跨线程走 channel；这里只传纯数据，消费侧再包成 core 帧）。
+#[cfg(target_os = "linux")]
+struct RawCaptureFrame {
+    raw: Vec<u8>,
+    width: u32,
+    height: u32,
+    pts_ms: u64,
+}
+
 #[cfg(target_os = "linux")]
 pub struct WaylandPortalCapturer {
     thread: Option<std::thread::JoinHandle<()>>,
-    rx: Option<std::sync::mpsc::Receiver<aerodesk_core::platform::VideoFrame>>,
+    rx: Option<std::sync::mpsc::Receiver<RawCaptureFrame>>,
     stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
@@ -181,11 +191,9 @@ fn strip_stride(data: &[u8], width: u32, height: u32, stride: u32) -> Vec<u8> {
     out
 }
 
-/// lamco `VideoFrame`（BGRA）→ core `VideoFrame`（raw=紧凑 BGRA32）。
+/// lamco `VideoFrame`（BGRA）→ 线程安全原始帧（raw=紧凑 BGRA32）。
 #[cfg(target_os = "linux")]
-fn lamco_frame_to_core(
-    frame: lamco_pipewire::VideoFrame,
-) -> Result<aerodesk_core::platform::VideoFrame, String> {
+fn lamco_frame_to_raw(frame: lamco_pipewire::VideoFrame) -> Result<RawCaptureFrame, String> {
     use lamco_pipewire::FrameBuffer;
     let lamco_pipewire::VideoFrame {
         width,
@@ -220,10 +228,8 @@ fn lamco_frame_to_core(
         .map_err(|e| format!("pipewire format convert: {e}"))?;
         bgra
     };
-    Ok(aerodesk_core::platform::VideoFrame {
-        platform: None,
-        handle: None,
-        raw: Some(raw),
+    Ok(RawCaptureFrame {
+        raw,
         width,
         height,
         pts_ms: pts / 1_000_000,
@@ -233,7 +239,7 @@ fn lamco_frame_to_core(
 #[cfg(target_os = "linux")]
 async fn wayland_capture_loop(
     _fps: u32,
-    frame_tx: std::sync::mpsc::SyncSender<aerodesk_core::platform::VideoFrame>,
+    frame_tx: std::sync::mpsc::SyncSender<RawCaptureFrame>,
     ready_tx: std::sync::mpsc::Sender<Result<(), String>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
@@ -271,7 +277,7 @@ async fn wayland_capture_loop(
         pw.connect(owned)
             .await
             .map_err(|e| format!("pipewire connect: {e}"))?;
-        let s = streams[0];
+        let s = &streams[0];
         let info = StreamInfo {
             node_id: s.node_id,
             position: s.position,
@@ -302,8 +308,8 @@ async fn wayland_capture_loop(
     while !stop.load(Ordering::Relaxed) {
         match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
             Ok(Some(frame)) => {
-                if let Ok(core) = lamco_frame_to_core(frame) {
-                    if frame_tx.send(core).is_err() {
+                if let Ok(raw) = lamco_frame_to_raw(frame) {
+                    if frame_tx.send(raw).is_err() {
                         break; // 消费端已 drop（stop）
                     }
                 }
@@ -379,7 +385,14 @@ impl aerodesk_core::platform::MediaSource for WaylandPortalCapturer {
             return Ok(None);
         };
         match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(frame) => Ok(Some(frame)),
+            Ok(frame) => Ok(Some(aerodesk_core::platform::VideoFrame {
+                platform: None,
+                handle: None,
+                raw: Some(frame.raw),
+                width: frame.width,
+                height: frame.height,
+                pts_ms: frame.pts_ms,
+            })),
             Err(_) => Ok(None), // 超时/断开 → 无新帧
         }
     }
