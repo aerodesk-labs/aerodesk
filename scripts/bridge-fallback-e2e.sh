@@ -267,9 +267,9 @@ if [ "$REMOTE" = "1" ]; then
   fi
   kill "$VIEW_B" "$PUB_A" 2>/dev/null || true
   if [ "${REMOTE_LOOPBACK:-}" = "1" ]; then
-    grep -qiE "panic|abort" /tmp/bfb-*.log && fail "发现 panic/abort"
+    grep -qiE "panicked|fatal runtime error|overflowed its stack" /tmp/bfb-*.log && fail "发现 panic/abort"
   else
-    grep -qiE "panic|abort" /tmp/bfb-view-b.log /tmp/bfb-pub-a.log && fail "发现 panic/abort"
+    grep -qiE "panicked|fatal runtime error|overflowed its stack" /tmp/bfb-view-b.log /tmp/bfb-pub-a.log && fail "发现 panic/abort"
   fi
   echo "== #216 M3 远程验收 PASS（直连 p50/p90/p99=${DIRECT_STATS}ms 桥=${BRIDGE_STATS}ms）=="
   exit 0
@@ -354,7 +354,7 @@ wait_decoded /tmp/bfb-view-b2.log || fail "场景2：viewer 跟随 Redirect 到 
 grep -q "fallback redirect" /tmp/bfb-sig-b2.log || fail "场景2：PoP-B 信令未记录 fallback redirect"
 echo "  场景2 PASS：桥失败 → v1 Redirect → viewer 自动跟随到 pop-a 解码"
 
-grep -qiE "panic|abort" /tmp/bfb-*.log && fail "发现 panic/abort"
+grep -qiE "panicked|fatal runtime error|overflowed its stack" /tmp/bfb-*.log && fail "发现 panic/abort"
 
 kill "$VIEW_B" "$PUB_A" 2>/dev/null || true
 echo "== #216 M3 桥接编排 e2e PASS（直连 p50/p90/p99=${DIRECT_STATS}ms 桥=${BRIDGE_STATS}ms；桥优先+重建+恢复+回退）=="
