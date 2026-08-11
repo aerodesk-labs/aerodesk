@@ -151,8 +151,8 @@ scripts/multipop-deploy.sh \
   [--dry-run] [--deploy-only] [--cleanup]
 ```
 
-- 默认客户端信令地址 `wss://<host>:443/ws`（生产反代）；直连调试用
-  `--signal-url-a/-b` 覆盖为 `ws://<host>:3001/ws`；
+- 默认客户端信令地址 `ws://<host>:3003/ws`（明文 WS；当前 tungstenite 构建无 TLS
+  feature，wss 需 TLS 反代或启用 TLS 构建后经 `--signal-url-a/-b` 指定）；
 - 生成 systemd unit（基于 deploy/systemd 模板，按 PoP 填 env：POP_ID/ROOM_POP_MAP/
   POP_URLS/TURN/BRIDGE_CMD/BRIDGE_AUTH_TOKEN/SFU_TOKEN/INTERNAL_TOKEN），
   安装并 `systemctl enable --now`；

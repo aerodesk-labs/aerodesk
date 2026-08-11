@@ -152,6 +152,8 @@ jobs:
 
       # #264 一键部署脚本：语法与参数解析守卫（真实部署需外部主机，dry-run 验证）。
       - name: multipop-deploy script sanity
+        if: runner.os != 'Windows'
+        shell: bash
         run: |
           bash -n scripts/multipop-deploy.sh
           scripts/multipop-deploy.sh --help >/dev/null
