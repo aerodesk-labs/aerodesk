@@ -438,8 +438,10 @@ export component AppWindow inherits Window {
     in-out property <float> remote-cursor-x: 0;
     in-out property <float> remote-cursor-y: 0;
     in-out property <bool> remote-cursor-visible: false;
-    // #75 是否显示远端光标叠加层（设置-显示 可关；默认开）。
-    in-out property <bool> show-remote-cursor: true;
+    // #75 是否显示远端光标叠加层（设置-显示 可开）。
+    // 默认关：对齐 RustDesk(show-remote-cursor=N)/TeamViewer(Show partner's cursor)
+    // 主流默认，避免叠加箭头被误认为“光标被采集进视频”。
+    in-out property <bool> show-remote-cursor: false;
     in-out property <float> frame-w: 0;
     in-out property <float> frame-h: 0;
     // ---- 设置 ----

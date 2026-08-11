@@ -2212,8 +2212,9 @@ struct AppSettings {
     /// 被控端：仅观看（只读）。
     #[serde(default)]
     inc_view_only: bool,
-    /// 观看端：是否显示远端光标叠加层（#75；默认开，蓝色半透明区别于真实鼠标）。
-    #[serde(default = "default_true")]
+    /// 观看端：是否显示远端光标叠加层（#75；默认关，对齐 RustDesk/TeamViewer
+    /// 主流默认；蓝色半透明区别于真实鼠标）。
+    #[serde(default)]
     show_remote_cursor: bool,
 }
 
