@@ -150,6 +150,14 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/bridge-turn-e2e.sh
 
+      # #264 一键部署脚本：语法与参数解析守卫（真实部署需外部主机，dry-run 验证）。
+      - name: multipop-deploy script sanity
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bash -n scripts/multipop-deploy.sh
+          scripts/multipop-deploy.sh --help >/dev/null
+
       # #163 信令连接配额：房间/全局上限，Join 超限拒绝。
       - name: e2e signal connection quota (macOS only)
         if: runner.os == 'macOS'
