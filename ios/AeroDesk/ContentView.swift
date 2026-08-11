@@ -36,6 +36,10 @@ struct ContentView: View {
     @State private var inputSeq: UInt64 = 0
     @State private var displayLayer = AVSampleBufferDisplayLayer()
     @State private var autoConnect = false
+    // 音频播放（PCMU 8kHz → AVAudioEngine；Rust 侧解码 i16 样本）。
+    @State private var audioEngine: AVAudioEngine?
+    @State private var audioPlayer: AVAudioPlayerNode?
+    @State private var audioFormat = AVAudioFormat(standardFormatWithSampleRate: 8000, channels: 1)
 
     /// 启动参数驱动（模拟器/CI 冒烟用）：
     ///   -server <ws://host:port>  覆盖信令地址（默认 127.0.0.1:3003）
@@ -43,8 +47,10 @@ struct ContentView: View {
     ///   -autoconnect              启动后自动连接，无需点击“连接”按钮
     init() {
         let args = CommandLine.arguments
-        var server = "ws://127.0.0.1:3003"
-        var room = "demo"
+        let d = UserDefaults.standard
+        var server = d.string(forKey: "server") ?? "ws://127.0.0.1:3003"
+        var room = d.string(forKey: "room") ?? "demo"
+        // 启动参数优先（CI/自动化覆盖），未传则用上次持久化的值。
         if let i = args.firstIndex(of: "-server"), args.count > i + 1 {
             server = args[i + 1]
         }
@@ -81,6 +87,8 @@ struct ContentView: View {
             HStack {
                 Button {
                     if viewer == nil {
+                        UserDefaults.standard.set(server, forKey: "server")
+                        UserDefaults.standard.set(room, forKey: "room")
                         startViewer()
                     }
                 } label: {
@@ -172,8 +180,10 @@ struct ContentView: View {
                 viewer = v
                 hasFrame = false
                 status = "已连接，收流解码中…"
+                startAudio()
                 timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
                     pollFrame()
+                    pollAudio()
                 }
             }
         }
@@ -243,9 +253,65 @@ struct ContentView: View {
         }
     }
 
+    /// 启动 AVAudioEngine + 播放节点（8kHz 单声道 PCM i16）。
+    private func startAudio() {
+        guard audioEngine == nil, let fmt = audioFormat else { return }
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback)
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            // 模拟器/无音频权限时静默降级（视频仍正常）。
+        }
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: fmt)
+        do {
+            try engine.start()
+        } catch {
+            return
+        }
+        player.play()
+        audioEngine = engine
+        audioPlayer = player
+    }
+
+    /// 轮询 Rust 侧解码出的 PCM i16 样本并调度播放。
+    private func pollAudio() {
+        guard let viewer, let player = audioPlayer, let engine = audioEngine,
+              engine.isRunning, let fmt = audioFormat else { return }
+        var samples = [Int16](repeating: 0, count: 8192)
+        let n = samples.withUnsafeMutableBufferPointer { buf -> Int32 in
+            ad_viewer_take_audio(viewer, buf.baseAddress, buf.count)
+        }
+        guard n > 0, let pcm = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(n)) else {
+            return
+        }
+        pcm.frameLength = AVAudioFrameCount(n)
+        if let ch = pcm.int16ChannelData?[0] {
+            samples.withUnsafeBufferPointer { src in
+                ch.update(from: src.baseAddress!, count: Int(n))
+            }
+            player.scheduleBuffer(pcm)
+        }
+    }
+
+    /// 停止音频播放并释放引擎。
+    private func stopAudio() {
+        audioPlayer?.stop()
+        audioEngine?.stop()
+        if let p = audioPlayer, let e = audioEngine {
+            e.detach(p)
+        }
+        audioPlayer = nil
+        audioEngine = nil
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
     private func stopViewer() {
         timer?.invalidate()
         timer = nil
+        stopAudio()
         displayLayer.flushAndRemoveImage()
         hasFrame = false
         if let viewer {

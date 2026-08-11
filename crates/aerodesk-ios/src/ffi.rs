@@ -177,7 +177,23 @@ pub unsafe extern "C" fn ad_viewer_take_frame(
     if v.is_null() || out.is_null() {
         return -1;
     }
-    unsafe { crate::viewer::take_frame(unsafe { &*v }, out) }
+    unsafe { crate::viewer::take_frame(&*v, out) }
+}
+
+/// 取解码后的 PCM i16 音频样本（8kHz 单声道）。返回拷贝样本数（0=暂无）。
+///
+/// # Safety
+/// `v` 必须来自 `ad_viewer_create`；`dst` 必须指向至少 `max` 个 i16 的有效空间。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ad_viewer_take_audio(
+    v: *mut ViewerSession,
+    dst: *mut i16,
+    max: usize,
+) -> c_int {
+    if v.is_null() || dst.is_null() {
+        return -1;
+    }
+    unsafe { crate::viewer::take_audio(&*v, dst, max) }
 }
 
 /// 发送输入事件（JSON InputFrame）到 input 数据通道。

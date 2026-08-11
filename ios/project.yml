@@ -24,7 +24,10 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: io.aerodesk.viewer
         PRODUCT_NAME: AeroDesk
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        # iPhone：竖屏为主；iPad：全方向 + 分屏（默认不强制全屏，SwiftUI 自适应）。
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+        TARGETED_DEVICE_FAMILY: "1,2"
         HEADER_SEARCH_PATHS:
           - $(SRCROOT)/AeroDeskBridge
         SWIFT_OBJC_BRIDGING_HEADER: $(SRCROOT)/AeroDesk/AeroDesk-Bridging-Header.h

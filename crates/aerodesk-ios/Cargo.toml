@@ -18,3 +18,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 aerodesk-softenc = { path = "../aerodesk-softenc" }
+aerodesk-ffmpeg = { path = "../aerodesk-ffmpeg" }
