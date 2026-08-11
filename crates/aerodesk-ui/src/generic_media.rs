@@ -1,13 +1,83 @@
 //! 非 macOS 桌面端（Windows/Linux）主控端：真实媒体观看。
 //!
 //! #277：解码/渲染统一走 core `Decoder`/`Renderer` trait（泛型管线
-//! `generic_viewer::run_viewer_generic`），本模块只负责组装
-//! SoftDecoder（OpenH264 软解）+ SlintRenderer。
+//! `generic_viewer::run_viewer_generic`），本模块只负责组装解码器 +
+//! SlintRenderer。Linux 优先 VAAPI 硬解（无 /dev/dri 时回退 OpenH264 软解），
+//! Windows 走 OpenH264 软解。
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-/// 启动非 macOS 主控端观看：连接 → 收流 → 组装 → OpenH264 软解 → Slint 渲染。
+/// 观看端解码器：VAAPI 硬解（Linux，设备可用时）→ OpenH264 软解回退。
+///
+/// 枚举封装避免 `Box<dyn Decoder>`（trait 无 Box 兜底实现）；
+/// `Decoder::configure` 按实际 codec 重建（H.264/HEVC/VP9/AV1）。
+enum ViewerDecoder {
+    Soft(aerodesk_softenc::decode::SoftDecoder),
+    #[cfg(target_os = "linux")]
+    Vaapi(aerodesk_linux::vaapi::VaapiDecoder),
+}
+
+impl aerodesk_core::platform::Decoder for ViewerDecoder {
+    type Error = String;
+
+    fn configure(
+        &mut self,
+        codec: aerodesk_core::media_pipeline::Codec,
+        width: u32,
+        height: u32,
+    ) -> Result<(), Self::Error> {
+        match self {
+            Self::Soft(d) => aerodesk_core::platform::Decoder::configure(d, codec, width, height),
+            #[cfg(target_os = "linux")]
+            Self::Vaapi(d) => aerodesk_core::platform::Decoder::configure(d, codec, width, height),
+        }
+    }
+
+    fn decode(
+        &mut self,
+        unit: &aerodesk_core::media_pipeline::EncodedUnit,
+    ) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        match self {
+            Self::Soft(d) => aerodesk_core::platform::Decoder::decode(d, unit),
+            #[cfg(target_os = "linux")]
+            Self::Vaapi(d) => aerodesk_core::platform::Decoder::decode(d, unit),
+        }
+    }
+}
+
+fn mk_viewer_decoder() -> Result<ViewerDecoder, String> {
+    #[cfg(target_os = "linux")]
+    {
+        use aerodesk_core::media_pipeline::Codec;
+        match aerodesk_linux::vaapi::VaapiDecoder::new(Codec::H264) {
+            Ok(d) => {
+                tracing::info!("linux viewer: VAAPI 硬解启用");
+                return Ok(ViewerDecoder::Vaapi(d));
+            }
+            Err(e) => {
+                tracing::warn!("linux viewer: VAAPI 不可用（{e}），回退 OpenH264 软解");
+            }
+        }
+    }
+    Ok(ViewerDecoder::Soft(
+        aerodesk_softenc::decode::SoftDecoder::new()?,
+    ))
+}
+
+/// 解码器状态栏显示名（平台相关）。
+fn decoder_label() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        "VAAPI 硬解/OpenH264 软解"
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        "OpenH264 软解"
+    }
+}
+
+/// 启动非 macOS 主控端观看：连接 → 收流 → 组装 → 解码（VAAPI/软解）→ Slint 渲染。
 pub fn run_generic_viewer(
     server: String,
     room: String,
@@ -26,8 +96,8 @@ pub fn run_generic_viewer(
         session_idx,
         input_rx,
         stop,
-        "OpenH264 软解",
-        || aerodesk_softenc::decode::SoftDecoder::new(),
+        decoder_label(),
+        mk_viewer_decoder,
         move || crate::SlintRenderer::new(ui2.clone(), session_idx),
     );
 }
