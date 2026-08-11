@@ -579,6 +579,12 @@ fn btn_evdev(button: MouseButton) -> u16 {
     }
 }
 
+/// 归一化坐标 → 绝对轴值（0..1 → 0..=max）。
+#[cfg(target_os = "linux")]
+fn map_abs(v: f64, max: i32) -> i32 {
+    (v.clamp(0.0, 1.0) * max as f64).round() as i32
+}
+
 #[cfg(target_os = "linux")]
 impl UinputInjector {
     /// 打开 `/dev/uinput` 并创建虚拟设备（EV_KEY + EV_ABS 绝对指针 + EV_REL 滚轮）。
@@ -738,9 +744,8 @@ impl UinputInjector {
         self.write_event(ev::EV_SYN, ev::SYN_REPORT, 0)
     }
 
-    /// 归一化坐标 → 绝对轴值。
     fn abs_value(&self, v: f64, max: i32) -> i32 {
-        (v.clamp(0.0, 1.0) * max as f64).round() as i32
+        map_abs(v, max)
     }
 
     fn move_abs(&self, x: f64, y: f64) -> Result<(), String> {
@@ -897,34 +902,29 @@ mod linux_tests {
 
     #[test]
     fn ioctl_numbers_match_linux_headers() {
-        // asm-generic/ioctl.h 手算基准：
+        // asm-generic/ioctl.h 手算基准（_IO 无方向位；_IOW 带 _IOC_WRITE=1<<30）：
         // UI_DEV_CREATE = _IO('U',1) = 0x5501；UI_DEV_DESTROY = _IO('U',2) = 0x5502。
         assert_eq!(UI_DEV_CREATE, 0x5501);
         assert_eq!(UI_DEV_DESTROY, 0x5502);
-        // UI_SET_EVBIT = _IOW('U',100,sizeof(int))：0x5500 | 100 | (4<<16)。
-        assert_eq!(UI_SET_EVBIT, 0x5500 | 100 | (4 << 16));
+        // UI_SET_EVBIT = _IOW('U',100,sizeof(int))：(1<<30) | 0x5500 | 100 | (4<<16)。
+        assert_eq!(UI_SET_EVBIT, 0x4000_0000 | 0x5500 | 100 | (4 << 16));
         // UI_SET_ABSBIT = _IOW('U',103,sizeof(int))。
-        assert_eq!(UI_SET_ABSBIT, 0x5500 | 103 | (4 << 16));
+        assert_eq!(UI_SET_ABSBIT, 0x4000_0000 | 0x5500 | 103 | (4 << 16));
         // UI_DEV_SETUP = _IOW('U',3,sizeof(uinput_setup))。
         assert_eq!(
             UI_DEV_SETUP,
-            0x5500 | 3 | (std::mem::size_of::<UinputSetup>() as u64) << 16
+            0x4000_0000 | 0x5500 | 3 | (std::mem::size_of::<UinputSetup>() as u64) << 16
         );
     }
 
     #[test]
     fn normalized_coords_map_to_abs_range() {
-        use std::os::fd::FromRawFd;
-        let inj = UinputInjector {
-            // 仅测映射逻辑，不触碰真实设备（std::fs::File 从伪 fd 构造仅供布局测试）。
-            file: unsafe { std::fs::File::from_raw_fd(-1) },
-            abs_max_x: 32_767,
-            abs_max_y: 32_767,
-        };
-        assert_eq!(inj.abs_value(0.0, inj.abs_max_x), 0);
-        assert_eq!(inj.abs_value(1.0, inj.abs_max_x), 32_767);
-        assert_eq!(inj.abs_value(0.5, inj.abs_max_x), 16_384);
-        assert_eq!(inj.abs_value(-1.0, inj.abs_max_x), 0);
-        assert_eq!(inj.abs_value(2.0, inj.abs_max_x), 32_767);
+        assert_eq!(map_abs(0.0, 32_767), 0);
+        assert_eq!(map_abs(1.0, 32_767), 32_767);
+        assert_eq!(map_abs(0.5, 32_767), 16_384);
+        assert_eq!(map_abs(-1.0, 32_767), 0);
+        assert_eq!(map_abs(2.0, 32_767), 32_767);
+        assert_eq!(map_abs(0.0, 100), 0);
+        assert_eq!(map_abs(1.0, 100), 100);
     }
 }
