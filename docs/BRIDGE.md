@@ -27,6 +27,9 @@ PoP-A (14600 系)                        PoP-B (14700 系)
 - **M6（#260）**：媒体按 kind 转发（视频+音频）——`connect_live_role_codec` 双腿
   协商音频 track（viewer recvonly / publisher send），bridge 按 md.mid 选 video/
   audio writer 原样重打包；control 白名单放行显示器切换。
+- **M9（#272）**：多房间并发——每房独立 spawn 桥（BRIDGE_MAX_RUNNING 全局上限），
+  `scripts/bridge-multiroom-e2e.sh` 验证双房间并发解码 + 上限=1 时第二房回退
+  Redirect 直连主 PoP。
 - **M3（文件，#230）**：跨 PoP 文件传输——PoP-B viewer `--send-file` → SFU-B →
   bridge（file 白名单）→ SFU-A → PoP-A publisher `--recv-dir`，落盘 sha256 与源一致。
   bridge 线程 16MB 栈（数据通道大块发送在默认 2MB 栈会溢出，见 RULE）。
