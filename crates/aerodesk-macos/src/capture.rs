@@ -32,26 +32,43 @@ pub struct ScreenCapture {
     stale: u32,
 }
 
+/// 显示器原生像素尺寸按上限等比缩放（默认高 ≤1080、宽 ≤1920）。
+/// 关键：必须保持与显示器相同的宽高比，否则画面被拉伸、输入坐标错位。
+pub const MAX_CAPTURE_W: u32 = 1920;
+pub const MAX_CAPTURE_H: u32 = 1080;
+
 /// 构建 SCContentFilter + SCStreamConfiguration（重建会话时复用）。
+/// width/height 传 0 表示按显示器原生尺寸等比缩放（保持宽高比）。
 fn build_capture(
     display_idx: usize,
     fps: u32,
     width: u32,
     height: u32,
-) -> Result<(SCContentFilter, SCStreamConfiguration, u32), String> {
+) -> Result<(SCContentFilter, SCStreamConfiguration, u32, u32, u32), String> {
     let content = SCShareableContent::get().map_err(|e| format!("SCK content: {e}"))?;
     let displays = content.displays();
     let display = displays.get(display_idx).ok_or("display not found")?;
     let display_id = display.display_id();
+    let (dw, dh) = (display.width().max(1), display.height().max(1));
+    let (w, h) = if width == 0 || height == 0 {
+        let scale = (MAX_CAPTURE_W as f32 / dw as f32)
+            .min(MAX_CAPTURE_H as f32 / dh as f32)
+            .min(1.0);
+        (((dw as f32 * scale) as u32).max(2), ((dh as f32 * scale) as u32).max(2))
+    } else {
+        (width, height)
+    };
 
     let filter = SCContentFilter::create().with_display(display).build();
 
     let mut config = SCStreamConfiguration::default();
-    config.set_width(width).set_height(height);
+    config.set_width(w).set_height(h);
     config.set_pixel_format(PixelFormat::BGRA);
-    config.set_shows_cursor(true);
+    // 光标不进画面：观看端用 cursor 通道 + 叠加层渲染（#75），
+    // 避免视频里烤进光标与叠加层重影/错位。
+    config.set_shows_cursor(false);
     config.set_minimum_frame_interval(&CMTime::new(1, fps as i32));
-    Ok((filter, config, display_id))
+    Ok((filter, config, display_id, w, h))
 }
 
 /// 采集线程：循环调用 capture_sample_buffer，成功把 IOSurface 发回主线程。
@@ -92,16 +109,16 @@ fn spawn_capture_thread(
 }
 
 impl ScreenCapture {
-    /// 启动采集（display_idx：0 = 主显示器）。
+    /// 启动采集（display_idx：0 = 主显示器；width/height=0 按显示器原生等比缩放）。
     pub fn start(display_idx: usize, fps: u32, width: u32, height: u32) -> Result<Self, String> {
-        let (filter, config, display_id) = build_capture(display_idx, fps, width, height)?;
+        let (filter, config, display_id, w, h) = build_capture(display_idx, fps, width, height)?;
         let rx = spawn_capture_thread(filter, config);
         Ok(Self {
             rx,
             display_idx,
             fps,
-            width,
-            height,
+            width: w,
+            height: h,
             seq: 0,
             display_id,
             stale: 0,
@@ -129,10 +146,12 @@ impl ScreenCapture {
                 if self.stale >= 60 {
                     self.stale = 0;
                     eprintln!("SCK capture stalled, recreating session");
-                    if let Ok((f, c, id)) =
+                    if let Ok((f, c, id, w, h)) =
                         build_capture(self.display_idx, self.fps, self.width, self.height)
                     {
                         self.display_id = id;
+                        self.width = w;
+                        self.height = h;
                         self.rx = spawn_capture_thread(f, c);
                     }
                 }
