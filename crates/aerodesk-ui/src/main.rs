@@ -549,6 +549,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_inc_audio(settings.inc_audio);
     ui.set_inc_mouse(settings.inc_mouse);
     ui.set_inc_view_only(settings.inc_view_only);
+    ui.set_show_remote_cursor(settings.show_remote_cursor);
     ui.set_quality(settings.quality);
     // 服务器地址 UI 上只展示 host:port（协议/路径在连接时由
     // aerodesk_core::signaling::normalize_signal_url 自动补全）。
@@ -1403,6 +1404,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 inc_audio: ui.get_inc_audio(),
                 inc_mouse: ui.get_inc_mouse(),
                 inc_view_only: ui.get_inc_view_only(),
+                show_remote_cursor: ui.get_show_remote_cursor(),
             };
             save_settings(&settings);
             // 即时生效：同步主页输入框（无需重启）。
@@ -2210,6 +2212,9 @@ struct AppSettings {
     /// 被控端：仅观看（只读）。
     #[serde(default)]
     inc_view_only: bool,
+    /// 观看端：是否显示远端光标叠加层（#75；默认开，蓝色半透明区别于真实鼠标）。
+    #[serde(default = "default_true")]
+    show_remote_cursor: bool,
 }
 
 fn default_true() -> bool {
