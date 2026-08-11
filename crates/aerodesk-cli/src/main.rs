@@ -72,6 +72,43 @@ fn main() {
     handle.join().expect("main thread join");
 }
 
+/// --probe-audio：验证 macOS 系统音频采集（audio-only SCStream）。
+fn probe_audio() {
+    #[cfg(target_os = "macos")]
+    {
+        use std::time::Instant;
+        match aerodesk_macos::audio_capture::SystemAudioCapture::start() {
+            Ok(cap) => {
+                info!("probe-audio: SCStream audio started");
+                let start = Instant::now();
+                let mut peak = 0u64;
+                while start.elapsed() < std::time::Duration::from_secs(5) {
+                    let n = cap.take_samples(48_000);
+                    if !n.is_empty() {
+                        peak = peak.max(n.len() as u64);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                info!(
+                    "probe-audio: total={} peak_batch={} -> {}",
+                    cap.total_samples(),
+                    peak,
+                    if cap.total_samples() > 1000 {
+                        "OK（系统音频可采集）"
+                    } else {
+                        "EMPTY（无音频输出/无权限/SCStream 音频不可用）"
+                    }
+                );
+            }
+            Err(e) => info!("probe-audio: start failed: {e}"),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        info!("probe-audio: 仅 macOS 支持");
+    }
+}
+
 fn run() {
     init_log();
     let args: Vec<String> = std::env::args().collect();
@@ -79,6 +116,13 @@ fn run() {
         issue_token(&args);
         return;
     }
+    // macOS 系统音频采集探针：--probe-audio 启动 audio-only SCStream 5s，
+    // 打印采集样本统计（验证 SCK 系统音频在本机可用）。
+    if args.iter().any(|a| a == "--probe-audio") {
+        probe_audio();
+        return;
+    }
+
     let role = arg(&args, "--role").unwrap_or_else(|| "viewer".into());
     let signal = arg(&args, "--signal").unwrap_or_else(|| "ws://127.0.0.1:3003/ws".into());
     let signal = if signal.contains("/ws") {
@@ -667,6 +711,109 @@ impl AudioTicker {
             }
             self.pts += 1;
             self.next += Duration::from_millis(20);
+        }
+    }
+}
+
+/// #73 真实系统音频发送：SCK audio-only SCStream → f32 mono 48k → Opus/PCMU。
+/// SCStream 音频采集失败时由调用方回退 AudioTicker（合成音）。
+struct RealAudioSender {
+    cap: aerodesk_macos::audio_capture::SystemAudioCapture,
+    /// Opus 编码器（--audio-opus；libopus 缺失时回退 PCMU）。
+    opus: Option<aerodesk_ffmpeg::audio::OpusEncoder>,
+    /// 48kHz 单声道 i16 缓冲（Opus 直用；PCMU 先 6:1 降采样到 8k）。
+    buf48: Vec<i16>,
+    /// 8kHz 单声道 i16 缓冲（PCMU 用）。
+    buf8: Vec<i16>,
+    pts48: u64,
+    pts8: u64,
+    /// 下一帧发送时间（20ms 节拍；一次只发一帧，避免 WriteWithoutPoll 突发）。
+    next_send: Instant,
+}
+
+impl RealAudioSender {
+    fn new(cap: aerodesk_macos::audio_capture::SystemAudioCapture, audio_opus: bool) -> Self {
+        let opus = if audio_opus {
+            match aerodesk_ffmpeg::audio::OpusEncoder::new(64_000) {
+                Ok(enc) => Some(enc),
+                Err(err) => {
+                    warn!("opus encoder init failed, fallback PCMU: {err}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        Self {
+            cap,
+            opus,
+            buf48: Vec::new(),
+            buf8: Vec::new(),
+            pts48: 0,
+            pts8: 0,
+            next_send: Instant::now(),
+        }
+    }
+
+    /// 排空采集样本并按 20ms 节拍补发**一帧**完整音频（防 WriteWithoutPoll 突发）。
+    fn tick(&mut self, endpoint: &mut Endpoint, mid: str0m::media::Mid, now: Instant) {
+        if now < self.next_send {
+            return;
+        }
+        let samples = self.cap.take_samples(48_000 * 5);
+        if !samples.is_empty() {
+            self.buf48.extend(
+                samples
+                    .into_iter()
+                    .map(|v| (v.clamp(-1.0, 1.0) * 32767.0) as i16),
+            );
+        }
+
+        // Opus（48k）：一次一帧；不足 960 样本时等下一拍。
+        if self.opus.is_some() {
+            if self.buf48.len() >= 960 {
+                let frame: Vec<i16> = self.buf48.drain(..960).collect();
+                let data = self
+                    .opus
+                    .as_mut()
+                    .and_then(|enc| enc.encode(&frame).ok().flatten());
+                if let Some(data) = data {
+                    let rtp_time = str0m::media::MediaTime::new(
+                        self.pts48 * 960,
+                        str0m::media::Frequency::FORTY_EIGHT_KHZ,
+                    );
+                    if let Err(e) = endpoint.send_audio_frame_opus(mid, data, rtp_time) {
+                        warn!("send opus audio failed: {e:?}");
+                    }
+                }
+                self.pts48 += 1;
+                self.next_send = now + Duration::from_millis(20);
+            } else {
+                self.next_send = now + Duration::from_millis(5);
+            }
+            return;
+        }
+
+        // PCMU（8kHz 电话级）：48k → 8k 6:1 降采样（简单平均），一次一帧。
+        let mut i = 0;
+        while i + 6 <= self.buf48.len() {
+            let sum: i32 = self.buf48[i..i + 6].iter().map(|&x| x as i32).sum();
+            self.buf8.push((sum / 6) as i16);
+            i += 6;
+        }
+        self.buf48.drain(..i);
+        if self.buf8.len() >= 160 {
+            let frame: Vec<i16> = self.buf8.drain(..160).collect();
+            let data = aerodesk_core::pcmu::pcmu_encode(&frame);
+            let rtp_time =
+                str0m::media::MediaTime::new(self.pts8 * 160, str0m::media::Frequency::EIGHT_KHZ);
+            if let Err(e) = endpoint.send_audio_frame(mid, data, rtp_time) {
+                warn!("send pcmu audio failed: {e:?}");
+            }
+            self.pts8 += 1;
+            self.next_send = now + Duration::from_millis(20);
+        } else {
+            self.next_send = now + Duration::from_millis(5);
         }
     }
 }
@@ -2255,6 +2402,18 @@ fn publisher_capture(
     }
 
     let mut connected = false;
+    // #73 真实系统音频：SCK audio-only SCStream 采集本机正在播放的声音；
+    // 采集失败/未开 --audio 时回退合成音 AudioTicker。
+    let mut real_audio: Option<RealAudioSender> = None;
+    if audio {
+        match aerodesk_macos::audio_capture::SystemAudioCapture::start() {
+            Ok(cap) => {
+                info!("system audio capture started (SCK audio)");
+                real_audio = Some(RealAudioSender::new(cap, audio_opus));
+            }
+            Err(e) => warn!("system audio capture failed, fallback synthetic: {e}"),
+        }
+    }
     let mut audio_ticker = AudioTicker::new(audio_opus);
     let mut pts = 0i64;
     let pts_inc = 90_000 / FPS as i64;
@@ -2325,9 +2484,13 @@ fn publisher_capture(
             }
         }
 
-        // #58 音频：按 20ms 节拍发送 PCMU 帧。
+        // #58/#73 音频：真实系统音频（SCK）优先，否则合成音节拍器。
         if let Some(amid) = audio_mid {
-            audio_ticker.tick(&mut endpoint, amid, Instant::now());
+            if let Some(sender) = &mut real_audio {
+                sender.tick(&mut endpoint, amid, Instant::now());
+            } else {
+                audio_ticker.tick(&mut endpoint, amid, Instant::now());
+            }
         }
         // #72 文件传输：推进发送。
         file_transfer::tick(&mut endpoint);
