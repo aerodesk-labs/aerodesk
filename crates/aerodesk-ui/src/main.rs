@@ -2586,13 +2586,19 @@ mod multi_session_e2e {
         // B 仍可收输入（重新发送直到新增 input 计数）
         let d = Instant::now() + Duration::from_secs(12);
         let mut b_alive = false;
-        let before_b = std::fs::read_to_string(format!("/tmp/mse2e-pub-{ROOM_B}.err.log"))
+        let before_b = std::fs::read_to_string(format!(
+            "/tmp/mse2e-{}-pub-{ROOM_B}.err.log",
+            std::process::id()
+        ))
+        .map(|t| t.matches("input: seq=").count())
+        .unwrap_or(0);
+        while Instant::now() < d {
+            let now_b = std::fs::read_to_string(format!(
+                "/tmp/mse2e-{}-pub-{ROOM_B}.err.log",
+                std::process::id()
+            ))
             .map(|t| t.matches("input: seq=").count())
             .unwrap_or(0);
-        while Instant::now() < d {
-            let now_b = std::fs::read_to_string(format!("/tmp/mse2e-pub-{ROOM_B}.err.log"))
-                .map(|t| t.matches("input: seq=").count())
-                .unwrap_or(0);
             if now_b > before_b {
                 b_alive = true;
                 break;
