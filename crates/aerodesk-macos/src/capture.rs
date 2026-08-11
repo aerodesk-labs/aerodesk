@@ -54,7 +54,10 @@ fn build_capture(
         let scale = (MAX_CAPTURE_W as f32 / dw as f32)
             .min(MAX_CAPTURE_H as f32 / dh as f32)
             .min(1.0);
-        (((dw as f32 * scale) as u32).max(2), ((dh as f32 * scale) as u32).max(2))
+        (
+            ((dw as f32 * scale) as u32).max(2),
+            ((dh as f32 * scale) as u32).max(2),
+        )
     } else {
         (width, height)
     };
