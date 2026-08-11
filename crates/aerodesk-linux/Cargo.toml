@@ -17,3 +17,7 @@ x11rb = { version = "0.13", features = ["xtest"] }
 libc = "0.2"
 # VAAPI 硬编/硬解：FFmpeg AVHWDeviceContext（CI ubuntu 已装 libavcodec-dev 等）
 ffmpeg-next = "8"
+# Wayland 采集：xdg-desktop-portal ScreenCast + PipeWire（lamco 封装，CI 需 libpipewire-0.3-dev/libspa-0.2-dev）
+lamco-portal = "0.4"
+lamco-pipewire = { version = "0.4", default-features = false }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }
