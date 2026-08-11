@@ -239,14 +239,18 @@ impl H264Decoder {
         let sample = build_sample_buffer(format, &avcc, _pts)?;
         self.pending = Some((sample, avcc));
         let (sample, _) = self.pending.as_ref().unwrap();
+
+        // 丢弃上一帧超时后残留的旧回调帧（防旧帧污染当前帧）。
+        while self.rx.try_recv().is_ok() {}
         session
             .decode(sample)
             .map_err(|e| format!("decode: {e:?}"))?;
 
-        // 取回调帧（解码异步，阻塞等待）
-        match self.rx.recv_timeout(std::time::Duration::from_millis(2000)) {
+        // 取回调帧（解码异步，阻塞等待）。超时从 2s 降到 150ms：
+        // ① 不让媒体循环被单帧解码卡死 2s；② 超时报 Err 供上层触发 PLI。
+        match self.rx.recv_timeout(std::time::Duration::from_millis(150)) {
             Ok(frame) => Ok(frame.image_buffer),
-            Err(_) => Ok(None),
+            Err(e) => Err(format!("decode timeout: {e:?}")),
         }
     }
 }
@@ -347,13 +351,17 @@ impl HevcDecoder {
         let sample = build_sample_buffer(format, &avcc, _pts)?;
         self.pending = Some((sample, avcc));
         let (sample, _) = self.pending.as_ref().unwrap();
+
+        // 丢弃上一帧超时后残留的旧回调帧（防旧帧污染当前帧）。
+        while self.rx.try_recv().is_ok() {}
         session
             .decode(sample)
             .map_err(|e| format!("hevc decode: {e:?}"))?;
 
-        match self.rx.recv_timeout(std::time::Duration::from_millis(2000)) {
+        // 超时 150ms 并报 Err（供上层触发 PLI），而非静默 None。
+        match self.rx.recv_timeout(std::time::Duration::from_millis(150)) {
             Ok(frame) => Ok(frame.image_buffer),
-            Err(_) => Ok(None),
+            Err(e) => Err(format!("hevc decode timeout: {e:?}")),
         }
     }
 }
