@@ -9,6 +9,7 @@
 
 #[cfg(target_os = "macos")]
 pub mod audio;
+pub mod audio_capture;
 pub mod camera;
 pub mod capture;
 pub mod cursor;
