@@ -129,6 +129,21 @@ pub static SESSIONS: std::sync::Mutex<Vec<SessionHandle>> = std::sync::Mutex::ne
 pub static INPUT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// #29 会话槽序号（单调递增，作为会话内部标识；UI 稠密索引见 slot_to_ui_index）。
 pub static SESSION_NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// 活动会话索引镜像（UI 线程维护；viewer 线程读此值判断是否同步 UI，避免跨线程升级）。
+pub static ACTIVE_SESSION: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+/// 文件传输总开关镜像（viewer 线程读；跨线程无法升级 UI 属性）。
+pub static FILE_TRANSFER_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+/// 会话相关测试共享锁：多会话 e2e 与无头 UI 状态测试都操作全局 SESSIONS，
+/// 必须串行执行避免互相污染。
+#[cfg(test)]
+pub static SESSION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 设置活动会话索引（UI 线程调用）：同步 Slint 属性与全局镜像。
+pub fn ui_set_active_session(ui: &AppWindow, idx: i32) {
+    ACTIVE_SESSION.store(idx, Ordering::SeqCst);
+    ui.set_active_session(idx);
+}
 
 /// macOS Dock 图标点击：主窗口弱引用（AppWindow::new 后设置，reopen 回调重显用）。
 #[cfg(target_os = "macos")]
@@ -149,6 +164,31 @@ pub fn focus_window_to_front(window: &slint::Window) {
 /// slot（会话内部标识）→ 当前 UI 稠密索引（SESSIONS 顺序即标签顺序）。
 pub fn slot_to_ui_index(slot: usize) -> Option<usize> {
     SESSIONS.lock().unwrap().iter().position(|s| s.slot == slot)
+}
+
+/// 从任意线程更新 UI：Slint 1.17 的 `Weak::upgrade()` 仅在创建线程可用
+/// （跨线程返回 None），viewer 线程必须经 `upgrade_in_event_loop` 排队到
+/// UI 线程执行。闭包收到 UI 线程上的强句柄，可安全调用 setter。
+pub fn with_ui<F>(ui_weak: &slint::Weak<AppWindow>, f: F)
+where
+    F: FnOnce(&AppWindow) + Send + 'static,
+{
+    let ui_weak = ui_weak.clone();
+    let _ = ui_weak.upgrade_in_event_loop(move |ui| f(&ui));
+}
+
+/// 会话结束（跨线程版）：viewer 线程调用，排队到 UI 线程执行清理。
+pub fn session_cleanup_weak(
+    ui_weak: &slint::Weak<AppWindow>,
+    slot: usize,
+    terminal: Option<String>,
+) {
+    with_ui(ui_weak, move |ui| session_cleanup(ui, slot, terminal));
+}
+
+/// 会话成功连接（跨线程版）：viewer 线程调用。
+pub fn session_joined_weak(ui_weak: &slint::Weak<AppWindow>, slot: usize) {
+    with_ui(ui_weak, move |ui| session_joined(ui, slot));
 }
 
 /// 由 SESSIONS 顺序构建 (标签, 帧数组)。
@@ -183,36 +223,35 @@ pub fn present_frame(
     h: usize,
     slot: usize,
 ) {
-    let Some(fui) = ui_weak.upgrade() else { return };
-    // 读-改-写模型在同一 SESSIONS 临界区内完成（多 viewer 线程串行），
-    // 只重建当前帧，其它会话沿用模型里已有的 Image，避免每帧全量复制。
-    let (ui_idx, img, arr) = {
-        let mut sessions = SESSIONS.lock().unwrap();
-        let Some(ui_idx) = sessions.iter().position(|s| s.slot == slot) else {
-            return; // 会话已移除（断开清理中），跳过渲染
+    // 帧像素必须在 UI 线程外先拷贝进可 Send 的数据，再排队到 UI 线程：
+    // Slint 的 Weak::upgrade() 跨线程返回 None，Image 也不可跨线程 Send。
+    let rgba: Arc<Vec<u8>> = Arc::new(rgba.to_vec());
+    let ui_weak = ui_weak.clone();
+    let _ = ui_weak.upgrade_in_event_loop(move |fui| {
+        // 读-改-写模型在 UI 线程 + SESSIONS 临界区内完成（多 viewer 线程
+        // 的排队闭包在 UI 线程串行执行），保证帧归属与模型一致。
+        let (ui_idx, frames) = {
+            let mut sessions = SESSIONS.lock().unwrap();
+            let Some(ui_idx) = sessions.iter().position(|s| s.slot == slot) else {
+                return; // 会话已移除（断开清理中），跳过渲染
+            };
+            sessions[ui_idx].frame = Some(SessionFrame {
+                rgba: rgba.clone(),
+                w: w as u32,
+                h: h as u32,
+            });
+            (ui_idx, build_tabs_frames(&sessions).1)
         };
-        sessions[ui_idx].frame = Some(SessionFrame {
-            rgba: Arc::new(rgba.to_vec()),
-            w: w as u32,
-            h: h as u32,
-        });
-        let img = img_from_session_frame(&sessions[ui_idx]);
-        let mut arr: Vec<slint::Image> = (0..fui.get_session_frames().row_count())
-            .filter_map(|i| fui.get_session_frames().row_data(i))
-            .collect();
-        if arr.len() <= ui_idx {
-            arr.resize(ui_idx + 1, slint::Image::default());
+        fui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(frames.clone())));
+        if fui.get_active_session() == ui_idx as i32 {
+            // 帧尺寸只在活动会话时写全局（切换会话后由 sync_active_session_ui 恢复）。
+            fui.set_frame_w(w as f32);
+            fui.set_frame_h(h as f32);
+            if let Some(f) = frames.get(ui_idx) {
+                fui.set_video_frame(f.clone());
+            }
         }
-        arr[ui_idx] = img.clone();
-        (ui_idx, img, arr)
-    };
-    fui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(arr)));
-    if fui.get_active_session() == ui_idx as i32 {
-        // 帧尺寸只在活动会话时写全局（切换会话后由 sync_active_session_ui 恢复）。
-        fui.set_frame_w(w as f32);
-        fui.set_frame_h(h as f32);
-        fui.set_video_frame(img);
-    }
+    });
 }
 
 fn img_from_session_frame(s: &SessionHandle) -> slint::Image {
@@ -236,7 +275,7 @@ pub fn session_refresh_ui(ui: &AppWindow) {
     ui.set_session_tabs(slint::ModelRc::new(slint::VecModel::from(tabs)));
     ui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(frames.clone())));
     if is_empty {
-        ui.set_active_session(0);
+        ui_set_active_session(ui, 0);
         ui.set_in_session(false);
         ui.set_conn_state(0);
         ui.set_video_frame(slint::Image::default());
@@ -249,7 +288,7 @@ pub fn session_refresh_ui(ui: &AppWindow) {
     } else {
         let cur = ui.get_active_session() as usize;
         let new_active = cur.min(frames.len() - 1);
-        ui.set_active_session(new_active as i32);
+        ui_set_active_session(ui, new_active as i32);
         if let Some(f) = frames.get(new_active) {
             ui.set_video_frame(f.clone());
         }
@@ -263,7 +302,7 @@ pub fn session_refresh_ui(ui: &AppWindow) {
 pub fn session_joined(ui: &AppWindow, slot: usize) {
     session_refresh_ui(ui);
     if let Some(pos) = slot_to_ui_index(slot) {
-        ui.set_active_session(pos as i32);
+        ui_set_active_session(ui, pos as i32);
         sync_active_session_ui(ui);
     }
 }
@@ -332,9 +371,10 @@ pub fn sync_active_session_ui(ui: &AppWindow) {
 }
 
 /// 修改某会话的 UI 状态；仅当该会话是活动会话时同步到全局 UI。
-pub fn with_session_ui_state<F>(ui: &AppWindow, slot: usize, f: F)
+/// `ui_weak` 供跨线程调用：同步动作排队到 UI 线程执行。
+pub fn with_session_ui_state<F>(ui_weak: &slint::Weak<AppWindow>, slot: usize, f: F)
 where
-    F: FnOnce(&mut SessionHandle),
+    F: FnOnce(&mut SessionHandle) + Send + 'static,
 {
     let is_active = {
         let mut sessions = SESSIONS.lock().unwrap();
@@ -342,10 +382,10 @@ where
             return;
         };
         f(&mut sessions[idx]);
-        ui.get_active_session() == idx as i32
+        ACTIVE_SESSION.load(Ordering::SeqCst) == idx as i32
     };
     if is_active {
-        sync_active_session_ui(ui);
+        with_ui(ui_weak, |ui| sync_active_session_ui(ui));
     }
 }
 
@@ -989,7 +1029,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui = ui.as_weak();
         move |idx| {
             let ui = ui.unwrap();
-            ui.set_active_session(idx);
+            ui_set_active_session(&ui, idx);
             if let Some(frame) = ui.get_session_frames().row_data(idx as usize) {
                 ui.set_video_frame(frame);
             }
@@ -1207,6 +1247,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let ui = ui.unwrap();
             let on = !ui.get_file_transfer_enabled();
             ui.set_file_transfer_enabled(on);
+            FILE_TRANSFER_ENABLED.store(on, Ordering::SeqCst);
             ui.set_session_status(if on {
                 "文件传输：开".into()
             } else {
@@ -1913,6 +1954,8 @@ mod tests {
     /// session_refresh_ui / sync_active_session_ui / session_cleanup / 帧按 slot 归属。
     #[test]
     fn ui_session_state_mapping_real_component() {
+        // 与多会话 e2e 串行（都操作全局 SESSIONS）。
+        let _guard = crate::SESSION_TEST_LOCK.lock().unwrap();
         i_slint_backend_testing::init_no_event_loop();
         let ui = AppWindow::new().unwrap();
 
@@ -2377,9 +2420,8 @@ mod multi_session_e2e {
 
     /// 多会话端到端主体（返回是否通过；服务进程由 Procs::drop 回收）。
     fn multi_session_e2e_run() -> bool {
-        // 0) 防并行污染：SESSIONS/平台是全局的。
-        static E2E_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = E2E_LOCK.lock().unwrap();
+        // 0) 防并行污染：SESSIONS/平台是全局的（与无头 UI 状态测试共用锁）。
+        let _guard = crate::SESSION_TEST_LOCK.lock().unwrap();
         let bin = format!("{}/../../target/debug", env!("CARGO_MANIFEST_DIR"));
 
         // 1) 起 SFU + signal（独立端口）

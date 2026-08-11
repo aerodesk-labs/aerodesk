@@ -43,52 +43,53 @@ pub fn run_generic_viewer(
         Ok(Ok(l)) => l,
         Ok(Err(e)) => {
             eprintln!("generic viewer connect failed: {e}");
+            let msg = format!("连接失败：{e}");
+            let terminal = msg.clone();
             if !stale() {
-                if let Some(ui) = ui_weak.upgrade() {
+                with_ui(&ui_weak, move |ui| {
                     ui.set_conn_state(3);
-                    ui.set_status(format!("连接失败：{e}").into());
-                }
+                    ui.set_status(msg.into());
+                });
             }
-            if let Some(ui) = ui_weak.upgrade() {
-                crate::session_cleanup(&ui, session_idx, Some(format!("连接失败：{e}")));
-            }
+            crate::session_cleanup_weak(&ui_weak, session_idx, Some(terminal));
             return;
         }
         Err(_) => {
             eprintln!("generic viewer connect TIMEOUT (20s)");
             if !stale() {
-                if let Some(ui) = ui_weak.upgrade() {
+                with_ui(&ui_weak, |ui| {
                     ui.set_conn_state(3);
                     ui.set_status("连接超时".into());
-                }
+                });
             }
-            if let Some(ui) = ui_weak.upgrade() {
-                crate::session_cleanup(&ui, session_idx, Some("连接超时".into()));
-            }
+            crate::session_cleanup_weak(&ui_weak, session_idx, Some("连接超时".into()));
             return;
         }
     };
     if stale() {
-        if let Some(ui) = ui_weak.upgrade() {
-            crate::session_cleanup(&ui, session_idx, None);
-        }
+        crate::session_cleanup_weak(&ui_weak, session_idx, None);
         return;
     }
-    let Some(ui) = ui_weak.upgrade() else { return };
-    ui.set_status(format!("已连接：peer={} ice={}", live.peer_id, live.ice_connected).into());
-    ui.set_log(
-        format!(
-            "房间: {room}\n服务器: {server}\nSDP 交换: OK\nICE: {}\n\nOpenH264 软解渲染（Windows/Linux）。",
-            if live.ice_connected { "connected" } else { "pending(5s 超时)" }
-        )
-        .into(),
-    );
-    crate::add_recent(&ui, &room, &server);
-    ui.set_conn_state(2);
-    ui.set_in_session(true);
-    ui.set_session_status("会话中 · OpenH264 软解".into());
+    let peer = live.peer_id.clone();
+    let ice = live.ice_connected;
+    let room2 = room.clone();
+    let server2 = server.clone();
+    with_ui(&ui_weak, move |ui| {
+        ui.set_status(format!("已连接：peer={peer} ice={ice}").into());
+        ui.set_log(
+            format!(
+                "房间: {room2}\n服务器: {server2}\nSDP 交换: OK\nICE: {}\n\nOpenH264 软解渲染（Windows/Linux）。",
+                if ice { "connected" } else { "pending(5s 超时)" }
+            )
+            .into(),
+        );
+        crate::add_recent(ui, &room2, &server2);
+        ui.set_conn_state(2);
+        ui.set_in_session(true);
+        ui.set_session_status("会话中 · OpenH264 软解".into());
+    });
     // #29 多会话：登记标签并切到当前会话。
-    crate::session_joined(&ui, session_idx);
+    crate::session_joined_weak(&ui_weak, session_idx);
     eprintln!(
         "generic viewer connected peer={} ice={}",
         live.peer_id, live.ice_connected
@@ -192,8 +193,7 @@ pub fn run_generic_viewer(
         std::thread::sleep(Duration::from_millis(1));
     }
     // 会话结束（断开置 stop）：提示后清理注册表与 UI 槽位。
-    if let Some(ui) = ui_weak.upgrade() {
-        ui.set_status(format!("已断开：{room}").into());
-        crate::session_cleanup(&ui, session_idx, None);
-    }
+    let msg = format!("已断开：{room}");
+    with_ui(&ui_weak, move |ui| ui.set_status(msg.into()));
+    crate::session_cleanup_weak(&ui_weak, session_idx, None);
 }
