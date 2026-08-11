@@ -1340,7 +1340,7 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }
     });
-    // 发送本地剪贴板文本到被控端（macOS pbpaste；其他平台 no-op）。
+    // 发送本地剪贴板文本到被控端（macOS pbpaste / Windows Get-Clipboard；其他平台 no-op）。
     ui.on_send_clipboard({
         let ui = ui.as_weak();
         move || {
@@ -1349,9 +1349,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 ui.set_session_status("剪贴板：文件传输已关闭".into());
                 return;
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             {
-                // pbpaste 会阻塞，放后台线程避免卡 UI 事件循环。
+                // pbpaste/Get-Clipboard 会阻塞，放后台线程避免卡 UI 事件循环。
                 let ui = ui.as_weak();
                 std::thread::spawn(move || {
                     let Some(ui) = ui.upgrade() else {
