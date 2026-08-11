@@ -208,6 +208,8 @@ pub fn run_viewer(
     let mut last_kf_request: Option<Instant> = None;
     let mut last_kf_rid: Option<str0m::media::Rid> = None;
     let mut seen_video = false;
+    /// 连续解码失败计数（超时/解码器卡死，≥8 次触发 PLI 自救）。
+    let mut decode_failures: u32 = 0;
 
     while !stale() {
         // #72 文件传输总开关：关闭时跳过 file 通道事件与收发推进（不落盘）。
@@ -387,12 +389,32 @@ pub fn run_viewer(
                                     data.time.as_micros(),
                                     data.is_keyframe(),
                                 )
-                                && let Ok(Some((rgba, w, h))) =
-                                    dec.decode_rgba(cc, &au.data, au.pts_us as i64)
                             {
-                                avsync.on_video(data.time.numer(), data.time.denom());
-                                // #73：先缓存最新帧，按音频时钟到点再渲染。
-                                pending_frame = Some((rgba, w, h, avsync.video_time_secs()));
+                                match dec.decode_rgba(cc, &au.data, au.pts_us as i64) {
+                                    Ok(Some((rgba, w, h))) => {
+                                        decode_failures = 0;
+                                        avsync.on_video(data.time.numer(), data.time.denom());
+                                        // #73：先缓存最新帧，按音频时钟到点再渲染。
+                                        pending_frame =
+                                            Some((rgba, w, h, avsync.video_time_secs()));
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        // 连续解码失败（超时/解码器卡死）：请求关键帧自救。
+                                        decode_failures += 1;
+                                        if decode_failures >= 8 {
+                                            decode_failures = 0;
+                                            let _ = live.endpoint.request_keyframe(
+                                                data.mid,
+                                                data.rid,
+                                                str0m::media::KeyframeRequestKind::Fir,
+                                            );
+                                            eprintln!(
+                                                "macos viewer: 连续 8 次解码失败，请求关键帧自救: {e}"
+                                            );
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
