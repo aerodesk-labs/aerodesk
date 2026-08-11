@@ -809,13 +809,13 @@ impl aerodesk_core::platform::InputInjector for UinputInjector {
                     (ev::KEY_LEFTMETA, modifiers.meta),
                 ];
                 if down {
-                    for (m, on) in mods.into_iter().filter(|(_, on)| *on) {
+                    for (m, _on) in mods.into_iter().filter(|(_, on)| *on) {
                         self.key_event(m, true)?;
                     }
                     self.key_event(keycode, true)?;
                 } else {
                     self.key_event(keycode, false)?;
-                    for (m, on) in mods.into_iter().filter(|(_, on)| *on) {
+                    for (m, _on) in mods.into_iter().filter(|(_, on)| *on) {
                         self.key_event(m, false)?;
                     }
                 }

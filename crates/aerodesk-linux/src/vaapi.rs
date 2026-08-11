@@ -88,7 +88,7 @@ fn create_device() -> Result<BufferRef, String> {
 /// 为编码器创建 VAAPI hw_frames_ctx（sw_format=NV12，encoder 侧上传用）。
 fn create_encoder_frames(device: &BufferRef, width: u32, height: u32) -> Result<BufferRef, String> {
     unsafe {
-        let frames = ffmpeg::ffi::av_hwframe_ctx_alloc(device.as_ptr());
+        let mut frames = ffmpeg::ffi::av_hwframe_ctx_alloc(device.as_ptr());
         if frames.is_null() {
             return Err("vaapi hwframe_ctx_alloc failed".into());
         }
@@ -120,7 +120,7 @@ fn vaapi_encoder_names(codec: Codec) -> &'static [&'static str] {
         Codec::H264 => &["h264_vaapi"],
         Codec::Hevc => &["hevc_vaapi"],
         Codec::Av1 => &["av1_vaapi"],
-        other => &[], // VP9 VAAPI 编码器不通用，保持软编
+        _other => &[], // VP9 VAAPI 编码器不通用，保持软编
     }
 }
 
@@ -192,8 +192,10 @@ impl VaapiEncoder {
         let mut ctx = ffmpeg::codec::context::Context::new_with_codec(codec_obj);
         {
             let p = unsafe { &mut *ctx.as_mut_ptr() };
-            p.hw_device_ctx = ffmpeg::ffi::av_buffer_ref(device.as_ptr());
-            p.hw_frames_ctx = ffmpeg::ffi::av_buffer_ref(frames.as_ptr());
+            // SAFETY: AVBufferRef 引用计数递增；与 BufferRef/AVCodecContext 各自持有一份引用，
+            // 在 Drop/avcodec_free_context 时对称释放。
+            p.hw_device_ctx = unsafe { ffmpeg::ffi::av_buffer_ref(device.as_ptr()) };
+            p.hw_frames_ctx = unsafe { ffmpeg::ffi::av_buffer_ref(frames.as_ptr()) };
         }
         let mut venc = ctx
             .encoder()
@@ -379,7 +381,8 @@ impl VaapiDecoder {
             ffmpeg::codec::context::Context::new_with_codec(ffmpeg_codec).decoder();
         {
             let p = unsafe { &mut *decoder_ctx.as_mut_ptr() };
-            p.hw_device_ctx = ffmpeg::ffi::av_buffer_ref(device.as_ptr());
+            // SAFETY: AVBufferRef 引用计数递增；decoder context 在 avcodec_free_context 时释放。
+            p.hw_device_ctx = unsafe { ffmpeg::ffi::av_buffer_ref(device.as_ptr()) };
         }
         let decoder = decoder_ctx
             .video()
