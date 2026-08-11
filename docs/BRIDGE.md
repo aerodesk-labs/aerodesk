@@ -139,6 +139,27 @@ CI 五场景全量回归；`REMOTE_LOOPBACK=1`（#257）在本地起双 PoP 但�
 默认 `pkill -f '[a]erodesk-bridge'` 作用于本地桥），CI 双跑——远程验收工具已
 端到端验证（含 `BRIDGE_KILL_CMD` 恢复与「非 Redirect 回退」断言）。
 
+### 一键部署+验收（#264，scripts/multipop-deploy.sh）
+
+在基建（两台可 ssh+sudo 的主机）就绪后，一条命令完成构建→部署→启动→远程验收：
+
+```sh
+scripts/multipop-deploy.sh \
+  --pop-a root@pop-a.example.com --pop-b root@pop-b.example.com \
+  --auth <信令token> --room-prefix bridge- \
+  [--signal-url-a wss://pop-a.example.com:443/ws --signal-url-b wss://pop-b.example.com:443/ws] \
+  [--dry-run] [--deploy-only] [--cleanup]
+```
+
+- 默认客户端信令地址 `wss://<host>:443/ws`（生产反代）；直连调试用
+  `--signal-url-a/-b` 覆盖为 `ws://<host>:3001/ws`；
+- 生成 systemd unit（基于 deploy/systemd 模板，按 PoP 填 env：POP_ID/ROOM_POP_MAP/
+  POP_URLS/TURN/BRIDGE_CMD/BRIDGE_AUTH_TOKEN/SFU_TOKEN/INTERNAL_TOKEN），
+  安装并 `systemctl enable --now`；
+- 健康等待后调 `bridge-fallback-e2e.sh` 远程模式验收，产出带时间戳报告
+  `/tmp/aerodesk-acceptance-*.log`；
+- `--dry-run` 只打印全部将执行的命令；`--cleanup` 停止并禁用两端服务。
+
 ### 真实多 PoP 部署验收 runbook（M3 剩余项）
 
 1. **部署**：每 PoP 一组 signal+SFU（+可选 coturn），见 `DEPLOYMENT.md`；
