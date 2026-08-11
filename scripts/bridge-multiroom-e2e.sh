@@ -75,6 +75,7 @@ for _ in $(seq 1 80); do
   sleep 0.2
 done
 sleep 0.3
+grep -q "bridge orchestration enabled" /tmp/bmr-sig-b.log || fail "PoP-B 未启用桥编排（BRIDGE_CMD 未生效）"
 
 start_pub() { # $1=room $2=log
   "$TARGET_DIR/aerodesk-cli" --role publisher --signal "$SIG_A_URL" --room "$1" --token "$AUTH" \
@@ -107,7 +108,9 @@ grep -q "signal redirect" /tmp/bmr-view2.log && fail "场景A：R2 不应 Redire
 grep -q "spawned for room $ROOM1" /tmp/bmr-sig-b.log || fail "场景A：R1 未 spawn 桥"
 grep -q "spawned for room $ROOM2" /tmp/bmr-sig-b.log || fail "场景A：R2 未 spawn 桥"
 SPAWNS=$(grep -c "bridge: spawned" /tmp/bmr-sig-b.log 2>/dev/null || echo 0)
-[ "${SPAWNS:-0}" -ge 2 ] || fail "场景A：桥 spawn=${SPAWNS} 应 ≥2"
+[ "${SPAWNS:-0}" -eq 2 ] || fail "场景A：桥 spawn=${SPAWNS} 应 =2"
+grep -q "bridge: room $ROOM1 ready" /tmp/bmr-sig-b.log || fail "场景A：R1 桥未就绪"
+grep -q "bridge: room $ROOM2 ready" /tmp/bmr-sig-b.log || fail "场景A：R2 桥未就绪"
 # 双 SFU 客户端数：A=2 publisher + 2 bridge-viewer 腿 = 4；B=2 bridge-pub 腿 + 2 viewer = 4。
 ok=0
 for _ in $(seq 1 20); do
@@ -134,6 +137,8 @@ POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="mroom-=pop-a" POP_URLS="pop-a=${S
 SIG_B_PID=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break; sleep 0.2; done
 sleep 0.3
+grep -q "bridge orchestration enabled" /tmp/bmr-sig-b2.log || fail "PoP-B（上限）未启用桥编排"
+grep -q "BRIDGE_MAX_RUNNING" /tmp/bmr-sig-b2.log || true   # 无日志；以行为断言为准
 
 PUB1=$(start_pub "$ROOM1" /tmp/bmr-pub1b.log)
 PUB2=$(start_pub "$ROOM2" /tmp/bmr-pub2b.log)
@@ -141,6 +146,8 @@ for _ in $(seq 1 120); do
   grep -q "ICE connected" /tmp/bmr-pub1b.log 2>/dev/null && grep -q "ICE connected" /tmp/bmr-pub2b.log 2>/dev/null && break
   sleep 0.5
 done
+grep -q "ICE connected" /tmp/bmr-pub1b.log || fail "场景B：publisher R1 未连上"
+grep -q "ICE connected" /tmp/bmr-pub2b.log || fail "场景B：publisher R2 未连上"
 VIEW1=$(start_view "$ROOM1" /tmp/bmr-view1b.log)
 wait_decoded /tmp/bmr-view1b.log || fail "场景B：R1（桥优先）未解码"
 grep -q "signal redirect" /tmp/bmr-view1b.log && fail "场景B：R1 不应 Redirect"
@@ -151,7 +158,7 @@ wait_decoded /tmp/bmr-view2b.log || fail "场景B：R2 跟随 Redirect 后未解
 # 只有 R1 的桥被 spawn；上限告警出现。
 grep -q "spawned for room $ROOM1" /tmp/bmr-sig-b2.log || fail "场景B：R1 未 spawn 桥"
 grep -q "spawned for room $ROOM2" /tmp/bmr-sig-b2.log && fail "场景B：R2 不应 spawn 桥（上限=1）"
-grep -qE "running bridges .* >= max|fallback redirect" /tmp/bmr-sig-b2.log || fail "场景B：未出现上限/回退日志"
+grep -q "running bridges .* >= max" /tmp/bmr-sig-b2.log || fail "场景B：未出现 BRIDGE_MAX_RUNNING 上限日志"
 echo "  场景B PASS：R1 桥优先、R2 上限回退 Redirect 并直连 PoP-A 解码"
 
 grep -qiE "panic|abort" /tmp/bmr-*.log && fail "发现 panic/abort"
