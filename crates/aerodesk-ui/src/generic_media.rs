@@ -178,9 +178,19 @@ pub fn run_generic_viewer(
                             }
                         }
                     }
+                    // #277 跨平台抽象：解码走 core `Decoder` trait
+                    // （SoftDecoder 已实现该 trait），观看端不再直接依赖具体 API。
                     let d = decoder.as_mut().unwrap();
-                    if let Ok(Some((rgba, w, h))) = d.decode_rgba(&au.data) {
+                    let unit = aerodesk_core::media_pipeline::EncodedUnit {
+                        data: au.data.clone(),
+                        keyframe: data.is_keyframe(),
+                        pts_ms: au.pts_us / 1000,
+                        rtp_timestamp: 0,
+                    };
+                    if let Ok(Some(frame)) = aerodesk_core::platform::Decoder::decode(d, &unit) {
                         frames += 1;
+                        let rgba = frame.raw.unwrap_or_default();
+                        let (w, h) = (frame.width as usize, frame.height as usize);
                         // 多会话：写入本会话帧槽 + 活动会话显示帧。
                         crate::present_frame(&ui_weak, &rgba, w, h, session_idx);
                         if last_stat.elapsed() >= Duration::from_secs(5) {
