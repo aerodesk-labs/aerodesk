@@ -12,11 +12,6 @@ pub struct CapturedFrame {
     pub pts_us: i64,
 }
 
-/// 采集器抽象（被控端）。
-pub trait ScreenCapturer {
-    fn next_frame(&mut self) -> Option<CapturedFrame>;
-}
-
 /// TODO(P4): OH_AVScreenCapture 实现（OpenHarmony SDK + ohos target）。
 pub struct AvScreenCapturer;
 
@@ -26,8 +21,17 @@ impl AvScreenCapturer {
     }
 }
 
-impl ScreenCapturer for AvScreenCapturer {
-    fn next_frame(&mut self) -> Option<CapturedFrame> {
-        None
+/// #277：统一实现 core `MediaSource`（采集帧 raw 按 BGRA32 约定）。
+impl aerodesk_core::platform::MediaSource for AvScreenCapturer {
+    type Error = String;
+
+    fn start(&mut self, _fps: u32, _with_cursor: bool) -> Result<(), Self::Error> {
+        Ok(())
     }
+
+    fn next_frame(&mut self) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        Ok(None)
+    }
+
+    fn stop(&mut self) {}
 }

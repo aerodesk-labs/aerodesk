@@ -135,3 +135,12 @@ impl Drop for SystemAudioCapture {
         let _ = self.stream.stop_capture();
     }
 }
+
+/// 核心 `AudioCapturer` 实现（被控端系统音频采集，单声道 f32）。
+impl aerodesk_core::platform::AudioCapturer for SystemAudioCapture {
+    type Error = String;
+
+    fn next_samples(&mut self, max: usize) -> Result<Vec<f32>, Self::Error> {
+        Ok(self.take_samples(max))
+    }
+}

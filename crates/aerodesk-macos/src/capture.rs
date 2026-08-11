@@ -134,8 +134,10 @@ impl ScreenCapture {
     }
 
     /// 采集一帧，返回 IOSurface（零拷贝，可直接进 VideoToolbox）。
-    /// 失败（如无权限）返回 None；SCK 挂起时连续超时自动重建会话。
-    pub fn next_frame(&mut self, timeout: Duration) -> Option<IOSurface> {
+    /// 采集一帧，返回 IOSurface（零拷贝，可直接进 VideoToolbox）。
+    /// 失败（如无权限）返回 None；SCK 挂起时连续超时自动重建会话（#274）。
+    /// 命名为 capture_frame 以区别于 core `MediaSource::next_frame`（#277）。
+    pub fn capture_frame(&mut self, timeout: Duration) -> Option<IOSurface> {
         match self.rx.recv_timeout(timeout) {
             Ok(Ok(surface)) => {
                 self.seq += 1;
@@ -195,4 +197,39 @@ pub fn surface_to_bgra(surface: &IOSurface, w: u32, h: u32) -> Result<Vec<u8>, S
         }
     }
     Ok(bgra)
+}
+
+/// 核心 `MediaSource` 实现：零拷贝帧以 `Arc<dyn Any + Send>` 承载 IOSurface，
+/// 交给实现了核心 `Encoder` 的 VideoToolbox 编码器直接消费（不拷贝像素）。
+impl aerodesk_core::platform::MediaSource for ScreenCapture {
+    type Error = String;
+
+    fn start(&mut self, _fps: u32, _with_cursor: bool) -> Result<(), Self::Error> {
+        // 采集器在构造时已按 ScreenCapture::start 参数建好；trait 的 start 为
+        // 泛化入口预留，重复调用视为已就绪。
+        Ok(())
+    }
+
+    fn next_frame(&mut self) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        match self.capture_frame(Duration::from_millis(33)) {
+            Some(surface) => {
+                let seq = self.seq();
+                Ok(Some(aerodesk_core::platform::VideoFrame {
+                    platform: Some(std::sync::Arc::new(surface)),
+                    handle: None,
+                    raw: None,
+                    width: self.width(),
+                    height: self.height(),
+                    pts_ms: (seq * 33) as u64,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn stop(&mut self) {}
+
+    fn display_id(&self) -> Option<u32> {
+        Some(ScreenCapture::display_id(self))
+    }
 }

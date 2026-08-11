@@ -63,7 +63,7 @@ mod tests {
 pub fn trigger_screen_capture_registration() {
     use std::time::Duration;
     if let Ok(mut cap) = crate::capture::ScreenCapture::start(0, 5, 320, 200) {
-        let _ = cap.next_frame(Duration::from_millis(250));
+        let _ = cap.capture_frame(Duration::from_millis(250));
     }
 }
 
@@ -72,4 +72,33 @@ pub fn trigger_screen_capture_registration() {
 /// 会打开系统设置窗口），比只做采集尝试更可靠；返回当前授权结果。
 pub fn request_screen_capture() -> bool {
     ScreenCaptureAccess.request()
+}
+
+/// 核心 `Permissions` trait 实现（macOS TCC）。
+pub struct MacPermissions;
+
+impl aerodesk_core::platform::Permissions for MacPermissions {
+    fn screen_capture_authorized(&self) -> bool {
+        screen_capture_authorized()
+    }
+
+    fn accessibility_authorized(&self) -> bool {
+        accessibility_authorized()
+    }
+
+    fn request_screen_capture(&self) -> bool {
+        request_screen_capture()
+    }
+
+    fn open_screen_capture_settings(&self) {
+        open_system_settings(SettingsPane::ScreenCapture);
+    }
+
+    fn open_accessibility_settings(&self) {
+        open_system_settings(SettingsPane::Accessibility);
+    }
+
+    fn trigger_screen_capture_registration(&self) {
+        trigger_screen_capture_registration();
+    }
 }

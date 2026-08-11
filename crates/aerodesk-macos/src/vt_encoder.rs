@@ -66,6 +66,35 @@ impl VtEncoder {
         })
     }
 
+    /// 按新参数重建会话（核心 `Encoder::configure` 用；分辨率/codec 变更后调用）。
+    pub fn reconfigure(
+        &mut self,
+        codec: Codec,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate_bps: u32,
+    ) -> Result<(), String> {
+        let session = CompressionSessionBuilder::new(width as i32, height as i32, codec)
+            .with_real_time(true)
+            .with_average_bit_rate(bitrate_bps as i32)
+            .with_expected_frame_rate(fps as f64)
+            .with_max_keyframe_interval((fps * 2) as i32)
+            .build()
+            .map_err(|e| format!("vt reconfigure ({codec:?}): {e:?}"))?;
+        self.session = session;
+        self.width = width;
+        self.height = height;
+        self.pts = 0;
+        self.pts_inc = (90_000 / fps.max(1)) as i64;
+        self.sps = None;
+        self.pps = None;
+        self.vps = None;
+        self.codec = codec;
+        self.force_keyframe_pending = false;
+        Ok(())
+    }
+
     pub fn codec(&self) -> Codec {
         self.codec
     }
@@ -327,5 +356,65 @@ mod tests {
             annexb.windows(4).any(|w| w == [0, 0, 0, 1]),
             "expected AnnexB start codes"
         );
+    }
+}
+
+/// 核心 `Encoder` 实现：优先走零拷贝 `VideoFrame.platform`（IOSurface），
+/// 无平台帧时回退 `raw`（BGRA）软路径。
+impl aerodesk_core::platform::Encoder for VtEncoder {
+    type Error = String;
+
+    fn configure(
+        &mut self,
+        codec: aerodesk_core::media_pipeline::Codec,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> Result<(), Self::Error> {
+        // 默认码率：>=720p 8Mbps，其余 4Mbps（与 CLI 屏幕采集默认一致）。
+        let bps = if width >= 1280 { 8_000_000 } else { 4_000_000 };
+        let vt_codec = match codec {
+            aerodesk_core::media_pipeline::Codec::Hevc => Codec::HEVC,
+            _ => Codec::H264,
+        };
+        self.reconfigure(vt_codec, width, height, fps, bps)
+    }
+
+    fn encode(
+        &mut self,
+        frame: &aerodesk_core::platform::VideoFrame,
+    ) -> Result<Option<aerodesk_core::media_pipeline::EncodedUnit>, Self::Error> {
+        use std::any::Any;
+        let encoded = if let Some(any) = &frame.platform {
+            let surface = any
+                .downcast_ref::<IOSurface>()
+                .ok_or("platform frame is not IOSurface")?;
+            self.encode_surface(surface)?
+        } else if let Some(raw) = &frame.raw {
+            self.encode_bgra(raw)?
+        } else {
+            return Ok(None);
+        };
+        let Some(encoded) = encoded else {
+            return Ok(None);
+        };
+        let keyframe = self.is_keyframe_avcc(&encoded.data);
+        let data = self.to_annexb(&encoded);
+        Ok(Some(aerodesk_core::media_pipeline::EncodedUnit {
+            data,
+            keyframe,
+            pts_ms: frame.pts_ms,
+            rtp_timestamp: 0,
+        }))
+    }
+
+    fn request_keyframe(&mut self) {
+        let _ = self.force_keyframe();
+    }
+
+    fn set_bitrate(&mut self, bitrate_bps: u64, fps: u32) {
+        // VideoToolbox 会话码率在 build 时固定；改码率需重建会话，本轮保持
+        // 兼容占位（宿主循环可用 configure 重建）。
+        let _ = (bitrate_bps, fps);
     }
 }

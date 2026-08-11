@@ -2082,30 +2082,24 @@ fn publisher_vt(
 }
 /// FFmpeg 发布端（#74）：合成 RGB → FfmpegEncoder（H264/H265/VP9/AV1）→ SFU。
 /// `--codec h264|h265|vp9|av1` 选择编码格式；AV1(SVT) 有 ~1s 编码延迟。
-fn publisher_ffmpeg(
+/// 泛型发布循环（跨平台抽象落地 #277）：只依赖 core 的 `MediaSource` + `Encoder`，
+/// 平台具体采集器/编码器由调用方构造后传入。cfg 只出现在调用方（适配器工厂）。
+fn publisher_generic<
+    S: aerodesk_core::platform::MediaSource,
+    E: aerodesk_core::platform::Encoder,
+>(
     signal_url: &str,
     room: &str,
     auth: Option<&str>,
     audio: bool,
     audio_opus: bool,
     codec: Codec,
-    noisy: bool,
+    fps: u32,
+    mut source: S,
+    mut encoder: E,
 ) {
-    use aerodesk_macos::synthetic::SyntheticSource;
-
-    const W: u32 = 640;
-    const H: u32 = 360;
-    const FPS: u32 = 30;
-
     let (mut signal, mut endpoint, mut socket, video_mid, audio_mid) =
         connect_codec(signal_url, room, Role::Publisher, auth, audio, codec).expect("connect");
-    let mut encoder = FfmpegEncoder::new(W, H, FPS, 1_500_000, codec).expect("ffmpeg encoder");
-    // #8：--noisy 高熵合成源（码率贴近目标档位，压测/高码率回归用）。
-    let mut source = if noisy {
-        SyntheticSource::new_noisy(W, H)
-    } else {
-        SyntheticSource::new(W, H)
-    };
     let mut connected = false;
     let mut audio_ticker = AudioTicker::new(audio_opus);
     let mut next_frame = Instant::now();
@@ -2138,7 +2132,7 @@ fn publisher_ffmpeg(
         while let Some(ev) = endpoint.poll_event() {
             match ev {
                 ClientEvent::IceConnected => {
-                    info!("ICE connected, starting ffmpeg stream (codec={codec:?})");
+                    info!("ICE connected, starting generic stream (codec={codec:?})");
                     connected = true;
                     next_frame = Instant::now();
                 }
@@ -2168,9 +2162,20 @@ fn publisher_ffmpeg(
         }
 
         if connected && Instant::now() >= next_frame {
-            next_frame += frame_interval(FPS);
-            let rgb = source.next_frame();
-            if let Some(unit) = encoder.encode_rgb(rgb).expect("encode") {
+            next_frame += frame_interval(fps);
+            let frame = match source.next_frame() {
+                Ok(Some(f)) => f,
+                Ok(None) => continue,
+                Err(e) => {
+                    warn!("source next_frame: {e}");
+                    continue;
+                }
+            };
+            if let Some(unit) = encoder
+                .encode(&frame)
+                .map_err(|e| e.to_string())
+                .expect("encode")
+            {
                 let rtp_time = str0m::media::MediaTime::new(
                     pts as u64 * 3000,
                     str0m::media::Frequency::NINETY_KHZ,
@@ -2188,6 +2193,35 @@ fn publisher_ffmpeg(
         std::thread::sleep(Duration::from_millis(2));
         let _ = &mut signal;
     }
+}
+
+/// FFmpeg 软编发布端（合成源，全平台可用）：SyntheticSource + FfmpegEncoder，
+/// 走泛型 `publisher_generic`（#277 消费方泛型化证明）。
+fn publisher_ffmpeg(
+    signal_url: &str,
+    room: &str,
+    auth: Option<&str>,
+    audio: bool,
+    audio_opus: bool,
+    codec: Codec,
+    noisy: bool,
+) {
+    use aerodesk_macos::synthetic::SyntheticSource;
+
+    const W: u32 = 640;
+    const H: u32 = 360;
+    const FPS: u32 = 30;
+
+    let encoder = FfmpegEncoder::new(W, H, FPS, 1_500_000, codec).expect("ffmpeg encoder");
+    // #8：--noisy 高熵合成源（码率贴近目标档位，压测/高码率回归用）。
+    let source = if noisy {
+        SyntheticSource::new_noisy(W, H)
+    } else {
+        SyntheticSource::new(W, H)
+    };
+    publisher_generic(
+        signal_url, room, auth, audio, audio_opus, codec, FPS, source, encoder,
+    );
 }
 
 /// 真实屏幕采集发布端：ScreenCaptureKit → VideoToolbox 硬编（零拷贝）→ SFU。
@@ -2283,7 +2317,7 @@ fn publisher_capture_ffmpeg(
             }
         }
 
-        if connected && let Some(surface) = capture.next_frame(Duration::from_millis(50)) {
+        if connected && let Some(surface) = capture.capture_frame(Duration::from_millis(50)) {
             // IOSurface（BGRA）→ 行复制到 CPU 缓冲 → FFmpeg 编码。
             let bgra = match aerodesk_macos::capture::surface_to_bgra(&surface, W, H) {
                 Ok(b) => b,
@@ -2535,7 +2569,7 @@ fn publisher_capture(
             let mut frames = Vec::with_capacity(layers.len());
             let mut captured_any = false;
             for (rid, encoder, capture) in &mut layers {
-                if let Some(surface) = capture.next_frame(Duration::from_millis(50)) {
+                if let Some(surface) = capture.capture_frame(Duration::from_millis(50)) {
                     captured_any = true;
                     match encoder.encode_surface(&surface) {
                         Ok(Some(frame)) => {

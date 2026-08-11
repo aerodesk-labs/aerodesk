@@ -73,3 +73,37 @@ mod tests {
         );
     }
 }
+
+/// 核心 `Decoder` 实现（OpenH264 软解，H.264；全平台回退）。
+impl aerodesk_core::platform::Decoder for SoftDecoder {
+    type Error = String;
+
+    fn configure(
+        &mut self,
+        codec: aerodesk_core::media_pipeline::Codec,
+        _width: u32,
+        _height: u32,
+    ) -> Result<(), Self::Error> {
+        if codec != aerodesk_core::media_pipeline::Codec::H264 {
+            return Err(format!("OpenH264 仅支持 H.264，收到 {codec:?}"));
+        }
+        Ok(())
+    }
+
+    fn decode(
+        &mut self,
+        unit: &aerodesk_core::media_pipeline::EncodedUnit,
+    ) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        let Some((rgba, w, h)) = self.decode_rgba(&unit.data)? else {
+            return Ok(None);
+        };
+        Ok(Some(aerodesk_core::platform::VideoFrame {
+            platform: None,
+            handle: None,
+            raw: Some(rgba),
+            width: w as u32,
+            height: h as u32,
+            pts_ms: unit.pts_ms,
+        }))
+    }
+}

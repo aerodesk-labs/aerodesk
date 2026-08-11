@@ -10,6 +10,7 @@ mod keymap;
 mod macos_media;
 use slint::Model;
 
+use aerodesk_core::platform::{AppShell, FilePicker, Permissions, Renderer};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -157,7 +158,9 @@ pub fn focus_window_to_front(window: &slint::Window) {
         && let Ok(raw) = handle.raw_window_handle()
         && let raw_window_handle::RawWindowHandle::AppKit(appkit) = raw
     {
-        aerodesk_macos::dock::focus_ns_view(appkit.ns_view.as_ptr() as *mut std::ffi::c_void);
+        // #277 平台抽象：窗口聚焦走 core `AppShell` trait。
+        aerodesk_macos::dock::MacAppShell
+            .focus_view(appkit.ns_view.as_ptr() as *mut std::ffi::c_void);
     }
 }
 
@@ -252,6 +255,35 @@ pub fn present_frame(
             }
         }
     });
+}
+
+/// 核心 `Renderer` trait 实现：Slint 渲染适配器（#277）。
+/// 包装 `present_frame`，让观看端管线可以按 `Decoder + Renderer` 泛型驱动。
+pub struct SlintRenderer {
+    ui: slint::Weak<AppWindow>,
+    slot: usize,
+}
+
+impl SlintRenderer {
+    pub fn new(ui: slint::Weak<AppWindow>, slot: usize) -> Self {
+        Self { ui, slot }
+    }
+}
+
+impl Renderer for SlintRenderer {
+    type Error = String;
+
+    fn render(&mut self, frame: &aerodesk_core::platform::VideoFrame) -> Result<(), Self::Error> {
+        let raw = frame.raw.as_deref().unwrap_or_default();
+        present_frame(
+            &self.ui,
+            raw,
+            frame.width as usize,
+            frame.height as usize,
+            self.slot,
+        );
+        Ok(())
+    }
 }
 
 fn img_from_session_frame(s: &SessionHandle) -> slint::Image {
@@ -507,7 +539,8 @@ fn main() -> Result<(), slint::PlatformError> {
     #[cfg(target_os = "macos")]
     {
         *MAIN_WINDOW.lock().unwrap() = Some(ui.as_weak());
-        aerodesk_macos::dock::set_reopen_callback(|| {
+        // #277 平台抽象：Dock 重开回调走 core `AppShell` trait。
+        aerodesk_macos::dock::MacAppShell.set_reopen_callback(Box::new(|| {
             let weak = MAIN_WINDOW.lock().unwrap().clone();
             if let Some(weak) = weak {
                 let _ = weak.upgrade_in_event_loop(|ui| {
@@ -515,7 +548,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     focus_window_to_front(ui.window());
                 });
             }
-        });
+        }));
     }
     // #72 拖放发送：填充会话 UI 弱引用（非 macOS 无 handler，仅写入无副作用）。
     *drop_ui.lock().unwrap() = Some(ui.as_weak());
@@ -1267,22 +1300,17 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             #[cfg(target_os = "macos")]
             {
-                // 文件选择器会阻塞等待用户选择，放后台线程避免卡 UI 事件循环。
+                // #277 平台抽象：文件选择器走 core `FilePicker` trait。
+                // 选择器会阻塞等待用户选择，放后台线程避免卡 UI 事件循环。
                 let ui = ui.as_weak();
                 std::thread::spawn(move || {
-                    let out = std::process::Command::new("osascript")
-                        .args(["-e", "POSIX path of (choose file)"])
-                        .output();
+                    let picked = aerodesk_macos::file_picker::MacFilePicker.pick_file();
                     let Some(ui) = ui.upgrade() else {
                         return;
                     };
-                    match out {
-                        Ok(o) if o.status.success() => {
-                            let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                            if path.is_empty() {
-                                ui.set_session_status("已取消选择文件".into());
-                                return;
-                            }
+                    match picked {
+                        Ok(Some(path)) => {
+                            let path = path.clone();
                             let idx = ui.get_active_session() as usize;
                             let sessions = SESSIONS.lock().unwrap();
                             if let Some(s) = sessions.get(idx) {
@@ -1294,8 +1322,13 @@ fn main() -> Result<(), slint::PlatformError> {
                                 ui.set_session_status("发送文件：未连接会话".into());
                             }
                         }
-                        _ => {
-                            ui.set_session_status("发送文件：无法打开文件选择器".into());
+                        Ok(None) => {
+                            ui.set_session_status("已取消选择文件".into());
+                        }
+                        Err(e) => {
+                            ui.set_session_status(
+                                format!("发送文件：无法打开文件选择器（{e}）").into(),
+                            );
                         }
                     }
                 });
@@ -1423,10 +1456,9 @@ fn main() -> Result<(), slint::PlatformError> {
             let ui = ui.unwrap();
             #[cfg(target_os = "macos")]
             {
-                let (sc, ax) = (
-                    aerodesk_macos::permissions::screen_capture_authorized(),
-                    aerodesk_macos::permissions::accessibility_authorized(),
-                );
+                // #277 平台抽象：权限查询走 core `Permissions` trait。
+                let p = aerodesk_macos::permissions::MacPermissions;
+                let (sc, ax) = (p.screen_capture_authorized(), p.accessibility_authorized());
                 ui.set_perm_screen(if sc {
                     "已授权".into()
                 } else {
@@ -1453,12 +1485,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 // 显式请求屏幕录制：CGRequestScreenCaptureAccess 会把本应用
                 // 登记进「屏幕录制」授权列表（不在列表时打开设置窗口），
                 // 后台线程避免阻塞 UI；随后再打开系统设置对应面板。
-                std::thread::spawn(|| {
-                    let _ = aerodesk_macos::permissions::request_screen_capture();
+                // #277 平台抽象：权限请求/引导走 core `Permissions` trait。
+                let p = aerodesk_macos::permissions::MacPermissions;
+                std::thread::spawn(move || {
+                    let _ = p.request_screen_capture();
                 });
-                aerodesk_macos::permissions::open_system_settings(
-                    aerodesk_macos::permissions::SettingsPane::ScreenCapture,
-                );
+                let p2 = aerodesk_macos::permissions::MacPermissions;
+                p2.open_screen_capture_settings();
             }
             #[cfg(not(target_os = "macos"))]
             if let Some(ui) = ui.upgrade() {
@@ -1470,9 +1503,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui = ui.as_weak();
         move || {
             #[cfg(target_os = "macos")]
-            aerodesk_macos::permissions::open_system_settings(
-                aerodesk_macos::permissions::SettingsPane::Accessibility,
-            );
+            aerodesk_macos::permissions::MacPermissions.open_accessibility_settings();
             #[cfg(not(target_os = "macos"))]
             if let Some(ui) = ui.upgrade() {
                 ui.set_settings_status("被控端权限引导仅 macOS 实现".into());
@@ -1485,14 +1516,15 @@ fn main() -> Result<(), slint::PlatformError> {
     // 放后台线程避免 SCShareableContent 首调阻塞首屏。
     #[cfg(target_os = "macos")]
     std::thread::spawn(|| {
-        aerodesk_macos::permissions::trigger_screen_capture_registration();
+        aerodesk_macos::permissions::MacPermissions.trigger_screen_capture_registration();
     });
     // 启动时刷一次权限状态
     ui.invoke_refresh_perms();
 
     // macOS：点击 Dock 图标恢复隐藏窗口（配合托盘隐藏）。
     #[cfg(target_os = "macos")]
-    aerodesk_macos::dock::install_reopen_handler();
+    // #277 平台抽象：Dock 重开处理器走 core `AppShell` trait。
+    aerodesk_macos::dock::MacAppShell.install_reopen_handler();
 
     // 系统托盘（Slint 1.17 SystemTrayIcon）：仅 macOS 创建；Linux/Windows 下
     // Slint 托盘创建失败会 abort（Xvfb/CI 无 StatusNotifier），故非 macOS 不创建。

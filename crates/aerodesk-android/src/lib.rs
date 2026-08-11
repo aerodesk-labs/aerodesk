@@ -11,6 +11,7 @@
 
 pub mod capture;
 pub mod decode;
+pub mod encode;
 pub mod inject;
 
 /// 解码帧格式（MediaCodec 输出）。

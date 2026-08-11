@@ -317,3 +317,18 @@ mod tests {
         assert_eq!(apply_gain_f32(0.9, 200), 0.9);
     }
 }
+
+/// 核心 `AudioSink` 实现（观看端 PCM 播放）。
+impl aerodesk_core::platform::AudioSink for AudioSink {
+    fn push_pcm(&mut self, samples: &[i16]) {
+        self.push_pcm(samples);
+    }
+
+    fn set_muted(&mut self, muted: bool) {
+        self.set_muted(muted);
+    }
+
+    fn set_volume(&mut self, volume: u16) {
+        self.set_volume(volume);
+    }
+}

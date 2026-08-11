@@ -82,3 +82,24 @@ pub fn focus_ns_view(ns_view: *mut c_void) {
         activate_app();
     }
 }
+
+/// 核心 `AppShell` trait 实现（macOS Dock / 窗口激活）。
+pub struct MacAppShell;
+
+impl aerodesk_core::platform::AppShell for MacAppShell {
+    fn activate(&self) {
+        activate_app();
+    }
+
+    fn focus_view(&self, view: *mut std::ffi::c_void) {
+        focus_ns_view(view);
+    }
+
+    fn install_reopen_handler(&self) {
+        install_reopen_handler();
+    }
+
+    fn set_reopen_callback(&self, callback: Box<dyn Fn() + Send + Sync>) {
+        set_reopen_callback(move || callback());
+    }
+}

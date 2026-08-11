@@ -102,6 +102,60 @@ mod tests {
     use crate::decode::SoftDecoder;
 
     /// OpenH264 编码 → OpenH264 解码回环（Windows/Linux 软编软解验证）。
+    /// #277 跨平台抽象：泛型函数只依赖 core `Encoder`/`Decoder` trait 即可
+    /// 完成 OpenH264 编解码（Windows/Linux/Android 软编软解回退路径）。
+    #[test]
+    fn generic_encoder_decoder_trait_roundtrip() {
+        fn encode_frames<E: aerodesk_core::platform::Encoder>(
+            enc: &mut E,
+            w: u32,
+            h: u32,
+        ) -> Vec<aerodesk_core::media_pipeline::EncodedUnit> {
+            enc.configure(aerodesk_core::media_pipeline::Codec::H264, w, h, 30)
+                .expect("configure");
+            let mut frame = vec![0u8; (w * h * 4) as usize];
+            let mut units = Vec::new();
+            for i in 0..8u32 {
+                for (j, px) in frame.iter_mut().enumerate() {
+                    *px = (i * 25 + (j as u32 / 400)) as u8;
+                }
+                let vf = aerodesk_core::platform::VideoFrame {
+                    platform: None,
+                    handle: None,
+                    raw: Some(frame.clone()),
+                    width: w,
+                    height: h,
+                    pts_ms: (i * 33) as u64,
+                };
+                if let Some(u) = enc.encode(&vf).expect("encode") {
+                    units.push(u);
+                }
+            }
+            units
+        }
+
+        fn count_frames<D: aerodesk_core::platform::Decoder>(
+            dec: &mut D,
+            units: &[aerodesk_core::media_pipeline::EncodedUnit],
+        ) -> usize {
+            let mut n = 0;
+            for u in units {
+                if let Ok(Some(_)) = dec.decode(u) {
+                    n += 1;
+                }
+            }
+            n
+        }
+
+        let (w, h) = (320u32, 180u32);
+        let mut enc = OpenH264Encoder::new(w, h, 30, 500).expect("encoder");
+        let units = encode_frames(&mut enc, w, h);
+        assert!(units.iter().any(|u| u.keyframe), "应有关键帧");
+        let mut dec = SoftDecoder::new().expect("decoder");
+        let n = count_frames(&mut dec, &units);
+        assert!(n >= 1, "泛型 Decoder 应解出帧，got {n}");
+    }
+
     #[test]
     fn openh264_encode_decode_roundtrip() {
         let (w, h) = (320u32, 180u32);
@@ -126,4 +180,49 @@ mod tests {
         assert_eq!(rgba.len(), (w * h * 4) as usize);
         assert!(rgba.chunks_exact(4).any(|p| p[3] == 255));
     }
+}
+
+/// 核心 `Encoder` 实现（OpenH264 软编，H.264；全平台回退）。
+/// `VideoFrame.raw` 按 core 约定为 BGRA32，此处转 RGBA 后编码。
+impl aerodesk_core::platform::Encoder for OpenH264Encoder {
+    type Error = String;
+
+    fn configure(
+        &mut self,
+        codec: aerodesk_core::media_pipeline::Codec,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> Result<(), Self::Error> {
+        if codec != aerodesk_core::media_pipeline::Codec::H264 {
+            return Err(format!("openh264 仅支持 H.264，收到 {codec:?}"));
+        }
+        *self = Self::new(width, height, fps, 1500)?;
+        Ok(())
+    }
+
+    fn encode(
+        &mut self,
+        frame: &aerodesk_core::platform::VideoFrame,
+    ) -> Result<Option<aerodesk_core::media_pipeline::EncodedUnit>, Self::Error> {
+        let Some(raw) = &frame.raw else {
+            return Err("openh264 encoder requires raw BGRA frame".into());
+        };
+        let rgba = crate::bgra_to_rgba(raw);
+        let Some(out) = self.encode_rgba(&rgba)? else {
+            return Ok(None);
+        };
+        Ok(Some(aerodesk_core::media_pipeline::EncodedUnit {
+            data: out.data,
+            keyframe: out.keyframe,
+            pts_ms: frame.pts_ms,
+            rtp_timestamp: 0,
+        }))
+    }
+
+    fn request_keyframe(&mut self) {
+        // openh264 wrapper 未暴露强制 IDR；GOP 内自然 IDR（≤2s）可接受。
+    }
+
+    fn set_bitrate(&mut self, _bitrate_bps: u64, _fps: u32) {}
 }

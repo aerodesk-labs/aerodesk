@@ -7,11 +7,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::CapturedFrame;
 
-/// 采集器抽象（被控端）。
-pub trait ScreenCapturer {
-    fn next_frame(&mut self) -> Option<CapturedFrame>;
-}
-
 /// X11 采集器（X11 桌面）。
 #[cfg(target_os = "linux")]
 pub struct X11Capturer {
@@ -53,7 +48,7 @@ impl X11Capturer {
     }
 
     /// 取下一帧（X11 GetImage，BGRA → RGBA）。
-    pub fn next_frame(&mut self) -> Option<CapturedFrame> {
+    pub fn capture_frame(&mut self) -> Option<CapturedFrame> {
         use x11rb::connection::Connection;
         use x11rb::protocol::xproto::{ConnectionExt, ImageFormat};
 
@@ -99,10 +94,27 @@ impl X11Capturer {
 }
 
 #[cfg(target_os = "linux")]
-impl ScreenCapturer for X11Capturer {
-    fn next_frame(&mut self) -> Option<CapturedFrame> {
-        self.next_frame()
+impl aerodesk_core::platform::MediaSource for X11Capturer {
+    type Error = String;
+
+    fn start(&mut self, _fps: u32, _with_cursor: bool) -> Result<(), Self::Error> {
+        Ok(())
     }
+
+    fn next_frame(&mut self) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        Ok(self
+            .capture_frame()
+            .map(|f| aerodesk_core::platform::VideoFrame {
+                platform: None,
+                handle: None,
+                raw: Some(f.rgba),
+                width: f.width,
+                height: f.height,
+                pts_ms: f.pts_us.max(0) as u64 / 1000,
+            }))
+    }
+
+    fn stop(&mut self) {}
 }
 
 /// 非 Linux 主机上的编译期骨架（保证 workspace 全平台可编译）。
@@ -121,10 +133,18 @@ impl X11Capturer {
 }
 
 #[cfg(not(target_os = "linux"))]
-impl ScreenCapturer for X11Capturer {
-    fn next_frame(&mut self) -> Option<CapturedFrame> {
-        None
+impl aerodesk_core::platform::MediaSource for X11Capturer {
+    type Error = String;
+
+    fn start(&mut self, _fps: u32, _with_cursor: bool) -> Result<(), Self::Error> {
+        Ok(())
     }
+
+    fn next_frame(&mut self) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        Ok(None)
+    }
+
+    fn stop(&mut self) {}
 }
 
 /// PipeWire 采集器占位（Wayland 真机阶段实现）。
@@ -136,8 +156,16 @@ impl PipeWireCapturer {
     }
 }
 
-impl ScreenCapturer for PipeWireCapturer {
-    fn next_frame(&mut self) -> Option<CapturedFrame> {
-        None
+impl aerodesk_core::platform::MediaSource for PipeWireCapturer {
+    type Error = String;
+
+    fn start(&mut self, _fps: u32, _with_cursor: bool) -> Result<(), Self::Error> {
+        Ok(())
     }
+
+    fn next_frame(&mut self) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        Ok(None)
+    }
+
+    fn stop(&mut self) {}
 }

@@ -175,3 +175,28 @@ mod tests {
         assert!(per_frame.as_millis() < 50, "4K 合成帧过慢: {per_frame:?}");
     }
 }
+
+/// 核心 `MediaSource` 实现（合成测试源：BGRA raw 帧，无需采集权限）。
+impl aerodesk_core::platform::MediaSource for SyntheticSource {
+    type Error = std::convert::Infallible;
+
+    fn start(&mut self, _fps: u32, _with_cursor: bool) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn next_frame(&mut self) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        let w = self.width;
+        let h = self.height;
+        let raw = self.next_frame_bgra().to_vec();
+        Ok(Some(aerodesk_core::platform::VideoFrame {
+            platform: None,
+            handle: None,
+            raw: Some(raw),
+            width: w,
+            height: h,
+            pts_ms: self.frame * 33,
+        }))
+    }
+
+    fn stop(&mut self) {}
+}
