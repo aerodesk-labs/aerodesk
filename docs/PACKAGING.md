@@ -8,7 +8,7 @@
 |---|---|---|---|
 | macOS | `.app` / `.dmg` | `scripts/package-macos.sh` | Developer ID + 公证（notarytool） |
 | Windows | `.exe` 安装器 / MSIX | cargo-bundle / WiX / MSIX 打包 | 代码签名证书（EV 可选） |
-| Linux | `.deb` / `.rpm` / AppImage | cargo-deb / fpm / appimage-builder | GPG 签名仓库（可选） |
+| Linux | `.deb` / `.rpm` / AppImage / 便携 `tar.gz` | cargo-deb / rpmbuild / linuxdeploy | GPG 签名仓库（可选） |
 | Android | `.apk` / `.aab` | Gradle（`android/`） | Play App Signing（上传密钥） |
 | iOS | `.ipa` | Xcode Archive（`ios/`） | App Store / TestFlight（开发者证书） |
 | HarmonyOS | `.hap` | DevEco Studio | 鸿蒙开发者证书 + Profile |
@@ -23,7 +23,7 @@ codesign --force --deep --sign "Developer ID Application: …" dist/AeroDesk.app
 xcrun notarytool submit dist/AeroDesk.app --keychain-profile aerodesk --wait
 
 # Linux（在 CI ubuntu 或目标机）
-bash scripts/package-linux.sh      # dist/aerodesk_<版本>_amd64.deb + 便携 tar.gz
+bash scripts/package-linux.sh      # dist/aerodesk_<版本>_amd64.deb + tar.gz + rpm + AppImage
 ```
 
 ## Android / iOS（在各自构建机）
@@ -41,7 +41,7 @@ bash scripts/package-linux.sh      # dist/aerodesk_<版本>_amd64.deb + 便携 t
   → Developer ID 签名（临时 keychain，secrets：`APPLE_CERT_P12`/`APPLE_CERT_PASSWORD`/`APPLE_TEAM_ID`）
   → notarytool 公证 + stapler 装订 → DMG（拖拽安装）→ DMG 签名/公证/装订 → 上传 Release
 - **Linux**：`cargo build --release -p aerodesk-ui` → `scripts/package-linux.sh`
-  → `cargo-deb` 产出 `.deb`（`depends=$auto` 自动探测：ffmpeg 6.1/x264/xkbcommon/fontconfig）+ 便携 tar.gz
+  → `cargo-deb` `.deb`（`depends=$auto` 自动探测）+ 便携 `tar.gz` + `rpmbuild` `.rpm` + `linuxdeploy` AppImage
   → 上传 Release（无签名，GPG 签名仓库可选）
 - **所需 secrets**：`APPLE_CERT_P12`（Developer ID Application 证书 base64）、`APPLE_CERT_PASSWORD`、
   `APPLE_TEAM_ID`、`APPLE_ID`、`APPLE_APP_PASSWORD`
@@ -58,7 +58,7 @@ scripts/package-macos.sh --dmg    # 额外产出 dist/AeroDesk-<版本>.dmg
 
 - [ ] Web：完善 `web/index.html`（浏览器原生 WebRTC；观看/发布/输入与原生端互通）
 - [ ] Windows：MF/NVENC 编码 + WiX/MSIX 打包脚本 + release job
-- [ ] Linux：rpm + AppImage（.deb/tar.gz 已接入 release job，#293）
+- [x] Linux：deb/tar.gz/rpm/AppImage 已接入 release job（#293/#312）
 - [ ] HarmonyOS：DevEco 打包（SDK 到位后）
 
 ## 本地构建验证（2026-08-04）
