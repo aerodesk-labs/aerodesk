@@ -18,6 +18,11 @@ jget() { python3 -c "import sys,json; v=json.load(sys.stdin); print(eval(sys.arg
 echo "== 构建"
 cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
 
+# 前置 e2e 可能残留 sfu/signal 占 14000-14003（无 INTERNAL_TOKEN）→ 先清理，
+# 否则无 token 403 断言会打到旧实例返回 200（CI 测试隔离）。
+pkill -f "aerodesk-sfu|aerodesk-signal" 2>/dev/null || true
+sleep 1
+
 echo "== 启动 sfu（独立端口 1478/14000/14002）+ signal（14001/14003）"
 RECORD_DIR="$REC" RECORD_ON_DEMAND=1 INTERNAL_TOKEN="$TOKEN" \
   SFU_MEDIA_PORT=1478 SFU_SIGNAL_PORT=14000 SFU_INTERNAL_PORT=14002 \

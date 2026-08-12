@@ -237,7 +237,10 @@ impl TurnTransport {
         ca: Option<&Path>,
         timeout: Duration,
     ) -> Result<Self, String> {
-        let stream = TcpStream::connect(server).map_err(|e| format!("turn tcp connect: {e}"))?;
+        // #216：TCP connect 用调用方超时（默认 3s），避免 OS 默认超时（~85s）
+        // 阻塞整条腿——桥/客户端在 TURN TCP 不可达时快速回退直连。
+        let stream = TcpStream::connect_timeout(&server, timeout)
+            .map_err(|e| format!("turn tcp connect: {e}"))?;
         stream.set_nodelay(true).ok();
         // 握手/allocate 用长超时；allocate 成功后切 10ms 泵超时。
         stream

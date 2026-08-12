@@ -841,7 +841,10 @@ impl AudioTicker {
         if self.next > now {
             return;
         }
-        while self.next <= now {
+        // #216：每次 tick 最多补发一帧（欠帧只追一帧）——while 补发全部欠帧会
+        // 突发塞满 str0m 输出队列，导致后续 send_video_frame 持续 WriteWithoutPoll，
+        // 视频被饿死（--audio 时视频几乎不发送）。
+        if self.next <= now {
             match self.codec {
                 AudioCodec::Pcmu => {
                     let mut samples = [0i16; 160];
