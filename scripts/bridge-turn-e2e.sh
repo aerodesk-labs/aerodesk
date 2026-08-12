@@ -166,9 +166,13 @@ echo "== 桥 data channel（TURN relay）功能性检查"
 # 全部 4 条腿都走 TURN relay 时，cursor 这类小 SCTP 消息被多跳重传放大
 # （实测 ~27s/样本），延迟分布验收属于直连模式（bridge-fallback-e2e）与真实
 # 网络远程模式；这里只证明 data channel 路径可用（≥3 样本即可）。
-for _ in $(seq 1 200); do
+# 全 relay 下实测 ~27s/样本，单轮 100s 在 CI 负载下可能不足；最多等两轮。
+for _attempt in 1 2; do
+  for _ in $(seq 1 200); do
+    [ "$(latency_count /tmp/btr-view-b.log)" -ge 3 ] && break
+    sleep 0.5
+  done
   [ "$(latency_count /tmp/btr-view-b.log)" -ge 3 ] && break
-  sleep 0.5
 done
 BRIDGE_STATS=$(latency_stats /tmp/btr-view-b.log)
 BRIDGE_P99=$(echo "$BRIDGE_STATS" | awk '{print $3}')
