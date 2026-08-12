@@ -292,6 +292,14 @@ fn run() {
                 // Windows：DXGI 采集 + OpenH264 软编 + SendInput 注入（被控端）。
                 // 其他平台（Linux）采集批次 #4，先回退合成源。
                 #[cfg(target_os = "windows")]
+                // #3 缩放：4K 显示器软编性能不足，默认缩放到 1920x1080；
+                // --width/--height 覆盖；0 = 原生分辨率。
+                let scale_w: u32 = arg(&args, "--width")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1920);
+                let scale_h: u32 = arg(&args, "--height")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1080);
                 publisher_capture_windows(
                     &signal,
                     &room,
@@ -299,6 +307,8 @@ fn run() {
                     audio,
                     audio_opus,
                     video_codec,
+                    scale_w,
+                    scale_h,
                 );
                 #[cfg(target_os = "linux")]
                 publisher_capture_linux(
@@ -2601,6 +2611,8 @@ fn publisher_capture_windows(
     audio: bool,
     audio_opus: bool,
     codec: Codec,
+    target_w: u32,
+    target_h: u32,
 ) {
     use aerodesk_core::platform::MediaSource;
     use aerodesk_softenc::openh264enc::OpenH264Encoder;
@@ -2608,7 +2620,7 @@ fn publisher_capture_windows(
 
     const FPS: u32 = 30;
 
-    let mut capture = match DxgiCapturer::new() {
+    let mut capture = match DxgiCapturer::new_with_scale(target_w, target_h) {
         Ok(c) => c,
         Err(e) => {
             error!("DXGI capture init failed: {e}");
