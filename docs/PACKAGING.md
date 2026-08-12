@@ -23,8 +23,7 @@ codesign --force --deep --sign "Developer ID Application: …" dist/AeroDesk.app
 xcrun notarytool submit dist/AeroDesk.app --keychain-profile aerodesk --wait
 
 # Linux（在 CI ubuntu 或目标机）
-cargo install cargo-deb
-cargo deb -p aerodesk-ui --target x86_64-unknown-linux-gnu
+bash scripts/package-linux.sh      # dist/aerodesk_<版本>_amd64.deb + 便携 tar.gz
 ```
 
 ## Android / iOS（在各自构建机）
@@ -37,14 +36,16 @@ cargo deb -p aerodesk-ui --target x86_64-unknown-linux-gnu
 `.github/workflows/release.yml`（参考 ../abb 项目的 Build & Release 流水线）：
 
 - **触发**：打 `v*` tag 自动构建并发布 GitHub Release；`workflow_dispatch` 手动触发只出产物
-- **macOS（当前桌面 UI 唯一可用平台）**：`cargo build --release --target aarch64-apple-darwin -p aerodesk-ui`
+- **macOS**：`cargo build --release --target aarch64-apple-darwin -p aerodesk-ui`
   → `scripts/assemble-macos-app.sh` 组装 `.app`（版本号取自 Cargo.toml、图标 `app-assets/AppIcon.icns`）
   → Developer ID 签名（临时 keychain，secrets：`APPLE_CERT_P12`/`APPLE_CERT_PASSWORD`/`APPLE_TEAM_ID`）
   → notarytool 公证 + stapler 装订 → DMG（拖拽安装）→ DMG 签名/公证/装订 → 上传 Release
+- **Linux**：`cargo build --release -p aerodesk-ui` → `scripts/package-linux.sh`
+  → `cargo-deb` 产出 `.deb`（`depends=$auto` 自动探测：ffmpeg 6.1/x264/xkbcommon/fontconfig）+ 便携 tar.gz
+  → 上传 Release（无签名，GPG 签名仓库可选）
 - **所需 secrets**：`APPLE_CERT_P12`（Developer ID Application 证书 base64）、`APPLE_CERT_PASSWORD`、
   `APPLE_TEAM_ID`、`APPLE_ID`、`APPLE_APP_PASSWORD`
-- **Windows/Linux**：aerodesk-ui 非 macOS 分支仍是占位（观看/发布桩），待 UI 落地后按 macos job 同构补
-  Windows Inno Setup + Linux deb/AppImage job
+- **Windows**：aerodesk-ui 非 macOS 分支已可观看（generic viewer），WiX/MSIX 打包 job 待补
 
 本地打包（不签名/公证，自测用）：
 
@@ -57,7 +58,7 @@ scripts/package-macos.sh --dmg    # 额外产出 dist/AeroDesk-<版本>.dmg
 
 - [ ] Web：完善 `web/index.html`（浏览器原生 WebRTC；观看/发布/输入与原生端互通）
 - [ ] Windows：MF/NVENC 编码 + WiX/MSIX 打包脚本 + release job
-- [ ] Linux：cargo-deb/rpm 脚本 + VAAPI 编码 + release job
+- [ ] Linux：rpm + AppImage（.deb/tar.gz 已接入 release job，#293）
 - [ ] HarmonyOS：DevEco 打包（SDK 到位后）
 
 ## 本地构建验证（2026-08-04）

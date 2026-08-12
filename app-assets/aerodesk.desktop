@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=AeroDesk
+GenericName=Remote Desktop Client
+Comment=AeroDesk remote desktop client (viewer/controller)
+Exec=aerodesk-ui
+Icon=aerodesk
+Terminal=false
+Categories=Network;RemoteAccess;
+StartupWMClass=aerodesk-ui

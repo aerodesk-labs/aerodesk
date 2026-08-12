@@ -1,9 +1,10 @@
 name: Build & Release
 
-# 打 tag v* 时自动构建 macOS 桌面端，签名/公证后发 GitHub Release；也可手动触发（只出产物）。
+# 打 tag v* 时自动构建 macOS（签名/公证）与 Linux（deb + tar.gz）桌面端，发 GitHub Release；
+# 也可手动触发（只出产物）。
 # 参考 ../abb 项目的 release 流水线（.github/workflows/release.yml）。
-# 当前桌面 UI（aerodesk-ui）为 macOS 优先：Windows/Linux 分支仍是占位（见 crates/aerodesk-ui
-# 非 macOS 的 run_viewer 桩），待对应平台 UI 落地后按本文件 macos job 同构补 Windows/Linux。
+# macOS：DMG（Developer ID + notarytool）；Linux：cargo-deb .deb + 便携 tar.gz（scripts/package-linux.sh）。
+# Windows：待 UI/WiX 落地后按本文件同构补。
 on:
   push:
     tags: ["v*"]
@@ -111,9 +112,43 @@ jobs:
           path: dist/AeroDesk-*.dmg
           if-no-files-found: error
 
+  # ─────────────────────── Linux（x86_64，deb + tar.gz）───────────────────────
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # workspace 里 aerodesk-sfu 的 dev-dep str0m-netem 是路径依赖（../../../str0m），
+      # cargo 解析 workspace 时必须能读到（与 CI test job 同款处理）。
+      - name: Checkout str0m (netem dev-dep)
+        shell: bash
+        run: |
+          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
+            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # aerodesk-ui(Linux) → aerodesk-linux(VAAPI, ffmpeg-next) + softenc(x264)：
+      # 与 CI test job 的 ubuntu System deps 一致。
+      - name: System deps
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev libx264-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev libswresample-dev libpostproc-dev libavdevice-dev libpipewire-0.3-dev libspa-0.2-dev
+
+      - name: Build release
+        run: cargo build --release -p aerodesk-ui
+
+      - name: Package Linux (deb + tar.gz)
+        run: bash scripts/package-linux.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-dist
+          path: dist/*
+          if-no-files-found: error
+
   # ─────────────────────────── 汇总发 Release ───────────────────────────
   release:
-    needs: [macos]
+    needs: [macos, linux]
     if: startsWith(github.ref, 'refs/tags/v') # 只有打 tag 才发 Release；手动跑只出产物
     runs-on: ubuntu-latest
     steps:
