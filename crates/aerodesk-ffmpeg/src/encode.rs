@@ -340,7 +340,12 @@ impl aerodesk_core::platform::Encoder for FfmpegEncoder {
             let (w, h, fps) = (self.width, self.height, self.fps);
             self.last_bitrate_bps = bitrate_bps;
             self.last_bitrate_at = now;
-            if let Ok(enc) = FfmpegEncoder::new(w, h, fps, bitrate_bps, codec) {
+            if let Ok(mut enc) = FfmpegEncoder::new(w, h, fps, bitrate_bps, codec) {
+                // 重建会替换 self，必须把节流状态带到新编码器：新编码器
+                // last_bitrate_bps=0 会把下一条反馈当首条免节流（#303），
+                // BWE 抖动时 1s 内多次重建打爆编码器（实测 0.2s 内连建两次）。
+                enc.last_bitrate_bps = bitrate_bps;
+                enc.last_bitrate_at = now;
                 *self = enc;
             } else {
                 tracing::warn!("ffmpeg set_bitrate rebuild failed");
