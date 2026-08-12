@@ -570,6 +570,19 @@ pub fn run_viewer(
                     ui.set_session_status("已收到远端剪贴板".into());
                 });
             }
+            // #271：接收远端图片（PNG）→ 写入系统剪贴板（NSPasteboard PNGf）。
+            if let Some(png) = file_transfer.take_incoming_clipboard_image() {
+                std::thread::spawn(move || {
+                    if aerodesk_core::clipboard::write_image(&png) {
+                        eprintln!("clipboard: applied {}B image from viewer", png.len());
+                    } else {
+                        eprintln!("clipboard: 图片写系统剪贴板失败（{}B）", png.len());
+                    }
+                });
+                with_ui(&ui_weak, |ui| {
+                    ui.set_session_status("已收到远端剪贴板图片".into());
+                });
+            }
             if last_file_status.elapsed() >= Duration::from_millis(500) {
                 last_file_status = Instant::now();
                 let st = file_transfer.status();

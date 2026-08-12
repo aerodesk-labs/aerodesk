@@ -69,25 +69,76 @@ pub fn write(text: &str) -> bool {
 }
 
 /// 读取剪贴板图片（PNG 编码；#271）。Windows 经 PowerShell
-/// System.Drawing/Windows.Forms；其他平台暂返回 None（后续批次）。
+/// System.Drawing/Windows.Forms；macOS 经 osascript NSPasteboard `«class PNGf»`
+/// （与 pbpaste/pbcopy 同思路，无额外依赖）；其他平台暂返回 None。
 pub fn read_image() -> Option<Vec<u8>> {
     #[cfg(target_os = "windows")]
     let result: Option<Vec<u8>> = windows_read_image();
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    let result: Option<Vec<u8>> = macos_read_image();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let result: Option<Vec<u8>> = None;
     result
 }
 
-/// 写入剪贴板图片（PNG，#271）。Windows 经 PowerShell；其他平台返回 false。
+/// 写入剪贴板图片（PNG，#271）。Windows 经 PowerShell；macOS 经 osascript
+/// NSPasteboard PNGf；其他平台返回 false。
 pub fn write_image(png: &[u8]) -> bool {
     #[cfg(target_os = "windows")]
     let result: bool = windows_write_image(png);
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    let result: bool = macos_write_image(png);
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let result: bool = {
         let _ = png;
         false
     };
     result
+}
+
+/// macOS：读剪贴板 PNG（osascript 把 NSPasteboard PNGf 写入临时文件再读取）。
+/// 剪贴板无图片时 osascript 报错 → 返回 None。
+#[cfg(target_os = "macos")]
+fn macos_read_image() -> Option<Vec<u8>> {
+    let tmp = std::env::temp_dir().join(format!("aerodesk-clip-read-{}.png", std::process::id()));
+    let script = format!(
+        "set f to open for access POSIX file \"{}\" with write permission\n\
+         write (the clipboard as «class PNGf») to f\n\
+         close access f",
+        tmp.display()
+    );
+    let out = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None; // 剪贴板无 PNG 或非交互会话
+    }
+    let data = std::fs::read(&tmp).ok()?;
+    let _ = std::fs::remove_file(&tmp);
+    if data.is_empty() { None } else { Some(data) }
+}
+
+/// macOS：写 PNG 到剪贴板（osascript 读临时 PNG 文件 → NSPasteboard PNGf）。
+#[cfg(target_os = "macos")]
+fn macos_write_image(png: &[u8]) -> bool {
+    let tmp = std::env::temp_dir().join(format!("aerodesk-clip-write-{}.png", std::process::id()));
+    if std::fs::write(&tmp, png).is_err() {
+        return false;
+    }
+    let script = format!(
+        "set the clipboard to (read (POSIX file \"{}\") as «class PNGf»)",
+        tmp.display()
+    );
+    let ok = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let _ = std::fs::remove_file(&tmp);
+    ok
 }
 
 /// 记录最近一次已知剪贴板内容（远端写入后更新，防止回声）。
@@ -290,6 +341,31 @@ mod tests {
         assert!(write_image(&got));
         let got2 = read_image().expect("再次读回");
         assert_eq!(got, got2, "重编码 PNG 应幂等");
+    }
+
+    /// macOS 真机图片剪贴板往返（#271）：写入 PNG → 读回 → 幂等稳定。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_clipboard_image_roundtrip() {
+        let _guard = CLIP_TEST_LOCK.lock().unwrap();
+        // 1x1 红色 PNG（与 Windows 同款标准字节序列）。
+        let png: Vec<u8> = vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        if !write_image(&png) {
+            eprintln!("SKIP: 剪贴板图片写入失败（无交互会话/被占用）");
+            return;
+        }
+        let got = read_image().expect("读回剪贴板图片");
+        assert!(got.starts_with(b"\x89PNG\r\n\x1a\n"), "读回应为合法 PNG");
+        // 幂等：写回再读应一致（NSPasteboard PNGf 不重编码）。
+        assert!(write_image(&got));
+        let got2 = read_image().expect("再次读回");
+        assert_eq!(got, got2, "PNG 往返应幂等");
     }
 
     /// Windows 真机剪贴板往返（CI windows runner 交互会话）。
