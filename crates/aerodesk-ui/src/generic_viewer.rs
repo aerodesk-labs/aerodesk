@@ -29,6 +29,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     ui_weak: slint::Weak<crate::AppWindow>,
     session_idx: usize,
     input_rx: std::sync::mpsc::Receiver<String>,
+    file_cmd_rx: std::sync::mpsc::Receiver<crate::FileCmd>,
     stop: Arc<AtomicBool>,
     decoder_label: &'static str,
     mut mk_decoder: DF,
@@ -107,6 +108,8 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     crate::session_joined_weak(&ui_weak, session_idx);
 
     let mut assembler = AccessUnitAssembler::new();
+    // #72/#271 文件/剪贴板状态机：观看端不落盘接收，但剪贴板文本/图片接收生效。
+    let mut file_transfer = aerodesk_core::file_transfer::FileTransfer::new(None);
     let mut decoder: Option<D> = None;
     let mut renderer: Option<R> = None;
     let mut frames: u64 = 0;
@@ -122,6 +125,46 @@ pub fn run_viewer_generic<D, R, DF, RF>(
         while let Ok(json) = input_rx.try_recv() {
             live.endpoint
                 .send_channel_data("input", false, json.as_bytes());
+        }
+        // #72/#271 文件/剪贴板命令（UI 工具栏）：发送文件/剪贴板文本/图片、取消。
+        while let Ok(cmd) = file_cmd_rx.try_recv() {
+            match cmd {
+                crate::FileCmd::SendFile(path) => match file_transfer.send_file(&path) {
+                    Ok(()) => {
+                        let msg = format!("开始发送文件：{}", path.display());
+                        with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                    }
+                    Err(e) => {
+                        let msg = format!("发送失败：{e}");
+                        with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                    }
+                },
+                crate::FileCmd::SendClipboard(text) => {
+                    aerodesk_core::clipboard::set_cache(text.clone());
+                    let sent = file_transfer.send_clipboard(&text, &mut live.endpoint);
+                    let msg = if sent {
+                        "已发送剪贴板到被控端".to_string()
+                    } else {
+                        "剪贴板：file 通道未就绪".to_string()
+                    };
+                    with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                }
+                crate::FileCmd::SendClipboardImage(png) => {
+                    match file_transfer.send_clipboard_image(png) {
+                        Ok(()) => {
+                            let msg = "已发送剪贴板图片到被控端".to_string();
+                            with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                        }
+                        Err(e) => {
+                            let msg = format!("剪贴板图片发送失败：{e}");
+                            with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                        }
+                    }
+                }
+                crate::FileCmd::Cancel => {
+                    file_transfer.cancel_send(&mut live.endpoint);
+                }
+            }
         }
         live.socket
             .set_read_timeout(Some(Duration::from_millis(10)))
@@ -156,6 +199,8 @@ pub fn run_viewer_generic<D, R, DF, RF>(
             }
         }
         while let Some(ev) = live.endpoint.poll_event() {
+            // #72 文件通道事件交给状态机（非 file 事件为 no-op）。
+            file_transfer.handle_event(&ev, &mut live.endpoint);
             if let ClientEvent::Media(data) = ev {
                 media_evts += 1;
                 // #136 首包 / 不连续 / 切层 → 请求关键帧（PLI，节流 1s）。
@@ -213,6 +258,24 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                     }
                 }
             }
+        }
+        // #72 文件传输推进 + 剪贴板接收落地（文本/图片写入系统剪贴板）。
+        file_transfer.tick(&mut live.endpoint);
+        if let Some(text) = file_transfer.take_incoming_clipboard() {
+            aerodesk_core::clipboard::set_cache(text.clone());
+            aerodesk_core::clipboard::write(&text);
+            with_ui(&ui_weak, move |ui| {
+                ui.set_session_status("已应用远端剪贴板文本".into())
+            });
+        }
+        if let Some(png) = file_transfer.take_incoming_clipboard_image() {
+            let ok = aerodesk_core::clipboard::write_image(&png);
+            let msg = if ok {
+                "已应用远端剪贴板图片".to_string()
+            } else {
+                "远端剪贴板图片写入失败".to_string()
+            };
+            with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
         }
         std::thread::sleep(Duration::from_millis(1));
     }

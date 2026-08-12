@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use aerodesk_protocol::file::{
-    self, CHUNK_SIZE, FileCancel, FileControl, FileDone, FileMeta, FileNack,
+    self, CHUNK_SIZE, FileCancel, FileControl, FileDone, FileKind, FileMeta, FileNack,
 };
 use sha2::{Digest, Sha256};
 
@@ -22,6 +22,8 @@ use sha2::{Digest, Sha256};
 static SEND_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// 单文件大小上限（1 GiB）：防远端恶意 Meta 触发巨量内存分配（审查 #255）。
+/// 剪贴板图片大小上限（16 MiB，#271）：截图 PNG 通常 <5 MiB，防远端恶意大图占内存。
+pub const MAX_CLIPBOARD_IMAGE: u64 = 16 * 1024 * 1024;
 pub const MAX_FILE_SIZE: u64 = 1024 * 1024 * 1024;
 /// 并发接收器数量上限：防远端用大量不同 id 塞满内存。
 pub const MAX_RECV: usize = 16;
@@ -81,8 +83,9 @@ pub struct FileTransfer {
     /// 是否允许响应远端 FileControl::Request 读取本机文件（默认 false；
     /// 仅被控端显式开启。观看端/UI 拒绝，防任意文件读取）。
     allow_request: bool,
-    /// 收到远端剪贴板文本（调用方 take 后写入系统剪贴板）。
+    /// 收到远端剪贴板文本/图片（调用方 take 后写入系统剪贴板；图片为 PNG，#271）。
     incoming_clipboard: Option<String>,
+    incoming_clipboard_image: Option<Vec<u8>>,
     /// 一次性状态事件（完成/失败/取消），UI 展示后消费。
     message: Option<String>,
     /// 待补发的剪贴板文本（SFU 转发可能丢首包，1s 幂等重试）。
@@ -92,10 +95,14 @@ pub struct FileTransfer {
 }
 
 struct Sender {
+    /// 内存数据源（#271 剪贴板图片；与 file 二选一，Some 时优先）。
+    data: Option<Vec<u8>>,
+    /// 内容类型（#271：剪贴板图片接收端不落盘）。
+    kind: FileKind,
     id: String,
     name: String,
-    /// 已打开的文件句柄（流式发送，避免整文件进内存）。
-    file: std::fs::File,
+    /// 已打开的文件句柄（流式发送，避免整文件进内存；#271 内存数据时为 None）。
+    file: Option<std::fs::File>,
     size: u64,
     hash: String,
     total_chunks: u64,
@@ -117,6 +124,8 @@ struct Sender {
 }
 
 struct Receiver {
+    /// 内容类型（#271：剪贴板图片接收端不落盘）。
+    kind: FileKind,
     name: String,
     size: u64,
     total_chunks: u64,
@@ -142,6 +151,7 @@ impl FileTransfer {
             completed: HashMap::new(),
             allow_request: false,
             incoming_clipboard: None,
+            incoming_clipboard_image: None,
             message: None,
             clipboard_pending: None,
             clipboard_sends: 0,
@@ -290,7 +300,11 @@ impl FileTransfer {
         }
     }
 
-    /// 取走收到的远端剪贴板文本（应用层写入系统剪贴板）。
+    /// 取走收到的远端剪贴板图片（PNG，#271；应用层写入系统剪贴板）。
+    pub fn take_incoming_clipboard_image(&mut self) -> Option<Vec<u8>> {
+        self.incoming_clipboard_image.take()
+    }
+
     pub fn take_incoming_clipboard(&mut self) -> Option<String> {
         self.incoming_clipboard.take()
     }
@@ -316,6 +330,28 @@ impl FileTransfer {
         self.clipboard_sends = 0;
         self.last_clipboard_send = Some(Instant::now());
         self.dispatch_clipboard(text, endpoint)
+    }
+
+    /// 发送剪贴板图片（PNG，#271）到远端：复用文件分片通道（Meta/Chunk/Done + Nack 补包），
+    /// 接收端不落盘、直接写入系统剪贴板。发送期间占用文件发送槽位（互斥）。
+    pub fn send_clipboard_image(&mut self, png: Vec<u8>) -> Result<(), String> {
+        if self.send.as_ref().is_some_and(|s| !s.confirmed) {
+            return Err("已有文件传输进行中，剪贴板图片稍后重试".into());
+        }
+        if png.is_empty() || png.len() as u64 > MAX_CLIPBOARD_IMAGE {
+            return Err(format!(
+                "剪贴板图片大小 {} 超出范围（0 < size <= {MAX_CLIPBOARD_IMAGE}）",
+                png.len()
+            ));
+        }
+        let name = format!(
+            "clipboard-image-{}.png",
+            SEND_SEQ.fetch_add(1, Ordering::SeqCst)
+        );
+        let sender = Sender::from_bytes(name, png, FileKind::ClipboardImage)?;
+        tracing::info!("clipboard image send start: {} bytes", sender.size);
+        self.send = Some(sender);
+        Ok(())
     }
 
     fn dispatch_clipboard(&mut self, text: &str, endpoint: &mut crate::Endpoint) -> bool {
@@ -415,7 +451,8 @@ impl FileTransfer {
     }
 
     fn on_meta(&mut self, m: FileMeta) {
-        if self.recv_dir.is_none() {
+        let is_clip_image = m.kind == FileKind::ClipboardImage;
+        if !is_clip_image && self.recv_dir.is_none() {
             tracing::info!("file receive disabled (no recv dir); ignore {}", m.name);
             return;
         }
@@ -424,17 +461,24 @@ impl FileTransfer {
             return;
         }
         // 安全上限（审查 #255 Critical）：防远端恶意 Meta 触发巨量分配/DoS。
-        let safe_name = safe_file_name(&m.name);
+        // #271 剪贴板图片：名字固定、不落盘，仅内存接收。
+        let safe_name = if is_clip_image {
+            "clipboard-image.png".to_string()
+        } else {
+            safe_file_name(&m.name)
+        };
         if safe_name.is_empty() {
             tracing::warn!("file receive rejected: 非法文件名 {:?}", m.name);
             return;
         }
         let expect_chunks = m.size.div_ceil(CHUNK_SIZE as u64);
-        if m.size == 0 || m.size > MAX_FILE_SIZE {
-            tracing::warn!(
-                "file receive rejected: size {} (max {MAX_FILE_SIZE})",
-                m.size
-            );
+        let max_size = if is_clip_image {
+            MAX_CLIPBOARD_IMAGE
+        } else {
+            MAX_FILE_SIZE
+        };
+        if m.size == 0 || m.size > max_size {
+            tracing::warn!("file receive rejected: size {} (max {max_size})", m.size);
             return;
         }
         if m.chunks != expect_chunks {
@@ -458,6 +502,7 @@ impl FileTransfer {
         self.recv.insert(
             m.id.clone(),
             Receiver {
+                kind: m.kind,
                 name: safe_name,
                 size: m.size,
                 total_chunks: m.chunks,
@@ -535,9 +580,6 @@ impl FileTransfer {
             }
             return;
         };
-        let Some(dir) = self.recv_dir.clone() else {
-            return;
-        };
         if !d.ok {
             if let Some(err) = &d.error {
                 tracing::warn!("file {} failed on sender: {err}", r.name);
@@ -565,6 +607,35 @@ impl FileTransfer {
                 return;
             }
         }
+        // #271 剪贴板图片：完整接收后交内存队列（不落盘），由调用方写入系统剪贴板。
+        if r.kind == FileKind::ClipboardImage {
+            tracing::info!("clipboard image receive complete: {} bytes", r.buf.len());
+            self.incoming_clipboard_image = Some(r.buf);
+            self.message = Some("已接收剪贴板图片".into());
+            self.completed.insert(d.id.clone(), Instant::now());
+            if self.completed.len() > MAX_COMPLETED {
+                let oldest = self
+                    .completed
+                    .iter()
+                    .min_by_key(|(_, t)| **t)
+                    .map(|(k, _)| k.clone());
+                if let Some(k) = oldest {
+                    self.completed.remove(&k);
+                }
+            }
+            let ack = FileControl::Done(FileDone {
+                id: d.id,
+                ok: true,
+                error: None,
+            });
+            if let Ok(json) = serde_json::to_string(&ack) {
+                let _ = endpoint.send_channel_data("file", false, json.as_bytes());
+            }
+            return;
+        }
+        let Some(dir) = self.recv_dir.clone() else {
+            return;
+        };
         // 落盘：目标路径限定在 recv_dir 内（safe_file_name 已在 on_meta 校验），
         // 临时文件 + rename 原子写入，避免半截文件与符号链接跟随。
         let Some(tmp) = temp_path_in(&dir, &r.name) else {
@@ -608,7 +679,6 @@ impl FileTransfer {
             let _ = endpoint.send_channel_data("file", false, json.as_bytes());
         }
     }
-
     /// 分片/校验失败：把接收器放回 map 并发 Nack 补包。
     fn request_resend(&mut self, mut r: Receiver, d: FileDone, endpoint: &mut crate::Endpoint) {
         let missing: Vec<u64> = r
@@ -688,9 +758,11 @@ impl Sender {
         let total_chunks = size.div_ceil(CHUNK_SIZE as u64);
         let seq = SEND_SEQ.fetch_add(1, Ordering::SeqCst);
         Ok(Self {
+            data: None,
+            file: Some(file),
+            kind: FileKind::File,
             id: format!("tx{}-{seq}", std::process::id()),
             name,
-            file,
             size,
             hash,
             total_chunks,
@@ -707,17 +779,56 @@ impl Sender {
         })
     }
 
-    /// 从文件句柄读取 [start, start+len) 分片（len ≤ CHUNK_SIZE）。
+    /// 从内存数据构造发送任务（#271 剪贴板图片；文件路径走 open）。
+    fn from_bytes(name: String, data: Vec<u8>, kind: FileKind) -> Result<Self, String> {
+        if data.is_empty() || data.len() as u64 > MAX_FILE_SIZE {
+            return Err(format!(
+                "剪贴板图片大小 {} 超出范围（0 < size <= {MAX_FILE_SIZE}）",
+                data.len()
+            ));
+        }
+        let hash = hex(&Sha256::digest(&data));
+        let size = data.len() as u64;
+        let total_chunks = size.div_ceil(CHUNK_SIZE as u64);
+        let seq = SEND_SEQ.fetch_add(1, Ordering::SeqCst);
+        Ok(Self {
+            id: format!("tx{}-{seq}", std::process::id()),
+            name,
+            data: Some(data),
+            file: None,
+            kind,
+            size,
+            hash,
+            total_chunks,
+            next_chunk: 0,
+            meta_sent: false,
+            last_meta_send: Instant::now(),
+            done_sent: false,
+            last_done_send: Instant::now(),
+            last_progress: Instant::now(),
+            start_after: Instant::now() + Duration::from_secs(3),
+            resend: Vec::new(),
+            confirmed: false,
+            failed: None,
+        })
+    }
+
+    /// 读取 [start, start+len) 分片（len ≤ CHUNK_SIZE）；内存数据源直接切片。
     fn read_chunk(&mut self, start: usize, len: usize) -> Option<Vec<u8>> {
-        use std::io::{Read, Seek, SeekFrom};
         if len == 0 {
             return Some(Vec::new());
         }
-        self.file.seek(SeekFrom::Start(start as u64)).ok()?;
+        if let Some(data) = &self.data {
+            let end = (start + len).min(data.len());
+            return Some(data[start..end].to_vec());
+        }
+        use std::io::{Read, Seek, SeekFrom};
+        let file = self.file.as_mut()?;
+        file.seek(SeekFrom::Start(start as u64)).ok()?;
         let mut out = vec![0u8; len];
         let mut got = 0;
         while got < len {
-            let n = self.file.read(&mut out[got..]).ok()?;
+            let n = file.read(&mut out[got..]).ok()?;
             if n == 0 {
                 return None;
             }
@@ -742,6 +853,7 @@ impl Sender {
                 size: self.size,
                 chunks: self.total_chunks,
                 hash: Some(self.hash.clone()),
+                kind: self.kind,
             });
             if let Ok(json) = serde_json::to_string(&meta)
                 && endpoint.send_channel_data("file", false, json.as_bytes())
@@ -903,12 +1015,14 @@ mod tests {
     }
 
     fn meta(id: &str, name: &str, size: u64, chunks: u64) -> FileMeta {
+        // #271：kind 缺省为 File（serde default），构造时显式给 File。
         FileMeta {
             id: id.to_string(),
             name: name.to_string(),
             size,
             chunks,
             hash: None,
+            kind: FileKind::File,
         }
     }
 
@@ -1012,5 +1126,68 @@ mod tests {
         let _ = &mut fake;
         // 直接调用 tick 需要 endpoint；改走内部清理路径不可行，验证 TTL 常量即可。
         assert!(RECV_TTL >= Duration::from_secs(60));
+    }
+
+    #[test]
+    fn clipboard_image_receive_in_memory_without_recv_dir() {
+        // #271：无 recv_dir 也能接收剪贴板图片（不落盘，直接进内存队列）。
+        let png: Vec<u8> = vec![0x89, b"P"[0], b"N"[0], b"G"[0], 1, 2, 3, 4];
+        let size = png.len() as u64;
+        let chunks = size.div_ceil(CHUNK_SIZE as u64);
+        let hash = hex(&Sha256::digest(&png));
+        let mut ep = crate::Endpoint::new();
+        let mut ft = FileTransfer::new(None);
+        let meta = FileControl::Meta(FileMeta {
+            id: "clipimg-1".into(),
+            name: "clipboard-image-1.png".into(),
+            size,
+            chunks,
+            hash: Some(hash),
+            kind: FileKind::ClipboardImage,
+        });
+        let json = serde_json::to_string(&meta).unwrap();
+        ft.handle_data(json.as_bytes(), &mut ep);
+        let frame = file::encode_chunk("clipimg-1", 0, &png);
+        ft.handle_data(&frame, &mut ep);
+        let done = FileControl::Done(FileDone {
+            id: "clipimg-1".into(),
+            ok: true,
+            error: None,
+        });
+        let json = serde_json::to_string(&done).unwrap();
+        ft.handle_data(json.as_bytes(), &mut ep);
+        assert_eq!(ft.take_incoming_clipboard_image().unwrap(), png);
+        assert!(ft.take_incoming_clipboard().is_none());
+        assert!(
+            ft.status()
+                .message
+                .as_deref()
+                .is_some_and(|m| m.contains("剪贴板图片"))
+        );
+    }
+
+    #[test]
+    #[test]
+    fn sender_from_bytes_read_chunk_slices_correctly() {
+        let data: Vec<u8> = (0..20000u32).map(|i| (i % 251) as u8).collect();
+        let mut s =
+            Sender::from_bytes("clip.png".into(), data.clone(), FileKind::ClipboardImage).unwrap();
+        assert_eq!(s.size, 20000);
+        assert_eq!(s.total_chunks, 3);
+        let c0 = s.read_chunk(0, CHUNK_SIZE).unwrap();
+        assert_eq!(c0, data[..CHUNK_SIZE]);
+        let tail = data.len() - 2 * CHUNK_SIZE;
+        let c2 = s.read_chunk(2 * CHUNK_SIZE, tail).unwrap();
+        assert_eq!(c2, data[2 * CHUNK_SIZE..]);
+    }
+
+    fn send_clipboard_image_rejects_empty_and_busy() {
+        let mut ft = FileTransfer::new(None);
+        assert!(ft.send_clipboard_image(Vec::new()).is_err(), "空图片应拒绝");
+        ft.send_clipboard_image(vec![1u8; 100]).unwrap();
+        assert!(
+            ft.send_clipboard_image(vec![2u8; 10]).is_err(),
+            "发送槽位忙时剪贴板图片应拒绝"
+        );
     }
 }

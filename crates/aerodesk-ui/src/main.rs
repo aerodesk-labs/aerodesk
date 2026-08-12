@@ -30,6 +30,8 @@ pub enum FileCmd {
     SendFile(std::path::PathBuf),
     /// 把文本写入被控端剪贴板。
     SendClipboard(String),
+    /// 把图片（PNG）写入被控端剪贴板（#271）。
+    SendClipboardImage(Vec<u8>),
     /// 取消当前发送。
     Cancel,
 }
@@ -714,6 +716,7 @@ fn main() -> Result<(), slint::PlatformError> {
                             weak2.clone(),
                             slot,
                             input_rx,
+                            file_cmd_rx,
                             stop,
                         );
                     }
@@ -1357,6 +1360,20 @@ fn main() -> Result<(), slint::PlatformError> {
                     let Some(ui) = ui.upgrade() else {
                         return;
                     };
+                    // #271：剪贴板有图片时优先发图片（PNG），否则发文本。
+                    if let Some(png) = aerodesk_core::clipboard::read_image() {
+                        let idx = ui.get_active_session() as usize;
+                        let sessions = SESSIONS.lock().unwrap();
+                        if let Some(s) = sessions.get(idx) {
+                            let _ = s.file_tx.send(FileCmd::SendClipboardImage(png));
+                            drop(sessions);
+                            ui.set_session_status("已发送剪贴板图片到被控端".into());
+                        } else {
+                            drop(sessions);
+                            ui.set_session_status("剪贴板：未连接会话".into());
+                        }
+                        return;
+                    }
                     match aerodesk_core::clipboard::read() {
                         Some(text) if !text.is_empty() => {
                             let idx = ui.get_active_session() as usize;

@@ -344,6 +344,19 @@ pub fn run_viewer(
                     };
                     with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
                 }
+                FileCmd::SendClipboardImage(png) => {
+                    // #271 图片剪贴板：复用 file 分片通道（接收端不落盘、写系统剪贴板）。
+                    match file_transfer.send_clipboard_image(png) {
+                        Ok(()) => {
+                            let msg = "已发送剪贴板图片到被控端".to_string();
+                            with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                        }
+                        Err(e) => {
+                            let msg = format!("剪贴板图片发送失败：{e}");
+                            with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                        }
+                    }
+                }
                 FileCmd::Cancel => {
                     file_transfer.cancel_send(&mut live.endpoint);
                 }
