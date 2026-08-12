@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "pipewire"))]
 
 //! Wayland/PipeWire 运行级自测：portal 会话 → PipeWire fd → 建流 → 收帧。
 //!

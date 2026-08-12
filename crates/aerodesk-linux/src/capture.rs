@@ -157,7 +157,7 @@ impl aerodesk_core::platform::MediaSource for X11Capturer {
 /// 无这些环境时 `start()` 返回明确错误（CI/无头环境跳过，不 panic）。
 /// 线程安全采集帧（core `VideoFrame` 含 `Arc<dyn Any + Send>` 非 Send，
 /// 不能直接跨线程走 channel；这里只传纯数据，消费侧再包成 core 帧）。
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
 struct RawCaptureFrame {
     raw: Vec<u8>,
     width: u32,
@@ -165,7 +165,7 @@ struct RawCaptureFrame {
     pts_ms: u64,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub struct WaylandPortalCapturer {
     thread: Option<std::thread::JoinHandle<()>>,
     rx: Option<std::sync::mpsc::Receiver<RawCaptureFrame>>,
@@ -173,7 +173,7 @@ pub struct WaylandPortalCapturer {
 }
 
 /// 按行剥离 stride padding，输出紧凑 BGRA（width*height*4）。
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
 fn strip_stride(data: &[u8], width: u32, height: u32, stride: u32) -> Vec<u8> {
     let row = (width as usize) * 4;
     if stride as usize == row || stride == 0 {
@@ -192,7 +192,7 @@ fn strip_stride(data: &[u8], width: u32, height: u32, stride: u32) -> Vec<u8> {
 }
 
 /// lamco `VideoFrame`（BGRA）→ 线程安全原始帧（raw=紧凑 BGRA32）。
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
 fn lamco_frame_to_raw(frame: lamco_pipewire::VideoFrame) -> Result<RawCaptureFrame, String> {
     use lamco_pipewire::FrameBuffer;
     let lamco_pipewire::VideoFrame {
@@ -236,7 +236,7 @@ fn lamco_frame_to_raw(frame: lamco_pipewire::VideoFrame) -> Result<RawCaptureFra
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
 async fn wayland_capture_loop(
     _fps: u32,
     frame_tx: std::sync::mpsc::SyncSender<RawCaptureFrame>,
@@ -324,7 +324,7 @@ async fn wayland_capture_loop(
     drop(frame_tx);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
 impl WaylandPortalCapturer {
     pub fn new() -> Result<Self, String> {
         Ok(Self {
@@ -335,7 +335,7 @@ impl WaylandPortalCapturer {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
 impl aerodesk_core::platform::MediaSource for WaylandPortalCapturer {
     type Error = String;
 
@@ -409,25 +409,29 @@ impl aerodesk_core::platform::MediaSource for WaylandPortalCapturer {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
 impl Drop for WaylandPortalCapturer {
     fn drop(&mut self) {
         <Self as aerodesk_core::platform::MediaSource>::stop(self);
     }
 }
 
-/// 非 Linux 主机上的编译期骨架。
-#[cfg(not(target_os = "linux"))]
+/// 非 pipewire 构建（macOS/Windows/Linux 默认）的编译期骨架。
+#[cfg(not(all(target_os = "linux", feature = "pipewire")))]
 pub struct WaylandPortalCapturer;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", feature = "pipewire")))]
 impl WaylandPortalCapturer {
     pub fn new() -> Result<Self, String> {
-        Err("linux: PipeWire capture only available on Linux".into())
+        Err(if cfg!(target_os = "linux") {
+            "linux: PipeWire capture disabled (build with feature `pipewire`)".into()
+        } else {
+            "linux: PipeWire capture only available on Linux".into()
+        })
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", feature = "pipewire")))]
 impl aerodesk_core::platform::MediaSource for WaylandPortalCapturer {
     type Error = String;
 
@@ -445,7 +449,7 @@ impl aerodesk_core::platform::MediaSource for WaylandPortalCapturer {
 /// 兼容别名：PipeWireCapturer = WaylandPortalCapturer。
 pub type PipeWireCapturer = WaylandPortalCapturer;
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, target_os = "linux", feature = "pipewire"))]
 mod linux_tests {
     use super::strip_stride;
 
