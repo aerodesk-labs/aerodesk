@@ -2591,8 +2591,8 @@ fn publisher_ffmpeg(
 /// FfmpegEncoder（H265/VP9/AV1）。H.264 走原 VtEncoder 零拷贝路径。
 /// 需要屏幕录制权限（TCC）。
 /// Windows 屏幕采集发布端（被控端）：DXGI Desktop Duplication → OpenH264 软编 → SFU。
-/// 输入注入走 SendInput（aerodesk-windows）；系统音频暂无采集，用合成音 AudioTicker；
-/// 需要交互桌面会话（DXGI 输出可用）。
+/// 输入注入走 SendInput（aerodesk-windows）；系统音频走 WASAPI loopback
+/// （采集系统正在播放的声音，失败回退合成音）；需要交互桌面会话（DXGI 输出可用）。
 #[cfg(target_os = "windows")]
 fn publisher_capture_windows(
     signal_url: &str,
@@ -2631,17 +2631,23 @@ fn publisher_capture_windows(
             return;
         }
     };
+    // #3 Windows 系统音频：WASAPI loopback 采集系统播放的声音；失败回退合成音。
+    let audio_cap: Option<aerodesk_windows::audio_capture::WasapiLoopbackCapture> = if audio {
+        match aerodesk_windows::audio_capture::WasapiLoopbackCapture::start() {
+            Ok(cap) => {
+                info!("Windows system audio capture started (WASAPI loopback)");
+                Some(cap)
+            }
+            Err(e) => {
+                warn!("WASAPI capture failed, fallback synthetic: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     publisher_generic(
-        signal_url,
-        room,
-        auth,
-        audio,
-        audio_opus,
-        codec,
-        FPS,
-        capture,
-        encoder,
-        None::<NoAudioCapture>,
+        signal_url, room, auth, audio, audio_opus, codec, FPS, capture, encoder, audio_cap,
     );
 }
 
