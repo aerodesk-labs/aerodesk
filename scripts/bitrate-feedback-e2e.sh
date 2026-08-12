@@ -17,7 +17,7 @@ TOKEN="test-token"
 INTERNAL_TOKEN="$TOKEN" SFU_MEDIA_PORT=1478 SFU_SIGNAL_PORT=14000 SFU_INTERNAL_PORT=14002 \
   ./target/debug/aerodesk-sfu >/tmp/brf-sfu.log 2>&1 &
 SFU=$!
-SIGNAL_PORT=14001 SIGNAL_PLAIN_PORT=14003 SFU_URL=http://127.0.0.1:14002 \
+SIGNAL_PORT=14001 SIGNAL_PLAIN_PORT=14003 SFU_URL=http://127.0.0.1:14002 SFU_TOKEN="$TOKEN" \
   ./target/debug/aerodesk-signal >/tmp/brf-sig.log 2>&1 &
 SIG=$!
 trap 'kill $SFU $SIG 2>/dev/null || true' EXIT
