@@ -20,6 +20,22 @@ pub const CHUNK_SIZE: usize = 8192;
 /// 分片二进制帧类型标记。
 pub const CHUNK_MAGIC: u8 = 0x01;
 
+/// 传输内容类型（#271 图片剪贴板：复用 file 分片通道，接收端不落盘）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileKind {
+    /// 普通文件（接收端落盘）。
+    File,
+    /// 剪贴板图片（PNG 编码；接收端写入系统剪贴板，不落盘）。
+    ClipboardImage,
+}
+
+impl Default for FileKind {
+    fn default() -> Self {
+        Self::File
+    }
+}
+
 /// 文件元信息（发送端先发）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileMeta {
@@ -31,6 +47,10 @@ pub struct FileMeta {
     pub size: u64,
     /// 分片总数。
     pub chunks: u64,
+    /// 内容类型（#271；缺省为普通文件，兼容旧消息）。
+    #[serde(default)]
+    pub kind: FileKind,
+
     /// 可选 SHA-256（十六进制小写），接收端校验。
     pub hash: Option<String>,
 }
@@ -135,6 +155,7 @@ mod tests {
             size: 1024,
             chunks: 1,
             hash: Some("abc".into()),
+            kind: FileKind::File,
         });
         let json = serde_json::to_string(&meta).unwrap();
         let back: FileControl = serde_json::from_str(&json).unwrap();
@@ -142,7 +163,19 @@ mod tests {
             FileControl::Meta(m) => {
                 assert_eq!(m.name, "a.bin");
                 assert_eq!(m.size, 1024);
+                assert_eq!(m.kind, FileKind::File);
             }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn meta_without_kind_defaults_to_file() {
+        // #271 兼容：旧版本消息无 kind 字段，应反序列化为 File。
+        let json = r#"{"type":"meta","id":"tx1","name":"a.bin","size":1,"chunks":1,"hash":null}"#;
+        let ctrl: FileControl = serde_json::from_str(json).unwrap();
+        match ctrl {
+            FileControl::Meta(m) => assert_eq!(m.kind, FileKind::File),
             other => panic!("unexpected {other:?}"),
         }
     }

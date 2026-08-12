@@ -85,6 +85,7 @@ pub fn run_generic_viewer(
     ui_weak: slint::Weak<crate::AppWindow>,
     session_idx: usize,
     input_rx: std::sync::mpsc::Receiver<String>,
+    file_cmd_rx: std::sync::mpsc::Receiver<crate::FileCmd>,
     stop: Arc<AtomicBool>,
 ) {
     let ui2 = ui_weak.clone();
@@ -95,6 +96,7 @@ pub fn run_generic_viewer(
         ui_weak,
         session_idx,
         input_rx,
+        file_cmd_rx,
         stop,
         decoder_label(),
         mk_viewer_decoder,
