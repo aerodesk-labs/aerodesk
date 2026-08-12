@@ -167,6 +167,10 @@ scripts/multipop-deploy.sh \
 ### 真实多 PoP 部署验收 runbook（M3 剩余项）
 
 1. **部署**：每 PoP 一组 signal+SFU（+可选 coturn），见 `DEPLOYMENT.md`；
+   **SFU 通告地址**（#216）：NAT/带 docker0 等虚拟网卡的服务器必须设
+   `SFU_HOST_ADDRESS=<公网IP>` + `SFU_BIND_ADDRESS=0.0.0.0`，否则 SFU 会把媒体/TURN
+   通告到不可达的虚拟网卡 IP（`multipop-deploy.sh` 对点分 IPv4 主机自动下发，或用
+   `--sfu-host-address-a/-b` 覆盖）；
    PoP-A 用 `ROOM_POP_MAP`/`POP_REGISTRY_FILE` 钉房间；PoP-B 设置
    `POP_ID=pop-b`、`ROOM_POP_MAP="<前缀>=pop-a"`、`POP_URLS="pop-a=wss://<pop-a>:443/ws"`、
    `BRIDGE_CMD="aerodesk-bridge --remote-signal wss://<pop-a>:443/ws --local-signal wss://<pop-b>:443/ws --room {room}"`

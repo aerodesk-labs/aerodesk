@@ -23,6 +23,7 @@
 # 用法：
 #   scripts/multipop-deploy.sh --pop-a root@pop-a.example.com --pop-b root@pop-b.example.com \
 #     --auth <信令token> --room-prefix bridge- [--dry-run] [--deploy-only] [--cleanup] [--help]
+#   [--sfu-host-address-a <IP> --sfu-host-address-b <IP>]  # SFU 对外通告地址覆盖（NAT/docker0；默认取 HOST 点分 IPv4）
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -36,6 +37,7 @@ SIG_WSS_PORT=3001; SIG_PLAIN_PORT=3003; TURN_PORT=3479; TURN_TLS_PORT=5349
 PROFILE="release"; TARGET_DIR="$PWD/target/$PROFILE"
 DRY_RUN=0; DEPLOY_ONLY=0; CLEANUP=0; SKIP_BUILD=0
 JWT_SECRET=""; CERT_FILE=""; KEY_FILE=""
+SFU_HOST_ADDRESS_A=""; SFU_HOST_ADDRESS_B=""
 need_value() { [ "$#" -ge 2 ] || { echo "参数 $1 需要值" >&2; exit 2; }; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -50,6 +52,8 @@ while [ "$#" -gt 0 ]; do
     --jwt-secret) need_value "$@"; JWT_SECRET="$2"; shift 2 ;;
     --cert-file) need_value "$@"; CERT_FILE="$2"; shift 2 ;;
     --key-file) need_value "$@"; KEY_FILE="$2"; shift 2 ;;
+    --sfu-host-address-a) need_value "$@"; SFU_HOST_ADDRESS_A="$2"; shift 2 ;;
+    --sfu-host-address-b) need_value "$@"; SFU_HOST_ADDRESS_B="$2"; shift 2 ;;
     --sfu-port) need_value "$@"; SFU_PORT="$2"; shift 2 ;;
     --sfu-http-port) need_value "$@"; SFU_HTTP_PORT="$2"; shift 2 ;;
     --sfu-int-port) need_value "$@"; SFU_INT_PORT="$2"; shift 2 ;;
@@ -103,6 +107,18 @@ gen_sfu_env() { # $1=pop-a|pop-b
   printf -v OUT '%sEnvironment=TURN_SECRET=%s\n' "$OUT" "$AUTH"
   printf -v OUT '%sEnvironment=SFU_TURN_PORT=%s\n' "$OUT" "$TURN_PORT"
   printf -v OUT '%sEnvironment=SFU_TURN_TLS_PORT=%s\n' "$OUT" "$TURN_TLS_PORT"
+  # #216：SFU 对外通告地址与绑定地址分离（防 docker0/podman 等虚拟网卡排在 eth0 前
+  # 被 select_host_address 选中，导致媒体/TURN 通告不可达地址）。HOST 为点分 IPv4
+  # 时默认通告 HOST + 绑定 0.0.0.0；可用 --sfu-host-address-a/-b 显式覆盖。
+  local h host_override
+  if [ "$1" = "pop-a" ]; then h="$HOST_A"; host_override="$SFU_HOST_ADDRESS_A"; else h="$HOST_B"; host_override="$SFU_HOST_ADDRESS_B"; fi
+  if [ -n "$host_override" ]; then
+    printf -v OUT '%sEnvironment=SFU_HOST_ADDRESS=%s\n' "$OUT" "$host_override"
+    printf -v OUT '%sEnvironment=SFU_BIND_ADDRESS=0.0.0.0\n' "$OUT"
+  elif echo "$h" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+    printf -v OUT '%sEnvironment=SFU_HOST_ADDRESS=%s\n' "$OUT" "$h"
+    printf -v OUT '%sEnvironment=SFU_BIND_ADDRESS=0.0.0.0\n' "$OUT"
+  fi
   if [ -n "$CERT_FILE" ]; then printf -v OUT '%sEnvironment=CERT_FILE=%s\n' "$OUT" "$CERT_FILE"; fi
   if [ -n "$KEY_FILE" ]; then printf -v OUT '%sEnvironment=KEY_FILE=%s\n' "$OUT" "$KEY_FILE"; fi
 }

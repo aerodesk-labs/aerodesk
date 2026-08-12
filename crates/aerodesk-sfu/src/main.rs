@@ -52,6 +52,16 @@ fn env_port(name: &str, default: u16) -> u16 {
         .unwrap_or(default)
 }
 
+/// 解析 IP 字符串（非法返回 None）。
+fn parse_ip(s: &str) -> Option<std::net::IpAddr> {
+    s.parse().ok()
+}
+
+/// 读环境变量 IP（缺失/非法返回 None，由调用方回退自动选择）。
+fn env_ip(name: &str) -> Option<std::net::IpAddr> {
+    std::env::var(name).ok().and_then(|v| parse_ip(&v))
+}
+
 fn init_log() {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     let env_filter = EnvFilter::try_from_default_env()
@@ -114,8 +124,9 @@ fn install_signal_handlers() {
 
 /// HTTP server 共享的应用状态（public/internal 各持一份）。
 struct AppState {
-    media_addr: SocketAddr,
-    tcp_addr: SocketAddr,
+    /// 对外通告的 ICE host 候选地址（SFU_HOST_ADDRESS 覆盖；默认=自动选择）。
+    candidate_udp_addr: SocketAddr,
+    candidate_tcp_addr: SocketAddr,
     shard_txs: Vec<mpsc::Sender<ShardCommand>>,
     router: Arc<Mutex<router::ShardRouter>>,
     turn: Option<TurnConfig>,
@@ -134,8 +145,8 @@ fn public_handler(request: &Request) -> Response {
     let state = PUBLIC_STATE.get().expect("public state initialized");
     web_request(
         request,
-        state.media_addr,
-        state.tcp_addr,
+        state.candidate_udp_addr,
+        state.candidate_tcp_addr,
         state.shard_txs.clone(),
         state.router.clone(),
         state.turn.clone(),
@@ -158,8 +169,8 @@ fn internal_handler(request: &Request) -> Response {
     }
     web_request(
         request,
-        state.media_addr,
-        state.tcp_addr,
+        state.candidate_udp_addr,
+        state.candidate_tcp_addr,
         state.shard_txs.clone(),
         state.router.clone(),
         state.turn.clone(),
@@ -392,10 +403,27 @@ pub fn main() {
     });
     info!("TLS identity source: {}", tls.source);
 
-    let host_addr = util::select_host_address();
+    // #216 真实部署：SFU_HOST_ADDRESS 覆盖对外通告地址（ICE 候选/TURN/web 地址），
+    // SFU_BIND_ADDRESS 覆盖绑定地址（默认跟随通告）。NAT/带 docker0 等虚拟网卡的
+    // 服务器建议 SFU_HOST_ADDRESS=<公网IP> + SFU_BIND_ADDRESS=0.0.0.0（见 DEPLOYMENT.md）。
+    let host_override = env_ip("SFU_HOST_ADDRESS");
+    let host_addr = host_override.unwrap_or_else(util::select_host_address);
+    // SFU_BIND_ADDRESS 未设时：显式通告外部地址 → 默认通配绑定 0.0.0.0（NAT/虚拟网卡）；
+    // 否则跟随自动选择的通告地址（保持原行为）。
+    let bind_addr = env_ip("SFU_BIND_ADDRESS").unwrap_or_else(|| {
+        if host_override.is_some() {
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        } else {
+            host_addr
+        }
+    });
     let media_port = env_port("SFU_MEDIA_PORT", MEDIA_PORT);
-    let media_addr = SocketAddr::new(host_addr, media_port);
+    let media_addr = SocketAddr::new(bind_addr, media_port);
     let tcp_listen_addr = media_addr;
+    let candidate_udp_addr = SocketAddr::new(host_addr, media_port);
+    if host_addr != bind_addr {
+        info!("advertised host address: {host_addr} (media bind {bind_addr})");
+    }
 
     // TURN 配置（#191：TURN_SECRET 未设置则不下发；显式 TURN_URLS 走外部 coturn；
     // 否则启动内嵌 TURN+STUN server（SFU_TURN_PORT，默认 3479，与媒体 3478 不冲突）。
@@ -458,6 +486,7 @@ pub fn main() {
     // 2. TCP/SSL-TCP：单个 listener + 全局读线程
     let (tcp_addr, tcp_rx) = tcp::spawn_tcp_listener(tcp_listen_addr);
     info!("Bound TCP/SSL-TCP media port: {tcp_addr}");
+    let candidate_tcp_addr = SocketAddr::new(host_addr, tcp_addr.port());
 
     // 3. 分片通道（先建 channel，后启线程）
     let mut shared = Shared::new(shard_count);
@@ -621,8 +650,8 @@ pub fn main() {
         );
     }
     let state = Arc::new(AppState {
-        media_addr,
-        tcp_addr,
+        candidate_udp_addr,
+        candidate_tcp_addr,
         shard_txs,
         router,
         turn,
@@ -1298,6 +1327,18 @@ mod tests {
 
     /// 串行化依赖全局 `DRAINING` 的端点测试（cargo test 默认并行线程）。
     static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn parse_ip_valid_and_invalid() {
+        assert_eq!(parse_ip("192.0.2.1"), Some("192.0.2.1".parse().unwrap()));
+        assert_eq!(
+            parse_ip("2001:db8::1"),
+            Some("2001:db8::1".parse().unwrap())
+        );
+        assert_eq!(parse_ip("not-an-ip"), None);
+        assert_eq!(parse_ip(""), None);
+        assert_eq!(parse_ip("127.0.0.1:3478"), None);
+    }
 
     #[test]
     fn healthz_ok_vs_draining() {
