@@ -9,6 +9,8 @@
 //! `windows` crate 依赖仅 Windows 目标启用；非 Windows 主机上本 crate 编译为
 //! 纯 trait 骨架（用于 workspace 测试与文档）。
 
+#[cfg(windows)]
+pub mod audio_capture;
 pub mod capture;
 pub mod encode;
 pub mod inject;
