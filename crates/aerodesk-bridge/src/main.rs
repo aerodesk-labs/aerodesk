@@ -216,22 +216,9 @@ fn main() {
     let view_audio_mid = view.audio_mid;
     tracing::info!("viewer audio mid: {view_audio_mid:?}");
 
-    // publisher leg（本 PoP，转发）
-    let mut local = connect_live_role_codec(
-        &local_signal,
-        &room,
-        Role::Publisher,
-        auth.as_deref(),
-        codec,
-    )
-    .expect("publisher leg connect");
-    tracing::info!("publisher leg: {}", local.summary());
-    let Some(local_mid) = local.video_mid else {
-        eprintln!("fatal: no video mid on publisher leg");
-        std::process::exit(1);
-    };
-    tracing::info!("publisher video mid: {local_mid:?}");
-
+    // #216：viewer 腿一连上就立刻起泵线程（DTLS 握手/重传必须持续泵）——
+    // 若先连 publisher 腿（TURN TCP 3s 超时 + ICE 等待），期间 viewer 腿
+    // DTLS 无人泵，SFU 侧握手超时 → 间歇失败（已复现）。
     let (media_tx, media_rx) = mpsc::channel::<MediaData>();
     let (cmd_tx, cmd_rx) = mpsc::channel::<KeyframeRequestKind>();
     let (stats_tx, stats_rx) = mpsc::channel::<(u64, u64)>();
@@ -253,6 +240,22 @@ fn main() {
             )
         })
         .expect("spawn viewer thread");
+
+    // publisher leg（本 PoP，转发）
+    let mut local = connect_live_role_codec(
+        &local_signal,
+        &room,
+        Role::Publisher,
+        auth.as_deref(),
+        codec,
+    )
+    .expect("publisher leg connect");
+    tracing::info!("publisher leg: {}", local.summary());
+    let Some(local_mid) = local.video_mid else {
+        eprintln!("fatal: no video mid on publisher leg");
+        std::process::exit(1);
+    };
+    tracing::info!("publisher video mid: {local_mid:?}");
 
     let mut forwarded = 0u64;
     let mut forwarded_kf = 0u64;
