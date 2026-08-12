@@ -4,6 +4,14 @@ on:
   push:
   pull_request:
 
+# 同一 commit 只保留一个 run（push 与 pull_request 事件共享分组，后到者取消先到者），
+# 新提交自动取消旧 run，防止陈旧 run 堆满 runner 队列（macOS 并发有限）。
+concurrency:
+  # PR 事件用 head.sha（分支 commit），push 事件用 github.sha——同一分支 commit
+  # 的 push/pr 双事件共享分组，后到者取消先到者，去重为单 run。
+  group: ci-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: test (${{ matrix.os }})

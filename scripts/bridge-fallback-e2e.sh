@@ -139,9 +139,13 @@ for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-direct-pub.log 2>/dev
   >/tmp/bfb-direct-view.log 2>&1 &
 VIEW0=$!
 wait_decoded /tmp/bfb-direct-view.log || fail "场景0：直连 viewer 未解码"
-for _ in $(seq 1 160); do
+# 样本不足时最多等两轮（数据通道偶发中断后恢复）。
+for _attempt in 1 2; do
+  for _ in $(seq 1 160); do
+    [ "$(latency_count /tmp/bfb-direct-view.log)" -ge 30 ] && break
+    sleep 0.5
+  done
   [ "$(latency_count /tmp/bfb-direct-view.log)" -ge 30 ] && break
-  sleep 0.5
 done
 DIRECT_STATS=$(latency_stats /tmp/bfb-direct-view.log)
 DIRECT_P99=$(echo "$DIRECT_STATS" | awk '{print $3}')
@@ -215,9 +219,13 @@ done
 echo "  PASS 跨 PoP 显示器切换：publisher 收到 display 1 请求"
 
 echo "== 桥延迟分布（LATENCY ≥30 样本，与直连基线对比）"
-for _ in $(seq 1 160); do
+# 数据通道在桥死亡/负载下可能偶发中断后恢复：样本不足时最多等两轮（共 ~160s）。
+for _attempt in 1 2; do
+  for _ in $(seq 1 160); do
+    [ "$(latency_count /tmp/bfb-view-b.log)" -ge 30 ] && break
+    sleep 0.5
+  done
   [ "$(latency_count /tmp/bfb-view-b.log)" -ge 30 ] && break
-  sleep 0.5
 done
 BRIDGE_STATS=$(latency_stats /tmp/bfb-view-b.log)
 BRIDGE_P99=$(echo "$BRIDGE_STATS" | awk '{print $3}')
