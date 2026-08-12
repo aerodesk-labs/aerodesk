@@ -106,6 +106,10 @@ impl FfmpegEncoder {
         ctx.set_time_base(ffmpeg::Rational(1, fps as i32));
         ctx.set_frame_rate(Some(ffmpeg::Rational(fps as i32, 1)));
         ctx.set_bit_rate(bitrate_bps as usize);
+        // #3 晚加入 viewer：2 秒 GOP（自然 IDR 间隔），配合 repeat-headers
+        // 保证 viewer 最迟 2s 拿到带 SPS/PPS 的关键帧可解码（libx264 默认
+        // keyint=250 ≈ 8s@30fps 太久；pict_type=I 的 PLI 强制在某些版本无效）。
+        ctx.set_gop(fps.saturating_mul(2).max(1));
         let mut dict = ffmpeg::Dictionary::new();
         if id == ffmpeg::codec::Id::VP9 {
             // libvpx-vp9 默认 lookahead 会吞帧：关掉 lag-in-frames 才能逐帧输出。
@@ -117,6 +121,16 @@ impl FfmpegEncoder {
             // 由 pending 队列吸收（见 encode_rgb）。
             dict.set("preset", "8");
             dict.set("svtav1-params", "lookahead=0");
+        } else if id == ffmpeg::codec::Id::H264 {
+            dict.set("preset", "veryfast");
+            // #3 晚加入 viewer 解码修复：libx264 默认 repeat-headers=0，
+            // SPS/PPS 仅在流首 IDR 内联一次；viewer 错过首关键帧后收不到
+            // 参数集（non-existing PPS 0 referenced），无法解码。每个 IDR
+            // 重复 SPS/PPS 保证任意时刻加入都能解码。
+            dict.set("x264-params", "repeat-headers=1");
+        } else if id == ffmpeg::codec::Id::HEVC {
+            dict.set("preset", "veryfast");
+            dict.set("x265-params", "repeat-headers=1");
         } else {
             dict.set("preset", "veryfast");
         }
@@ -310,5 +324,50 @@ impl aerodesk_core::platform::Encoder for FfmpegEncoder {
                 tracing::warn!("ffmpeg set_bitrate rebuild failed");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #3 晚加入 viewer 解码回归：**后续**关键帧（PLI 后）必须内联 SPS/PPS。
+    /// libx264 默认 repeat-headers=0 时仅首 IDR 带参数集；viewer 错过首帧后
+    /// 请求关键帧得到的 IDR 不含 SPS/PPS（non-existing PPS 0 referenced），
+    /// 无法解码。repeat-headers=1 保证每个 IDR 都带参数集。
+    #[test]
+    fn h264_second_keyframe_contains_sps_pps() {
+        // 强制 libx264 软编（macOS 默认硬编 h264_videotoolbox 输出格式不同，
+        // 本测试验证软编路径的参数集行为；hardware 路径由 codec e2e 覆盖）。
+        let mut enc =
+            FfmpegEncoder::open_named("libx264", ffmpeg::codec::Id::H264, 320, 180, 30, 500_000)
+                .expect("libx264 encoder");
+        let rgb = vec![128u8; 320 * 180 * 3];
+        // 晚加入 viewer：等待自然 GOP 的第二个关键帧（2s GOP = 60 帧@30fps），
+        // 必须内联 SPS/PPS（repeat-headers=1），否则 viewer 仍无法解码。
+        let mut second: Option<Vec<u8>> = None;
+        let mut keyframes = 0;
+        for _ in 0..(30 * 4) {
+            if let Some(unit) = enc.encode_rgb(&rgb).expect("encode") {
+                if unit.keyframe {
+                    keyframes += 1;
+                    if keyframes == 2 {
+                        second = Some(unit.data);
+                        break;
+                    }
+                }
+            }
+        }
+        let data = second.expect("2s GOP 内应产出第二个关键帧");
+        assert!(
+            data.windows(5).any(|w| w == [0, 0, 0, 1, 0x67]),
+            "SPS NAL missing in 2nd keyframe (repeat-headers?): {} bytes",
+            data.len()
+        );
+        assert!(
+            data.windows(5).any(|w| w == [0, 0, 0, 1, 0x68]),
+            "PPS NAL missing in 2nd keyframe (repeat-headers?): {} bytes",
+            data.len()
+        );
     }
 }
