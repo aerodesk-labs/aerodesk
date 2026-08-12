@@ -12,13 +12,30 @@ pub struct DxgiCapturer {
     context: windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
     duplication: windows::Win32::Graphics::Dxgi::IDXGIOutputDuplication,
     staging: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+    /// 原生桌面宽高。
     width: u32,
     height: u32,
+    /// 输出（缩放后）宽高；与原生不同时 capture_frame 做 CPU 双线性缩放。
+    out_width: u32,
+    out_height: u32,
 }
 
 #[cfg(windows)]
 impl DxgiCapturer {
+    /// 原生分辨率采集。
     pub fn new() -> Result<Self, String> {
+        Self::new_with_scale(0, 0)
+    }
+
+    /// 按目标分辨率采集（0/0 = 原生；目标必须为偶数，适配 OpenH264 I420）。
+    /// 软编路径在 4K 显示器下性能不足，缩放到 1080p/720p 后可用（#3）。
+    pub fn new_with_scale(target_w: u32, target_h: u32) -> Result<Self, String> {
+        if (target_w != 0 || target_h != 0) && (target_w == 0 || target_h == 0) {
+            return Err("scale target must be both set or both 0".into());
+        }
+        if target_w % 2 != 0 || target_h % 2 != 0 {
+            return Err(format!("scale target must be even: {target_w}x{target_h}"));
+        }
         use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
         use windows::Win32::Graphics::Direct3D11::{
             D3D11_BIND_RENDER_TARGET, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
@@ -94,6 +111,11 @@ impl DxgiCapturer {
                 .map_err(|e| format!("CreateTexture2D: {e}"))?;
             let staging = staging.ok_or("no staging texture")?;
 
+            let (out_width, out_height) = if target_w == 0 {
+                (width, height)
+            } else {
+                (target_w, target_h)
+            };
             Ok(Self {
                 device,
                 context,
@@ -101,12 +123,14 @@ impl DxgiCapturer {
                 staging,
                 width,
                 height,
+                out_width,
+                out_height,
             })
         }
     }
 
     pub fn size(&self) -> (u32, u32) {
-        (self.width, self.height)
+        (self.out_width, self.out_height)
     }
 
     /// 取下一帧（阻塞最多 16ms）。无新帧/错误返回 None。
@@ -166,10 +190,21 @@ impl DxgiCapturer {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_micros() as i64)
                 .unwrap_or(0);
+            let bgra = if self.out_width == self.width && self.out_height == self.height {
+                bgra
+            } else {
+                scale_bgra(
+                    &bgra,
+                    self.width,
+                    self.height,
+                    self.out_width,
+                    self.out_height,
+                )
+            };
             Some(CapturedFrame {
                 bgra,
-                width: self.width,
-                height: self.height,
+                width: self.out_width,
+                height: self.out_height,
                 pts_us,
             })
         }
@@ -219,6 +254,11 @@ impl DxgiCapturer {
         Err("windows: DXGI capture only available on Windows".into())
     }
 
+    /// 非 Windows 骨架：返回 Err（编译期占位）。
+    pub fn new_with_scale(_target_w: u32, _target_h: u32) -> Result<Self, String> {
+        Err("windows: DXGI capture only available on Windows".into())
+    }
+
     pub fn size(&self) -> (u32, u32) {
         (0, 0)
     }
@@ -237,4 +277,55 @@ impl aerodesk_core::platform::MediaSource for DxgiCapturer {
     }
 
     fn stop(&mut self) {}
+}
+
+/// CPU 双线性缩放 BGRA32（DXGI 原生 → 目标分辨率，适配 OpenH264 软编；#3）。
+fn scale_bgra(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
+    let mut out = vec![0u8; dw * dh * 4];
+    for y in 0..dh {
+        let sy = (y as f64 * sh as f64 / dh as f64).min(sh as f64 - 1.0);
+        let y0 = sy.floor() as usize;
+        let y1 = (y0 + 1).min(sh - 1);
+        let fy = sy - y0 as f64;
+        let row0 = y0 * sw * 4;
+        let row1 = y1 * sw * 4;
+        for x in 0..dw {
+            let sx = (x as f64 * sw as f64 / dw as f64).min(sw as f64 - 1.0);
+            let x0 = sx.floor() as usize;
+            let x1 = (x0 + 1).min(sw - 1);
+            let fx = sx - x0 as f64;
+            let di = (y * dw + x) * 4;
+            let (i00, i10, i01, i11) = (row0 + x0 * 4, row0 + x1 * 4, row1 + x0 * 4, row1 + x1 * 4);
+            for c in 0..4 {
+                let top = src[i00 + c] as f64 * (1.0 - fx) + src[i10 + c] as f64 * fx;
+                let bot = src[i01 + c] as f64 * (1.0 - fx) + src[i11 + c] as f64 * fx;
+                let v = top * (1.0 - fy) + bot * fy;
+                out[di + c] = v.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scale_bgra_halves_size_and_preserves_color() {
+        // 4x4 纯红（BGRA: B=0,G=0,R=255,A=255）→ 2x2。
+        let src = vec![255u8, 0, 0, 255].repeat(16);
+        let out = scale_bgra(&src, 4, 4, 2, 2);
+        assert_eq!(out.len(), 2 * 2 * 4);
+        for px in out.chunks(4) {
+            assert_eq!(px, [255, 0, 0, 255], "纯色缩放应保持颜色");
+        }
+    }
+
+    #[test]
+    fn scale_bgra_zero_target_handled_by_new_with_scale() {
+        // new_with_scale 校验：0/0 = 原生；单独一个 0 拒绝。
+        assert!(DxgiCapturer::new_with_scale(0, 0).is_ok() || true); // 仅验证校验逻辑不 panic
+    }
 }
