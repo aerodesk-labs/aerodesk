@@ -82,7 +82,9 @@ impl DxgiCapturer {
                     Quality: 0,
                 },
                 Usage: D3D11_USAGE_STAGING,
-                BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                // STAGING 纹理不允许绑定标志（BindFlags 必须为 0）；
+                // 此前误设 RENDER_TARGET 导致 CreateTexture2D 返回 E_INVALIDARG（0x80070057）。
+                BindFlags: 0,
                 CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
                 MiscFlags: 0,
             };

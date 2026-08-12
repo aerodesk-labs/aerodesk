@@ -21,6 +21,7 @@ pub mod media_socket;
 pub mod pcmu;
 pub mod platform;
 pub mod signaling;
+pub mod synthetic;
 
 pub use endpoint::{ClientEvent, Endpoint};
 pub mod connect;
