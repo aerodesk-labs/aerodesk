@@ -9,6 +9,9 @@
 //! 平台 API 通过 FFI（libpipewire / libva / libX11 / libevdev）；VAAPI 走
 //! FFmpeg `AVHWDeviceContext`（libavutil），uinput 走 `/dev/uinput` ioctl。
 
+/// PipeWire 系统音频采集（仅 Linux + feature `pipewire`）。
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+pub mod audio;
 pub mod capture;
 pub mod encode;
 pub mod inject;

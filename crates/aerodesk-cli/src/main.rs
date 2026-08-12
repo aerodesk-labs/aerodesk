@@ -902,12 +902,22 @@ impl AudioTicker {
     }
 }
 
-/// #73 真实系统音频发送：SCK audio-only SCStream → f32 mono 48k → Opus/PCMU。
-/// SCStream 音频采集失败时由调用方回退 AudioTicker（合成音）。
-/// macOS 专属（Windows/Linux 暂无系统音频采集，用 AudioTicker 合成音）。
-#[cfg(target_os = "macos")]
-struct RealAudioSender {
-    cap: aerodesk_macos::audio_capture::SystemAudioCapture,
+/// 无真实音频源占位（publisher_generic 泛型参数用；传 None 时不会构造实例）。
+struct NoAudioCapture;
+
+impl aerodesk_core::platform::AudioCapturer for NoAudioCapture {
+    type Error = String;
+
+    fn next_samples(&mut self, _max: usize) -> Result<Vec<f32>, String> {
+        Ok(Vec::new())
+    }
+}
+
+/// #73 真实系统音频发送：系统音频采集（core `AudioCapturer`，f32 mono 48k）
+/// → Opus/PCMU。macOS：SCK audio-only SCStream；Linux：PipeWire sink 捕获（#316）。
+/// 采集失败时由调用方回退 AudioTicker（合成音）。
+struct RealAudioSender<C: aerodesk_core::platform::AudioCapturer<Error = String>> {
+    cap: C,
     /// Opus 编码器（--audio-opus；libopus 缺失时回退 PCMU）。
     opus: Option<aerodesk_ffmpeg::audio::OpusEncoder>,
     /// 48kHz 单声道 i16 缓冲（Opus 直用；PCMU 先 6:1 降采样到 8k）。
@@ -920,9 +930,8 @@ struct RealAudioSender {
     next_send: Instant,
 }
 
-#[cfg(target_os = "macos")]
-impl RealAudioSender {
-    fn new(cap: aerodesk_macos::audio_capture::SystemAudioCapture, audio_opus: bool) -> Self {
+impl<C: aerodesk_core::platform::AudioCapturer<Error = String>> RealAudioSender<C> {
+    fn new(cap: C, audio_opus: bool) -> Self {
         let opus = if audio_opus {
             match aerodesk_ffmpeg::audio::OpusEncoder::new(64_000) {
                 Ok(enc) => Some(enc),
@@ -950,7 +959,7 @@ impl RealAudioSender {
         if now < self.next_send {
             return;
         }
-        let samples = self.cap.take_samples(48_000 * 5);
+        let samples = self.cap.next_samples(48_000 * 5).unwrap_or_default();
         if !samples.is_empty() {
             self.buf48.extend(
                 samples
@@ -2408,6 +2417,7 @@ fn publisher_vt(
 fn publisher_generic<
     S: aerodesk_core::platform::MediaSource,
     E: aerodesk_core::platform::Encoder,
+    C: aerodesk_core::platform::AudioCapturer<Error = String>,
 >(
     signal_url: &str,
     room: &str,
@@ -2418,10 +2428,13 @@ fn publisher_generic<
     fps: u32,
     mut source: S,
     mut encoder: E,
+    audio_cap: Option<C>,
 ) {
     let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
         connect_codec(signal_url, room, Role::Publisher, auth, audio, codec).expect("connect");
     let mut connected = false;
+    // #316：有真实系统音频采集则优先（RealAudioSender），否则合成音 AudioTicker。
+    let mut real_audio = audio_cap.map(|cap| RealAudioSender::new(cap, audio_opus));
     let mut audio_ticker = AudioTicker::new(audio_opus);
     let mut next_frame = Instant::now();
     let mut pts = 0i64;
@@ -2469,9 +2482,13 @@ fn publisher_generic<
             }
         }
 
-        // #58 音频 + #72 文件传输推进。
+        // #58 音频 + #72 文件传输推进：真实系统音频优先，合成音回退。
         if let Some(amid) = audio_mid {
-            audio_ticker.tick(&mut endpoint, amid, Instant::now());
+            if let Some(ra) = &mut real_audio {
+                ra.tick(&mut endpoint, amid, Instant::now());
+            } else {
+                audio_ticker.tick(&mut endpoint, amid, Instant::now());
+            }
         }
         file_transfer::tick(&mut endpoint);
         cmd_exec::tick(&mut endpoint);
@@ -2541,7 +2558,16 @@ fn publisher_ffmpeg(
         SyntheticSource::new(W, H)
     };
     publisher_generic(
-        signal_url, room, auth, audio, audio_opus, codec, FPS, source, encoder,
+        signal_url,
+        room,
+        auth,
+        audio,
+        audio_opus,
+        codec,
+        FPS,
+        source,
+        encoder,
+        None::<NoAudioCapture>,
     );
 }
 
@@ -2593,7 +2619,16 @@ fn publisher_capture_windows(
         }
     };
     publisher_generic(
-        signal_url, room, auth, audio, audio_opus, codec, FPS, capture, encoder,
+        signal_url,
+        room,
+        auth,
+        audio,
+        audio_opus,
+        codec,
+        FPS,
+        capture,
+        encoder,
+        None::<NoAudioCapture>,
     );
 }
 
@@ -2679,8 +2714,23 @@ fn publisher_capture_linux(
             }
         }
     };
+    // #316 Linux 系统音频（PipeWire sink 捕获）：可用则真实音频，失败回退合成音。
+    let audio_cap: Option<aerodesk_linux::audio::SystemAudioCapture> = if audio {
+        match aerodesk_linux::audio::SystemAudioCapture::new() {
+            Ok(cap) => {
+                info!("Linux system audio capture started (PipeWire)");
+                Some(cap)
+            }
+            Err(e) => {
+                warn!("Linux system audio capture failed, fallback synthetic: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     publisher_generic(
-        signal_url, room, auth, audio, audio_opus, codec, FPS, capture, encoder,
+        signal_url, room, auth, audio, audio_opus, codec, FPS, capture, encoder, audio_cap,
     );
 }
 
@@ -3029,7 +3079,8 @@ fn publisher_capture(
     let mut connected = false;
     // #73 真实系统音频：SCK audio-only SCStream 采集本机正在播放的声音；
     // 采集失败/未开 --audio 时回退合成音 AudioTicker。
-    let mut real_audio: Option<RealAudioSender> = None;
+    let mut real_audio: Option<RealAudioSender<aerodesk_macos::audio_capture::SystemAudioCapture>> =
+        None;
     if audio {
         match aerodesk_macos::audio_capture::SystemAudioCapture::start() {
             Ok(cap) => {

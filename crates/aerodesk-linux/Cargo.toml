@@ -28,5 +28,6 @@ libc = "0.2"
 ffmpeg-next = "8"
 # Wayland 采集（feature `pipewire` 启用时编译；CI 需 libpipewire-0.3-dev/libspa-0.2-dev）
 lamco-portal = { version = "0.4", optional = true }
-lamco-pipewire = { version = "0.4", default-features = false, optional = true }
+# audio：PipeWire 系统音频捕获（stream.capture.sink，无需 portal）
+lamco-pipewire = { version = "0.4", default-features = false, features = ["audio"], optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"], optional = true }
