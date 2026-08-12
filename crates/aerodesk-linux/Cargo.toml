@@ -6,6 +6,15 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+# Wayland/PipeWire 采集（xdg-desktop-portal + PipeWire）。默认关闭：
+# lamco-portal→ashpd 会开启 zbus 的 tokio feature，而 aerodesk-ui 的
+# slint system-tray（ksni→zbus）在无 tokio runtime 的主线程会 panic
+# （"there is no reactor running"）。被控端宿主按需启用；ubuntu CI 用
+# `--features aerodesk-linux/pipewire` 覆盖构建/测试。
+pipewire = ["dep:lamco-portal", "dep:lamco-pipewire", "dep:tokio"]
+
 [dependencies]
 aerodesk-core = { path = "../aerodesk-core" }
 aerodesk-softenc = { path = "../aerodesk-softenc" }
@@ -17,3 +26,7 @@ x11rb = { version = "0.13", features = ["xtest"] }
 libc = "0.2"
 # VAAPI 硬编/硬解：FFmpeg AVHWDeviceContext（CI ubuntu 已装 libavcodec-dev 等）
 ffmpeg-next = "8"
+# Wayland 采集（feature `pipewire` 启用时编译；CI 需 libpipewire-0.3-dev/libspa-0.2-dev）
+lamco-portal = { version = "0.4", optional = true }
+lamco-pipewire = { version = "0.4", default-features = false, optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"], optional = true }

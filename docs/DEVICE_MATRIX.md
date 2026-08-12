@@ -11,7 +11,7 @@
 |---|---|---|---|---|---|---|---|
 | macOS | ✅（web-e2e：观看/发布/文件/重连） | ✅（smoke + UI e2e；默认 h265 硬编 + 真实系统音频 #274/#276） | ✅（iOS 模拟器 e2e：H.265 硬解观看 macOS 流 #275） | ⬜ 待 Android | ⬜ 待 Win | ⬜ 待 Linux | ⬜ 待鸿蒙 |
 | Windows | ⬜（DXGI 采集 + SendInput 注入 + 剪贴板文本 #281，CI 编译/e2e 守护） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
-| Linux | ⬜（X11 采集 + XTest/uinput 注入 + VAAPI 硬编/硬解 + 剪贴板文本 #282/#283/#284，CI 编译/e2e 守护；Wayland/PipeWire 采集 PR #286 进行中） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
+| Linux | ⬜（X11 采集 + XTest/uinput 注入 + VAAPI 硬编/硬解 + Wayland/PipeWire 采集 + 剪贴板文本 #282/#283/#284/#286，CI 编译/e2e 守护） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 | Android | ⬜（MediaProjection + MediaCodec + 无障碍注入代码就绪；**模拟器经 TURN relay 已出帧解码（#201/#203）**，真机验收待设备） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 
 ## 各 issue 验收门槛
@@ -21,7 +21,7 @@
 | #1 iOS 壳层 | 壳 + **H.264/H.265 硬解 + 音视频分流 + PCMU 播放 + iPad 支持 + 设置持久化**（#275）；模拟器 e2e（含 h265 观看 macOS） | iPhone 真机（A12+）：观看 macOS 流 |
 | #2 Android 真机 | 观看端 MediaCodec 渲染 + 被控端 MediaProjection/硬编/无障碍注入 + Android 14 前台服务（#156/#165/#187）；APK CI 守护 | Android 真机（API 26+）：端到端画面 + 输入 |
 | #3 Windows | DXGI 采集 + SendInput 注入 + OpenH264 软编/软解 + VDD（#159/#188）；Windows UI e2e CI 守护 | Win10/11 真机：端到端 + 真机编解码器记录 |
-| #4 Linux | X11 采集 + XTest/uinput 注入 + x264 软编 + OpenH264 软解 + **VAAPI 硬编/硬解优先（#282/#284）** + 剪贴板文本（#283）+ 运行级自测；Linux UI e2e CI 守护 | Linux 真机：X11/Wayland 端到端 + VAAPI/uinput 真机验收（Wayland/PipeWire 采集 PR #286 进行中） |
+| #4 Linux | X11 采集 + XTest/uinput 注入 + x264 软编 + OpenH264 软解 + **VAAPI 硬编/硬解优先（#282/#284）** + **Wayland/PipeWire 采集（#286）** + 剪贴板文本（#283）+ 运行级自测；Linux UI e2e CI 守护 | Linux 真机：X11/Wayland 端到端 + VAAPI/uinput 真机验收 |
 | #6 HarmonyOS | NAPI 规约 ✅（docs/HARMONYOS.md，tmp/ohos-check） | DevEco + OHOS NDK + 鸿蒙真机（ring 交叉编译） |
 | #75 鼠标控制 | 远程光标渲染 ✅（#86）、输入全事件 e2e ✅（#95）、高 DPI/多显示器坐标映射 ✅（#105）、远端光标叠加默认关（对齐 RustDesk/TeamViewer，#274） | 多显示器真机高 DPI 验证 + Windows/Linux/Android 注入真机验收 |
 | #271 剪贴板 | **macOS/Windows/Linux 文本双向同步**（#281/#283 + 既有 macOS）；图片/富文本待做 | — |

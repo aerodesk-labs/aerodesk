@@ -13,10 +13,15 @@ jobs:
         include:
           - os: macos-latest
             skip_crates: ""
+            features: ""
           - os: ubuntu-latest
+            # #4 Wayland/PipeWire 采集是可选 feature（默认关，避免 UI 的
+            # slint system-tray→zbus 与 ashpd 的 zbus/tokio 冲突）；CI 显式启用覆盖。
             skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli
+            features: --features aerodesk-linux/pipewire
           - os: windows-latest
             skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli --exclude aerodesk-linux --exclude x264
+            features: 
     runs-on: ${{ matrix.os }}
     env:
       CARGO_TERM_COLOR: always
@@ -34,7 +39,7 @@ jobs:
 
       - name: System deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev libx264-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev libswresample-dev libpostproc-dev libavdevice-dev
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev libx264-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev libswresample-dev libpostproc-dev libavdevice-dev libpipewire-0.3-dev libspa-0.2-dev
       - name: System deps (macOS)
         if: runner.os == 'macOS'
         run: brew install x264 ffmpeg
@@ -69,10 +74,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: clippy
-        run: cargo clippy --workspace ${{ matrix.skip_crates }} --all-targets
+        run: cargo clippy --workspace ${{ matrix.skip_crates }} --all-targets ${{ matrix.features }}
 
       - name: test
-        run: cargo test --workspace ${{ matrix.skip_crates }}
+        run: cargo test --workspace ${{ matrix.skip_crates }} ${{ matrix.features }}
 
       # 端到端冒烟依赖 macOS 专属编码器（aerodesk-cli ← aerodesk-macos），
       # 跨平台编译/单测已由三平台矩阵覆盖。
@@ -408,7 +413,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: System deps
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev libx264-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev libswresample-dev libpostproc-dev libavdevice-dev xvfb x11-apps imagemagick
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev libx264-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev libswresample-dev libpostproc-dev libavdevice-dev libpipewire-0.3-dev libspa-0.2-dev xvfb x11-apps imagemagick
 
       - name: Run Linux UI e2e
         run: bash scripts/linux-ui-e2e.sh
