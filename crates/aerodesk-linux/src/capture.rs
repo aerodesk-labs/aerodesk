@@ -171,6 +171,8 @@ pub struct WaylandPortalCapturer {
     thread: Option<std::thread::JoinHandle<()>>,
     rx: Option<std::sync::mpsc::Receiver<RawCaptureFrame>>,
     stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// portal 流尺寸（start() 成功后从 streams[0].size 取得；未启动为 0）。
+    size: (u32, u32),
 }
 
 /// 按行剥离 stride padding，输出紧凑 BGRA（width*height*4）。
@@ -241,7 +243,7 @@ fn lamco_frame_to_raw(frame: lamco_pipewire::VideoFrame) -> Result<RawCaptureFra
 async fn wayland_capture_loop(
     _fps: u32,
     frame_tx: std::sync::mpsc::SyncSender<RawCaptureFrame>,
-    ready_tx: std::sync::mpsc::Sender<Result<(), String>>,
+    ready_tx: std::sync::mpsc::Sender<Result<(u32, u32), String>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     use std::os::fd::{FromRawFd, OwnedFd};
@@ -293,18 +295,18 @@ async fn wayland_capture_loop(
             .frame_receiver(handle.id)
             .await
             .ok_or_else(|| "pipewire: 无帧接收器".to_string())?;
-        Ok::<_, String>((portal, session, pw, rx))
+        Ok::<_, String>((portal, session, pw, rx, streams[0].size))
     }
     .await;
 
-    let (portal, session, mut pw, mut rx) = match init {
+    let (portal, session, mut pw, mut rx, size) = match init {
         Ok(x) => x,
         Err(e) => {
             let _ = ready_tx.send(Err(e));
             return;
         }
     };
-    let _ = ready_tx.send(Ok(()));
+    let _ = ready_tx.send(Ok(size));
 
     while !stop.load(Ordering::Relaxed) {
         match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
@@ -327,11 +329,17 @@ async fn wayland_capture_loop(
 
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 impl WaylandPortalCapturer {
+    /// portal 流尺寸（start() 成功后可用；未启动/失败为 (0,0)）。
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
     pub fn new() -> Result<Self, String> {
         Ok(Self {
             thread: None,
             rx: None,
             stop: None,
+            size: (0, 0),
         })
     }
 }
@@ -369,7 +377,10 @@ impl aerodesk_core::platform::MediaSource for WaylandPortalCapturer {
         self.rx = Some(frame_rx);
 
         match ready_rx.recv_timeout(std::time::Duration::from_secs(30)) {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(size)) => {
+                self.size = size;
+                Ok(())
+            }
             Ok(Err(e)) => {
                 self.stop();
                 Err(e)
@@ -423,6 +434,10 @@ pub struct WaylandPortalCapturer;
 
 #[cfg(not(all(target_os = "linux", feature = "pipewire")))]
 impl WaylandPortalCapturer {
+    pub fn size(&self) -> (u32, u32) {
+        (0, 0)
+    }
+
     pub fn new() -> Result<Self, String> {
         Err(if cfg!(target_os = "linux") {
             "linux: PipeWire capture disabled (build with feature `pipewire`)".into()
