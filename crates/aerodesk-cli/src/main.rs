@@ -494,6 +494,21 @@ fn connect(
     connect_inner(signal_url, room, role, None, false, audio, auth)
 }
 
+/// 探测本机出接口 IP（绑 0.0.0.0 连公共地址后取 local_addr；失败回退 loopback）。
+fn discover_egress_ip(port: u16) -> std::net::SocketAddr {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    if let Ok(probe) = UdpSocket::bind("0.0.0.0:0") {
+        if probe.connect("8.8.8.8:53").is_ok()
+            && let Ok(la) = probe.local_addr()
+            && !la.ip().is_unspecified()
+            && !la.ip().is_loopback()
+        {
+            return SocketAddr::new(la.ip(), port);
+        }
+    }
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+}
+
 #[cfg(not(target_os = "windows"))]
 fn connect_h264(
     signal_url: &str,
@@ -566,35 +581,51 @@ fn connect_inner(
     let (peer_id, turn) = signal.join(room, role, auth)?;
     info!("joined room {room} as {peer_id}");
 
-    let direct = UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("bind udp: {e}"))?;
+    // #216 外部 NAT 场景：非回环信令绑 0.0.0.0（否则 127.0.0.1 源地址发不出外部
+    // UDP，TURN UDP 中继不可用，只能退 TCP TURN）；与 aerodesk-core connect 对齐。
+    let loopback_signal = signal_url.contains("127.0.0.1")
+        || signal_url.contains("localhost")
+        || signal_url.contains("::1");
+    // #218：force-relay（AERODESK_FORCE_RELAY=1|true，与 core 一致）——ICE 只通告
+    // relayed 候选、跳过 host 候选，强制媒体走 TURN 中继（NAT/弱网压测中继路径）。
+    let force_relay = aerodesk_core::connect::force_relay_env();
+    let direct = if loopback_signal {
+        UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("bind udp: {e}"))?
+    } else {
+        UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("bind udp: {e}"))?
+    };
     let addr = direct.local_addr().map_err(|e| e.to_string())?;
     info!("local UDP addr: {addr}");
 
     // #157 M2：join 返回 TURN 配置时建立中继传输（失败仅告警，直连兜底）。
-    let turn_transport = turn.as_ref().and_then(|tc| setup_turn(tc, true));
+    let turn_transport = turn.as_ref().and_then(|tc| setup_turn(tc, loopback_signal));
     let socket = MediaSocket::new(direct, turn_transport);
-
-    // #218：force-relay（AERODESK_FORCE_RELAY=1|true，与 core 一致）——ICE 只通告
-    // relayed 候选、跳过 host 候选，强制媒体走 TURN 中继（NAT/弱网压测中继路径）。
-    let force_relay = aerodesk_core::connect::force_relay_env();
 
     let mut endpoint = match codec {
         None => Endpoint::new(),
         Some(Codec::H264) => Endpoint::new_h264(),
         Some(c) => Endpoint::new_with_codec(c),
     };
+    // 通配绑定（0.0.0.0）的 local_addr 不能作为候选（str0m 拒绝）：探测出接口 IP
+    // 作为 host 候选（与 aerodesk-core 一致；失败回退 loopback）。
+    let mut host_candidate = addr;
+    if addr.ip().is_unspecified() {
+        host_candidate = discover_egress_ip(addr.port());
+    }
     if force_relay {
-        info!("force-relay: skip host candidate {addr}");
+        info!("force-relay: skip host candidate {host_candidate}");
     } else {
         endpoint
-            .add_local_candidate(addr, Protocol::Udp)
+            .add_local_candidate(host_candidate, Protocol::Udp)
             .map_err(|e| format!("candidate: {e}"))?;
     }
     // #157 M2：relayed 候选加入 offer（`typ relay`），ICE 按优先级直连优先、TURN 兜底。
     if let Some(tt) = socket.turn() {
         let relayed = tt.relayed_addr();
         if let Ok(la) = tt.local_addr() {
-            let local = std::net::SocketAddr::new(addr.ip(), la.port());
+            // relayed 候选的 local 用 host 候选 IP（通配 0.0.0.0 会被 str0m 拒绝/无法映射，
+            // 与 aerodesk-core connect_live_role 的 candidates.first() 一致）。
+            let local = std::net::SocketAddr::new(host_candidate.ip(), la.port());
             info!("relayed candidate {relayed} (local {local}) force_relay={force_relay}");
             if let Err(e) = endpoint.add_relay_candidate(relayed, local) {
                 warn!("relay candidate rejected (TURN disabled): {e:?}");
