@@ -143,6 +143,18 @@ jobs:
       - name: e2e record API (macOS only)
         if: runner.os == 'macOS'
         run: ./scripts/record-api-e2e.sh
+      # #266 录制转封装：ADREC2 → rec2mp4 按访问单元聚合 → MP4 帧数断言。
+      - name: e2e record-mp4 (#266, macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/record-mp4-e2e.sh
+      # #268 TCP 中继并发连接上限：超限拒绝行为可观测。
+      - name: e2e tcp quota (#268, macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/tcp-quota-e2e.sh
+      # #267 发布端码率反馈回路：viewer --send-control → SFU 透传 → publisher 解析。
+      - name: e2e bitrate feedback (#267, macOS only)
+        if: runner.os == 'macOS'
+        run: ./scripts/bitrate-feedback-e2e.sh
 
       # #240 SFU 会话管理 API：房间/客户端列表 + 踢人 + 审计留痕。
       - name: e2e session API (macOS only)
