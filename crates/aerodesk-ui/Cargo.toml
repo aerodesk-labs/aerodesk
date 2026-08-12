@@ -49,7 +49,7 @@ getrandom = { version = "0.2", features = ["js"] }
 name = "aerodesk"
 maintainer = "AeroDesk Labs <aerodesk-labs@users.noreply.github.com>"
 copyright = "2026 AeroDesk Labs"
-license = "MIT OR Apache-2.0"
+# license 取自 [package] license，cargo-deb 无独立 license 字段（v3.7 schema）
 depends = "$auto"
 section = "net"
 priority = "optional"
