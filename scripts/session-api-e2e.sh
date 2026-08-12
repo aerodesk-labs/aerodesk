@@ -28,9 +28,11 @@ SIGNAL_PORT=14001 SIGNAL_PLAIN_PORT=14003 SFU_URL=http://127.0.0.1:14002 SFU_TOK
 SIG=$!
 trap 'kill $SFU $SIG 2>/dev/null || true; wait 2>/dev/null || true' EXIT
 # 前序同端口 e2e（record-mp4/bitrate-feedback）SFU 收 SIGTERM 后可能仍在收尾；
-# 先等 14002/14003 完全释放，避免 nc 命中残留进程导致无鉴权 200。
+# 先等 1478（媒体）与 14002/14003（internal/signal）完全释放，避免：
+#   - nc 命中残留进程导致无鉴权 200
+#   - 本 SFU 绑定 1478 失败（Address already in use）
 for _ in $(seq 1 50); do
-    if ! nc -z 127.0.0.1 14002 2>/dev/null && ! nc -z 127.0.0.1 14003 2>/dev/null; then break; fi
+    if ! nc -z 127.0.0.1 1478 2>/dev/null && ! nc -z 127.0.0.1 14002 2>/dev/null && ! nc -z 127.0.0.1 14003 2>/dev/null; then break; fi
     sleep 0.2
 done
 for _ in $(seq 1 50); do
