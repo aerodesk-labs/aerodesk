@@ -156,12 +156,22 @@ jobs:
         run: ./scripts/bridge-multiroom-e2e.sh
 
       # #264 一键部署脚本：语法与参数解析守卫（真实部署需外部主机，dry-run 验证）。
+      # #216：--help 不得泄漏源码行（历史缺陷：sed 固定行号越界打印 set -uo
+      # pipefail / cd / 参数段）；阳性对照：修复前本断言必失败。
       - name: multipop-deploy script sanity
-        if: runner.os != 'Windows'
         shell: bash
         run: |
           bash -n scripts/multipop-deploy.sh
-          scripts/multipop-deploy.sh --help >/dev/null
+          help_out="$(bash scripts/multipop-deploy.sh --help)"
+          printf '%s\n' "$help_out"
+          if echo "$help_out" | grep -q "set -uo pipefail"; then
+            echo "FAIL: --help 泄漏源码行" >&2
+            exit 1
+          fi
+          if ! echo "$help_out" | grep -q "用法："; then
+            echo "FAIL: --help 缺少用法" >&2
+            exit 1
+          fi
 
       # #163 信令连接配额：房间/全局上限，Join 超限拒绝。
       - name: e2e signal connection quota (macOS only)
