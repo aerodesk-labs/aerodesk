@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
 
+# 同分支/PR 新提交自动取消旧 run，防止陈旧 run 堆满 runner 队列（macOS 并发有限）。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: test (${{ matrix.os }})
