@@ -26,7 +26,6 @@ use str0m::net::TcpType;
 use str0m::{Candidate, Rtc, net::Protocol};
 
 mod bitrate;
-mod recorder;
 mod router;
 mod shard;
 mod tcp;
@@ -34,7 +33,7 @@ mod turn_server;
 mod util;
 
 use aerodesk_protocol::signal::{Role, TurnConfig};
-use recorder::Recorder;
+use aerodesk_sfu::recorder::Recorder;
 use shard::{Shard, ShardCommand, Shared};
 
 /// 统一媒体端口（UDP + TCP + SSL-TCP 复用）。生产用 443。
@@ -514,7 +513,7 @@ pub fn main() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0)
             * 1_000_000; // env 为秒，内部微秒
-        match recorder::Recorder::new(&dir, on_demand, max_bytes, max_secs) {
+        match aerodesk_sfu::recorder::Recorder::new(&dir, on_demand, max_bytes, max_secs) {
             Ok(rec) => {
                 let rec = Arc::new(rec);
                 // SIGINT（Ctrl+C）时先 finalize 录制再退出，保证 meta.json 落盘。
