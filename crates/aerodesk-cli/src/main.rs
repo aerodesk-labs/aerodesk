@@ -598,12 +598,7 @@ fn connect_inner(
     info!("local UDP addr: {addr}");
 
     // #157 M2：join 返回 TURN 配置时建立中继传输（失败仅告警，直连兜底）。
-    // #216：回环信令（同机 SFU）跳过 TURN——避免 TURN relayed 候选与直连竞争。
-    let turn_transport = if loopback_signal {
-        None
-    } else {
-        turn.as_ref().and_then(|tc| setup_turn(tc, false))
-    };
+    let turn_transport = turn.as_ref().and_then(|tc| setup_turn(tc, loopback_signal));
     let socket = MediaSocket::new(direct, turn_transport);
 
     let mut endpoint = match codec {

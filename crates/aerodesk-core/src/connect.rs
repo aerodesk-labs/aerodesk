@@ -216,13 +216,7 @@ fn connect_live_role_impl(
     let loopback_signal =
         server.contains("127.0.0.1") || server.contains("localhost") || server.contains("::1");
     // #157 M2：join 返回 TURN 配置时建立中继传输（失败仅告警，直连兜底）。
-    // #216：回环信令（同机 SFU）跳过 TURN——只保留直连候选，避免 TURN TCP relayed
-    // 候选与直连竞争导致 ICE 选中数据不通的中继路径、DTLS 握手超时。
-    let turn_transport = if loopback_signal {
-        None
-    } else {
-        turn.as_ref().and_then(|tc| setup_turn(tc, false))
-    };
+    let turn_transport = turn.as_ref().and_then(|tc| setup_turn(tc, loopback_signal));
     let direct = if loopback_signal {
         UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("udp bind: {e}"))?
     } else {
