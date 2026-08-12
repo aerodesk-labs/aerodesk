@@ -26,4 +26,7 @@ cpal = "0.15"
 [target.'cfg(target_os = "linux")'.dependencies]
 # #271 Linux 剪贴板：arboard（X11 x11rb / Wayland data-control，纯 Rust 无外部命令依赖）。
 arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+# #271 Linux 图片剪贴板：xclip / wl-copy（与 macOS pbpaste 同思路的命令方案）读写
+# image/png；png crate 仅用于真机往返测试编解码。
+png = "0.17" 
 
