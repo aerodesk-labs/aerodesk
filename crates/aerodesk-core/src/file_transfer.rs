@@ -1167,7 +1167,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn sender_from_bytes_read_chunk_slices_correctly() {
         let data: Vec<u8> = (0..20000u32).map(|i| (i % 251) as u8).collect();
         let mut s =
@@ -1181,6 +1180,7 @@ mod tests {
         assert_eq!(c2, data[2 * CHUNK_SIZE..]);
     }
 
+    #[test]
     fn send_clipboard_image_rejects_empty_and_busy() {
         let mut ft = FileTransfer::new(None);
         assert!(ft.send_clipboard_image(Vec::new()).is_err(), "空图片应拒绝");

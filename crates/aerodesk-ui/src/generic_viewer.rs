@@ -110,6 +110,10 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     let mut assembler = AccessUnitAssembler::new();
     // #72/#271 文件/剪贴板状态机：观看端不落盘接收，但剪贴板文本/图片接收生效。
     let mut file_transfer = aerodesk_core::file_transfer::FileTransfer::new(None);
+    // #271 剪贴板自动同步：本机复制内容 → 1s 节流轮询 → 发往被控端。
+    // last_clip_img 为最近一次已发送/已应用的图片字节，防回声（远端写回又发回）。
+    let mut last_clip_poll: Option<Instant> = None;
+    let mut last_clip_img: Option<Vec<u8>> = None;
     let mut decoder: Option<D> = None;
     let mut renderer: Option<R> = None;
     let mut frames: u64 = 0;
@@ -270,6 +274,8 @@ pub fn run_viewer_generic<D, R, DF, RF>(
         }
         if let Some(png) = file_transfer.take_incoming_clipboard_image() {
             let ok = aerodesk_core::clipboard::write_image(&png);
+            // 防回声：远端图片已落地，视为已同步（避免自动轮询原样发回）。
+            last_clip_img = Some(png);
             let msg = if ok {
                 "已应用远端剪贴板图片".to_string()
             } else {
@@ -277,10 +283,112 @@ pub fn run_viewer_generic<D, R, DF, RF>(
             };
             with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
         }
+        // #271 剪贴板自动同步（1s 节流）：图片优先，否则文本；变化才发，防回声。
+        if last_clip_poll
+            .map(|t| t.elapsed() >= Duration::from_secs(1))
+            .unwrap_or(true)
+        {
+            last_clip_poll = Some(Instant::now());
+            match decide_clipboard_sync(
+                aerodesk_core::clipboard::read_image(),
+                aerodesk_core::clipboard::read(),
+                aerodesk_core::clipboard::cached().as_deref(),
+                last_clip_img.as_deref(),
+            ) {
+                ClipboardSync::Image(png) => {
+                    if file_transfer.send_clipboard_image(png.clone()).is_ok() {
+                        last_clip_img = Some(png);
+                        tracing::info!("clipboard auto-sync: image sent");
+                    }
+                }
+                ClipboardSync::Text(text) => {
+                    if file_transfer.send_clipboard(&text, &mut live.endpoint) {
+                        aerodesk_core::clipboard::set_cache(text.clone());
+                        tracing::info!("clipboard auto-sync: text sent");
+                    }
+                }
+                ClipboardSync::None => {}
+            }
+        }
         std::thread::sleep(Duration::from_millis(1));
     }
     // 会话结束（断开置 stop）：提示后清理注册表与 UI 槽位。
     let msg = format!("已断开：{room}");
     with_ui(&ui_weak, move |ui| ui.set_status(msg.into()));
     crate::session_cleanup_weak(&ui_weak, session_idx, None);
+}
+
+/// 剪贴板自动同步决策结果（#271）。
+#[derive(Debug, PartialEq, Eq)]
+enum ClipboardSync {
+    Image(Vec<u8>),
+    Text(String),
+    None,
+}
+
+/// 剪贴板自动同步决策（纯逻辑，便于单测）：图片优先于文本；内容未变化不发送。
+/// - `read_image`：当前剪贴板图片（PNG，无则 None）
+/// - `read_text`：当前剪贴板文本（无则 None）
+/// - `cached_text`：最近一次已同步文本（防回声）
+/// - `last_img`：最近一次已同步图片字节（防回声）
+fn decide_clipboard_sync(
+    read_image: Option<Vec<u8>>,
+    read_text: Option<String>,
+    cached_text: Option<&str>,
+    last_img: Option<&[u8]>,
+) -> ClipboardSync {
+    if let Some(png) = read_image {
+        if last_img == Some(png.as_slice()) {
+            return ClipboardSync::None;
+        }
+        return ClipboardSync::Image(png);
+    }
+    match read_text {
+        Some(text) if !text.is_empty() && cached_text != Some(text.as_str()) => {
+            ClipboardSync::Text(text)
+        }
+        _ => ClipboardSync::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decide_sync_prefers_image_and_dedups() {
+        let png = vec![1u8, 2, 3, 4];
+        // 图片优先于文本。
+        assert_eq!(
+            decide_clipboard_sync(Some(png.clone()), Some("hello".into()), None, None),
+            ClipboardSync::Image(png.clone())
+        );
+        // 图片未变化 → None。
+        assert_eq!(
+            decide_clipboard_sync(Some(png.clone()), None, None, Some(png.as_slice())),
+            ClipboardSync::None
+        );
+    }
+
+    #[test]
+    fn decide_sync_text_dedup_and_empty() {
+        assert_eq!(
+            decide_clipboard_sync(None, Some("hi".into()), None, None),
+            ClipboardSync::Text("hi".into())
+        );
+        // 与缓存相同 → None（防回声）。
+        assert_eq!(
+            decide_clipboard_sync(None, Some("hi".into()), Some("hi"), None),
+            ClipboardSync::None
+        );
+        // 空文本/无内容 → None。
+        assert_eq!(
+            decide_clipboard_sync(None, Some("".into()), None, None),
+            ClipboardSync::None
+        );
+        assert_eq!(
+            decide_clipboard_sync(None, None, None, None),
+            ClipboardSync::None
+        );
+    }
 }
