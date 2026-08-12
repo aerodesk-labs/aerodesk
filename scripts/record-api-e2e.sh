@@ -25,7 +25,7 @@ SIGNAL_PORT=14001 SIGNAL_PLAIN_PORT=14003 SFU_URL=http://127.0.0.1:14002 SFU_TOK
 SIG=$!
 trap 'kill $SFU $SIG 2>/dev/null || true; wait 2>/dev/null || true' EXIT
 # 同 session-api：先等 1478/14002/14003 释放，避免命中前序残留 SFU 或绑定失败。
-for _ in $(seq 1 50); do
+for _ in $(seq 1 100); do
     if ! nc -z 127.0.0.1 1478 2>/dev/null && ! nc -z 127.0.0.1 14002 2>/dev/null && ! nc -z 127.0.0.1 14003 2>/dev/null; then break; fi
     sleep 0.2
 done
@@ -34,7 +34,7 @@ for _ in $(seq 1 50); do
     sleep 0.2
 done
 sleep 0.3
-kill -0 "$SFU" 2>/dev/null || fail "sfu 启动失败（端口可能被残留进程占用）"
+kill -0 "$SFU" 2>/dev/null || { echo "--- /tmp/recapi-sfu.log ---"; tail -20 /tmp/recapi-sfu.log; fail "sfu 启动失败（端口可能被残留进程占用）"; }
 
 echo "== 无 token 应 403"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:14002/record/start?room=zz")

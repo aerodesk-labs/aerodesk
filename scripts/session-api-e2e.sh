@@ -31,7 +31,7 @@ trap 'kill $SFU $SIG 2>/dev/null || true; wait 2>/dev/null || true' EXIT
 # 先等 1478（媒体）与 14002/14003（internal/signal）完全释放，避免：
 #   - nc 命中残留进程导致无鉴权 200
 #   - 本 SFU 绑定 1478 失败（Address already in use）
-for _ in $(seq 1 50); do
+for _ in $(seq 1 100); do
     if ! nc -z 127.0.0.1 1478 2>/dev/null && ! nc -z 127.0.0.1 14002 2>/dev/null && ! nc -z 127.0.0.1 14003 2>/dev/null; then break; fi
     sleep 0.2
 done
@@ -40,7 +40,7 @@ for _ in $(seq 1 50); do
     sleep 0.2
 done
 sleep 0.3
-kill -0 "$SFU" 2>/dev/null || fail "sfu 启动失败（端口可能被残留进程占用）"
+kill -0 "$SFU" 2>/dev/null || { echo "--- /tmp/sess-sfu.log ---"; tail -20 /tmp/sess-sfu.log; fail "sfu 启动失败（端口可能被残留进程占用）"; }
 
 echo "== 无 token 应 403"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:14002/session/rooms")
