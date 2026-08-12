@@ -18,6 +18,8 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
@@ -32,6 +34,11 @@ const SSL_CLIENT_HELLO: [u8; 72] = [
     0x00, 0x62, 0x00, 0x00, 0x03, 0x00, 0x00, 0x06, 0x1f, 0x17, 0x0c, 0xa6, 0x2f, 0x00, 0x78, 0xfc,
     0x46, 0x55, 0x2e, 0xb1, 0x83, 0x39, 0xf1, 0xea,
 ];
+
+/// #268：TCP 中继并发连接上限默认值（env `SFU_TCP_MAX_CONNS` 覆盖）。
+pub const DEFAULT_TCP_MAX_CONNS: usize = 512;
+/// TCP 中继连接线程栈（数据通道/转发链调用栈深，显式放大，见 RULE）。
+const CONN_THREAD_STACK: usize = 8 << 20;
 
 /// Fixed fake-SSL server hello (libwebrtc kSslServerHello, 79 bytes).
 const SSL_SERVER_HELLO: [u8; 79] = [
@@ -60,7 +67,23 @@ pub enum TcpEvent {
 
 /// 绑定 TCP 监听（SO_REUSEADDR + 短重试；#216 双 SFU 快速复跑时避免 TIME_WAIT
 /// 端口占用导致 Address already in use——与 HTTPS bind_public_with_retry 同类问题）。
+/// 绑定 TCP 监听（SO_REUSEADDR + 短重试；#216 双 SFU 快速复跑时避免 TIME_WAIT
+/// 端口占用导致 Address already in use——与 HTTPS bind_public_with_retry 同类问题）。
 pub fn spawn_tcp_listener(bind: SocketAddr) -> (SocketAddr, Receiver<TcpEvent>) {
+    let max = std::env::var("SFU_TCP_MAX_CONNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TCP_MAX_CONNS)
+        .clamp(1, 4096);
+    spawn_tcp_listener_with_max(bind, max)
+}
+
+/// #268：带并发连接上限的 TCP 监听器（可测试/可配置）。
+/// 超限时新连接直接关闭（拒绝），进程线程/内存占用受控。
+pub fn spawn_tcp_listener_with_max(
+    bind: SocketAddr,
+    max_conns: usize,
+) -> (SocketAddr, Receiver<TcpEvent>) {
     let mut last_err = None;
     for _ in 0..5 {
         let sock = match socket2::Socket::new(
@@ -82,7 +105,11 @@ pub fn spawn_tcp_listener(bind: SocketAddr) -> (SocketAddr, Receiver<TcpEvent>) 
                 let _ = listener.set_nonblocking(true);
                 let addr = listener.local_addr().expect("TCP local addr");
                 let (tx, rx) = mpsc::channel::<TcpEvent>();
-                thread::spawn(move || accept_loop(listener, tx));
+                let quota = Arc::new(AtomicUsize::new(0));
+                thread::Builder::new()
+                    .stack_size(CONN_THREAD_STACK)
+                    .spawn(move || accept_loop(listener, tx, quota, max_conns))
+                    .expect("spawn tcp accept thread");
                 return (addr, rx);
             }
             Err(e) => {
@@ -99,13 +126,29 @@ pub fn spawn_tcp_listener(bind: SocketAddr) -> (SocketAddr, Receiver<TcpEvent>) 
     );
 }
 
-fn accept_loop(listener: TcpListener, tx: Sender<TcpEvent>) {
+fn accept_loop(
+    listener: TcpListener,
+    tx: Sender<TcpEvent>,
+    quota: Arc<AtomicUsize>,
+    max_conns: usize,
+) {
     loop {
         match listener.accept() {
             Ok((stream, addr)) => {
+                // #268：并发上限——超限立即关闭新连接（拒绝服务而非打满资源）。
+                let cur = quota.fetch_add(1, Ordering::SeqCst);
+                if cur >= max_conns {
+                    quota.fetch_sub(1, Ordering::SeqCst);
+                    drop(stream);
+                    warn!("tcp: 连接超上限拒绝 {addr}（当前 {cur}/{max_conns}）");
+                    continue;
+                }
                 let write = match stream.try_clone() {
                     Ok(w) => w,
-                    Err(_) => continue,
+                    Err(_) => {
+                        quota.fetch_sub(1, Ordering::SeqCst);
+                        continue;
+                    }
                 };
                 if tx
                     .send(TcpEvent::New {
@@ -114,10 +157,18 @@ fn accept_loop(listener: TcpListener, tx: Sender<TcpEvent>) {
                     })
                     .is_err()
                 {
+                    quota.fetch_sub(1, Ordering::SeqCst);
                     return;
                 }
                 let tx2 = tx.clone();
-                thread::spawn(move || read_loop(stream, addr, tx2));
+                let quota2 = quota.clone();
+                thread::Builder::new()
+                    .stack_size(CONN_THREAD_STACK)
+                    .spawn(move || {
+                        read_loop(stream, addr, tx2);
+                        quota2.fetch_sub(1, Ordering::SeqCst);
+                    })
+                    .ok();
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(10));
@@ -260,6 +311,64 @@ fn demux(buf: &[u8]) -> Option<(Vec<u8>, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #268：并发超过上限时新连接被关闭（拒绝），已连接不受影响。
+    #[test]
+    fn connection_quota_rejects_over_limit() {
+        let (addr, _rx) = spawn_tcp_listener_with_max("127.0.0.1:0".parse().unwrap(), 2);
+        let mut c1 = std::net::TcpStream::connect(addr).expect("c1");
+        let mut c2 = std::net::TcpStream::connect(addr).expect("c2");
+        // 给 accept 循环时间处理前两个连接。
+        std::thread::sleep(Duration::from_millis(200));
+        let mut c3 = std::net::TcpStream::connect(addr).expect("c3");
+        c3.set_read_timeout(Some(Duration::from_millis(100))).ok();
+        let mut buf = [0u8; 1];
+        // 服务端应尽快关闭 c3：读到 EOF(0) 或 ConnectionReset。
+        let mut closed = false;
+        for _ in 0..20 {
+            match c3.read(&mut buf) {
+                Ok(0) => {
+                    closed = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    closed = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(closed, "超限连接 c3 应被服务端关闭");
+        // c1/c2 仍可写（未被误杀）。
+        c1.write_all(b"\x00").expect("c1 write");
+        c2.write_all(b"\x00").expect("c2 write");
+        // 关闭 c1 后释放配额：新连接应可再次建立并保持打开。
+        drop(c1);
+        std::thread::sleep(Duration::from_millis(200));
+        let mut c4 = std::net::TcpStream::connect(addr).expect("c4");
+        c4.set_read_timeout(Some(Duration::from_millis(100))).ok();
+        let mut buf4 = [0u8; 1];
+        let mut closed4 = false;
+        for _ in 0..10 {
+            match c4.read(&mut buf4) {
+                Ok(0) => {
+                    closed4 = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(_) => {
+                    closed4 = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!closed4, "释放配额后 c4 应保持打开");
+    }
 
     #[test]
     fn fake_ssl_hello_sizes() {
