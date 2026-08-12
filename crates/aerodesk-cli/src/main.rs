@@ -322,6 +322,7 @@ fn run() {
             let tt = type_text.clone();
             let ci = cmd_intent.clone();
             let rf = request_file.clone();
+            let sc = arg(&args, "--send-control");
             run_with_reconnect(
                 move || {
                     viewer(
@@ -338,6 +339,7 @@ fn run() {
                         ci.as_ref(),
                         cmd_json,
                         rf.as_deref(),
+                        sc.as_deref(),
                     )
                 },
                 reconnect,
@@ -1090,10 +1092,16 @@ fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
                 }
             } else if endpoint.channel_label(cid).as_deref() == Some("control") {
                 // #58 显示器切换：viewer → SFU → publisher（control 通道转发）。
-                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&data)
-                    && let Some(n) = v.get("display").and_then(|d| d.as_u64())
-                {
-                    info!("control: display switch request -> display {n}");
+                // #267 码率反馈：SFU/观看端经 control 下发 {"bitrate":N}。
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&data) {
+                    if let Some(n) = v.get("display").and_then(|d| d.as_u64()) {
+                        info!("control: display switch request -> display {n}");
+                    }
+                    if let Some(bps) = v.get("bitrate").and_then(|b| b.as_u64()) {
+                        // 合成发布端（vt/x264/ffmpeg）无持久编码器句柄：日志验证；
+                        // 真实屏幕发布端（publisher_capture）在此处应用 set_bitrate。
+                        info!("control: bitrate feedback -> {bps} bps");
+                    }
                 }
             }
         }
@@ -1268,6 +1276,7 @@ fn viewer(
     cmd_intent: Option<&cmd_exec::Intent>,
     cmd_json: bool,
     request_file: Option<&str>,
+    send_control: Option<&str>,
 ) -> Result<(), String> {
     let (mut signal, mut endpoint, mut socket, _, _audio_mid) =
         connect(signal_url, room, Role::Viewer, auth, audio)?;
@@ -1281,6 +1290,7 @@ fn viewer(
     let mut input_seq = 0u64;
     let mut last_input = Instant::now();
     let mut layer_sent = layer.is_none();
+    let mut control_sent = send_control.is_none();
     // #58 观看端静音：--mute-audio 经 control 通道下发；静音后丢弃音频帧。
     let audio_muted = mute_audio;
     let mut mute_sent = false;
@@ -1533,6 +1543,16 @@ fn viewer(
                         if endpoint.send_channel_data("control", false, &data) {
                             info!("display switch command sent: {d}");
                             display_sent = true;
+                        }
+                    }
+                    // #267 测试/自动化钩子：--send-control '<json>' 经 control 通道下发一次
+                    // （如 {"bitrate":N}，验证码率反馈回路）。
+                    if let Some(ctl) = send_control
+                        && !control_sent
+                    {
+                        if endpoint.send_channel_data("control", false, ctl.as_bytes()) {
+                            info!("control command sent: {ctl}");
+                            control_sent = true;
                         }
                     }
                 }
@@ -2523,14 +2543,23 @@ fn publisher_capture(
                     }
                 }
                 // #58 显示器切换：viewer 经 control 通道请求，SFU 转发到 publisher。
+                // #267 码率反馈：SFU 经 control 通道下发 {"bitrate":N} → 编码器降档。
                 ClientEvent::ChannelData(cid, binary, data) => {
                     if endpoint.channel_label(cid).as_deref() == Some("control") {
-                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&data)
-                            && let Some(n) = v.get("display").and_then(|d| d.as_u64())
-                        {
-                            info!("control: display switch request -> display {n}");
-                            if let Err(e) = rebuild_captures(n as usize, &mut layers) {
-                                warn!("display switch failed（保持当前显示器）: {e}");
+                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&data) {
+                            if let Some(n) = v.get("display").and_then(|d| d.as_u64()) {
+                                info!("control: display switch request -> display {n}");
+                                if let Err(e) = rebuild_captures(n as usize, &mut layers) {
+                                    warn!("display switch failed（保持当前显示器）: {e}");
+                                }
+                            }
+                            if let Some(bps) = v.get("bitrate").and_then(|b| b.as_u64()) {
+                                info!("control: bitrate feedback -> {bps} bps");
+                                for (_, enc, _) in layers.iter_mut() {
+                                    aerodesk_core::platform::Encoder::set_bitrate(
+                                        enc, bps, FPS as u32,
+                                    );
+                                }
                             }
                         }
                     } else {

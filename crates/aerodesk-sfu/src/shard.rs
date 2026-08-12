@@ -1046,6 +1046,11 @@ pub struct Client {
     /// #211：SCTP input 发送缓冲堆积监控（对端 ACK 延迟/CPU 饥饿时告警）。
     last_sctp_monitor: Instant,
     sctp_input_high_since: Option<Instant>,
+    /// #267：媒体出站连续写失败计数——瞬时拥塞时丢包背压，超阈值才断连。
+    write_failures: u32,
+    /// #267：最近一次向发布端反馈的目标码率（bps），节流用。
+    last_bwe_target: u64,
+    last_bwe_at: Instant,
 }
 
 impl Client {
@@ -1070,6 +1075,9 @@ impl Client {
             pending_channel_out_bytes: 0,
             last_sctp_monitor: Instant::now(),
             sctp_input_high_since: None,
+            write_failures: 0,
+            last_bwe_target: 0,
+            last_bwe_at: Instant::now(),
         }
     }
 
@@ -1193,14 +1201,42 @@ impl Client {
                         _ => return Propagated::Noop,
                     };
                     self.bwe.update_estimate(estimate);
-                    self.rtc.bwe().set_current_bitrate(self.bwe.target());
+                    let target = self.bwe.target();
+                    self.rtc.bwe().set_current_bitrate(target);
                     // #238：BWE 目标码率进质量快照。
-                    self.qos.lock().unwrap().bwe_bps = self.bwe.target().as_f64() as u64;
+                    self.qos.lock().unwrap().bwe_bps = target.as_f64() as u64;
                     trace!(
-                        "client {} bwe estimate {estimate:?} target {:?}",
-                        *self.id,
-                        self.bwe.target()
+                        "client {} bwe estimate {estimate:?} target {target:?}",
+                        *self.id
                     );
+                    // #267：向房间内发布端反馈目标码率（control 通道 {"bitrate":N}），
+                    // 发布端 Encoder::set_bitrate 降档，避免单层拥塞时出站队列放大断连。
+                    // 节流：变化 >10% 且距上次 ≥1s 才发，防 BWE 抖动风暴。
+                    let now = std::time::Instant::now();
+                    let target_bps = target.as_f64() as u64;
+                    let changed = self.last_bwe_target == 0
+                        || target_bps.abs_diff(self.last_bwe_target) > target_bps / 10;
+                    if changed && now.duration_since(self.last_bwe_at) >= Duration::from_secs(1) {
+                        self.last_bwe_target = target_bps;
+                        self.last_bwe_at = now;
+                        let msg = serde_json::json!({ "bitrate": target_bps })
+                            .to_string()
+                            .into_bytes();
+                        // ChannelId 构造私有：用本客户端 control 通道 id 作载体
+                        // （handle_channel_data_out 按目标客户端 label 查自己的 id，
+                        // 载体 id 不参与路由）。
+                        if let Some(cid) = self.channels.get("control").copied() {
+                            return Propagated::ChannelData(
+                                self.id,
+                                "control".into(),
+                                str0m::channel::ChannelData {
+                                    id: cid,
+                                    binary: false,
+                                    data: msg,
+                                },
+                            );
+                        }
+                    }
                     Propagated::Noop
                 }
                 Event::MediaIngressStats(data) => {
@@ -1388,9 +1424,10 @@ impl Client {
                     info!("Client ({}) display request: {disp}", *self.id);
                     return Propagated::ChannelData(self.id, "control".into(), d);
                 }
+                // #267：其它 control 消息（如发布端码率反馈 {"bitrate":N}）透传给房间，
+                // 由 peer（publisher）自行处理；层选请求仍由 SFU 消费不转发。
+                return Propagated::ChannelData(self.id, "control".into(), d);
             }
-            warn!("Client ({}) 未知 control 消息", *self.id);
-            return Propagated::Noop;
         }
         Propagated::ChannelData(self.id, label, d)
     }
@@ -1592,9 +1629,28 @@ impl Client {
         let Some(pt) = writer.match_params(data.params) else {
             return;
         };
-        if let Err(e) = writer.write(pt, data.network_time, data.time, data.data.clone()) {
-            warn!("Client ({}) failed: {:?}", *self.id, e);
-            self.rtc.disconnect();
+        match writer.write(pt, data.network_time, data.time, data.data.clone()) {
+            Ok(()) => {
+                // 写成功：重置失败计数（瞬时拥塞恢复后不再累积）。
+                self.write_failures = 0;
+            }
+            Err(e) => {
+                // #267：瞬时拥塞不直接断连——丢包背压（实时媒体丢帧优于踢会话）；
+                // 连续失败超阈值（~3s @30fps）才判定会话真坏断开。
+                self.write_failures += 1;
+                if self.write_failures >= 100 {
+                    warn!(
+                        "Client ({}) {} consecutive write failures, disconnecting",
+                        *self.id, self.write_failures
+                    );
+                    self.rtc.disconnect();
+                } else if self.write_failures == 1 || self.write_failures % 20 == 0 {
+                    warn!(
+                        "Client ({}) write backpressure (failures={}): {e:?}",
+                        *self.id, self.write_failures
+                    );
+                }
+            }
         }
     }
 

@@ -29,6 +29,9 @@ pub struct VtEncoder {
     codec: Codec,
     /// 下一帧强制关键帧（SFU 关键帧请求后置位，编码一帧后清除）。
     force_keyframe_pending: bool,
+    /// #267：码率自适应节流状态（变化 >20% 且 ≥1s 才重建会话）。
+    last_bitrate_bps: u64,
+    last_bitrate_at: std::time::Instant,
 }
 
 impl VtEncoder {
@@ -63,6 +66,8 @@ impl VtEncoder {
             vps: None,
             codec,
             force_keyframe_pending: false,
+            last_bitrate_bps: 0,
+            last_bitrate_at: std::time::Instant::now(),
         })
     }
 
@@ -413,8 +418,24 @@ impl aerodesk_core::platform::Encoder for VtEncoder {
     }
 
     fn set_bitrate(&mut self, bitrate_bps: u64, fps: u32) {
-        // VideoToolbox 会话码率在 build 时固定；改码率需重建会话，本轮保持
-        // 兼容占位（宿主循环可用 configure 重建）。
-        let _ = (bitrate_bps, fps);
+        // #267：VideoToolbox 码率在 build 时固定，改码率需重建会话（代价高）。
+        // 节流：变化 >20% 且距上次 ≥1s 才重建，避免 BWE 抖动风暴打爆编码器。
+        let now = std::time::Instant::now();
+        let changed = self.last_bitrate_bps == 0
+            || bitrate_bps.abs_diff(self.last_bitrate_bps) > self.last_bitrate_bps / 5;
+        if changed && now.duration_since(self.last_bitrate_at) >= std::time::Duration::from_secs(1)
+        {
+            self.last_bitrate_bps = bitrate_bps;
+            self.last_bitrate_at = now;
+            if let Err(e) = self.reconfigure(
+                self.codec,
+                self.width,
+                self.height,
+                fps.max(1),
+                bitrate_bps as u32,
+            ) {
+                tracing::warn!("vt set_bitrate reconfigure failed: {e}");
+            }
+        }
     }
 }

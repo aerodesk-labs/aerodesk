@@ -2,6 +2,7 @@
 //! 硬编优先（macOS VideoToolbox H.264/HEVC），否则 FFmpeg 软编回退。
 
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::codec::packet::Packet;
@@ -51,6 +52,9 @@ pub struct FfmpegEncoder {
     ffmpeg_id: ffmpeg_next::codec::Id,
     /// 编码器缓冲产出（AV1/SVT 等有内部延迟，先入队再按序返回）。
     pending: VecDeque<EncodedUnit>,
+    /// #267：码率自适应节流状态（变化 >20% 且 ≥1s 才重建）。
+    last_bitrate_bps: u64,
+    last_bitrate_at: Instant,
 }
 
 impl FfmpegEncoder {
@@ -146,6 +150,8 @@ impl FfmpegEncoder {
             keyframe_pending: false,
             ffmpeg_id: id,
             pending: VecDeque::new(),
+            last_bitrate_bps: 0,
+            last_bitrate_at: Instant::now(),
         })
     }
 
@@ -288,7 +294,21 @@ impl aerodesk_core::platform::Encoder for FfmpegEncoder {
     }
 
     fn set_bitrate(&mut self, bitrate_bps: u64, _fps: u32) {
-        // FFmpeg 软编码率在 open 时固定；宿主可用 configure 重建。
-        let _ = bitrate_bps;
+        // #267：FFmpeg 码率在 open 时固定，改码率需重建（代价高）。
+        // 节流：变化 >20% 且距上次 ≥1s 才重建，避免 BWE 抖动风暴打爆编码器。
+        let now = Instant::now();
+        let changed = self.last_bitrate_bps == 0
+            || bitrate_bps.abs_diff(self.last_bitrate_bps) > self.last_bitrate_bps / 5;
+        if changed && now.duration_since(self.last_bitrate_at) >= Duration::from_secs(1) {
+            let codec = self.codec();
+            let (w, h, fps) = (self.width, self.height, self.fps);
+            self.last_bitrate_bps = bitrate_bps;
+            self.last_bitrate_at = now;
+            if let Ok(enc) = FfmpegEncoder::new(w, h, fps, bitrate_bps, codec) {
+                *self = enc;
+            } else {
+                tracing::warn!("ffmpeg set_bitrate rebuild failed");
+            }
+        }
     }
 }
