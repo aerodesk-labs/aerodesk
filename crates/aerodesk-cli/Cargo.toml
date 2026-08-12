@@ -29,5 +29,7 @@ videotoolbox = "0.18"
 aerodesk-windows = { path = "../aerodesk-windows" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# Linux 被控端：X11 采集 + XTest/uinput 注入 + VAAPI/x264 编码（#4/#306）。
-aerodesk-linux = { path = "../aerodesk-linux" }
+# Linux 被控端：X11/Wayland(portal) 采集 + XTest/uinput 注入 + VAAPI/x264 编码（#4/#306，Wayland 批次）。
+# 启用 pipewire feature（CLI 无 slint/system-tray，无 zbus/tokio 主线程冲突；
+# UI 保持默认 feature 不受影响——feature 按包统一，但 UI 构建命令不包含 aerodesk-cli）。
+aerodesk-linux = { path = "../aerodesk-linux", features = ["pipewire"] }

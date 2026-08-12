@@ -2480,10 +2480,10 @@ fn publisher_capture_windows(
     );
 }
 
-/// Linux 屏幕采集发布端（被控端）：X11 x11rb GetImage（BGRA）→ 编码 → SFU。
+/// Linux 屏幕采集发布端（被控端）：X11（DISPLAY 会话，x11rb GetImage）或
+/// Wayland（xdg-desktop-portal ScreenCast + PipeWire）→ 编码 → SFU。
 /// H.264：VAAPI 硬编优先（#282），x264 软编回退；HEVC/VP9/AV1 走 FFmpeg 软编。
 /// 输入注入：XTest（X11）/ uinput（Wayland/无 X，见 `inject_input`）。
-/// 需要 X11 桌面会话（DISPLAY 可用）。
 #[cfg(target_os = "linux")]
 fn publisher_capture_linux(
     signal_url: &str,
@@ -2494,27 +2494,42 @@ fn publisher_capture_linux(
     codec: Codec,
 ) {
     use aerodesk_core::platform::MediaSource;
-    use aerodesk_linux::capture::X11Capturer;
+    use aerodesk_linux::capture::{WaylandPortalCapturer, X11Capturer};
 
     const FPS: u32 = 30;
 
-    let mut capture = match X11Capturer::new() {
-        Ok(c) => c,
-        Err(e) => {
-            error!("X11 capture init failed: {e}");
-            info!(
-                "Linux 屏幕采集需要 X11 桌面会话（DISPLAY）；Wayland 采集见 aerodesk-linux `pipewire` feature"
-            );
-            return;
+    // DISPLAY 存在 → X11；否则 → Wayland portal（PipeWire，触发用户授权）。
+    let mut capture = if std::env::var("DISPLAY").is_ok() {
+        match X11Capturer::new() {
+            Ok(c) => LinuxScreenSource::X11(c),
+            Err(e) => {
+                error!("X11 capture init failed: {e}");
+                return;
+            }
+        }
+    } else {
+        match WaylandPortalCapturer::new() {
+            Ok(c) => LinuxScreenSource::Wayland(c),
+            Err(e) => {
+                error!("Wayland portal capture init failed: {e}");
+                return;
+            }
         }
     };
+    // start 先行：Wayland 需 portal 会话建立后才能拿到流尺寸；X11 start 为 no-op。
+    if let Err(e) = MediaSource::start(&mut capture, FPS, false) {
+        error!("capture start failed: {e}");
+        info!(
+            "Linux 屏幕采集：X11 需 DISPLAY 会话；Wayland 需 xdg-desktop-portal + PipeWire + 用户授权"
+        );
+        return;
+    }
     let (w, h) = capture.size();
     if w == 0 || h == 0 {
-        error!("X11 capture: 无可用显示器输出");
+        error!("capture: 无可用显示器输出");
         return;
     }
     info!("Linux screen capture started at {w}x{h}");
-    let _ = MediaSource::start(&mut capture, FPS, false);
 
     let encoder = match codec {
         Codec::H264 => {
@@ -2550,6 +2565,50 @@ fn publisher_capture_linux(
     publisher_generic(
         signal_url, room, auth, audio, audio_opus, codec, FPS, capture, encoder,
     );
+}
+
+/// Linux 屏幕采集源：X11 x11rb / Wayland portal（PipeWire）。
+#[cfg(target_os = "linux")]
+#[allow(clippy::large_enum_variant)]
+enum LinuxScreenSource {
+    X11(aerodesk_linux::capture::X11Capturer),
+    Wayland(aerodesk_linux::capture::WaylandPortalCapturer),
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxScreenSource {
+    fn size(&self) -> (u32, u32) {
+        match self {
+            Self::X11(c) => c.size(),
+            Self::Wayland(c) => c.size(),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl aerodesk_core::platform::MediaSource for LinuxScreenSource {
+    type Error = String;
+
+    fn start(&mut self, fps: u32, with_cursor: bool) -> Result<(), Self::Error> {
+        match self {
+            Self::X11(c) => aerodesk_core::platform::MediaSource::start(c, fps, with_cursor),
+            Self::Wayland(c) => aerodesk_core::platform::MediaSource::start(c, fps, with_cursor),
+        }
+    }
+
+    fn next_frame(&mut self) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        match self {
+            Self::X11(c) => aerodesk_core::platform::MediaSource::next_frame(c),
+            Self::Wayland(c) => aerodesk_core::platform::MediaSource::next_frame(c),
+        }
+    }
+
+    fn stop(&mut self) {
+        match self {
+            Self::X11(c) => aerodesk_core::platform::MediaSource::stop(c),
+            Self::Wayland(c) => aerodesk_core::platform::MediaSource::stop(c),
+        }
+    }
 }
 
 /// Linux 屏幕发布编码器：VAAPI 硬编 / x264 软编 / FFmpeg 软编（多 codec）。
