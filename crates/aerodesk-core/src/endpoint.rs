@@ -580,4 +580,32 @@ mod tests {
             "plain offer must not advertise simulcast"
         );
     }
+
+    /// 摄像头第二路视频轨（#304）：add_camera_recvonly 后 offer 含两个 video m-line，
+    /// camera_mid 独立返回；未请求时 camera_mid=None。
+    #[test]
+    fn camera_offer_adds_second_video_mline() {
+        let mut ep = Endpoint::new();
+        ep.add_video_recvonly();
+        ep.add_camera_recvonly();
+        let (offer, _pending, video_mid, _audio_mid, camera_mid) =
+            ep.create_offer().expect("offer");
+        assert!(video_mid.is_some(), "screen video mid expected");
+        let cam = camera_mid.expect("camera mid expected");
+        assert_ne!(
+            cam,
+            video_mid.unwrap(),
+            "camera mid must differ from screen mid"
+        );
+        let sdp = offer.to_sdp_string();
+        let video_lines = sdp.matches("m=video").count();
+        assert_eq!(
+            video_lines, 2,
+            "offer should contain 2 video m-lines: {sdp}"
+        );
+        assert!(
+            sdp.contains("recvonly"),
+            "viewer camera line should be recvonly"
+        );
+    }
 }

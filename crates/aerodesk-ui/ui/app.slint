@@ -466,6 +466,9 @@ export component AppWindow inherits Window {
     in-out property <bool> file-transfer-enabled: true;
     // #58 当前会话静音态（工具栏音频按钮高亮用，按会话同步）。
     in-out property <bool> audio-muted: false;
+    // 摄像头画面切换：camera-available=远端发布了摄像头轨；camera-active=当前显示摄像头。
+    in-out property <bool> camera-available: false;
+    in-out property <bool> camera-active: false;
     in-out property <bool> inc-view-only: false;
     // 设置页密码编辑
     in-out property <string> pw-edit: "";
@@ -479,6 +482,7 @@ export component AppWindow inherits Window {
     callback refresh-device-pw();
     callback toggle-fullscreen();
     callback toggle-audio();
+    callback toggle-camera();
     // #73 观看端音量滑块（0..1）。
     callback change-volume(float);
     // #75：会话视图指针输入 → Rust 侧转发为 InputFrame（0=Move 1=Down 2=Up）。
@@ -1371,6 +1375,7 @@ export component AppWindow inherits Window {
                             spacing: 2px;
                             IconBtn { icon: "\u{e5d0}"; tooltip: "全屏"; clicked => { root.toggle-fullscreen(); } }
                             IconBtn { icon: "\u{e050}"; active: root.audio-muted; danger: root.audio-muted; tooltip: root.audio-muted ? "音频已静音（本会话）" : "音频"; clicked => { root.toggle-audio(); } }
+                            IconBtn { icon: "\u{e3b0}"; active: root.camera-active; enabled: root.camera-available; tooltip: "摄像头"; clicked => { root.toggle-camera(); } }
                             Slider {
                                 width: 80px;
                                 minimum: 0;

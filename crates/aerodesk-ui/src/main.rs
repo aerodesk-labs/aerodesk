@@ -118,6 +118,8 @@ pub struct SessionHandle {
     pub muted: Arc<AtomicBool>,
     pub volume: Arc<AtomicU16>,
     pub stop: Arc<AtomicBool>,
+    /// 画面源切换：false=屏幕 / true=摄像头（观看端本地渲染选择）。
+    pub show_camera: Arc<AtomicBool>,
     /// 最近一帧（未收到帧时为 None，UI 显示空槽）。
     pub frame: Option<SessionFrame>,
     /// 远端光标最新位置（None = 尚未收到光标事件）。
@@ -318,6 +320,8 @@ pub fn session_refresh_ui(ui: &AppWindow) {
         ui.set_remote_cursor_visible(false);
         ui.set_frame_w(0.0);
         ui.set_frame_h(0.0);
+        ui.set_camera_active(false);
+        ui.set_camera_available(false);
         ui.set_status("已断开".into());
         ui.set_connecting(false);
     } else {
@@ -362,7 +366,7 @@ pub fn session_cleanup(ui: &AppWindow, slot: usize, terminal: Option<String>) {
 /// 切换会话、会话加入/离开后调用，保证多会话之间不串状态。
 pub fn sync_active_session_ui(ui: &AppWindow) {
     let idx = ui.get_active_session() as usize;
-    let (vol, muted, cursor, frame, fp, fl) = {
+    let (vol, muted, camera_active, cursor, frame, fp, fl) = {
         let sessions = SESSIONS.lock().unwrap();
         let Some(s) = sessions.get(idx) else {
             return;
@@ -370,6 +374,7 @@ pub fn sync_active_session_ui(ui: &AppWindow) {
         (
             s.volume.load(Ordering::SeqCst) as f32 / 100.0,
             s.muted.load(Ordering::SeqCst),
+            s.show_camera.load(Ordering::SeqCst),
             s.cursor,
             s.frame.as_ref().map(|f| (f.w as f32, f.h as f32)),
             s.file_progress,
@@ -378,6 +383,7 @@ pub fn sync_active_session_ui(ui: &AppWindow) {
     };
     ui.set_volume(vol);
     ui.set_audio_muted(muted);
+    ui.set_camera_active(camera_active);
     match cursor {
         Some((x, y)) => {
             ui.set_remote_cursor_x(x);
@@ -664,6 +670,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let muted = Arc::new(AtomicBool::new(false));
             let volume = Arc::new(AtomicU16::new(100));
             let stop = Arc::new(AtomicBool::new(false));
+            let show_camera = Arc::new(AtomicBool::new(false));
             {
                 let mut sessions = SESSIONS.lock().unwrap();
                 sessions.push(SessionHandle {
@@ -676,6 +683,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     muted: muted.clone(),
                     volume: volume.clone(),
                     stop: stop.clone(),
+                    show_camera: show_camera.clone(),
                     frame: None,
                     cursor: None,
                     file_progress: -1.0,
@@ -703,6 +711,7 @@ fn main() -> Result<(), slint::PlatformError> {
                             file_cmd_rx,
                             muted,
                             volume,
+                            show_camera,
                             stop,
                         );
                     }
@@ -1114,6 +1123,26 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_audio_muted(m);
             ui.set_session_status(
                 format!("音频：{}（仅本会话）", if m { "已静音" } else { "已开启" }).into(),
+            );
+        }
+    });
+    // 摄像头画面切换：当前会话渲染源 屏幕/摄像头（本地选择，不下发控制指令）。
+    ui.on_toggle_camera({
+        let weak = ui.as_weak();
+        move || {
+            let ui = weak.unwrap();
+            let idx = ui.get_active_session() as usize;
+            let m = {
+                let sessions = SESSIONS.lock().unwrap();
+                let Some(s) = sessions.get(idx) else {
+                    ui.set_session_status("没有活动会话".into());
+                    return;
+                };
+                !s.show_camera.fetch_xor(true, Ordering::SeqCst)
+            };
+            ui.set_camera_active(m);
+            ui.set_session_status(
+                format!("画面：{}（本会话）", if m { "摄像头" } else { "屏幕" }).into(),
             );
         }
     });
@@ -1949,6 +1978,7 @@ mod tests {
             muted: Arc::new(AtomicBool::new(false)),
             volume: Arc::new(AtomicU16::new(100)),
             stop: Arc::new(AtomicBool::new(false)),
+            show_camera: Arc::new(AtomicBool::new(false)),
             frame: None,
             cursor: None,
             file_progress: -1.0,
@@ -2559,6 +2589,7 @@ mod multi_session_e2e {
                 muted: Arc::new(AtomicBool::new(false)),
                 volume: Arc::new(AtomicU16::new(100)),
                 stop: stop.clone(),
+                show_camera: Arc::new(AtomicBool::new(false)),
                 frame: None,
                 cursor: None,
                 file_progress: -1.0,
