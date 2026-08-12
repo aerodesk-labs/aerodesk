@@ -63,7 +63,10 @@ while [ "$#" -gt 0 ]; do
     --cleanup) CLEANUP=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --help|-h)
-      sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      # 只输出文件头部连续注释块（用法/前提/注意），到首个非注释行即停，
+      # 避免 sed 固定行号越界泄漏 set -uo pipefail 等源码行。
+      awk 'NR == 1 { next } /^#/ { line = $0; sub(/^# ?/, "", line); print line; next } { exit }' "$0"
+      exit 0 ;;
     *) echo "未知参数: ${1}（--help 查看用法）" >&2; exit 2 ;;
   esac
 done
