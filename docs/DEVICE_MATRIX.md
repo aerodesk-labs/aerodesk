@@ -1,6 +1,7 @@
 # 真机冒烟矩阵与硬件验收状态（#1/#2/#3/#4/#6/#8）
 
-> 软件侧（主控端 + 被控端）已全部合入 main 并经 CI 自测（截至 #195，main 全绿）；
+> 软件侧（主控端 + 被控端）已全部合入 main 并经 CI 自测（截至 2026-08-12，main 全绿）；
+> 平台抽象（core `platform` trait + 泛型发布/观看管线）已完成并合入（#277/#278/#279）。
 > 下表为**真机/干净环境验收**的当前状态。
 > 未打勾单元格 = 需要对应硬件，代码已就绪（或明确为后续实现）。
 
@@ -8,23 +9,25 @@
 
 | 被控端 \\ 观看端 | Web | macOS | iOS | Android | Windows | Linux | HarmonyOS |
 |---|---|---|---|---|---|---|---|
-| macOS | ✅（web-e2e：观看/发布/文件/重连） | ✅（smoke + UI e2e） | ⬜ 待 iPhone | ⬜ 待 Android | ⬜ 待 Win | ⬜ 待 Linux | ⬜ 待鸿蒙 |
-| Windows | ⬜（DXGI 采集 + SendInput 注入代码就绪，CI 编译/e2e 守护） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
-| Linux | ⬜（X11 采集 + XTest 注入 + VAAPI 硬编/硬解 + uinput 注入代码就绪，CI 编译/e2e 守护；Wayland/PipeWire 采集待接入） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
+| macOS | ✅（web-e2e：观看/发布/文件/重连） | ✅（smoke + UI e2e；默认 h265 硬编 + 真实系统音频 #274/#276） | ✅（iOS 模拟器 e2e：H.265 硬解观看 macOS 流 #275） | ⬜ 待 Android | ⬜ 待 Win | ⬜ 待 Linux | ⬜ 待鸿蒙 |
+| Windows | ⬜（DXGI 采集 + SendInput 注入 + 剪贴板文本 #281，CI 编译/e2e 守护） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
+| Linux | ⬜（X11 采集 + XTest/uinput 注入 + VAAPI 硬编/硬解 + 剪贴板文本 #282/#283/#284，CI 编译/e2e 守护；Wayland/PipeWire 采集 PR #286 进行中） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 | Android | ⬜（MediaProjection + MediaCodec + 无障碍注入代码就绪；**模拟器经 TURN relay 已出帧解码（#201/#203）**，真机验收待设备） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 
 ## 各 issue 验收门槛
 
 | Issue | 软件侧（已合入 main） | 硬件/环境门槛 |
 |---|---|---|
-| #1 iOS 壳层 | 壳 + H.264 硬解 + 模拟器 e2e（#31/#32/#39/#189） | iPhone 真机（A12+）：观看 macOS 流 |
+| #1 iOS 壳层 | 壳 + **H.264/H.265 硬解 + 音视频分流 + PCMU 播放 + iPad 支持 + 设置持久化**（#275）；模拟器 e2e（含 h265 观看 macOS） | iPhone 真机（A12+）：观看 macOS 流 |
 | #2 Android 真机 | 观看端 MediaCodec 渲染 + 被控端 MediaProjection/硬编/无障碍注入 + Android 14 前台服务（#156/#165/#187）；APK CI 守护 | Android 真机（API 26+）：端到端画面 + 输入 |
 | #3 Windows | DXGI 采集 + SendInput 注入 + OpenH264 软编/软解 + VDD（#159/#188）；Windows UI e2e CI 守护 | Win10/11 真机：端到端 + 真机编解码器记录 |
-| #4 Linux | X11 采集 + XTest 注入 + x264 软编 + OpenH264 软解 + VAAPI 硬编/硬解 + uinput 注入 + 运行级自测（#179/#188/#190）；Linux UI e2e CI 守护 | Linux 真机：X11/Wayland 端到端 + VAAPI/uinput 真机验收（Wayland/PipeWire 采集待接入） |
+| #4 Linux | X11 采集 + XTest/uinput 注入 + x264 软编 + OpenH264 软解 + **VAAPI 硬编/硬解优先（#282/#284）** + 剪贴板文本（#283）+ 运行级自测；Linux UI e2e CI 守护 | Linux 真机：X11/Wayland 端到端 + VAAPI/uinput 真机验收（Wayland/PipeWire 采集 PR #286 进行中） |
 | #6 HarmonyOS | NAPI 规约 ✅（docs/HARMONYOS.md，tmp/ohos-check） | DevEco + OHOS NDK + 鸿蒙真机（ring 交叉编译） |
-| #75 鼠标控制 | 远程光标渲染 ✅（#86）、输入全事件 e2e ✅（#95）、高 DPI/多显示器坐标映射 ✅（#105） | 多显示器真机高 DPI 验证 + Windows/Linux/Android 注入真机验收 |
+| #75 鼠标控制 | 远程光标渲染 ✅（#86）、输入全事件 e2e ✅（#95）、高 DPI/多显示器坐标映射 ✅（#105）、远端光标叠加默认关（对齐 RustDesk/TeamViewer，#274） | 多显示器真机高 DPI 验证 + Windows/Linux/Android 注入真机验收 |
+| #271 剪贴板 | **macOS/Windows/Linux 文本双向同步**（#281/#283 + 既有 macOS）；图片/富文本待做 | — |
+| #277 平台抽象 | **core `platform` trait 全部实现 + 平台重复 trait 收敛 + 消费方泛型化**（publisher_generic + run_viewer_generic，#278/#279）：MediaSource/Encoder/Decoder/Renderer/InputInjector/AudioSink/AudioCapturer/Clipboard/CursorSource/Permissions/CameraSource/FilePicker/AppShell/VirtualDisplay/Notifier；键盘映射 macOS/Windows VK/Linux keysym | 平台真机批次（Windows WASAPI→Windows Codex、Linux PipeWire、Android JNI、macOS AVFoundation 摄像头） |
 | #8 压测 | 工具链/报告 ✅（#38）、netem ✅ | 干净环境 4K60 基线 + 真机矩阵 |
-| #58 工具栏媒体控制 | 画质选层 ✅、音频链路 ✅（PCMU → SFU → viewer + UI 静音）、显示器切换 ✅（viewer `--display N` → SFU control 转发 → publisher `ScreenCaptureKit` 重建采集，`scripts/display-e2e.sh` 守护控制链路）；三个 e2e 均已接入 macOS CI | 真实系统音频采集（AudioUnit/TCC）+ 多显示器真机切换验收（macOS 先行） |
+| #58 工具栏媒体控制 | 画质选层 ✅、音频链路 ✅（PCMU/Opus → SFU → viewer + UI 静音）、**真实系统音频采集已接入**（SCK audio → Opus/PCMU，#276）、显示器切换 ✅（viewer `--display N` → SFU control 转发 → publisher 重建采集，`scripts/display-e2e.sh` 守护）；e2e 已接入 macOS CI | 多显示器真机切换验收 |
 
 ## 虚拟显示器冒烟（ADR-0001/0002/0003，#140）
 
@@ -36,11 +39,11 @@
 | macOS | BetterDisplay CLI | `scripts/macos-vdd-smoke.sh`（需 BetterDisplay 2.2.x+ 运行） | 设计 ✅ / 待 mac 真机/无头 |
 | Linux | VKMS + krfb-virtualmonitor | `scripts/linux-vdd-smoke.sh`（KDE Plasma 6 / Wayland） | 设计 ✅ / 待 Linux 真机 |
 
-## 自动验证现状（2026-08-09，main @ #195 全绿）
+## 自动验证现状（2026-08-12，main 全绿；#274-#284 已合入）
 - CI 三平台（macOS/Ubuntu/Windows）：cargo fmt/clippy/test 全绿 ✅
-- macOS e2e：web 观看/发布/文件上传/自动重连、SFU 准入配额、audio/simulcast/display、cursor、record、multipop/popreg ✅
-- Windows/Linux UI e2e（viewer 真实媒体 + 输入）✅；iOS 模拟器 e2e（viewer 解码）✅；Android APK 构建 ✅
-- Web 主控端文件上传 e2e（#195）：1MB 随机文件 → CLI 被控端落盘 → sha256 一致 ✅
+- macOS e2e：web 观看/发布/文件上传/自动重连、SFU 准入配额、audio/simulcast/display、cursor、record、multipop/popreg、bridge-fallback ✅（#280 修复 SCTP abort 误判后稳定）
+- Windows/Linux UI e2e（viewer 真实媒体 + 输入；Linux 走 VAAPI 硬解优先 #284）✅；iOS 模拟器 e2e（viewer 解码，含 h265 #275）✅；Android APK 构建 ✅
+- 平台抽象 CI：#278/#279 全平台编译 + e2e 全绿（Windows/Linux 真机编译验证键盘映射/MediaSource/InputInjector）
 - 本机（共享开发机）：smoke/web-file/web-reconnect 多次全 PASS ✅
 
 ## 硬件就绪后的验收 runbook
@@ -69,8 +72,8 @@ RECORD_DIR=/tmp/aerodesk-acceptance ./target/debug/aerodesk-sfu   # 分片服务
 ### 2. iOS 真机（#1，iPhone A12+）
 1. 构建：`bash scripts/build-ios-lib.sh all` → `cd ios && xcodegen generate`（双 slice 已由 CI 守护）
 2. Xcode 打开 `ios/AeroDesk.xcodeproj`：选真机 + 开发者签名 → Run（或 Archive 出 ipa/TestFlight）
-3. App 内填：服务器 `ws://<宿主机LAN IP>:3003`、房间 `accept` → 连接
-4. 验收：看到 macOS 被控端画面；拖动/点击/键盘回传生效（被控端光标与应用响应）；`AVSampleBufferDisplayLayer` 低延迟路径
+3. App 内填：服务器 `ws://<宿主机LAN IP>:3003`、房间 `accept` → 连接（支持 H.264/H.265 硬解 + 音频播放 #275；iPad 全方向/分屏）
+4. 验收：看到 macOS 被控端画面（默认 h265 硬编）；拖动/点击/键盘回传生效；能听到被控端系统音频（发布端 `--audio`）；`AVSampleBufferDisplayLayer` 低延迟路径
 5. 证据：截图 + 无报错日志 → 关 #1
 
 ### 3. Android 真机（#2，API 26+）
@@ -115,7 +118,7 @@ RECORD_DIR=/tmp/aerodesk-acceptance ./target/debug/aerodesk-sfu   # 分片服务
 ./scripts/display-e2e.sh
 ```
 真机验收（对应 issue 评论贴证据）：
-1. **音频真实采集/播放**：macOS 端 AudioUnit/AVAudioEngine 采集系统音频接入 publisher（当前为合成 PCMU；代码路径待接入），观看端出声且「音频」按钮静音后无声
+1. **音频真实采集/播放**：macOS 端 SCK 系统音频采集已接入（`--audio`，#276），观看端出声且「音频」按钮静音后无声；iOS 观看端已支持 PCMU 播放（#275）
 2. **多显示器切换**：macOS 被控端 ≥2 显示器，`--encoder screen --display N` 或 viewer `--display N` 切换后画面/码率变化
 3. 证据 → 关 #58
 
