@@ -23,7 +23,7 @@ use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcError, net::Receiv
 use aerodesk_protocol::signal::Role;
 
 use crate::bitrate::{BitrateController, Layer};
-use crate::recorder::Recorder;
+use aerodesk_sfu::recorder::Recorder;
 
 /// 发往分片的命令。
 #[allow(clippy::large_enum_variant)]

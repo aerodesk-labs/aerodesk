@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const MAGIC: &[u8] = b"ADREC2\n";
+pub const MAGIC: &[u8] = b"ADREC2\n";
 
 /// ADREC2 包 kind 值。
 pub const KIND_VIDEO: u8 = 0;

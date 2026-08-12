@@ -199,6 +199,7 @@ dependencies = [
 name = "aerodesk-sfu"
 version = "0.1.0"
 dependencies = [
+ "aerodesk-core",
  "aerodesk-protocol",
  "ctrlc",
  "ipnet",
