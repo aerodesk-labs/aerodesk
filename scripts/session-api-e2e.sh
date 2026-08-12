@@ -27,11 +27,18 @@ SIGNAL_PORT=14001 SIGNAL_PLAIN_PORT=14003 SFU_URL=http://127.0.0.1:14002 SFU_TOK
   ./target/debug/aerodesk-signal >/tmp/sess-sig.log 2>&1 &
 SIG=$!
 trap 'kill $SFU $SIG 2>/dev/null || true; wait 2>/dev/null || true' EXIT
+# 前序同端口 e2e（record-mp4/bitrate-feedback）SFU 收 SIGTERM 后可能仍在收尾；
+# 先等 14002/14003 完全释放，避免 nc 命中残留进程导致无鉴权 200。
+for _ in $(seq 1 50); do
+    if ! nc -z 127.0.0.1 14002 2>/dev/null && ! nc -z 127.0.0.1 14003 2>/dev/null; then break; fi
+    sleep 0.2
+done
 for _ in $(seq 1 50); do
     if nc -z 127.0.0.1 14002 2>/dev/null && nc -z 127.0.0.1 14003 2>/dev/null; then break; fi
     sleep 0.2
 done
 sleep 0.3
+kill -0 "$SFU" 2>/dev/null || fail "sfu 启动失败（端口可能被残留进程占用）"
 
 echo "== 无 token 应 403"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:14002/session/rooms")
