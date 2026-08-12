@@ -15,7 +15,7 @@ echo "== 启动 sfu（SFU_TCP_MAX_CONNS=${MAX}，媒体端口 ${PORT}）"
 SFU_MEDIA_PORT=$PORT SFU_TCP_MAX_CONNS=$MAX SFU_BIND_ADDRESS=127.0.0.1 \
   ./target/debug/aerodesk-sfu >/tmp/tcpq-sfu.log 2>&1 &
 SFU=$!
-trap 'kill $SFU 2>/dev/null || true' EXIT
+trap 'kill $SFU 2>/dev/null || true; sleep 1; kill -9 $SFU 2>/dev/null || true' EXIT
 # 前序脚本 SFU 收 SIGTERM 后可能仍在收尾；先等 1478（媒体端口）完全释放，
 # 避免本 SFU 绑定失败（Address already in use，CI 顺序执行偶发）。
 for _ in $(seq 1 50); do

@@ -26,7 +26,7 @@ SFU=$!
 SIGNAL_PORT=14001 SIGNAL_PLAIN_PORT=14003 SFU_URL=http://127.0.0.1:14002 SFU_TOKEN="$TOKEN" \
   ./target/debug/aerodesk-signal >/tmp/sess-sig.log 2>&1 &
 SIG=$!
-trap 'kill $SFU $SIG 2>/dev/null || true; wait 2>/dev/null || true' EXIT
+trap 'kill $SFU $SIG 2>/dev/null || true; sleep 1; kill -9 $SFU $SIG 2>/dev/null || true; wait 2>/dev/null || true' EXIT
 # 前序同端口 e2e（record-mp4/bitrate-feedback）SFU 收 SIGTERM 后可能仍在收尾；
 # 先等 1478（媒体）与 14002/14003（internal/signal）完全释放，避免：
 #   - nc 命中残留进程导致无鉴权 200

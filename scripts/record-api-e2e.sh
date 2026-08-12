@@ -23,7 +23,7 @@ RECORD_DIR="$REC" RECORD_ON_DEMAND=1 INTERNAL_TOKEN="$TOKEN" \
 SFU=$!
 SIGNAL_PORT=14001 SIGNAL_PLAIN_PORT=14003 SFU_URL=http://127.0.0.1:14002 SFU_TOKEN="$TOKEN" ./target/debug/aerodesk-signal >/tmp/recapi-sig.log 2>&1 &
 SIG=$!
-trap 'kill $SFU $SIG 2>/dev/null || true; wait 2>/dev/null || true' EXIT
+trap 'kill $SFU $SIG 2>/dev/null || true; sleep 1; kill -9 $SFU $SIG 2>/dev/null || true; wait 2>/dev/null || true' EXIT
 # 同 session-api：先等 1478/14002/14003 释放，避免命中前序残留 SFU 或绑定失败。
 for _ in $(seq 1 100); do
     if ! nc -z 127.0.0.1 1478 2>/dev/null && ! nc -z 127.0.0.1 14002 2>/dev/null && ! nc -z 127.0.0.1 14003 2>/dev/null; then break; fi

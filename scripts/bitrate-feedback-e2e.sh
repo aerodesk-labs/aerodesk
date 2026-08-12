@@ -20,7 +20,7 @@ SFU=$!
 SIGNAL_PORT=14001 SIGNAL_PLAIN_PORT=14003 SFU_URL=http://127.0.0.1:14002 SFU_TOKEN="$TOKEN" \
   ./target/debug/aerodesk-signal >/tmp/brf-sig.log 2>&1 &
 SIG=$!
-trap 'kill $SFU $SIG 2>/dev/null || true' EXIT
+trap 'kill $SFU $SIG 2>/dev/null || true; sleep 1; kill -9 $SFU $SIG 2>/dev/null || true' EXIT
 # 前序脚本 SFU 收 SIGTERM 后可能仍在收尾；先等 1478（媒体端口）完全释放，
 # 避免本 SFU 绑定失败（Address already in use，CI 顺序执行偶发）。
 for _ in $(seq 1 50); do
