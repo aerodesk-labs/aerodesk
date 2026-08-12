@@ -25,7 +25,8 @@ jobs:
           - os: ubuntu-latest
             # #4 Wayland/PipeWire 采集是可选 feature（默认关，避免 UI 的
             # slint system-tray→zbus 与 ashpd 的 zbus/tokio 冲突）；CI 显式启用覆盖。
-            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli
+            # #306：aerodesk-cli 纳入 Linux 编译/测试（原生被控端宿主）。
+            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios
             features: --features aerodesk-linux/pipewire
           - os: windows-latest
             # #3：Windows CLI 已跨平台化（DXGI+OpenH264+SendInput），纳入编译/测试；
@@ -439,6 +440,10 @@ jobs:
 
       - name: Run Linux UI e2e
         run: bash scripts/linux-ui-e2e.sh
+
+      # #306 Linux 原生被控端端到端：Xvfb + CLI --encoder screen（X11 采集→编码→SFU）→ viewer 收帧。
+      - name: Run Linux native controlled-side e2e
+        run: bash scripts/linux-native-e2e.sh
 
   # Android APK 构建回归：#2 软件侧（Rust .so + Gradle APK）每次 push/PR 都验证。
   # ubuntu-latest 镜像预装 Android SDK（platform 34 / build-tools / NDK r2x），

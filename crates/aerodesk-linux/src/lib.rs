@@ -16,10 +16,10 @@ pub mod inject;
 #[cfg(target_os = "linux")]
 pub mod vaapi;
 
-/// 采集帧（RGBA，与编码器输入对齐）。
+/// 采集帧（BGRA32，core `VideoFrame.raw` 约定，与编码器输入对齐）。
 #[derive(Debug, Clone)]
 pub struct CapturedFrame {
-    pub rgba: Vec<u8>,
+    pub bgra: Vec<u8>,
     pub width: u32,
     pub height: u32,
     pub pts_us: i64,

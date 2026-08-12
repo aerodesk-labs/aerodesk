@@ -280,11 +280,18 @@ fn run() {
                     audio_opus,
                     video_codec,
                 );
-                #[cfg(not(target_os = "windows"))]
+                #[cfg(target_os = "linux")]
+                publisher_capture_linux(
+                    &signal,
+                    &room,
+                    token.as_deref(),
+                    audio,
+                    audio_opus,
+                    video_codec,
+                );
+                #[cfg(not(any(target_os = "windows", target_os = "linux")))]
                 {
-                    info!(
-                        "--encoder screen 仅 macOS/Windows 支持（Linux 采集批次 #4）；回退合成源"
-                    );
+                    info!("--encoder screen 仅 macOS/Windows/Linux 支持；回退合成源");
                     publisher_ffmpeg(
                         &signal,
                         &room,
@@ -1196,7 +1203,49 @@ fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
     }
 }
 
-/// 把观看端输入事件注入被控端（平台分支：macOS CGEvent / Windows SendInput）。
+/// Linux 输入注入器：X11 会话用 XTest；无 X（Wayland/无头）用 uinput。
+#[cfg(target_os = "linux")]
+enum LinuxInjector {
+    XTest(aerodesk_linux::inject::XTestInjector),
+    Uinput(aerodesk_linux::inject::UinputInjector),
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxInjector {
+    fn new() -> Option<Self> {
+        if std::env::var("DISPLAY").is_ok() {
+            match aerodesk_linux::inject::XTestInjector::new() {
+                Ok(i) => Some(Self::XTest(i)),
+                Err(e) => {
+                    warn!("XTest injector init failed: {e}");
+                    None
+                }
+            }
+        } else {
+            match aerodesk_linux::inject::UinputInjector::new() {
+                Ok(i) => Some(Self::Uinput(i)),
+                Err(e) => {
+                    warn!("uinput injector init failed: {e}");
+                    None
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl aerodesk_core::platform::InputInjector for LinuxInjector {
+    type Error = String;
+
+    fn inject(&mut self, event: &InputEvent) -> Result<(), String> {
+        match self {
+            Self::XTest(i) => aerodesk_core::platform::InputInjector::inject(i, event),
+            Self::Uinput(i) => aerodesk_core::platform::InputInjector::inject(i, event),
+        }
+    }
+}
+
+/// 把观看端输入事件注入被控端（平台分支：macOS CGEvent / Windows SendInput / Linux XTest-uinput）。
 fn inject_input(seq: u64, event: &InputEvent) {
     #[cfg(target_os = "macos")]
     {
@@ -1213,7 +1262,30 @@ fn inject_input(seq: u64, event: &InputEvent) {
             Err(e) => info!("inject failed: seq={seq} {event:?}: {e}"),
         }
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        use std::cell::RefCell;
+        use std::thread_local;
+
+        thread_local! {
+            static LINUX_INJ: RefCell<Option<LinuxInjector>> = const { RefCell::new(None) };
+        }
+        LINUX_INJ.with(|cell| {
+            let mut opt = cell.borrow_mut();
+            if opt.is_none() {
+                *opt = LinuxInjector::new();
+            }
+            match opt
+                .as_mut()
+                .map(|inj| aerodesk_core::platform::InputInjector::inject(inj, event))
+            {
+                Some(Ok(())) => info!("inject: seq={seq} {event:?}"),
+                Some(Err(e)) => info!("inject failed: seq={seq} {event:?}: {e}"),
+                None => info!("inject: 无可用注入器（X11/uinput 均不可用）"),
+            }
+        });
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (seq, event);
     }
@@ -2406,6 +2478,139 @@ fn publisher_capture_windows(
     publisher_generic(
         signal_url, room, auth, audio, audio_opus, codec, FPS, capture, encoder,
     );
+}
+
+/// Linux 屏幕采集发布端（被控端）：X11 x11rb GetImage（BGRA）→ 编码 → SFU。
+/// H.264：VAAPI 硬编优先（#282），x264 软编回退；HEVC/VP9/AV1 走 FFmpeg 软编。
+/// 输入注入：XTest（X11）/ uinput（Wayland/无 X，见 `inject_input`）。
+/// 需要 X11 桌面会话（DISPLAY 可用）。
+#[cfg(target_os = "linux")]
+fn publisher_capture_linux(
+    signal_url: &str,
+    room: &str,
+    auth: Option<&str>,
+    audio: bool,
+    audio_opus: bool,
+    codec: Codec,
+) {
+    use aerodesk_core::platform::MediaSource;
+    use aerodesk_linux::capture::X11Capturer;
+
+    const FPS: u32 = 30;
+
+    let mut capture = match X11Capturer::new() {
+        Ok(c) => c,
+        Err(e) => {
+            error!("X11 capture init failed: {e}");
+            info!(
+                "Linux 屏幕采集需要 X11 桌面会话（DISPLAY）；Wayland 采集见 aerodesk-linux `pipewire` feature"
+            );
+            return;
+        }
+    };
+    let (w, h) = capture.size();
+    if w == 0 || h == 0 {
+        error!("X11 capture: 无可用显示器输出");
+        return;
+    }
+    info!("Linux screen capture started at {w}x{h}");
+    let _ = MediaSource::start(&mut capture, FPS, false);
+
+    let encoder = match codec {
+        Codec::H264 => {
+            // VAAPI 硬编优先，失败回退 x264 软编。
+            match aerodesk_linux::vaapi::VaapiEncoder::new(w, h, FPS, 8_000_000, Codec::H264) {
+                Ok(e) => {
+                    info!("Linux screen encoder: VAAPI (h264_vaapi)");
+                    LinuxScreenEncoder::Vaapi(e)
+                }
+                Err(e) => {
+                    warn!("VAAPI encoder unavailable ({e})，回退 x264 软编");
+                    match aerodesk_linux::encode::SoftEncoder::new(w, h, FPS, 8_000) {
+                        Ok(e) => LinuxScreenEncoder::Soft(e),
+                        Err(e) => {
+                            error!("x264 encoder init failed: {e}");
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        other => {
+            // HEVC/VP9/AV1：FFmpeg 软编（BGRA 输入，全平台 aerodesk-ffmpeg）。
+            match aerodesk_ffmpeg::encode::FfmpegEncoder::new(w, h, FPS, 8_000_000, other) {
+                Ok(e) => LinuxScreenEncoder::Ffmpeg(e),
+                Err(e) => {
+                    error!("ffmpeg encoder init failed: {e}");
+                    return;
+                }
+            }
+        }
+    };
+    publisher_generic(
+        signal_url, room, auth, audio, audio_opus, codec, FPS, capture, encoder,
+    );
+}
+
+/// Linux 屏幕发布编码器：VAAPI 硬编 / x264 软编 / FFmpeg 软编（多 codec）。
+#[cfg(target_os = "linux")]
+#[allow(clippy::large_enum_variant)]
+enum LinuxScreenEncoder {
+    Vaapi(aerodesk_linux::vaapi::VaapiEncoder),
+    Soft(aerodesk_linux::encode::SoftEncoder),
+    Ffmpeg(aerodesk_ffmpeg::encode::FfmpegEncoder),
+}
+
+#[cfg(target_os = "linux")]
+impl aerodesk_core::platform::Encoder for LinuxScreenEncoder {
+    type Error = String;
+
+    fn configure(
+        &mut self,
+        codec: Codec,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> Result<(), Self::Error> {
+        match self {
+            Self::Vaapi(e) => {
+                aerodesk_core::platform::Encoder::configure(e, codec, width, height, fps)
+            }
+            Self::Soft(e) => {
+                aerodesk_core::platform::Encoder::configure(e, codec, width, height, fps)
+            }
+            Self::Ffmpeg(e) => {
+                aerodesk_core::platform::Encoder::configure(e, codec, width, height, fps)
+            }
+        }
+    }
+
+    fn encode(
+        &mut self,
+        frame: &aerodesk_core::platform::VideoFrame,
+    ) -> Result<Option<aerodesk_core::media_pipeline::EncodedUnit>, Self::Error> {
+        match self {
+            Self::Vaapi(e) => aerodesk_core::platform::Encoder::encode(e, frame),
+            Self::Soft(e) => aerodesk_core::platform::Encoder::encode(e, frame),
+            Self::Ffmpeg(e) => aerodesk_core::platform::Encoder::encode(e, frame),
+        }
+    }
+
+    fn request_keyframe(&mut self) {
+        match self {
+            Self::Vaapi(e) => aerodesk_core::platform::Encoder::request_keyframe(e),
+            Self::Soft(e) => aerodesk_core::platform::Encoder::request_keyframe(e),
+            Self::Ffmpeg(e) => aerodesk_core::platform::Encoder::request_keyframe(e),
+        }
+    }
+
+    fn set_bitrate(&mut self, bitrate_bps: u64, fps: u32) {
+        match self {
+            Self::Vaapi(e) => aerodesk_core::platform::Encoder::set_bitrate(e, bitrate_bps, fps),
+            Self::Soft(e) => aerodesk_core::platform::Encoder::set_bitrate(e, bitrate_bps, fps),
+            Self::Ffmpeg(e) => aerodesk_core::platform::Encoder::set_bitrate(e, bitrate_bps, fps),
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
