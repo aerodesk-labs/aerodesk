@@ -150,6 +150,9 @@ fn run() {
     // #73 音频：--audio-opus 使用 Opus（48kHz）替代 PCMU（8kHz）。
     let audio_opus = args.iter().any(|a| a == "--audio-opus");
     let mute_audio = args.iter().any(|a| a == "--mute-audio");
+    // 摄像头：publisher --camera 发布本地摄像头（第二路视频轨）；viewer --camera 接收统计。
+    let camera = args.iter().any(|a| a == "--camera");
+    let camera_device = arg(&args, "--camera-device");
     // #75/#109 MCP 键鼠：--send-input '<InputEvent JSON>' 单次发送输入事件后退出。
     let send_input: Option<InputEvent> =
         arg(&args, "--send-input").and_then(|json| serde_json::from_str::<InputEvent>(&json).ok());
@@ -253,6 +256,8 @@ fn run() {
                         audio_opus,
                         display,
                         video_codec,
+                        camera,
+                        camera_device.clone(),
                     )
                 } else {
                     // #74：VP9/AV1 或本机无 VT HEVC 时，屏幕采集走 FFmpeg 软编。
@@ -395,6 +400,7 @@ fn run() {
                         tok.as_deref(),
                         layer.as_deref(),
                         audio,
+                        camera,
                         mute_audio,
                         viewer_display,
                         input_script,
@@ -495,10 +501,11 @@ fn connect(
         MediaSocket,
         str0m::media::Mid,
         Option<str0m::media::Mid>,
+        Option<str0m::media::Mid>,
     ),
     String,
 > {
-    connect_inner(signal_url, room, role, None, false, audio, auth)
+    connect_inner(signal_url, room, role, None, false, audio, auth, false)
 }
 
 /// 探测本机出接口 IP（绑 0.0.0.0 连公共地址后取 local_addr；失败回退 loopback）。
@@ -531,6 +538,7 @@ fn connect_h264(
         MediaSocket,
         str0m::media::Mid,
         Option<str0m::media::Mid>,
+        Option<str0m::media::Mid>,
     ),
     String,
 > {
@@ -542,6 +550,7 @@ fn connect_h264(
         simulcast,
         audio,
         auth,
+        false,
     )
 }
 
@@ -559,10 +568,43 @@ fn connect_codec(
         MediaSocket,
         str0m::media::Mid,
         Option<str0m::media::Mid>,
+        Option<str0m::media::Mid>,
     ),
     String,
 > {
-    connect_inner(signal_url, room, role, Some(codec), false, audio, auth)
+    connect_inner(
+        signal_url,
+        room,
+        role,
+        Some(codec),
+        false,
+        audio,
+        auth,
+        false,
+    )
+}
+
+/// 带第二路视频轨（摄像头）的连接：publisher 发布 / viewer 接收（recvonly）。
+/// codec=None 用默认端点（H264 全兼容 + PCMU/Opus）。
+fn connect_camera(
+    signal_url: &str,
+    room: &str,
+    role: Role,
+    auth: Option<&str>,
+    audio: bool,
+    codec: Option<Codec>,
+) -> Result<
+    (
+        WsSignalClient,
+        Endpoint,
+        MediaSocket,
+        str0m::media::Mid,
+        Option<str0m::media::Mid>,
+        Option<str0m::media::Mid>,
+    ),
+    String,
+> {
+    connect_inner(signal_url, room, role, codec, false, audio, auth, true)
 }
 
 fn connect_inner(
@@ -573,12 +615,14 @@ fn connect_inner(
     simulcast: bool,
     audio: bool,
     auth: Option<&str>,
+    camera: bool,
 ) -> Result<
     (
         WsSignalClient,
         Endpoint,
         MediaSocket,
         str0m::media::Mid,
+        Option<str0m::media::Mid>,
         Option<str0m::media::Mid>,
     ),
     String,
@@ -659,9 +703,17 @@ fn connect_inner(
             endpoint.add_audio();
         }
     }
-    let (offer, pending, video_mid, audio_mid) =
+    // 摄像头第二路视频轨（publisher 发布 / viewer recvonly）。
+    if camera {
+        if role == Role::Viewer {
+            endpoint.add_camera_recvonly();
+        } else {
+            endpoint.add_camera();
+        }
+    }
+    let (offer, pending, video_mid, audio_mid, camera_mid) =
         endpoint.create_offer().map_err(|e| format!("offer: {e}"))?;
-    info!("video mid: {video_mid:?} audio mid: {audio_mid:?}");
+    info!("video mid: {video_mid:?} audio mid: {audio_mid:?} camera mid: {camera_mid:?}");
     let offer_json = serde_json::to_string(&offer).map_err(|e| e.to_string())?;
     let answer_json = signal.exchange_description(&offer_json)?;
     let answer: str0m::change::SdpAnswer =
@@ -674,7 +726,7 @@ fn connect_inner(
 
     info!("SDP negotiated, awaiting ICE...");
     let video_mid = video_mid.ok_or("no video mid")?;
-    Ok((signal, endpoint, socket, video_mid, audio_mid))
+    Ok((signal, endpoint, socket, video_mid, audio_mid, camera_mid))
 }
 
 /// VideoToolbox 合成源编码参数（--width/--height/--fps/--bitrate）。
@@ -1303,7 +1355,7 @@ fn publisher(
     let frames = parse_vp8_pcap(pcap);
     info!("loaded {} VP8 frames from pcap", frames.len());
 
-    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid) =
+    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
         connect(signal_url, room, Role::Publisher, auth, audio)?;
     let mut connected = false;
     let mut audio_ticker = AudioTicker::new(audio_opus);
@@ -1450,6 +1502,7 @@ fn viewer(
     auth: Option<&str>,
     layer: Option<&str>,
     audio: bool,
+    camera: bool,
     mute_audio: bool,
     display: Option<usize>,
     input_script: bool,
@@ -1460,11 +1513,22 @@ fn viewer(
     request_file: Option<&str>,
     send_control: Option<&str>,
 ) -> Result<(), String> {
-    let (mut signal, mut endpoint, mut socket, _, _audio_mid) =
-        connect(signal_url, room, Role::Viewer, auth, audio)?;
+    let (mut signal, mut endpoint, mut socket, _, _audio_mid, _camera_mid) = if camera {
+        connect_camera(signal_url, room, Role::Viewer, auth, audio, None)?
+    } else {
+        connect(signal_url, room, Role::Viewer, auth, audio)?
+    };
     let mut frames = 0u64;
     let mut bytes = 0u64;
     let mut keyframes = 0u64;
+    // 摄像头第二路视频轨统计（--camera）：SFU 转发 mid 为 SFU 本地 mid，
+    // 无法与本地协商 mid 直接比对；按「首个视频 mid=屏幕、第二个=摄像头」
+    // 的到达顺序区分（SFU 按发布端 offer 顺序开轨）。
+    let mut video_mids: Vec<str0m::media::Mid> = Vec::new();
+    let mut camera_frames = 0u64;
+    let mut camera_bytes = 0u64;
+    let mut camera_decoded = 0u64;
+    let mut camera_decoder: Option<aerodesk_ffmpeg::decode::FfmpegDecoder> = None;
     let mut audio_frames = 0u64;
     let mut audio_bytes = 0u64;
     let mut last_report = Instant::now();
@@ -1620,6 +1684,12 @@ fn viewer(
                             }
                         }
                     } else {
+                        // 摄像头/屏幕轨区分：SFU 转发 mid 无法与本地协商 mid 比对，
+                        // 按「首个视频 mid=屏幕、第二个=摄像头」到达顺序区分。
+                        if !video_mids.contains(&data.mid) {
+                            video_mids.push(data.mid);
+                        }
+                        let is_camera = camera && video_mids.len() > 1 && video_mids[1] == data.mid;
                         // #136 首包 / 不连续 / 切层 → 请求关键帧（PLI，节流 1s）。
                         let now = Instant::now();
                         let rid_changed = last_kf_rid != data.rid;
@@ -1636,13 +1706,6 @@ fn viewer(
                             last_kf_rid = data.rid;
                         }
                         seen_video = true;
-                        frames += 1;
-                        bytes += data.data.len() as u64;
-                        avsync.on_video(data.time.numer(), data.time.denom());
-                        if data.is_keyframe() {
-                            keyframes += 1;
-                        }
-                        // #74 解码端：FFmpeg 软解 H264/H265/VP9/AV1 → RGBA。
                         let core_codec = match data.params.spec().codec {
                             str0m::format::Codec::H264 => Some(Codec::H264),
                             str0m::format::Codec::H265 => Some(Codec::Hevc),
@@ -1650,26 +1713,62 @@ fn viewer(
                             str0m::format::Codec::Av1 => Some(Codec::Av1),
                             _ => None,
                         };
-                        if let Some(cc) = core_codec {
-                            if video_decoder
-                                .as_ref()
-                                .map(|d| d.codec() != cc)
-                                .unwrap_or(true)
-                            {
-                                video_decoder =
-                                    aerodesk_ffmpeg::decode::FfmpegDecoder::new(cc).ok();
-                            }
-                            if let Some(dec) = &mut video_decoder {
-                                let unit = aerodesk_core::media_pipeline::EncodedUnit {
-                                    data: data.data.as_ref().to_vec(),
-                                    keyframe: data.is_keyframe(),
-                                    pts_ms: 0,
-                                    rtp_timestamp: 0,
-                                };
-                                if let Ok(Some(frame)) = dec.decode_unit(&unit)
-                                    && frame.raw.is_some()
+                        if is_camera {
+                            // 摄像头轨：独立计数 + 独立解码器。
+                            camera_frames += 1;
+                            camera_bytes += data.data.len() as u64;
+                            if let Some(cc) = core_codec {
+                                if camera_decoder
+                                    .as_ref()
+                                    .map(|d| d.codec() != cc)
+                                    .unwrap_or(true)
                                 {
-                                    decoded_frames += 1;
+                                    camera_decoder =
+                                        aerodesk_ffmpeg::decode::FfmpegDecoder::new(cc).ok();
+                                }
+                                if let Some(dec) = &mut camera_decoder {
+                                    let unit = aerodesk_core::media_pipeline::EncodedUnit {
+                                        data: data.data.as_ref().to_vec(),
+                                        keyframe: data.is_keyframe(),
+                                        pts_ms: 0,
+                                        rtp_timestamp: 0,
+                                    };
+                                    if let Ok(Some(frame)) = dec.decode_unit(&unit)
+                                        && frame.raw.is_some()
+                                    {
+                                        camera_decoded += 1;
+                                    }
+                                }
+                            }
+                        } else {
+                            frames += 1;
+                            bytes += data.data.len() as u64;
+                            avsync.on_video(data.time.numer(), data.time.denom());
+                            if data.is_keyframe() {
+                                keyframes += 1;
+                            }
+                            // #74 解码端：FFmpeg 软解 H264/H265/VP9/AV1 → RGBA。
+                            if let Some(cc) = core_codec {
+                                if video_decoder
+                                    .as_ref()
+                                    .map(|d| d.codec() != cc)
+                                    .unwrap_or(true)
+                                {
+                                    video_decoder =
+                                        aerodesk_ffmpeg::decode::FfmpegDecoder::new(cc).ok();
+                                }
+                                if let Some(dec) = &mut video_decoder {
+                                    let unit = aerodesk_core::media_pipeline::EncodedUnit {
+                                        data: data.data.as_ref().to_vec(),
+                                        keyframe: data.is_keyframe(),
+                                        pts_ms: 0,
+                                        rtp_timestamp: 0,
+                                    };
+                                    if let Ok(Some(frame)) = dec.decode_unit(&unit)
+                                        && frame.raw.is_some()
+                                    {
+                                        decoded_frames += 1;
+                                    }
                                 }
                             }
                         }
@@ -1904,7 +2003,7 @@ fn viewer(
             let buffered = jitter.buffered();
             let jdropped = jitter.dropped();
             info!(
-                "RECEIVED: {frames} frames, {bytes} bytes, {keyframes} keyframes, DECODED: {decoded_frames}, input sent: {input_seq}, AUDIO: {audio_frames} frames {audio_bytes} bytes muted={audio_muted} dropped={dropped_audio_frames} AVSYNC: audio={audio_ms:.0}ms video={video_ms:.0}ms drift={drift_ms:.0}ms buffered={buffered} dropped={jdropped} played={audio_played}"
+                "RECEIVED: {frames} frames, {bytes} bytes, {keyframes} keyframes, DECODED: {decoded_frames}, CAMERA: {camera_frames} frames {camera_bytes} bytes decoded={camera_decoded}, input sent: {input_seq}, AUDIO: {audio_frames} frames {audio_bytes} bytes muted={audio_muted} dropped={dropped_audio_frames} AVSYNC: audio={audio_ms:.0}ms video={video_ms:.0}ms drift={drift_ms:.0}ms buffered={buffered} dropped={jdropped} played={audio_played}"
             );
             last_report = Instant::now();
         }
@@ -2004,7 +2103,7 @@ fn publisher_x264(
     const W: u32 = 640;
     const H: u32 = 360;
 
-    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid) =
+    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
         connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio).expect("connect");
 
     let make_source = |w: u32, h: u32| {
@@ -2151,7 +2250,7 @@ fn publisher_vt(
     use aerodesk_macos::vt_encoder::VtEncoder;
     use str0m::media::Rid;
 
-    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid) =
+    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
         connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio).expect("connect");
 
     let make_source = |w: u32, h: u32| {
@@ -2302,7 +2401,7 @@ fn publisher_generic<
     mut source: S,
     mut encoder: E,
 ) {
-    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid) =
+    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
         connect_codec(signal_url, room, Role::Publisher, auth, audio, codec).expect("connect");
     let mut connected = false;
     let mut audio_ticker = AudioTicker::new(audio_opus);
@@ -2630,7 +2729,7 @@ fn publisher_capture_ffmpeg(
     const H: u32 = 1080;
     const FPS: u32 = 30;
 
-    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid) =
+    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
         connect_codec(signal_url, room, Role::Publisher, auth, audio, codec).expect("connect");
     let mut capture = match ScreenCapture::start(initial_display, FPS, W, H) {
         Ok(c) => c,
@@ -2737,7 +2836,10 @@ fn publisher_capture(
     audio_opus: bool,
     initial_display: usize,
     codec: Codec,
+    camera: bool,
+    camera_device: Option<String>,
 ) {
+    use aerodesk_core::platform::CameraSource;
     use aerodesk_macos::capture::ScreenCapture;
     use aerodesk_macos::vt_encoder::VtEncoder;
     use str0m::media::Rid;
@@ -2754,7 +2856,7 @@ fn publisher_capture(
         _ => VtCodec::H264,
     };
 
-    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid) = connect_inner(
+    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) = connect_inner(
         signal_url,
         room,
         Role::Publisher,
@@ -2762,6 +2864,7 @@ fn publisher_capture(
         simulcast,
         audio,
         auth,
+        camera,
     )
     .expect("connect");
 
@@ -2863,6 +2966,35 @@ fn publisher_capture(
     let mut pts = 0i64;
     let pts_inc = 90_000 / FPS as i64;
 
+    // 摄像头第二路视频轨（--camera）：AVFoundation 采集 + FFmpeg 软编（BGRA）。
+    let mut camera_cap: Option<aerodesk_macos::camera::MacCamera> = None;
+    let mut camera_enc: Option<aerodesk_ffmpeg::encode::FfmpegEncoder> = None;
+    let mut camera_pts = 0i64;
+    let camera_pts_inc = 90_000 / 30;
+    let mut camera_frames = 0u64;
+    if camera {
+        // 未授权时先弹系统授权框（TCC「相机」），授权后才真正启动采集。
+        if !aerodesk_macos::camera::camera_authorized() {
+            info!("camera permission not granted, requesting…");
+            if aerodesk_macos::camera::request_camera_access() {
+                info!("camera permission granted");
+            } else {
+                warn!("camera permission denied (System Settings > Privacy & Security > Camera)");
+            }
+        }
+        let mut cam = aerodesk_macos::camera::MacCamera::new();
+        if let Some(id) = &camera_device {
+            cam = cam.with_device(id.clone());
+        }
+        match cam.start(1280, 720, 30) {
+            Ok(()) => {
+                info!("camera capture started (device={camera_device:?})");
+                camera_cap = Some(cam);
+            }
+            Err(e) => warn!("camera capture disabled: {e}"),
+        }
+    }
+
     loop {
         // #211：排空式读取（软编/高负载下保证 SCTP ACK 及时消费，input 送达率不塌陷）。
         let wait = Duration::from_millis(5);
@@ -2905,6 +3037,12 @@ fn publisher_capture(
                                 Err(e) => warn!("vt capture force keyframe failed: {e}"),
                             }
                         }
+                    }
+                    // 摄像头轨关键帧（SFU 转发 mid 为发布端 mid，可按 mid 路由）。
+                    if Some(req.mid) == camera_mid
+                        && let Some(enc) = &mut camera_enc
+                    {
+                        enc.request_keyframe();
                     }
                 }
                 // #58 显示器切换：viewer 经 control 通道请求，SFU 转发到 publisher。
@@ -2984,6 +3122,76 @@ fn publisher_capture(
                 // simulcast：每层一帧都需一次 do_payload，多排空避免 WriteWithoutPoll 背压。
                 drain_payload_queue(&mut endpoint, layers.len());
                 pts += 1;
+            }
+            // 摄像头：drain 帧 → FFmpeg 软编（BGRA）→ 第二路 mid。
+            // 编码器按首帧实际尺寸懒创建（AVFoundation 分辨率不固定）。
+            if let (Some(cam), Some(cmid)) = (&mut camera_cap, camera_mid) {
+                match cam.next_frame() {
+                    Ok(Some(frame)) => {
+                        camera_frames += 1;
+                        if camera_frames == 1 || camera_frames % 150 == 0 {
+                            info!(
+                                "camera frame #{camera_frames} {}x{}",
+                                frame.width, frame.height
+                            );
+                        }
+                        if camera_enc.is_none() {
+                            let bps = if frame.width >= 1920 {
+                                4_000_000
+                            } else {
+                                1_500_000
+                            };
+                            match aerodesk_ffmpeg::encode::FfmpegEncoder::new(
+                                frame.width,
+                                frame.height,
+                                30,
+                                bps,
+                                codec,
+                            ) {
+                                Ok(enc) => {
+                                    info!(
+                                        "camera encoder ready {}x{} {codec:?}",
+                                        frame.width, frame.height
+                                    );
+                                    camera_enc = Some(enc);
+                                }
+                                Err(e) => {
+                                    warn!("camera encoder init failed (ffmpeg {codec:?}): {e}");
+                                    camera_enc = None;
+                                }
+                            }
+                        }
+                        if let Some(enc) = &mut camera_enc {
+                            match enc.encode_bgra(&frame.raw) {
+                                Ok(Some(unit)) => {
+                                    let rtp_time = str0m::media::MediaTime::new(
+                                        camera_pts as u64 * camera_pts_inc as u64,
+                                        str0m::media::Frequency::NINETY_KHZ,
+                                    );
+                                    if let Err(e) =
+                                        endpoint.send_video_frame(cmid, unit.data, rtp_time)
+                                    {
+                                        warn!("camera send failed: {e:?}");
+                                    } else {
+                                        camera_pts += 1;
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    if camera_frames <= 3 || camera_frames % 150 == 0 {
+                                        warn!("camera encode: {e}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        if camera_frames <= 3 || camera_frames % 150 == 0 {
+                            warn!("camera next_frame: {e}");
+                        }
+                    }
+                }
             }
         }
 
