@@ -41,6 +41,47 @@ fn encoder_names(codec: Codec) -> (&'static [&'static str], ffmpeg_next::codec::
     }
 }
 
+/// 切分 AnnexB NAL，返回 (类型, 含起始码的 NAL)。
+fn split_annexb(codec_id: ffmpeg_next::codec::Id, data: &[u8]) -> Vec<(u8, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 3 <= data.len() {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            let start = i + 3;
+            let mut j = start;
+            while j + 3 <= data.len() {
+                if data[j] == 0 && data[j + 1] == 0 && data[j + 2] == 1 {
+                    break;
+                }
+                j += 1;
+            }
+            if j + 3 > data.len() {
+                j = data.len();
+            }
+            if j > start {
+                let nal = &data[start - 3..j];
+                let ty = match codec_id {
+                    ffmpeg_next::codec::Id::HEVC => (nal[3] >> 1) & 0x3F,
+                    _ => nal[3] & 0x1F,
+                };
+                out.push((ty, nal.to_vec()));
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// 是否参数集 NAL（H264: SPS/PPS；HEVC: VPS/SPS/PPS）。
+fn is_param_set_nal(codec_id: ffmpeg_next::codec::Id, ty: u8) -> bool {
+    match codec_id {
+        ffmpeg_next::codec::Id::HEVC => matches!(ty, 32 | 33 | 34),
+        _ => matches!(ty, 7 | 8),
+    }
+}
+
 /// FFmpeg 视频编码器（RGB24 输入 → 编码包）。
 pub struct FfmpegEncoder {
     encoder: ffmpeg_next::encoder::Video,
@@ -58,6 +99,10 @@ pub struct FfmpegEncoder {
     /// #267：码率自适应节流状态（变化 >20% 且 ≥1s 才重建）。
     last_bitrate_bps: u64,
     last_bitrate_at: Instant,
+    /// 首个关键帧提取的参数集（H264 SPS/PPS / HEVC VPS/SPS/PPS，AnnexB 含起始码）。
+    /// hevc_videotoolbox 等硬编不重复参数集，后续关键帧需要前置才能让晚加入
+    /// viewer（iOS VideoToolbox 硬解）建出 format description。
+    param_sets: Vec<Vec<u8>>,
 }
 
 impl FfmpegEncoder {
@@ -173,7 +218,42 @@ impl FfmpegEncoder {
             pending: VecDeque::new(),
             last_bitrate_bps: 0,
             last_bitrate_at: Instant::now(),
+            param_sets: Vec::new(),
         })
+    }
+
+    /// 关键帧参数集注入：缓存首个关键帧的参数集，后续关键帧缺参数集时前置。
+    /// hevc_videotoolbox/h264_videotoolbox 不重复参数集（repeat-headers 仅软编
+    /// 生效），晚加入的 viewer（尤其 iOS VideoToolbox 硬解，只在看到参数集时
+    /// 建 format description）需要每个关键帧自包含才能解码。
+    fn keyframe_data(&mut self, packet: &ffmpeg_next::codec::packet::Packet) -> Vec<u8> {
+        let raw = packet.data().unwrap_or(&[]);
+        if !packet.is_key() {
+            return raw.to_vec();
+        }
+        let nals = split_annexb(self.ffmpeg_id, raw);
+        let has_param = nals
+            .iter()
+            .any(|(ty, _)| is_param_set_nal(self.ffmpeg_id, *ty));
+        if self.param_sets.is_empty() && has_param {
+            self.param_sets = nals
+                .into_iter()
+                .filter(|(ty, _)| is_param_set_nal(self.ffmpeg_id, *ty))
+                .map(|(_, nal)| nal)
+                .collect();
+            return raw.to_vec();
+        }
+        if !self.param_sets.is_empty() && !has_param {
+            let mut out = Vec::with_capacity(
+                raw.len() + self.param_sets.iter().map(|n| n.len()).sum::<usize>(),
+            );
+            for n in &self.param_sets {
+                out.extend_from_slice(n);
+            }
+            out.extend_from_slice(raw);
+            return out;
+        }
+        raw.to_vec()
     }
 
     /// 编码一帧 RGB24，返回编码包（AnnexB/OBU，str0m 按 codec 分包）。
@@ -205,8 +285,9 @@ impl FfmpegEncoder {
         let mut packet = Packet::empty();
         while let Ok(()) = self.encoder.receive_packet(&mut packet) {
             let pts_ms = (self.pts * 1000 / self.fps.max(1) as i64) as u64;
+            let data = self.keyframe_data(&packet);
             self.pending.push_back(EncodedUnit {
-                data: packet.data().unwrap_or(&[]).to_vec(),
+                data,
                 keyframe: packet.is_key(),
                 pts_ms,
                 rtp_timestamp: (self.pts * 90_000 / self.fps.max(1) as i64) as u32,
@@ -241,8 +322,9 @@ impl FfmpegEncoder {
         let mut packet = Packet::empty();
         while let Ok(()) = self.encoder.receive_packet(&mut packet) {
             let pts_ms = (self.pts * 1000 / self.fps.max(1) as i64) as u64;
+            let data = self.keyframe_data(&packet);
             self.pending.push_back(EncodedUnit {
-                data: packet.data().unwrap_or(&[]).to_vec(),
+                data,
                 keyframe: packet.is_key(),
                 pts_ms,
                 rtp_timestamp: (self.pts * 90_000 / self.fps.max(1) as i64) as u32,
@@ -423,6 +505,47 @@ mod tests {
         assert!(
             data.windows(5).any(|w| w == [0, 0, 0, 1, 0x68]),
             "PPS NAL missing in 2nd keyframe (repeat-headers?): {} bytes",
+            data.len()
+        );
+    }
+
+    #[test]
+    fn hevc_keyframes_carry_parameter_sets() {
+        // hevc_videotoolbox 不重复参数集；keyframe_data 需在后续关键帧前置
+        // VPS/SPS/PPS（晚加入 viewer/iOS 硬解才能建 format description）。
+        let mut enc = FfmpegEncoder::new(320, 180, 30, 1_000_000, Codec::Hevc).expect("hevc");
+        let mut frame = vec![0u8; 320 * 180 * 4];
+        let mut second: Option<Vec<u8>> = None;
+        let mut keyframes = 0;
+        for i in 0..(30 * 4) {
+            for (j, px) in frame.iter_mut().enumerate() {
+                *px = (i as u8).wrapping_add((j / 100) as u8);
+            }
+            if let Some(unit) = enc.encode_bgra(&frame).expect("encode") {
+                if unit.keyframe {
+                    keyframes += 1;
+                    if keyframes == 2 {
+                        second = Some(unit.data);
+                        break;
+                    }
+                }
+            }
+        }
+        let data = second.expect("2s GOP 内应产出第二个关键帧");
+        let nals = split_annexb(ffmpeg_next::codec::Id::HEVC, &data);
+        assert!(
+            nals.iter().any(|(t, _)| *t == 32),
+            "VPS NAL missing in 2nd HEVC keyframe: {} bytes",
+            data.len()
+        );
+        assert!(
+            nals.iter().any(|(t, _)| *t == 33),
+            "SPS NAL missing in 2nd HEVC keyframe: {} bytes",
+            data.len()
+        );
+        assert!(
+            nals.iter().any(|(t, _)| *t == 34),
+            "PPS NAL missing in 2nd HEVC keyframe: {} bytes",
             data.len()
         );
     }

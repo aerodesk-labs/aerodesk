@@ -1,4 +1,4 @@
-//! iOS 观看会话：连接 + 媒体收流循环 + H.264 硬解 → 最新帧槽。
+//! iOS 观看会话：连接 + 媒体收流循环 + H.264/HEVC 硬解 → 最新帧槽（屏幕/摄像头双轨）。
 //!
 //! 由 `ffi.rs` 暴露给 Swift：`ad_viewer_create` 启动后台收流线程，
 //! Swift 轮询 `ad_viewer_take_frame` 取最新 CVPixelBuffer 渲染。
@@ -45,6 +45,12 @@ impl UiDecoder {
 pub struct ViewerSession {
     /// 最新解码帧（+1 retained，调用方 take 后转移所有权）。
     latest: Arc<Mutex<Option<CVPixelBuffer>>>,
+    /// 摄像头轨最新解码帧（发布端 --camera 且观看端请求第二路视频轨时才有）。
+    latest_camera: Arc<Mutex<Option<CVPixelBuffer>>>,
+    /// 画面源选择：false=屏幕 / true=摄像头（take_frame 按此返回对应槽）。
+    show_camera: Arc<AtomicBool>,
+    /// 是否已收到摄像头轨（Swift 侧据此启用切换按钮）。
+    camera_available: Arc<AtomicBool>,
     /// 输入事件发送通道（viewer → publisher，经 input 数据通道）。
     input_tx: mpsc::Sender<Vec<u8>>,
     /// 解码后的 PCM i16 音频样本（8kHz 单声道；Swift 侧轮询取走播放）。
@@ -56,18 +62,46 @@ pub struct ViewerSession {
 impl ViewerSession {
     /// 连接信令并启动收流解码线程。
     pub fn connect(server: &str, room: &str) -> Result<ViewerSession, String> {
-        let session = aerodesk_core::connect::connect_live(server, room)?;
+        // 请求第二路视频轨（摄像头 recvonly）：发布端未开 --camera 时 m-line
+        // inactive，不影响屏幕流。
+        let session = aerodesk_core::connect::connect_live_role_with_camera(
+            server,
+            room,
+            aerodesk_protocol::signal::Role::Viewer,
+            None,
+            true,
+        )?;
         let latest = Arc::new(Mutex::new(None));
+        let latest_camera = Arc::new(Mutex::new(None));
+        let show_camera = Arc::new(AtomicBool::new(false));
+        let camera_available = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
         let (input_tx, input_rx) = mpsc::channel();
         let (audio_tx, audio_rx) = mpsc::channel();
         let pump = {
             let latest = latest.clone();
+            let latest_camera = latest_camera.clone();
+            let show_camera = show_camera.clone();
+            let camera_available = camera_available.clone();
             let stop = stop.clone();
-            thread::spawn(move || pump_media(session, latest, stop, input_rx, audio_tx))
+            thread::spawn(move || {
+                pump_media(
+                    session,
+                    latest,
+                    latest_camera,
+                    show_camera,
+                    camera_available,
+                    stop,
+                    input_rx,
+                    audio_tx,
+                )
+            })
         };
         Ok(ViewerSession {
             latest,
+            latest_camera,
+            show_camera,
+            camera_available,
             input_tx,
             audio_rx,
             stop,
@@ -80,6 +114,16 @@ impl ViewerSession {
     /// 发送输入事件（JSON InputFrame）。失败返回 false（通道未开/已断开）。
     pub fn send_input(&self, json: &[u8]) -> bool {
         self.input_tx.send(json.to_vec()).is_ok()
+    }
+
+    /// 切换画面源：true=摄像头 / false=屏幕（take_frame 按此返回对应帧）。
+    pub fn set_show_camera(&self, show: bool) {
+        self.show_camera.store(show, Ordering::SeqCst);
+    }
+
+    /// 是否已收到摄像头轨（远端发布端带 --camera 且本端请求了第二路视频轨）。
+    pub fn camera_available(&self) -> bool {
+        self.camera_available.load(Ordering::SeqCst)
     }
 }
 
@@ -96,6 +140,9 @@ impl Drop for ViewerSession {
 fn pump_media(
     mut session: LiveSession,
     latest: Arc<Mutex<Option<CVPixelBuffer>>>,
+    latest_camera: Arc<Mutex<Option<CVPixelBuffer>>>,
+    _show_camera: Arc<AtomicBool>,
+    camera_available: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     input_rx: mpsc::Receiver<Vec<u8>>,
     audio_tx: mpsc::Sender<Vec<i16>>,
@@ -103,18 +150,26 @@ fn pump_media(
     // H264/HEVC 自动识别：首关键帧含参数集后创建对应硬解器。
     let mut decoder: Option<UiDecoder> = None;
     let mut decoder_kind: Option<DecoderKind> = None;
+    // 摄像头轨独立解码（屏幕/摄像头是两条 RTP 流，必须各自 assembler/解码器）。
+    let mut camera_decoder: Option<UiDecoder> = None;
+    let mut camera_decoder_kind: Option<DecoderKind> = None;
+    let mut camera_assembler = AccessUnitAssembler::new();
     // 音频帧统计（本轮：音视频分流，音频暂不入视频组装器）。
     let mut audio_pkts = 0u64;
     // str0m 输出单条 AnnexB NAL；按 RTP 时间戳聚合为完整访问单元后再解码
     // （SPS/PPS 与 VCL 同帧，VideoToolbox 才能建 format description）。
     let mut assembler = AccessUnitAssembler::new();
+    // 屏幕/摄像头轨区分：SFU 转发 mid 无法与本地协商 mid 直接比对，按
+    // 「首个视频 mid=屏幕、第二个=摄像头」到达顺序区分（发布端 offer 顺序）。
+    let mut video_mids: Vec<str0m::media::Mid> = Vec::new();
     // 冒烟诊断：ICE/收包/解码计数（模拟器 --console 可见）。
     let mut diag_pkts = 0u64;
     let mut diag_media = 0u64;
     let mut diag_frames = 0u64;
     eprintln!(
-        "pump: started, socket local={:?}",
-        session.socket.local_addr()
+        "pump: started, socket local={:?} camera_mid={:?}",
+        session.socket.local_addr(),
+        session.camera_mid
     );
     while !stop.load(Ordering::SeqCst) {
         // 输入事件：观看端捕获 → input 数据通道 → SFU → 被控端。
@@ -186,24 +241,57 @@ fn pump_media(
                         continue;
                     }
                     // 视频：先按参数集确认 codec，再组装 + 解码。
-                    if let Some(kind) = detect_codec(data.data.as_ref()) {
-                        if decoder_kind != Some(kind) || decoder.is_none() {
-                            decoder = Some(match kind {
-                                DecoderKind::H264 => UiDecoder::H264(H264Decoder::new()),
-                                DecoderKind::Hevc => UiDecoder::Hevc(HevcDecoder::new()),
-                            });
-                            decoder_kind = Some(kind);
-                            eprintln!("pump: using decoder {kind:?}");
-                        }
+                    if !video_mids.contains(&data.mid) {
+                        video_mids.push(data.mid);
                     }
-                    let Some(dec) = &mut decoder else {
+                    let is_camera = video_mids.len() > 1 && video_mids[1] == data.mid;
+                    let target_latest = if is_camera { &latest_camera } else { &latest };
+                    let dec = if is_camera {
+                        if let Some(kind) = detect_codec(data.data.as_ref()) {
+                            if camera_decoder_kind != Some(kind) || camera_decoder.is_none() {
+                                camera_decoder = Some(match kind {
+                                    DecoderKind::H264 => UiDecoder::H264(H264Decoder::new()),
+                                    DecoderKind::Hevc => UiDecoder::Hevc(HevcDecoder::new()),
+                                });
+                                camera_decoder_kind = Some(kind);
+                                eprintln!("pump: using camera decoder {kind:?}");
+                            }
+                        }
+                        camera_decoder.as_mut()
+                    } else {
+                        if let Some(kind) = detect_codec(data.data.as_ref()) {
+                            if decoder_kind != Some(kind) || decoder.is_none() {
+                                decoder = Some(match kind {
+                                    DecoderKind::H264 => UiDecoder::H264(H264Decoder::new()),
+                                    DecoderKind::Hevc => UiDecoder::Hevc(HevcDecoder::new()),
+                                });
+                                decoder_kind = Some(kind);
+                                eprintln!("pump: using decoder {kind:?}");
+                            }
+                        }
+                        decoder.as_mut()
+                    };
+                    let Some(dec) = dec else {
                         continue; // 等关键帧
                     };
-                    if let Some(au) = assembler.push(
-                        data.data.as_ref(),
-                        data.time.as_micros(),
-                        data.is_keyframe(),
-                    ) {
+                    let au = if is_camera {
+                        camera_assembler.push(
+                            data.data.as_ref(),
+                            data.time.as_micros(),
+                            data.is_keyframe(),
+                        )
+                    } else {
+                        assembler.push(
+                            data.data.as_ref(),
+                            data.time.as_micros(),
+                            data.is_keyframe(),
+                        )
+                    };
+                    if let Some(au) = au {
+                        if is_camera && !camera_available.load(Ordering::SeqCst) {
+                            camera_available.store(true, Ordering::SeqCst);
+                            eprintln!("pump: 摄像头轨已接收");
+                        }
                         diag_frames += 1;
                         if diag_frames <= 3 || diag_frames % 60 == 0 {
                             eprintln!(
@@ -211,7 +299,7 @@ fn pump_media(
                                 au.data.len()
                             );
                         }
-                        feed_frame(dec, &au.data, au.pts_us, &latest);
+                        feed_frame(dec, &au.data, au.pts_us, target_latest);
                     }
                 }
                 ClientEvent::IceConnected => {
@@ -275,7 +363,17 @@ pub unsafe fn take_audio(session: &ViewerSession, dst: *mut i16, max: usize) -> 
 /// # Safety
 /// `out` 必须有效且可写。
 pub unsafe fn take_frame(session: &ViewerSession, out: *mut *mut std::ffi::c_void) -> i32 {
-    let mut slot = session.latest.lock().unwrap_or_else(|e| e.into_inner());
+    // 摄像头视图：优先返回摄像头帧；未出帧时回退屏幕帧（避免黑屏）。
+    let mut slot = if session.show_camera.load(Ordering::SeqCst) {
+        let cam = session
+            .latest_camera
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let screen = session.latest.lock().unwrap_or_else(|e| e.into_inner());
+        if cam.is_some() { cam } else { screen }
+    } else {
+        session.latest.lock().unwrap_or_else(|e| e.into_inner())
+    };
     match slot.take() {
         Some(buf) => {
             let raw = buf.as_ptr();

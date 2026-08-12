@@ -35,6 +35,8 @@ struct ContentView: View {
     @State private var hasFrame = false
     @State private var inputSeq: UInt64 = 0
     @State private var displayLayer = AVSampleBufferDisplayLayer()
+    @State private var cameraAvailable = false
+    @State private var cameraActive = false
     @State private var autoConnect = false
     // 音频播放（PCMU 8kHz → AVAudioEngine；Rust 侧解码 i16 样本）。
     @State private var audioEngine: AVAudioEngine?
@@ -106,6 +108,21 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
                 .disabled(viewer == nil)
+            }
+
+            HStack {
+                Button {
+                    cameraActive.toggle()
+                    if let viewer {
+                        ad_viewer_set_show_camera(viewer, cameraActive ? 1 : 0)
+                        status = cameraActive ? "画面：摄像头" : "画面：屏幕"
+                    }
+                } label: {
+                    Text(cameraActive ? "摄像头 ✓" : "摄像头")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(!cameraAvailable)
             }
 
             Text(status)
@@ -191,6 +208,7 @@ struct ContentView: View {
 
     private func pollFrame() {
         guard let viewer else { return }
+        cameraAvailable = ad_viewer_camera_available(viewer) == 1
         var out: UnsafeMutableRawPointer?
         let r = ad_viewer_take_frame(viewer, &out)
         guard r == 0, let buf = out else { return }
