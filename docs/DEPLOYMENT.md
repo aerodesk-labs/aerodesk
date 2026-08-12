@@ -36,6 +36,8 @@
 | sfu | `TURN_DENIED_PEER_CIDRS` | 拒绝中继的 peer CIDR 列表（逗号分隔，默认空，#204） |
 | sfu | `SFU_TURN_IPV6` | `1` 时 TURN 双栈绑定（IPv6 中继，#204） |
 | sfu | `TURN_URLS` | 显式设置时走外部 coturn（向后兼容），空/未设走内嵌 |
+| sfu | `SFU_HOST_ADDRESS` | 对外通告地址（ICE 候选/TURN/web 地址；默认自动选择首个非回环 IPv4，#216）。NAT/带 docker0 等虚拟网卡的服务器必须设公网 IP，否则外部客户端连不上媒体 |
+| sfu | `SFU_BIND_ADDRESS` | 媒体 socket 绑定地址（未设时：显式 `SFU_HOST_ADDRESS` 则默认 `0.0.0.0`，否则跟随通告地址，#216） |
 | signal | `SFU_URL` / `SFU_TOKEN` | SFU 内部接口 + 内部 token |
 | sfu | `RECORD_DIR` | 录制/审计目录（可选） |
 | sfu | `RECORD_ON_DEMAND` | `1` 时只录显式 start() 的房间（配合内部 API 按需录制，#160） |
