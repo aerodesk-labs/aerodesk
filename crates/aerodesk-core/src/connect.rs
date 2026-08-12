@@ -44,6 +44,8 @@ pub struct LiveSession {
     pub video_mid: Option<str0m::media::Mid>,
     /// #216 M6：音频 mid（桥跨 PoP 转发用；CLI 不用此字段）。
     pub audio_mid: Option<str0m::media::Mid>,
+    /// 第二路视频轨（摄像头，观看端 recvonly；未请求时 None）。
+    pub camera_mid: Option<str0m::media::Mid>,
     pub room: String,
     pub peer_id: String,
     pub ice_connected: bool,
@@ -150,7 +152,38 @@ pub fn connect_live_role(
     role: Role,
     auth: Option<&str>,
 ) -> Result<LiveSession, String> {
-    connect_live_role_impl(server, room, role, auth, force_relay_env(), None, false)
+    connect_live_role_impl(
+        server,
+        room,
+        role,
+        auth,
+        force_relay_env(),
+        None,
+        false,
+        false,
+    )
+}
+
+/// 连接并保留活跃会话，可选请求第二路视频轨（摄像头）。
+/// `camera=true` 时 offer 增加一个 recvonly（viewer）/sendrecv（publisher）
+/// 视频 m-line，返回 `LiveSession::camera_mid`。
+pub fn connect_live_role_with_camera(
+    server: &str,
+    room: &str,
+    role: Role,
+    auth: Option<&str>,
+    camera: bool,
+) -> Result<LiveSession, String> {
+    connect_live_role_impl(
+        server,
+        room,
+        role,
+        auth,
+        force_relay_env(),
+        None,
+        false,
+        camera,
+    )
 }
 
 /// force-relay（#201）：ICE 只通告 relayed 候选、跳过 host 候选。
@@ -171,6 +204,7 @@ pub fn connect_live_role_forced(
         force_relay || force_relay_env(),
         None,
         false, // with_audio：force-relay 路径（CLI/移动端）不协商音频，避免 SDP 行为变化
+        false,
     )
 }
 
@@ -191,7 +225,16 @@ pub fn connect_live_role_codec(
     auth: Option<&str>,
     codec: Option<Codec>,
 ) -> Result<LiveSession, String> {
-    connect_live_role_impl(server, room, role, auth, force_relay_env(), codec, true)
+    connect_live_role_impl(
+        server,
+        room,
+        role,
+        auth,
+        force_relay_env(),
+        codec,
+        true,
+        false,
+    )
 }
 
 fn connect_live_role_impl(
@@ -203,6 +246,8 @@ fn connect_live_role_impl(
     codec: Option<Codec>,
     // #216 M6：是否协商音频 track（仅桥接客户端需要，CLI/移动端保持原 SDP）。
     with_audio: bool,
+    // 是否协商第二路视频轨（摄像头；观看端 recvonly）。
+    with_camera: bool,
 ) -> Result<LiveSession, String> {
     let mut signal = WsSignalClient::connect(server).map_err(|e| format!("signal connect: {e}"))?;
     let (peer_id, turn) = signal
@@ -285,7 +330,15 @@ fn connect_live_role_impl(
             endpoint.add_audio();
         }
     }
-    let (offer, pending, video_mid, audio_mid, _camera_mid) = endpoint
+    // 摄像头第二路视频轨（观看端 recvonly；被控端未发布时 m-line 保持 inactive）。
+    if with_camera {
+        if role == Role::Viewer {
+            endpoint.add_camera_recvonly();
+        } else {
+            endpoint.add_camera();
+        }
+    }
+    let (offer, pending, video_mid, audio_mid, camera_mid) = endpoint
         .create_offer()
         .map_err(|e| format!("offer: {e:?}"))?;
     let offer_json = serde_json::to_string(&offer).map_err(|e| e.to_string())?;
@@ -351,6 +404,7 @@ fn connect_live_role_impl(
         socket,
         video_mid,
         audio_mid,
+        camera_mid,
         room: room.to_string(),
         peer_id,
         ice_connected,

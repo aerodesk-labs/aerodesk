@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 use aerodesk_core::access_unit::AccessUnitAssembler;
-use aerodesk_core::connect::connect_live_role;
+use aerodesk_core::connect::connect_live_role_with_camera;
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media_pipeline::Codec;
 use aerodesk_macos::decode::{H264Decoder, HevcDecoder, to_rgba};
@@ -176,6 +176,7 @@ pub fn run_viewer(
     file_cmd_rx: std::sync::mpsc::Receiver<FileCmd>,
     muted: Arc<AtomicBool>,
     volume: Arc<AtomicU16>,
+    show_camera: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
 ) {
     // #29 多会话：本会话 stop 置位即退出（断开只关当前活动会话）。
@@ -192,7 +193,7 @@ pub fn run_viewer(
         .stack_size(16 * 1024 * 1024)
         .spawn(move || {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                connect_live_role(&srv, &rm, Role::Viewer, auth2.as_deref())
+                connect_live_role_with_camera(&srv, &rm, Role::Viewer, auth2.as_deref(), true)
             }));
             match r {
                 Ok(res) => {
@@ -233,6 +234,10 @@ pub fn run_viewer(
         crate::session_cleanup_weak(&ui_weak, session_idx, None);
         return;
     }
+    eprintln!(
+        "macos viewer: connected peer={} ice={} camera_mid={:?}",
+        live.peer_id, live.ice_connected, live.camera_mid
+    );
     let peer = live.peer_id.clone();
     let ice = live.ice_connected;
     let room2 = room.clone();
@@ -260,6 +265,15 @@ pub fn run_viewer(
     // 实际协商/正在解码的视频 codec（状态栏显示用；首包后才有值）。
     let mut current_codec: Option<Codec> = None;
     let mut frames: u64 = 0;
+    // 摄像头第二路视频轨：SFU 转发 mid 无法与本地协商 mid 直接比对，按
+    // 「首个视频 mid=屏幕、第二个=摄像头」到达顺序区分。
+    let mut video_mids: Vec<str0m::media::Mid> = Vec::new();
+    // 摄像头与屏幕是两条独立 RTP 流，必须各自一个 AccessUnitAssembler。
+    let mut camera_assembler = AccessUnitAssembler::new();
+    let mut camera_decoder: Option<UiDecoder> = None;
+    let mut camera_pending: Option<(Vec<u8>, u32, u32, f64)> = None;
+    let mut camera_frames: u64 = 0;
+    let mut camera_seen = false;
     let mut last_stat = Instant::now();
     // #72 文件传输 + 剪贴板（接收落盘到 ~/Downloads/AeroDesk）。
     let mut file_transfer =
@@ -454,6 +468,23 @@ pub fn run_viewer(
                         };
                         if let Some(cc) = codec {
                             current_codec = Some(cc);
+                            // 摄像头/屏幕轨区分：SFU 转发 mid 与本地协商 mid 不
+                            // 直接可比，按「首个视频 mid=屏幕、第二个=摄像头」
+                            // 到达顺序区分（发布端 offer 顺序：屏幕在前）。
+                            if !video_mids.contains(&data.mid) {
+                                video_mids.push(data.mid);
+                            }
+                            let is_camera = video_mids.len() > 1 && video_mids[1] == data.mid;
+                            if is_camera && !camera_seen {
+                                camera_seen = true;
+                                eprintln!(
+                                    "macos viewer: 摄像头轨已接收 (mid={:?} codec={:?})",
+                                    data.mid, cc
+                                );
+                                if let Some(fui) = ui_weak.upgrade() {
+                                    fui.set_camera_available(true);
+                                }
+                            }
                             // #136 首包 / 不连续 / 切层 → 请求关键帧（PLI，节流 1s）。
                             // SFU 收到后按当前 chosen_rid 转发给发布端强制 IDR。
                             let now = Instant::now();
@@ -471,10 +502,40 @@ pub fn run_viewer(
                                 last_kf_rid = data.rid;
                             }
                             seen_video = true;
-                            if decoder.as_ref().map(|d| !d.matches(cc)).unwrap_or(true) {
+                            if is_camera {
+                                // 摄像头轨：独立解码器 + 独立帧缓存。
+                                if camera_decoder
+                                    .as_ref()
+                                    .map(|d| !d.matches(cc))
+                                    .unwrap_or(true)
+                                {
+                                    camera_decoder = UiDecoder::for_codec(cc);
+                                }
+                                if let Some(dec) = &mut camera_decoder
+                                    && let Some(au) = camera_assembler.push(
+                                        data.data.as_ref(),
+                                        data.time.as_micros(),
+                                        data.is_keyframe(),
+                                    )
+                                {
+                                    match dec.decode_rgba(cc, &au.data, au.pts_us as i64) {
+                                        Ok(Some((rgba, w, h))) => {
+                                            avsync.on_video(data.time.numer(), data.time.denom());
+                                            camera_pending =
+                                                Some((rgba, w, h, avsync.video_time_secs()));
+                                            camera_frames += 1;
+                                        }
+                                        Ok(None) => {}
+                                        Err(e) => {
+                                            eprintln!("macos viewer: 摄像头解码失败: {e}");
+                                        }
+                                    }
+                                }
+                            } else if decoder.as_ref().map(|d| !d.matches(cc)).unwrap_or(true) {
                                 decoder = UiDecoder::for_codec(cc);
                             }
-                            if let Some(dec) = &mut decoder
+                            if !is_camera
+                                && let Some(dec) = &mut decoder
                                 && let Some(au) = assembler.push(
                                     data.data.as_ref(),
                                     data.time.as_micros(),
@@ -539,7 +600,14 @@ pub fn run_viewer(
             }
         }
         // #73 A/V 同步渲染：音频活跃时视频不超前 >50ms；无音频时立即渲染兜底。
-        if let Some((rgba, w, h, vtime)) = pending_frame.take() {
+        // 摄像头视图：优先展示摄像头帧（未出帧时回退屏幕帧，避免黑屏）。
+        let show_cam = show_camera.load(Ordering::SeqCst);
+        let frame = if show_cam {
+            camera_pending.take().or_else(|| pending_frame.take())
+        } else {
+            pending_frame.take()
+        };
+        if let Some((rgba, w, h, vtime)) = frame {
             let audio_active = last_audio.elapsed() < Duration::from_millis(500);
             let due = !audio_active || avsync.audio_time_secs() + 0.05 >= vtime;
             if due {
@@ -628,12 +696,18 @@ pub fn run_viewer(
             } else {
                 format!("音频 {audio_played}帧 缓存{audio_buffered} 丢{audio_dropped}")
             };
+            let cam = if camera_seen {
+                format!(" 摄像头{camera_frames}帧/2s")
+            } else {
+                String::new()
+            };
             let stat = format!(
-                "会话中 · {} {frames}帧/2s · {audio}",
+                "会话中 · {} {frames}帧/2s{cam} · {audio}",
                 codec_label(current_codec)
             );
             with_ui(&ui_weak, move |ui| ui.set_session_status(stat.into()));
             frames = 0;
+            camera_frames = 0;
             audio_played = 0;
             audio_dropped = 0;
             last_stat = Instant::now();
