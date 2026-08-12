@@ -237,6 +237,7 @@ pub fn connect_live_role_codec(
     )
 }
 
+#[allow(clippy::too_many_arguments)] // 内部实现：角色/鉴权/中继/音频/摄像头等开关收敛一处
 fn connect_live_role_impl(
     server: &str,
     room: &str,
