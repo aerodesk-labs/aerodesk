@@ -423,7 +423,10 @@ impl aerodesk_core::platform::Encoder for VtEncoder {
         let now = std::time::Instant::now();
         let changed = self.last_bitrate_bps == 0
             || bitrate_bps.abs_diff(self.last_bitrate_bps) > self.last_bitrate_bps / 5;
-        if changed && now.duration_since(self.last_bitrate_at) >= std::time::Duration::from_secs(1)
+        // 首条反馈（last_bitrate_bps==0）不受 1s 节流限制，否则 BWE 只降一次档时永远不生效。
+        if changed
+            && (self.last_bitrate_bps == 0
+                || now.duration_since(self.last_bitrate_at) >= std::time::Duration::from_secs(1))
         {
             self.last_bitrate_bps = bitrate_bps;
             self.last_bitrate_at = now;
