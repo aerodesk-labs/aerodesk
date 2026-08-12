@@ -24,12 +24,15 @@ pub(crate) fn init() {
 /// 编码器名（硬编优先，软编回退）。
 fn encoder_names(codec: Codec) -> (&'static [&'static str], ffmpeg_next::codec::Id) {
     match codec {
+        // #3 Windows MF 硬件编码：FFmpeg 的 h264_mf/hevc_mf 封装 Media Foundation
+        // H.264/HEVC Encoder MFT（Win10+ 自带）；不存在的编码器 find_by_name 返回
+        // None 自动回退：macOS→videotoolbox、Windows→mf、其他→libx264/libx265。
         Codec::H264 => (
-            &["h264_videotoolbox", "libx264"],
+            &["h264_videotoolbox", "h264_mf", "libx264"],
             ffmpeg_next::codec::Id::H264,
         ),
         Codec::Hevc => (
-            &["hevc_videotoolbox", "libx265"],
+            &["hevc_videotoolbox", "hevc_mf", "libx265"],
             ffmpeg_next::codec::Id::HEVC,
         ),
         Codec::Vp9 => (&["libvpx-vp9"], ffmpeg_next::codec::Id::VP9),
