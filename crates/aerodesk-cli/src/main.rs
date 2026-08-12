@@ -153,6 +153,21 @@ fn run() {
     // 摄像头：publisher --camera 发布本地摄像头（第二路视频轨）；viewer --camera 接收统计。
     let camera = args.iter().any(|a| a == "--camera");
     let camera_device = arg(&args, "--camera-device");
+    // --list-cameras：打印本机摄像头 id/名称（配合 --camera-device 选择），然后退出。
+    if args.iter().any(|a| a == "--list-cameras") {
+        #[cfg(target_os = "macos")]
+        {
+            for c in aerodesk_macos::camera::list_cameras() {
+                println!("{}\t{}", c.id, c.name);
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            eprintln!("--list-cameras 仅 macOS 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
     // #75/#109 MCP 键鼠：--send-input '<InputEvent JSON>' 单次发送输入事件后退出。
     let send_input: Option<InputEvent> =
         arg(&args, "--send-input").and_then(|json| serde_json::from_str::<InputEvent>(&json).ok());
