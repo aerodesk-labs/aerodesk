@@ -213,3 +213,33 @@ pub unsafe extern "C" fn ad_viewer_send_input(v: *mut ViewerSession, json: *cons
         -2
     }
 }
+
+/// 切换画面源：1=摄像头 / 0=屏幕（take_frame 按此返回对应轨的最新帧）。
+/// 返回 0=成功，<0=参数错误。
+///
+/// # Safety
+/// `v` 必须来自 `ad_viewer_create` 且未被销毁过。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ad_viewer_set_show_camera(v: *mut ViewerSession, show: c_int) -> c_int {
+    if v.is_null() {
+        return -1;
+    }
+    unsafe { &*v }.set_show_camera(show != 0);
+    0
+}
+
+/// 是否已收到摄像头轨（远端发布端带 --camera）。1=有，0=无，<0=参数错误。
+///
+/// # Safety
+/// `v` 必须来自 `ad_viewer_create` 且未被销毁过。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ad_viewer_camera_available(v: *mut ViewerSession) -> c_int {
+    if v.is_null() {
+        return -1;
+    }
+    if unsafe { &*v }.camera_available() {
+        1
+    } else {
+        0
+    }
+}

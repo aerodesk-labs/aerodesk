@@ -52,3 +52,9 @@ int ad_viewer_take_audio(void *viewer, int16_t *dst, size_t max);
 #endif
 
 #endif /* AD_AERODESK_H */
+
+/// 切换画面源：show=1 摄像头 / 0 屏幕（take_frame 按此返回对应轨）。返回 0=成功。
+int ad_viewer_set_show_camera(void *viewer, int show);
+
+/// 是否已收到摄像头轨。1=有，0=无。
+int ad_viewer_camera_available(void *viewer);

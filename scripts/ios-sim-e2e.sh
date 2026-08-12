@@ -58,7 +58,12 @@ done
 # 发布端编码：CI 默认 x264（合成源，无采集权限）；本地可 PUBLISHER_ENCODER=screen
 # 验证默认 h265（HEVC）真实屏幕硬编 → iOS 硬解链路。
 PUBLISHER_ENCODER="${PUBLISHER_ENCODER:-x264}"
-./target/debug/aerodesk-cli --role publisher --signal "ws://127.0.0.1:${SIGNAL_PLAIN_PORT:-3003}" --room "$ROOM" --encoder "$PUBLISHER_ENCODER" >/tmp/iossim-pub.log 2>&1 &
+# 本地摄像头链路验证：PUBLISHER_CAMERA=1 时发布端加 --camera（CI 无摄像头不启用）。
+CAMERA_ARGS=""
+if [ "${PUBLISHER_CAMERA:-0}" = "1" ]; then
+    CAMERA_ARGS="--camera"
+fi
+./target/debug/aerodesk-cli --role publisher --signal "ws://127.0.0.1:${SIGNAL_PLAIN_PORT:-3003}" --room "$ROOM" --encoder "$PUBLISHER_ENCODER" $CAMERA_ARGS >/tmp/iossim-pub.log 2>&1 &
 PUB=$!
 sleep 2
 

@@ -13,6 +13,7 @@ crate-type = ["rlib", "staticlib"]
 videotoolbox = { version = "0.18", features = ["decompression"] }
 apple-cf = "0.9"
 aerodesk-core = { path = "../aerodesk-core" }
+aerodesk-protocol.workspace = true
 str0m = { workspace = true, features = ["rust-crypto"] }
 tracing.workspace = true
 
