@@ -127,6 +127,10 @@ impl FfmpegEncoder {
             // SPS/PPS 仅在流首 IDR 内联一次；viewer 错过首关键帧后收不到
             // 参数集（non-existing PPS 0 referenced），无法解码。每个 IDR
             // 重复 SPS/PPS 保证任意时刻加入都能解码。
+            // 远程桌面低延迟：tune=zerolatency（threads=1/bframes=0/no-lookahead）
+            // 消除 libx264 多线程帧缓冲延迟（实测首帧延迟 ~20 帧），PLI 后
+            // 重建编码器下一帧即出 IDR。repeat-headers 保证每个 IDR 带 SPS/PPS。
+            dict.set("tune", "zerolatency");
             dict.set("x264-params", "repeat-headers=1");
         } else if id == ffmpeg::codec::Id::HEVC {
             dict.set("preset", "veryfast");
@@ -246,7 +250,18 @@ impl FfmpegEncoder {
 
     /// 请求关键帧（下一帧设为 I 帧）。
     pub fn request_keyframe(&mut self) {
-        self.keyframe_pending = true;
+        // #3：libx264 对 frame->pict_type=I 的 PLI 提示在 FFmpeg 8.1 实测无效
+        // （仍输出 P 帧）；重建编码器是最可靠强制 IDR 的方式（新 encoder 首帧
+        // 必为 IDR，且 repeat-headers 带 SPS/PPS）。与 #267 set_bitrate 重建同模式。
+        let codec = self.codec();
+        // 未调过 set_bitrate 时 last_bitrate_bps 为 0（open 参数未留存）；
+        // 用与 open 相同的默认码率兜底（1.5 Mbps 参考值，见 FfmpegEncoder::new 调用方）。
+        let bps = self.last_bitrate_bps.max(1_500_000);
+        let (w, h, fps) = (self.width, self.height, self.fps);
+        match FfmpegEncoder::new(w, h, fps, bps, codec) {
+            Ok(enc) => *self = enc,
+            Err(e) => tracing::warn!("ffmpeg keyframe rebuild failed: {e}"),
+        }
     }
 
     pub fn codec(&self) -> Codec {
@@ -334,6 +349,35 @@ impl aerodesk_core::platform::Encoder for FfmpegEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #3 PLI 立即响应：request_keyframe 后下一帧必须为关键帧。
+    /// （libx264 对 pict_type=I 提示无效；通过重建编码器强制 IDR。）
+    #[test]
+    fn request_keyframe_yields_immediate_idr() {
+        let mut enc =
+            FfmpegEncoder::open_named("libx264", ffmpeg::codec::Id::H264, 320, 180, 30, 500_000)
+                .expect("libx264 encoder");
+        let rgb = vec![128u8; 320 * 180 * 3];
+        // 出首帧关键帧（zerolatency 下第 0 帧即 IDR）。
+        for _ in 0..30 {
+            if let Some(unit) = enc.encode_rgb(&rgb).expect("encode") {
+                if unit.keyframe {
+                    break;
+                }
+            }
+        }
+        enc.request_keyframe();
+        let mut got_key = false;
+        for _ in 0..5 {
+            if let Some(unit) = enc.encode_rgb(&rgb).expect("encode") {
+                if unit.keyframe {
+                    got_key = true;
+                    break;
+                }
+            }
+        }
+        assert!(got_key, "PLI 后 5 帧内应产出关键帧");
+    }
 
     /// #3 晚加入 viewer 解码回归：**后续**关键帧（PLI 后）必须内联 SPS/PPS。
     /// libx264 默认 repeat-headers=0 时仅首 IDR 带参数集；viewer 错过首帧后
