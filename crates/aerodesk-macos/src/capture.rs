@@ -37,6 +37,57 @@ pub struct ScreenCapture {
 pub const MAX_CAPTURE_W: u32 = 1920;
 pub const MAX_CAPTURE_H: u32 = 1080;
 
+/// 显示器休眠时 SCK 的 `displays()` 为空（#315），采集拿不到画面。
+/// 用 `caffeinate -u`（断言用户活跃）唤醒后重查，最多重试 6 次（约 9s）。
+fn ensure_displays() -> Result<SCShareableContent, String> {
+    let mut last = SCShareableContent::get().map_err(|e| format!("SCK content: {e}"))?;
+    if !last.displays().is_empty() {
+        return Ok(last);
+    }
+    tracing::warn!("显示器休眠中（SCK 无可用显示器），尝试唤醒…");
+    for _ in 0..6 {
+        let _ = std::process::Command::new("caffeinate")
+            .args(["-u", "-t", "3"])
+            .spawn();
+        std::thread::sleep(Duration::from_millis(1500));
+        last = SCShareableContent::get().map_err(|e| format!("SCK content: {e}"))?;
+        if !last.displays().is_empty() {
+            tracing::info!("显示器已唤醒，恢复屏幕采集");
+            return Ok(last);
+        }
+    }
+    tracing::error!("显示器唤醒失败（可能已锁屏/无物理显示器）");
+    Ok(last)
+}
+
+/// 采集期间保持显示器唤醒（`caffeinate -d` 防显示器休眠）；Drop 时释放。
+/// 解决远控场景下显示器闲置休眠后 SCK 枚举不到显示器的问题（#315）。
+pub struct KeepAwake {
+    child: Option<std::process::Child>,
+}
+
+impl KeepAwake {
+    pub fn start() -> Self {
+        let child = std::process::Command::new("caffeinate")
+            .arg("-d")
+            .spawn()
+            .ok();
+        if child.is_some() {
+            tracing::info!("已保持显示器唤醒（caffeinate -d，会话结束自动释放）");
+        }
+        Self { child }
+    }
+}
+
+impl Drop for KeepAwake {
+    fn drop(&mut self) {
+        if let Some(mut c) = self.child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
 /// 构建 SCContentFilter + SCStreamConfiguration（重建会话时复用）。
 /// width/height 传 0 表示按显示器原生尺寸等比缩放（保持宽高比）。
 fn build_capture(
@@ -45,7 +96,7 @@ fn build_capture(
     width: u32,
     height: u32,
 ) -> Result<(SCContentFilter, SCStreamConfiguration, u32, u32, u32), String> {
-    let content = SCShareableContent::get().map_err(|e| format!("SCK content: {e}"))?;
+    let content = ensure_displays()?;
     let displays = content.displays();
     let display = displays.get(display_idx).ok_or("display not found")?;
     let display_id = display.display_id();
