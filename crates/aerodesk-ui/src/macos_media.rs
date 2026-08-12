@@ -142,6 +142,19 @@ impl aerodesk_core::platform::Decoder for UiDecoder {
 }
 
 /// 状态栏 codec 显示名（首包前未知 → H.264 兼容占位，收到首包后更新）。
+/// 系统通知（#277 `Notifier` trait 的 macOS 消费入口；非 macOS no-op）。
+fn notify_user(title: &str, body: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        use aerodesk_core::platform::Notifier;
+        aerodesk_macos::notifier::MacNotifier.notify(title, body);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (title, body);
+    }
+}
+
 fn codec_label(codec: Option<Codec>) -> &'static str {
     match codec {
         Some(Codec::Hevc) => "H.265",
@@ -252,6 +265,8 @@ pub fn run_viewer(
     let mut file_transfer =
         aerodesk_core::file_transfer::FileTransfer::new(Some(default_recv_dir()));
     let mut last_file_status = Instant::now();
+    // #277：收到文件完成时发一次系统通知（Notifier trait）。
+    let mut last_notified_file: Option<String> = None;
     // #73 音频播放 + A/V 同步：PCMU/Opus 解码 → jitter buffer → AudioSink（cpal）；
     // sink 按首个音频帧的 codec 采样率惰性创建；无输出设备时降级为仅统计。
     let mut avsync = aerodesk_core::avsync::AvSync::new();
@@ -564,6 +579,10 @@ pub fn run_viewer(
                     let pct = done as f64 * 100.0 / total.max(1) as f64;
                     let status = format!("接收文件：{name} {done}/{total} ({pct:.0}%)");
                     let label = format!("接收 {name} {pct:.0}%");
+                    if done >= total && last_notified_file.as_deref() != Some(name.as_str()) {
+                        notify_user("AeroDesk", &format!("收到文件：{name}"));
+                        last_notified_file = Some(name.clone());
+                    }
                     with_ui(&ui_weak, move |ui| ui.set_session_status(status.into()));
                     crate::with_session_ui_state(&ui_weak, session_idx, move |s| {
                         s.file_progress = (pct / 100.0) as f32;
