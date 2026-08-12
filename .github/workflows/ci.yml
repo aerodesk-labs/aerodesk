@@ -168,20 +168,22 @@ jobs:
       # 断言流，端到端验证远程验收工具含 BRIDGE_KILL_CMD 恢复）。
       - name: e2e bridge fallback (macOS only)
         if: runner.os == 'macOS'
-        run: |
-          ./scripts/bridge-fallback-e2e.sh
-          REMOTE_LOOPBACK=1 ./scripts/bridge-fallback-e2e.sh
+        # 复杂网络 e2e 在 macOS runner 偶发瞬时 flake（#280 同类），按仓库
+        # web-reconnect/ios-sim 约定限 3 次重试；真实回归会被 3 连败暴露。
+        run: bash scripts/ci-retry.sh 3 bash -c "
+          ./scripts/bridge-fallback-e2e.sh &&
+          REMOTE_LOOPBACK=1 ./scripts/bridge-fallback-e2e.sh" 
 
       # #216 M7：桥接 TURN 中继路径验收（#262）——双 PoP 内嵌 TURN +
       # AERODESK_FORCE_RELAY=1，桥双腿走 relay（真实 NAT 就绪）。
       - name: e2e bridge TURN relay (macOS only)
         if: runner.os == 'macOS'
-        run: ./scripts/bridge-turn-e2e.sh
+        run: bash scripts/ci-retry.sh 3 ./scripts/bridge-turn-e2e.sh
 
       # #216 M9：多房间桥并发 + BRIDGE_MAX_RUNNING 上限回退（#272）。
       - name: e2e bridge multiroom (macOS only)
         if: runner.os == 'macOS'
-        run: ./scripts/bridge-multiroom-e2e.sh
+        run: bash scripts/ci-retry.sh 3 ./scripts/bridge-multiroom-e2e.sh
 
       # #264 一键部署脚本：语法与参数解析守卫（真实部署需外部主机，dry-run 验证）。
       # #216：--help 不得泄漏源码行（历史缺陷：sed 固定行号越界打印 set -uo
