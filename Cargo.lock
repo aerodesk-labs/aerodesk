@@ -73,6 +73,7 @@ dependencies = [
  "aerodesk-macos",
  "aerodesk-protocol",
  "aerodesk-softenc",
+ "aerodesk-windows",
  "pcap-file",
  "serde",
  "serde_json",

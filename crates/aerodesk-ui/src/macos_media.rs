@@ -651,8 +651,8 @@ fn present_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aerodesk_core::synthetic::SyntheticSource;
     use aerodesk_macos::decode::to_rgba;
-    use aerodesk_macos::synthetic::SyntheticSource;
     use aerodesk_macos::vt_encoder::VtEncoder;
 
     /// 按 AnnexB 起始码拆分 NAL（保留起始码，模拟 str0m 的 `Output::Media` AnnexB 输出）。

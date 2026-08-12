@@ -10,7 +10,6 @@ sha2 = "0.10"
 aerodesk-ffmpeg = { path = "../aerodesk-ffmpeg" }
 str0m = { workspace = true, features = ["rust-crypto"] }
 aerodesk-core = { path = "../aerodesk-core" }
-aerodesk-macos = { path = "../aerodesk-macos" }
 aerodesk-protocol.workspace = true
 aerodesk-softenc = { path = "../aerodesk-softenc" }
 tungstenite = "0.30"
@@ -21,4 +20,10 @@ tracing-subscriber.workspace = true
 pcap-file = "2.0.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# macOS 专属：VideoToolbox 硬编 + SCK 采集/音频/CGEvent 注入（Windows/Linux 不编译）。
+aerodesk-macos = { path = "../aerodesk-macos" }
 videotoolbox = "0.18"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows 被控端：DXGI 采集 + SendInput 注入（编码走全平台 aerodesk-softenc）。
+aerodesk-windows = { path = "../aerodesk-windows" }

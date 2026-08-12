@@ -28,7 +28,9 @@ jobs:
             skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli
             features: --features aerodesk-linux/pipewire
           - os: windows-latest
-            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-cli --exclude aerodesk-linux --exclude x264
+            # #3：Windows CLI 已跨平台化（DXGI+OpenH264+SendInput），纳入编译/测试；
+            # x264 与 aerodesk-linux 仍排除（MSVC 下 C 库/平台采集批次）。
+            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-linux --exclude x264
             features: 
     runs-on: ${{ matrix.os }}
     env:

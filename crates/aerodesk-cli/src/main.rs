@@ -140,6 +140,9 @@ fn run() {
     let encoder = arg(&args, "--encoder").unwrap_or_else(|| "pcap".into());
     // #58：publisher 多路编码（q/h/f 三层），SFU 选层请求才能真正切换画质。
     let simulcast = args.iter().any(|a| a == "--simulcast");
+    // Windows 暂无 simulcast 路径（DXGI 单层），标记避免 unused 告警。
+    #[cfg(target_os = "windows")]
+    let _ = simulcast;
     // 高熵合成源（伪随机噪声）：码率贴近目标档位，用于选层/压测验证。
     let noisy = args.iter().any(|a| a == "--noisy");
     // #58 音频：publisher 发送合成 PCMU 音频 / viewer 接收；--mute-audio 观看端静音。
@@ -172,7 +175,13 @@ fn run() {
         None
     };
     // #58 显示器：publisher 初始采集显示器 / viewer 请求切换（--display N，0 = 主显示器）。
+    // 仅 macOS 屏幕采集使用（Windows DXGI 采集主输出；Linux 批次 #4）。
+    #[cfg(target_os = "macos")]
     let display: usize = arg(&args, "--display")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    #[cfg(not(target_os = "macos"))]
+    let _display: usize = arg(&args, "--display")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     let viewer_display: Option<usize> = arg(&args, "--display").and_then(|v| v.parse().ok());
@@ -227,63 +236,102 @@ fn run() {
 
     match role.as_str() {
         "publisher" if encoder == "screen" => {
-            let vt_capable = video_codec == Codec::H264
-                || (video_codec == Codec::Hevc
-                    && aerodesk_macos::vt_encoder::VtEncoder::hevc_encoder_available());
-            if vt_capable {
-                // #74 硬编优先：H264/H265 走 VideoToolbox 硬编（HEVC 无硬编
-                // 时探针失败回退 FFmpeg）。
-                publisher_capture(
+            #[cfg(target_os = "macos")]
+            {
+                let vt_capable = video_codec == Codec::H264
+                    || (video_codec == Codec::Hevc
+                        && aerodesk_macos::vt_encoder::VtEncoder::hevc_encoder_available());
+                if vt_capable {
+                    // #74 硬编优先：H264/H265 走 VideoToolbox 硬编（HEVC 无硬编
+                    // 时探针失败回退 FFmpeg）。
+                    publisher_capture(
+                        &signal,
+                        &room,
+                        token.as_deref(),
+                        simulcast,
+                        audio,
+                        audio_opus,
+                        display,
+                        video_codec,
+                    )
+                } else {
+                    // #74：VP9/AV1 或本机无 VT HEVC 时，屏幕采集走 FFmpeg 软编。
+                    publisher_capture_ffmpeg(
+                        &signal,
+                        &room,
+                        token.as_deref(),
+                        audio,
+                        audio_opus,
+                        video_codec,
+                        display,
+                    )
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                // Windows：DXGI 采集 + OpenH264 软编 + SendInput 注入（被控端）。
+                // 其他平台（Linux）采集批次 #4，先回退合成源。
+                #[cfg(target_os = "windows")]
+                publisher_capture_windows(
                     &signal,
                     &room,
                     token.as_deref(),
-                    simulcast,
-                    audio,
-                    audio_opus,
-                    display,
-                    video_codec,
-                )
-            } else {
-                // #74：VP9/AV1 或本机无 VT HEVC 时，屏幕采集走 FFmpeg 软编。
-                publisher_capture_ffmpeg(
-                    &signal,
-                    &room,
-                    token.as_deref(),
                     audio,
                     audio_opus,
                     video_codec,
-                    display,
-                )
+                );
+                #[cfg(not(target_os = "windows"))]
+                {
+                    info!(
+                        "--encoder screen 仅 macOS/Windows 支持（Linux 采集批次 #4）；回退合成源"
+                    );
+                    publisher_ffmpeg(
+                        &signal,
+                        &room,
+                        token.as_deref(),
+                        audio,
+                        audio_opus,
+                        video_codec,
+                        noisy,
+                    );
+                }
             }
         }
         "publisher" if encoder == "vt" => {
-            let w: u32 = arg(&args, "--width")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(640);
-            let h: u32 = arg(&args, "--height")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(360);
-            let fps: u32 = arg(&args, "--fps")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(30);
-            let br: u32 = arg(&args, "--bitrate")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(800_000);
-            publisher_vt(
-                &signal,
-                &room,
-                token.as_deref(),
-                VideoParams {
-                    width: w,
-                    height: h,
-                    fps,
-                    bitrate: br,
-                },
-                simulcast,
-                noisy,
-                audio,
-                audio_opus,
-            );
+            #[cfg(target_os = "macos")]
+            {
+                let w: u32 = arg(&args, "--width")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(640);
+                let h: u32 = arg(&args, "--height")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(360);
+                let fps: u32 = arg(&args, "--fps")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(30);
+                let br: u32 = arg(&args, "--bitrate")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(800_000);
+                publisher_vt(
+                    &signal,
+                    &room,
+                    token.as_deref(),
+                    VideoParams {
+                        width: w,
+                        height: h,
+                        fps,
+                        bitrate: br,
+                    },
+                    simulcast,
+                    noisy,
+                    audio,
+                    audio_opus,
+                );
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                info!("--encoder vt 仅 macOS（VideoToolbox）；Windows 请用 --encoder screen");
+            }
         }
         "publisher" if encoder == "ffmpeg" => publisher_ffmpeg(
             &signal,
@@ -294,15 +342,24 @@ fn run() {
             video_codec,
             noisy,
         ),
-        "publisher" if encoder == "x264" => publisher_x264(
-            &signal,
-            &room,
-            token.as_deref(),
-            simulcast,
-            noisy,
-            audio,
-            audio_opus,
-        ),
+        "publisher" if encoder == "x264" => {
+            #[cfg(not(target_os = "windows"))]
+            publisher_x264(
+                &signal,
+                &room,
+                token.as_deref(),
+                simulcast,
+                noisy,
+                audio,
+                audio_opus,
+            );
+            #[cfg(target_os = "windows")]
+            {
+                info!(
+                    "--encoder x264 不支持 Windows（x264 crate 仅非 Windows 编译）；请用 --encoder screen"
+                );
+            }
+        }
         "publisher" => {
             let sig = signal.clone();
             let r = room.clone();
@@ -435,6 +492,7 @@ fn connect(
     connect_inner(signal_url, room, role, None, false, audio, auth)
 }
 
+#[cfg(not(target_os = "windows"))]
 fn connect_h264(
     signal_url: &str,
     room: &str,
@@ -580,6 +638,7 @@ fn connect_inner(
 }
 
 /// VideoToolbox 合成源编码参数（--width/--height/--fps/--bitrate）。
+#[cfg(target_os = "macos")]
 struct VideoParams {
     width: u32,
     height: u32,
@@ -735,6 +794,8 @@ impl AudioTicker {
 
 /// #73 真实系统音频发送：SCK audio-only SCStream → f32 mono 48k → Opus/PCMU。
 /// SCStream 音频采集失败时由调用方回退 AudioTicker（合成音）。
+/// macOS 专属（Windows/Linux 暂无系统音频采集，用 AudioTicker 合成音）。
+#[cfg(target_os = "macos")]
 struct RealAudioSender {
     cap: aerodesk_macos::audio_capture::SystemAudioCapture,
     /// Opus 编码器（--audio-opus；libopus 缺失时回退 PCMU）。
@@ -749,6 +810,7 @@ struct RealAudioSender {
     next_send: Instant,
 }
 
+#[cfg(target_os = "macos")]
 impl RealAudioSender {
     fn new(cap: aerodesk_macos::audio_capture::SystemAudioCapture, audio_opus: bool) -> Self {
         let opus = if audio_opus {
@@ -1077,14 +1139,8 @@ fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
                             clipboard::write(text);
                         }
                         _ => {
-                            // #75：把 viewer 输入注入被控端（macOS CGEvent；无辅助功能
-                            // 权限时静默失败，但路径与日志可验证）。
-                            match aerodesk_macos::inject::inject(&frame.event) {
-                                Ok(()) => info!("inject: seq={} {:?}", frame.seq, frame.event),
-                                Err(e) => {
-                                    info!("inject failed: seq={} {:?}: {e}", frame.seq, frame.event)
-                                }
-                            }
+                            // #75：把 viewer 输入注入被控端（macOS CGEvent / Windows SendInput）。
+                            inject_input(frame.seq, &frame.event);
                         }
                     }
                 }
@@ -1098,6 +1154,29 @@ fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
             }
         }
         _ => {}
+    }
+}
+
+/// 把观看端输入事件注入被控端（平台分支：macOS CGEvent / Windows SendInput）。
+fn inject_input(seq: u64, event: &InputEvent) {
+    #[cfg(target_os = "macos")]
+    {
+        match aerodesk_macos::inject::inject(event) {
+            Ok(()) => info!("inject: seq={seq} {event:?}"),
+            Err(e) => info!("inject failed: seq={seq} {event:?}: {e}"),
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let mut inj = aerodesk_windows::inject::SendInputInjector;
+        match aerodesk_core::platform::InputInjector::inject(&mut inj, event) {
+            Ok(()) => info!("inject: seq={seq} {event:?}"),
+            Err(e) => info!("inject failed: seq={seq} {event:?}: {e}"),
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (seq, event);
     }
 }
 
@@ -1784,6 +1863,7 @@ fn drain_udp_input(socket: &mut MediaSocket, endpoint: &mut Endpoint, max_packet
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn publisher_x264(
     signal_url: &str,
     room: &str,
@@ -1793,7 +1873,7 @@ fn publisher_x264(
     audio: bool,
     audio_opus: bool,
 ) {
-    use aerodesk_macos::synthetic::SyntheticSource;
+    use aerodesk_core::synthetic::SyntheticSource;
     use aerodesk_softenc::encode::X264Encoder;
     use str0m::media::Rid;
 
@@ -1927,6 +2007,7 @@ fn publisher_x264(
 /// VideoToolbox 硬编发布端：合成 BGRA → 硬编 → SFU。
 /// 压测可传 --width/--height/--fps/--bitrate（如 3840x2160@60 8Mbps）。
 /// `--simulcast` 时编码 q/h/f 三层（SFU 选层生效）。
+#[cfg(target_os = "macos")]
 fn publisher_vt(
     signal_url: &str,
     room: &str,
@@ -1943,7 +2024,7 @@ fn publisher_vt(
         fps,
         bitrate,
     } = params;
-    use aerodesk_macos::synthetic::SyntheticSource;
+    use aerodesk_core::synthetic::SyntheticSource;
     use aerodesk_macos::vt_encoder::VtEncoder;
     use str0m::media::Rid;
 
@@ -2206,7 +2287,7 @@ fn publisher_ffmpeg(
     codec: Codec,
     noisy: bool,
 ) {
-    use aerodesk_macos::synthetic::SyntheticSource;
+    use aerodesk_core::synthetic::SyntheticSource;
 
     const W: u32 = 640;
     const H: u32 = 360;
@@ -2230,6 +2311,53 @@ fn publisher_ffmpeg(
 /// 屏幕采集 + FFmpeg 多 codec（#74）：ScreenCaptureKit → IOSurface → BGRA →
 /// FfmpegEncoder（H265/VP9/AV1）。H.264 走原 VtEncoder 零拷贝路径。
 /// 需要屏幕录制权限（TCC）。
+/// Windows 屏幕采集发布端（被控端）：DXGI Desktop Duplication → OpenH264 软编 → SFU。
+/// 输入注入走 SendInput（aerodesk-windows）；系统音频暂无采集，用合成音 AudioTicker；
+/// 需要交互桌面会话（DXGI 输出可用）。
+#[cfg(target_os = "windows")]
+fn publisher_capture_windows(
+    signal_url: &str,
+    room: &str,
+    auth: Option<&str>,
+    audio: bool,
+    audio_opus: bool,
+    codec: Codec,
+) {
+    use aerodesk_core::platform::MediaSource;
+    use aerodesk_softenc::openh264enc::OpenH264Encoder;
+    use aerodesk_windows::capture::DxgiCapturer;
+
+    const FPS: u32 = 30;
+
+    let mut capture = match DxgiCapturer::new() {
+        Ok(c) => c,
+        Err(e) => {
+            error!("DXGI capture init failed: {e}");
+            info!("Windows 屏幕采集需要交互桌面会话（非 headless/服务会话）");
+            return;
+        }
+    };
+    let (w, h) = capture.size();
+    if w == 0 || h == 0 {
+        error!("DXGI capture: 无可用显示器输出");
+        return;
+    }
+    info!("Windows screen capture started at {w}x{h}");
+    let _ = MediaSource::start(&mut capture, FPS, false);
+    // OpenH264 软编（BGRA raw 输入，全平台 aerodesk-softenc）。
+    let encoder = match OpenH264Encoder::new(w, h, FPS, 8_000) {
+        Ok(e) => e,
+        Err(e) => {
+            error!("OpenH264 encoder init failed: {e}");
+            return;
+        }
+    };
+    publisher_generic(
+        signal_url, room, auth, audio, audio_opus, codec, FPS, capture, encoder,
+    );
+}
+
+#[cfg(target_os = "macos")]
 fn publisher_capture_ffmpeg(
     signal_url: &str,
     room: &str,
@@ -2343,6 +2471,7 @@ fn publisher_capture_ffmpeg(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn publisher_capture(
     signal_url: &str,
     room: &str,
