@@ -1276,6 +1276,17 @@ fn web_request(
     let mut rtc = rtc.build(std::time::Instant::now());
     let candidate = Candidate::host(udp_addr, "udp").expect("a host candidate");
     rtc.add_local_candidate(candidate).unwrap();
+    // #216：通告地址为公网/非回环时，同机客户端（桥、web、本机 CLI）需要回环候选
+    // 才能直连——公网地址 hairpin 回不到 loopback 绑定的 socket（桥 ICE 会 20s 超时）。
+    if udp_addr.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) {
+        let loopback_addr = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            udp_addr.port(),
+        );
+        if let Ok(loopback) = Candidate::host(loopback_addr, "udp") {
+            let _ = rtc.add_local_candidate(loopback);
+        }
+    }
     let tcp_candidate = Candidate::builder()
         .tcp()
         .host(tcp_addr)

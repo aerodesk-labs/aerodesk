@@ -32,7 +32,7 @@ rust-version = "1.85"
 # 指向 aerodesk-labs 派生（7db621f + #85 dimpl DTLS receive queue 2048 +
 # acd7e77 SCTP send buffer 8MB / rwnd 8MB），避免 data channel 大文件突发
 # 触发 Receive queue full 断连，并解除单 SACK 周期在途字节瓶颈（100MB <60s）。
-str0m = { git = "https://github.com/aerodesk-labs/str0m.git", rev = "acd7e773d668b74411242951b716c22b162ca751", default-features = false }
+str0m = { git = "https://github.com/aerodesk-labs/str0m.git", rev = "999e726b07ff8be85109c1f1be427ce3cb961317", default-features = false }
 rouille = { version = "3.6.2", features = ["rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
