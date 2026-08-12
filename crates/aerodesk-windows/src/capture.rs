@@ -8,7 +8,6 @@ use crate::CapturedFrame;
 /// DXGI Desktop Duplication 采集器（被控端，Windows）。
 #[cfg(windows)]
 pub struct DxgiCapturer {
-    device: windows::Win32::Graphics::Direct3D11::ID3D11Device,
     context: windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
     duplication: windows::Win32::Graphics::Dxgi::IDXGIOutputDuplication,
     staging: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
@@ -38,10 +37,9 @@ impl DxgiCapturer {
         }
         use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
         use windows::Win32::Graphics::Direct3D11::{
-            D3D11_BIND_RENDER_TARGET, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-            D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
-            ID3D11Texture2D,
+            D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+            D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device,
+            ID3D11DeviceContext, ID3D11Texture2D,
         };
         use windows::Win32::Graphics::Dxgi::Common::{
             DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
@@ -117,7 +115,6 @@ impl DxgiCapturer {
                 (target_w, target_h)
             };
             Ok(Self {
-                device,
                 context,
                 duplication,
                 staging,
@@ -315,7 +312,7 @@ mod tests {
     #[test]
     fn scale_bgra_halves_size_and_preserves_color() {
         // 4x4 纯红（BGRA: B=0,G=0,R=255,A=255）→ 2x2。
-        let src = vec![255u8, 0, 0, 255].repeat(16);
+        let src = [255u8, 0, 0, 255].repeat(16);
         let out = scale_bgra(&src, 4, 4, 2, 2);
         assert_eq!(out.len(), 2 * 2 * 4);
         for px in out.chunks(4) {
@@ -323,9 +320,13 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
-    fn scale_bgra_zero_target_handled_by_new_with_scale() {
-        // new_with_scale 校验：0/0 = 原生；单独一个 0 拒绝。
-        assert!(DxgiCapturer::new_with_scale(0, 0).is_ok() || true); // 仅验证校验逻辑不 panic
+    fn new_with_scale_odd_target_rejected() {
+        // 奇数目标拒绝（OpenH264 I420 需要偶数）；真机无桌面时 0/0=原生可能失败。
+        assert!(
+            DxgiCapturer::new_with_scale(1, 1).is_err(),
+            "奇数目标应拒绝"
+        );
     }
 }
