@@ -46,6 +46,10 @@ pub struct Endpoint {
     want_audio: bool,
     /// 音频方向（viewer 用 RecvOnly，publisher 用 SendRecv）。
     audio_direction: str0m::media::Direction,
+    /// 是否在下一个 offer 中添加第二路视频（摄像头，同 codec 配置）。
+    want_camera: bool,
+    /// 摄像头方向（viewer 用 RecvOnly，publisher 用 SendRecv）。
+    camera_direction: str0m::media::Direction,
 }
 
 impl Default for Endpoint {
@@ -73,6 +77,8 @@ impl Endpoint {
             video_simulcast: None,
             want_audio: false,
             audio_direction: str0m::media::Direction::SendRecv,
+            want_camera: false,
+            camera_direction: str0m::media::Direction::SendRecv,
         }
     }
 
@@ -102,6 +108,8 @@ impl Endpoint {
             video_simulcast: None,
             want_audio: false,
             audio_direction: str0m::media::Direction::SendRecv,
+            want_camera: false,
+            camera_direction: str0m::media::Direction::SendRecv,
         }
     }
 
@@ -142,6 +150,8 @@ impl Endpoint {
             video_simulcast: None,
             want_audio: false,
             audio_direction: str0m::media::Direction::SendRecv,
+            want_camera: false,
+            camera_direction: str0m::media::Direction::SendRecv,
         }
     }
 
@@ -215,11 +225,33 @@ impl Endpoint {
         self.audio_direction = str0m::media::Direction::RecvOnly;
     }
 
-    /// 主动发起：创建 offer（含 video（可选）+ offer/answer + input 两个数据通道）。
-    /// 返回 (offer, pending, video_mid)。
+    /// 请求在下一个 offer 中添加第二路视频轨（摄像头，发布方向 SendRecv）。
+    /// 与屏幕视频轨共用 codec 配置；SFU 按 (origin, mid) 独立转发。
+    pub fn add_camera(&mut self) {
+        self.want_camera = true;
+        self.camera_direction = str0m::media::Direction::SendRecv;
+    }
+
+    /// 请求在下一个 offer 中添加第二路视频轨，方向为 **RecvOnly**（观看端）。
+    pub fn add_camera_recvonly(&mut self) {
+        self.want_camera = true;
+        self.camera_direction = str0m::media::Direction::RecvOnly;
+    }
+
+    /// 主动发起：创建 offer（含 video（可选）+ camera（可选）+ 数据通道）。
+    /// 返回 (offer, pending, video_mid, audio_mid, camera_mid)。
     pub fn create_offer(
         &mut self,
-    ) -> Result<(SdpOffer, SdpPendingOffer, Option<Mid>, Option<Mid>), RtcError> {
+    ) -> Result<
+        (
+            SdpOffer,
+            SdpPendingOffer,
+            Option<Mid>,
+            Option<Mid>,
+            Option<Mid>,
+        ),
+        RtcError,
+    > {
         let mut change = self.rtc.sdp_api();
         let video_mid = if self.want_video {
             Some(change.add_media(
@@ -237,6 +269,12 @@ impl Endpoint {
         } else {
             None
         };
+        // 摄像头第二路视频轨（与屏幕视频独立 mid，SFU 按 mid 转发）。
+        let camera_mid = if self.want_camera {
+            Some(change.add_media(MediaKind::Video, self.camera_direction, None, None, None))
+        } else {
+            None
+        };
         let _ = change.add_channel("offer/answer".into());
         let _ = change.add_channel("input".into());
         // #29 画质/显示切换：观看端 → SFU 的控制通道（选层请求等）。
@@ -250,7 +288,7 @@ impl Endpoint {
         let (offer, pending) = change
             .apply()
             .ok_or(RtcError::Io(std::io::Error::other("no changes")))?;
-        Ok((offer, pending, video_mid, audio_mid))
+        Ok((offer, pending, video_mid, audio_mid, camera_mid))
     }
 
     /// 被动应答：接受 offer。
@@ -514,7 +552,8 @@ mod tests {
     fn simulcast_offer_declares_qhf_rids() {
         let mut ep = Endpoint::new();
         ep.add_video_simulcast();
-        let (offer, _pending, video_mid, _audio_mid) = ep.create_offer().expect("offer");
+        let (offer, _pending, video_mid, _audio_mid, _camera_mid) =
+            ep.create_offer().expect("offer");
         assert!(video_mid.is_some(), "simulcast offer should include video");
         let sdp = offer.to_sdp_string();
         assert!(
@@ -533,7 +572,8 @@ mod tests {
     fn plain_video_offer_has_no_simulcast() {
         let mut ep = Endpoint::new();
         ep.add_video();
-        let (offer, _pending, video_mid, _audio_mid) = ep.create_offer().expect("offer");
+        let (offer, _pending, video_mid, _audio_mid, _camera_mid) =
+            ep.create_offer().expect("offer");
         assert!(video_mid.is_some());
         assert!(
             !offer.to_sdp_string().contains("simulcast"),

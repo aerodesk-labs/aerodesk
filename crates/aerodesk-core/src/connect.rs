@@ -285,7 +285,7 @@ fn connect_live_role_impl(
             endpoint.add_audio();
         }
     }
-    let (offer, pending, video_mid, audio_mid) = endpoint
+    let (offer, pending, video_mid, audio_mid, _camera_mid) = endpoint
         .create_offer()
         .map_err(|e| format!("offer: {e:?}"))?;
     let offer_json = serde_json::to_string(&offer).map_err(|e| e.to_string())?;

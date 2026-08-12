@@ -18,6 +18,14 @@ aerodesk-protocol.workspace = true
 aerodesk-core = { path = "../aerodesk-core" }
 objc = "0.2"
 tracing.workspace = true
+objc2-av-foundation = "0.3.2"
+block2 = "0.6"
+objc2 = "0.6"
+dispatch2 = "0.3"
+objc2-core-media = "0.3"
+objc2-core-video = "0.3"
+objc2-foundation = "0.3"
+objc2-core-foundation = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cpal = "0.15"

@@ -133,7 +133,7 @@ pub struct CameraFrame {
     pub pts_ms: u64,
 }
 
-/// 摄像头源（远端摄像头转发；前瞻抽象，各平台批次实现）。
+/// 摄像头源（远端摄像头转发；macOS AVFoundation 已实现，其他平台批次）。
 pub trait CameraSource {
     type Error: std::fmt::Display + std::fmt::Debug;
     fn start(&mut self, width: u32, height: u32, fps: u32) -> Result<(), Self::Error>;
