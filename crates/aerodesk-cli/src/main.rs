@@ -1282,11 +1282,13 @@ fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
     }
 }
 
-/// Linux 输入注入器：X11 会话用 XTest；无 X（Wayland/无头）用 uinput。
+/// Linux 输入注入器：X11 会话用 XTest；Wayland（无 DISPLAY）优先
+/// portal RemoteDesktop（compositor 级，无需 root），失败回退 uinput。
 #[cfg(target_os = "linux")]
 enum LinuxInjector {
     XTest(aerodesk_linux::inject::XTestInjector),
     Uinput(aerodesk_linux::inject::UinputInjector),
+    Portal(aerodesk_linux::portal_inject::PortalInjector),
 }
 
 #[cfg(target_os = "linux")]
@@ -1301,6 +1303,16 @@ impl LinuxInjector {
                 }
             }
         } else {
+            // Wayland：portal RemoteDesktop 优先（#319；aerodesk-linux 依赖固定启用 pipewire）。
+            {
+                match aerodesk_linux::portal_inject::PortalInjector::new() {
+                    Ok(i) => {
+                        info!("Linux input injector: portal RemoteDesktop");
+                        return Some(Self::Portal(i));
+                    }
+                    Err(e) => warn!("portal injector init failed, fallback uinput: {e}"),
+                }
+            }
             match aerodesk_linux::inject::UinputInjector::new() {
                 Ok(i) => Some(Self::Uinput(i)),
                 Err(e) => {
@@ -1320,6 +1332,7 @@ impl aerodesk_core::platform::InputInjector for LinuxInjector {
         match self {
             Self::XTest(i) => aerodesk_core::platform::InputInjector::inject(i, event),
             Self::Uinput(i) => aerodesk_core::platform::InputInjector::inject(i, event),
+            Self::Portal(i) => aerodesk_core::platform::InputInjector::inject(i, event),
         }
     }
 }

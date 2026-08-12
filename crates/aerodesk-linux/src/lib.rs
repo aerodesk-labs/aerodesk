@@ -15,6 +15,9 @@ pub mod audio;
 pub mod capture;
 pub mod encode;
 pub mod inject;
+/// Wayland portal RemoteDesktop 输入注入（仅 Linux + feature `pipewire`）。
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+pub mod portal_inject;
 /// VAAPI 硬编/硬解（仅 Linux；设备不可用时上层回退软编/软解）。
 #[cfg(target_os = "linux")]
 pub mod vaapi;
