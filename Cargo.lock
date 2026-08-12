@@ -70,6 +70,7 @@ version = "0.1.0"
 dependencies = [
  "aerodesk-core",
  "aerodesk-ffmpeg",
+ "aerodesk-linux",
  "aerodesk-macos",
  "aerodesk-protocol",
  "aerodesk-softenc",

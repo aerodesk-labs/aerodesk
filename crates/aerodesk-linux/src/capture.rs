@@ -1,7 +1,8 @@
 //! 屏幕采集（被控端）。
 //!
-//! X11 回退：x11rb `GetImage`（纯 Rust，无 C 依赖）读回 BGRA → RGBA。
-//! Wayland：xdg-desktop-portal ScreenCast + PipeWire（真机阶段）。
+//! X11 回退：x11rb `GetImage`（纯 Rust，无 C 依赖）读回 BGRX/BGRA → BGRA
+//! （core `VideoFrame.raw` 约定 BGRA32）。
+//! Wayland：xdg-desktop-portal ScreenCast + PipeWire（feature `pipewire`）。
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,7 +48,7 @@ impl X11Capturer {
         (self.width, self.height)
     }
 
-    /// 取下一帧（X11 GetImage，BGRA → RGBA）。
+    /// 取下一帧（X11 GetImage，BGRX/BGRA → BGRA32，core 约定）。
     pub fn capture_frame(&mut self) -> Option<CapturedFrame> {
         use x11rb::connection::Connection;
         use x11rb::protocol::xproto::{ConnectionExt, ImageFormat};
@@ -69,15 +70,15 @@ impl X11Capturer {
             .reply()
             .ok()?;
         let src = img.data.as_slice();
-        // X11 24/32bpp little-endian：内存为 BGRX / BGRA → 转 RGBA。
+        // X11 24/32bpp little-endian：内存为 BGRX / BGRA，直接作为 BGRA32 输出。
         let bpp = (self.depth / 8).max(3) as usize;
-        let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
+        let mut bgra = Vec::with_capacity(w as usize * h as usize * 4);
         for y in 0..h as usize {
             let row = y * w as usize * bpp;
             for x in 0..w as usize {
                 let i = row + x * bpp;
                 let (b, g, r) = (src[i], src[i + 1], src[i + 2]);
-                rgba.extend_from_slice(&[r, g, b, 255]);
+                bgra.extend_from_slice(&[b, g, r, 255]);
             }
         }
         let pts_us = SystemTime::now()
@@ -85,7 +86,7 @@ impl X11Capturer {
             .map(|d| d.as_micros() as i64)
             .unwrap_or(0);
         Some(CapturedFrame {
-            rgba,
+            bgra,
             width: w,
             height: h,
             pts_us,
@@ -107,7 +108,7 @@ impl aerodesk_core::platform::MediaSource for X11Capturer {
             .map(|f| aerodesk_core::platform::VideoFrame {
                 platform: None,
                 handle: None,
-                raw: Some(f.rgba),
+                raw: Some(f.bgra),
                 width: f.width,
                 height: f.height,
                 pts_ms: f.pts_us.max(0) as u64 / 1000,

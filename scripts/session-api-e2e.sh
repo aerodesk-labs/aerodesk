@@ -30,11 +30,18 @@ for _ in $(seq 1 50); do
     if nc -z 127.0.0.1 14002 2>/dev/null && nc -z 127.0.0.1 14003 2>/dev/null; then break; fi
     sleep 0.2
 done
-sleep 0.3
 
 echo "== 无 token 应 403"
-CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:14002/session/rooms")
-[ "$CODE" = "403" ] && echo "PASS unauthenticated 403" || fail "expected 403 got $CODE"
+# 等 INTERNAL_TOKEN 生效：前一 e2e（bitrate-feedback）SFU 无 token 且退出
+# 后有 3s drain 窗口，TCP 就绪探测可能命中旧实例（无 token → 200）。
+# 必须等到「无 token 返回 403」才认为已连到本脚本的受保护实例。
+CODE=000
+for _ in $(seq 1 50); do
+    CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:14002/session/rooms")
+    [ "$CODE" = "403" ] && break
+    sleep 0.2
+done
+[ "$CODE" = "403" ] && echo "PASS unauthenticated 403" || fail "expected 403 got $CODE (旧实例残留或 SFU 未绑定 14002)"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:14002/session/kick?room=x&client=1")
 [ "$CODE" = "403" ] && echo "PASS kick unauthenticated 403" || fail "expected 403 got $CODE"
 
