@@ -17,6 +17,8 @@ pub struct DxgiCapturer {
     /// 输出（缩放后）宽高；与原生不同时 capture_frame 做 CPU 双线性缩放。
     out_width: u32,
     out_height: u32,
+    /// 被控显示器在虚拟屏幕中的区域（像素；多显示器坐标映射用，#75）。
+    display_rect: (i32, i32, u32, u32),
 }
 
 #[cfg(windows)]
@@ -29,6 +31,11 @@ impl DxgiCapturer {
     /// 按目标分辨率采集（0/0 = 原生；目标必须为偶数，适配 OpenH264 I420）。
     /// 软编路径在 4K 显示器下性能不足，缩放到 1080p/720p 后可用（#3）。
     pub fn new_with_scale(target_w: u32, target_h: u32) -> Result<Self, String> {
+        Self::new_with_display(0, target_w, target_h)
+    }
+
+    /// 按显示器索引 + 目标分辨率采集（#75 多显示器；display=0 主显示器）。
+    pub fn new_with_display(display: u32, target_w: u32, target_h: u32) -> Result<Self, String> {
         if (target_w != 0 || target_h != 0) && (target_w == 0 || target_h == 0) {
             return Err("scale target must be both set or both 0".into());
         }
@@ -71,8 +78,8 @@ impl DxgiCapturer {
                 .EnumAdapters1(0)
                 .map_err(|e| format!("EnumAdapters1: {e}"))?;
             let output = adapter
-                .EnumOutputs(0)
-                .map_err(|e| format!("EnumOutputs: {e}"))?;
+                .EnumOutputs(display)
+                .map_err(|e| format!("EnumOutputs({display}): {e}"))?;
             let output1: IDXGIOutput1 = output.cast().map_err(|e| format!("cast output1: {e}"))?;
             let desc = output.GetDesc().map_err(|e| format!("GetDesc: {e}"))?;
             let width =
@@ -114,6 +121,12 @@ impl DxgiCapturer {
             } else {
                 (target_w, target_h)
             };
+            let display_rect = (
+                desc.DesktopCoordinates.left,
+                desc.DesktopCoordinates.top,
+                (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left).max(0) as u32,
+                (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top).max(0) as u32,
+            );
             Ok(Self {
                 context,
                 duplication,
@@ -122,12 +135,18 @@ impl DxgiCapturer {
                 height,
                 out_width,
                 out_height,
+                display_rect,
             })
         }
     }
 
     pub fn size(&self) -> (u32, u32) {
         (self.out_width, self.out_height)
+    }
+
+    /// 被控显示器在虚拟屏幕中的区域（像素；#75 注入坐标映射用）。
+    pub fn display_rect(&self) -> (i32, i32, u32, u32) {
+        self.display_rect
     }
 
     /// 取下一帧（阻塞最多 16ms）。无新帧/错误返回 None。
@@ -253,6 +272,11 @@ impl DxgiCapturer {
 
     /// 非 Windows 骨架：返回 Err（编译期占位）。
     pub fn new_with_scale(_target_w: u32, _target_h: u32) -> Result<Self, String> {
+        Err("windows: DXGI capture only available on Windows".into())
+    }
+
+    /// 非 Windows 骨架：返回 Err（编译期占位）。
+    pub fn new_with_display(_display: u32, _target_w: u32, _target_h: u32) -> Result<Self, String> {
         Err("windows: DXGI capture only available on Windows".into())
     }
 

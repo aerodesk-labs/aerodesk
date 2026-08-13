@@ -311,6 +311,7 @@ fn run() {
                         video_codec,
                         scale_w,
                         scale_h,
+                        _display as u32,
                     );
                 }
                 #[cfg(target_os = "linux")]
@@ -1350,6 +1351,11 @@ impl aerodesk_core::platform::InputInjector for LinuxInjector {
     }
 }
 
+/// Windows 被控端当前采集显示器在虚拟屏幕中的区域（#75 多显示器注入坐标映射）。
+#[cfg(target_os = "windows")]
+static ACTIVE_DISPLAY_RECT: std::sync::Mutex<Option<(i32, i32, u32, u32)>> =
+    std::sync::Mutex::new(None);
+
 /// 把观看端输入事件注入被控端（平台分支：macOS CGEvent / Windows SendInput / Linux XTest-uinput）。
 fn inject_input(seq: u64, event: &InputEvent) {
     #[cfg(target_os = "macos")]
@@ -1361,7 +1367,10 @@ fn inject_input(seq: u64, event: &InputEvent) {
     }
     #[cfg(target_os = "windows")]
     {
-        let mut inj = aerodesk_windows::inject::SendInputInjector;
+        let mut inj = aerodesk_windows::inject::SendInputInjector::new();
+        if let Ok(guard) = ACTIVE_DISPLAY_RECT.lock() {
+            inj.set_active_display(*guard);
+        }
         match aerodesk_core::platform::InputInjector::inject(&mut inj, event) {
             Ok(()) => info!("inject: seq={seq} {event:?}"),
             Err(e) => info!("inject failed: seq={seq} {event:?}: {e}"),
@@ -2616,6 +2625,7 @@ fn publisher_capture_windows(
     codec: Codec,
     target_w: u32,
     target_h: u32,
+    display: u32,
 ) {
     use aerodesk_core::platform::MediaSource;
     use aerodesk_softenc::openh264enc::OpenH264Encoder;
@@ -2623,7 +2633,7 @@ fn publisher_capture_windows(
 
     const FPS: u32 = 30;
 
-    let mut capture = match DxgiCapturer::new_with_scale(target_w, target_h) {
+    let mut capture = match DxgiCapturer::new_with_display(display, target_w, target_h) {
         Ok(c) => c,
         Err(e) => {
             error!("DXGI capture init failed: {e}");
@@ -2631,6 +2641,10 @@ fn publisher_capture_windows(
             return;
         }
     };
+    // #75 多显示器：注入坐标按被控显示器在虚拟屏幕中的区域映射。
+    if let Ok(mut guard) = ACTIVE_DISPLAY_RECT.lock() {
+        *guard = Some(capture.display_rect());
+    }
     let (w, h) = capture.size();
     if w == 0 || h == 0 {
         error!("DXGI capture: 无可用显示器输出");
