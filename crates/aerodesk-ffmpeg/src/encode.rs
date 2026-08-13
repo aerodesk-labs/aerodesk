@@ -365,7 +365,12 @@ impl FfmpegEncoder {
 impl Drop for FfmpegEncoder {
     fn drop(&mut self) {
         // 让编码器正常收尾（SVT-AV1 会在未 EOS 时打印告警）。
+        // 必须排空到 EOS：只 send_eof 不 drain 时 SVT-AV1 内部线程不释放，
+        // 同进程下一个 SVT 实例会死锁（main CI `av1_roundtrip` 挂起根因——
+        // loopback_all_codecs 的 AV1 实例 drop 后，av1_roundtrip 的新实例卡死）。
         let _ = self.encoder.send_eof();
+        let mut packet = Packet::empty();
+        while let Ok(()) = self.encoder.receive_packet(&mut packet) {}
     }
 }
 
