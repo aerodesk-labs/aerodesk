@@ -1138,89 +1138,117 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                     .bridge
                     .as_ref()
                     .is_some_and(|b| role == Role::Publisher && b.is_running(&room));
-                // #163 配额：房间/全局上限检查（0=不限）。桥自身 publisher 腿是
-                // 内部基础设施，豁免（否则小配额下会把真实 viewer 挤掉）。
-                if !bridge_leg {
-                    let room_len = rooms
-                        .lock()
-                        .unwrap()
-                        .get(&room)
-                        .map(|peers| peers.len())
-                        .unwrap_or(0);
+                // 全局配额原子预订：所有路径统一 fetch_add 占位，非桥腿超限回滚；
+                // 后续（用户/房间）失败也回滚，消除 load-then-increment 的 TOCTOU。
+                let total_reserved = {
                     let total = TOTAL_CLIENTS
                         .get()
                         .expect("total initialized")
-                        .load(Ordering::Relaxed);
-                    if let Err(reason) = quota_ok(
-                        room_len,
-                        total,
-                        config.max_room_clients,
-                        config.max_total_clients,
-                    ) {
-                        info!("reject join room={room} role={role:?}: {reason}");
-                        send(
-                            ws.clone(),
-                            SignalMessage::Error {
-                                message: reason.to_string(),
-                            },
-                        );
-                        continue;
+                        .fetch_add(1, Ordering::Relaxed);
+                    if !bridge_leg
+                        && config.max_total_clients > 0
+                        && total >= config.max_total_clients
+                    {
+                        TOTAL_CLIENTS
+                            .get()
+                            .expect("total initialized")
+                            .fetch_sub(1, Ordering::Relaxed);
+                        false
+                    } else {
+                        true
                     }
+                };
+                if !total_reserved {
+                    info!("reject join room={room} role={role:?}: server full");
+                    send(
+                        ws.clone(),
+                        SignalMessage::Error {
+                            message: "server full".into(),
+                        },
+                    );
+                    continue;
                 }
                 // #171 用户配额：JWT max_conns（0=不限）。
                 let user = claims.as_ref().map(|c| c.sub.clone());
+                let mut user_quota_inc = false;
                 if let Some(sub) = &user {
                     let max_conns = claims
                         .as_ref()
                         .map(|c| c.max_conns.unwrap_or(0))
                         .unwrap_or(0);
-                    let mut uc = USER_CONNS
-                        .get()
-                        .expect("user conns initialized")
-                        .lock()
-                        .unwrap();
-                    if let Err(reason) = user_quota_take(&mut uc, sub, max_conns) {
-                        info!("reject join user={sub}: {reason}");
+                    // max_conns==0 时 user_quota_take 不占位，回滚时不能 release。
+                    if max_conns > 0 {
+                        let mut uc = USER_CONNS
+                            .get()
+                            .expect("user conns initialized")
+                            .lock()
+                            .unwrap();
+                        if let Err(reason) = user_quota_take(&mut uc, sub, max_conns) {
+                            TOTAL_CLIENTS
+                                .get()
+                                .expect("total initialized")
+                                .fetch_sub(1, Ordering::Relaxed);
+                            info!("reject join user={sub}: {reason}");
+                            send(
+                                ws.clone(),
+                                SignalMessage::Error {
+                                    message: reason.to_string(),
+                                },
+                            );
+                            continue;
+                        }
+                        user_quota_inc = true;
+                    }
+                }
+                let peer_id = format!("{}-{}", room, fastrand_id());
+                // 房间配额检查 + peers 快照 + push 在同一 rooms 锁内（原子）。
+                let peers: Vec<PeerInfo> = {
+                    let mut r = rooms.lock().unwrap();
+                    let cur = r.get(&room).map(|peers| peers.len()).unwrap_or(0);
+                    if !bridge_leg && config.max_room_clients > 0 && cur >= config.max_room_clients
+                    {
+                        TOTAL_CLIENTS
+                            .get()
+                            .expect("total initialized")
+                            .fetch_sub(1, Ordering::Relaxed);
+                        if user_quota_inc && let Some(sub) = &user {
+                            let mut uc = USER_CONNS
+                                .get()
+                                .expect("user conns initialized")
+                                .lock()
+                                .unwrap();
+                            user_quota_release(&mut uc, sub.as_str());
+                        }
+                        info!("reject join room={room} role={role:?}: room full");
                         send(
                             ws.clone(),
                             SignalMessage::Error {
-                                message: reason.to_string(),
+                                message: "room full".into(),
                             },
                         );
                         continue;
                     }
-                }
-                let peer_id = format!("{}-{}", room, fastrand_id());
-                let peers: Vec<PeerInfo> = rooms
-                    .lock()
-                    .unwrap()
-                    .get(&room)
-                    .map(|peers| {
-                        peers
-                            .iter()
-                            .map(|p| PeerInfo {
-                                peer_id: p.id.clone(),
-                                role: p.role,
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                rooms
-                    .lock()
-                    .unwrap()
-                    .entry(room.clone())
-                    .or_default()
-                    .push(Peer {
+                    let peers: Vec<PeerInfo> = r
+                        .get(&room)
+                        .map(|peers| {
+                            peers
+                                .iter()
+                                .map(|p| PeerInfo {
+                                    peer_id: p.id.clone(),
+                                    role: p.role,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    r.entry(room.clone()).or_default().push(Peer {
                         id: peer_id.clone(),
                         role,
                         ws: ws.clone(),
                         user,
                         bridge_leg,
                     });
-                TOTAL_CLIENTS
-                    .get()
-                    .expect("total initialized")
-                    .fetch_add(1, Ordering::Relaxed);
+                    peers
+                };
                 info!("peer {peer_id} joined room {room} as {role:?}");
                 own_peer_id = Some(peer_id.clone());
                 send(
