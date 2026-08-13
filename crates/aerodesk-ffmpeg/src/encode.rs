@@ -136,7 +136,7 @@ impl FfmpegEncoder {
         Err(format!("no encoder available for {codec:?}: {last_err}"))
     }
 
-    fn open_named(
+    pub(crate) fn open_named(
         name: &str,
         id: ffmpeg_next::codec::Id,
         width: u32,

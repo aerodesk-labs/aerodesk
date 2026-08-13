@@ -6,6 +6,10 @@ pub mod decode;
 pub mod encode;
 pub mod mux;
 
+// #3 Windows 观看端硬解（D3D11VA/DXVA2，raw FFI；仅 Windows 编译）。
+#[cfg(windows)]
+pub mod hw_decode;
+
 /// FFmpeg 版本探测（最小可用性检查）。
 pub fn version() -> u32 {
     ffmpeg_next::util::version()
