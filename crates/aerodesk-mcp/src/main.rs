@@ -111,7 +111,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "read_file",
-            "description": "读取远程文件内容（默认上限 4MB）。",
+            "description": "读取远程文件内容（上限 700KiB，受 cmd 单条消息上限约束）。",
             "inputSchema": {
                 "type": "object",
                 "properties": {"path": {"type": "string", "description": "远程文件路径"}},

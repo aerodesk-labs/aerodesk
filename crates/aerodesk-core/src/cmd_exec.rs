@@ -22,10 +22,12 @@ pub use crate::platform::CmdOutput;
 pub const MAX_OUTPUT_BYTES: usize = 1 << 20;
 /// 默认超时。
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
-/// 读文件默认上限。
-pub const DEFAULT_READ_MAX_BYTES: usize = 4 << 20;
-/// 读文件硬上限（防内存失控）。
-pub const MAX_READ_BYTES: usize = 16 << 20;
+/// 读文件硬上限（防内存失控 + 保证 base64 后单条 cmd 响应 ≤1MiB 可送达）。
+/// cmd 通道单条消息上限与 str0m SCTP LOCAL_MAX_MESSAGE_SIZE（1MiB）对齐；
+/// 文件内容 base64 后约 4/3 倍，取 700KiB 留足 JSON 头余量。
+pub const MAX_READ_BYTES: usize = 700 * 1024;
+/// 读文件默认上限（与硬上限一致：超过该大小无法经单条 cmd 消息回传）。
+pub const DEFAULT_READ_MAX_BYTES: usize = MAX_READ_BYTES;
 
 /// 危险/交互式命令模式（默认禁止）。命中即拦截，除非命令以白名单前缀开头。
 pub fn is_dangerous(command: &str) -> bool {
@@ -391,11 +393,16 @@ impl CommandExecutor for DefaultCommandExecutor {
         let cap = max_bytes
             .unwrap_or(DEFAULT_READ_MAX_BYTES)
             .min(MAX_READ_BYTES);
-        let data = std::fs::read(path).map_err(|e| format!("read failed: {e}"))?;
-        if data.len() > cap {
-            return Err(format!("file too large ({}B > {}B)", data.len(), cap));
+        let mut f = std::fs::File::open(path).map_err(|e| format!("read failed: {e}"))?;
+        // 只读 cap+1 字节：超大文件不整体读入内存；超限返回的 error 响应很小可送达。
+        let mut buf = Vec::with_capacity(cap + 1);
+        f.take((cap + 1) as u64)
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("read failed: {e}"))?;
+        if buf.len() > cap {
+            return Err(format!("file too large (>{cap}B)"));
         }
-        Ok(data)
+        Ok(buf)
     }
 
     fn write_file(&self, path: &str, data: &[u8]) -> Result<(), String> {
@@ -696,6 +703,21 @@ mod tests {
         // 超上限报错
         let err = read_file(f.to_str().unwrap(), Some(4)).unwrap_err();
         assert!(err.contains("too large"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_file_rejects_oversize_without_reading_whole_file() {
+        let dir = std::env::temp_dir().join(format!("aerodesk-cmd-big-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("big.bin");
+        // 超过硬上限（700KiB）的默认读 → too large（错误响应可经 cmd 通道送达）。
+        std::fs::write(&f, vec![0u8; MAX_READ_BYTES + 100]).unwrap();
+        let err = read_file(f.to_str().unwrap(), None).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+        // 显式 max_bytes 超过硬上限时同样收敛到硬上限。
+        let err = read_file(f.to_str().unwrap(), Some(MAX_READ_BYTES + 1)).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
