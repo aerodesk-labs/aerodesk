@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -98,6 +98,10 @@ struct Shared {
     nonce: String,
     host: IpAddr,
     next_conn: AtomicU64,
+    /// TURN TCP/TLS 并发连接数（当前）。
+    tcp_conns: AtomicUsize,
+    /// TURN TCP/TLS 并发连接上限（0=不限）。
+    max_tcp_conns: usize,
     /// 每 IP 最大并发 allocation（0=不限）。
     max_allocs_per_ip: usize,
     /// 全局最大并发 allocation（0=不限）。
@@ -157,6 +161,8 @@ pub fn spawn(
         ),
         host: host_addr,
         next_conn: AtomicU64::new(1),
+        tcp_conns: AtomicUsize::new(0),
+        max_tcp_conns: env_usize("MAX_TURN_TCP_CONNS", 512),
         // #204：配额默认 16/IP、256 全局（0=不限）；CIDR 列表默认空=不限制。
         max_allocs_per_ip: env_usize("MAX_TURN_ALLOCS_PER_IP", 16),
         max_allocs_total: env_usize("MAX_TURN_ALLOCS_TOTAL", 256),
@@ -441,12 +447,24 @@ fn tcp_accept_loop(
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
+                // 连接配额：超限拒绝（防未授权客户端开无限连接耗尽线程）。
+                let cur = shared.tcp_conns.fetch_add(1, Ordering::SeqCst);
+                if shared.max_tcp_conns > 0 && cur >= shared.max_tcp_conns {
+                    shared.tcp_conns.fetch_sub(1, Ordering::SeqCst);
+                    drop(stream);
+                    warn!(
+                        "turn tcp: 连接超上限拒绝（当前 {cur}/{max}）",
+                        max = shared.max_tcp_conns
+                    );
+                    continue;
+                }
                 let conn_id = shared.next_conn.fetch_add(1, Ordering::SeqCst);
-                let shared = shared.clone();
+                let conn_shared = shared.clone();
                 let server = server.clone();
                 let acceptor = acceptor.clone();
                 std::thread::spawn(move || {
-                    let _ = tcp_conn_loop(shared, server, conn_id, stream, acceptor);
+                    let _ = tcp_conn_loop(conn_shared.clone(), server, conn_id, stream, acceptor);
+                    conn_shared.tcp_conns.fetch_sub(1, Ordering::SeqCst);
                 });
             }
             // 非阻塞 listener 在无连接时返回 WouldBlock：必须 sleep，否则空转烧满核。
