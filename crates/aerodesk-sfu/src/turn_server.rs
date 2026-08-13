@@ -411,18 +411,22 @@ impl FrameReader {
         self.pending.extend_from_slice(data);
     }
 
-    /// 取出下一完整帧（无则 None）。
-    fn next_frame(&mut self) -> Option<Vec<u8>> {
+    /// 取出下一完整帧；畸形帧返回 Err（调用方应断开连接）。
+    fn next_frame(&mut self) -> Result<Option<Vec<u8>>, String> {
         if self.pending.len() < 2 {
-            return None;
+            return Ok(None);
         }
         let len = u16::from_be_bytes([self.pending[0], self.pending[1]]) as usize;
-        if len < 20 || self.pending.len() < 2 + len {
-            return None;
+        if len < 20 {
+            // STUN 消息至少 20 字节；len<20 是畸形前缀，若不判错则永不 drain → 无界增长。
+            return Err(format!("bad frame length {len}"));
+        }
+        if self.pending.len() < 2 + len {
+            return Ok(None);
         }
         let frame = self.pending[2..2 + len].to_vec();
         self.pending.drain(..2 + len);
-        Some(frame)
+        Ok(Some(frame))
     }
 }
 
@@ -502,8 +506,15 @@ fn tcp_conn_loop(
             }
         };
         fr.push(&tmp[..n]);
-        while let Some(frame) = fr.next_frame() {
-            handle_packet(&shared, &server, &frame, key, &sink);
+        loop {
+            match fr.next_frame() {
+                Ok(Some(frame)) => handle_packet(&shared, &server, &frame, key, &sink),
+                Ok(None) => break,
+                Err(e) => {
+                    warn!("tcp turn frame error ({e}); closing conn {conn_id}");
+                    return Err(io::Error::other(e));
+                }
+            }
         }
     }
     // 连接断开：清理该连接 allocation。
@@ -706,6 +717,9 @@ fn handle_allocate(
             return;
         }
     };
+    // relay 线程依赖 recv_from 周期性返回才能检测 stop/expires 退出；否则永久阻塞
+    // 泄漏线程+socket（审查发现）。
+    let _ = relay.set_read_timeout(Some(POLL_TIMEOUT));
     let Ok(relay_port) = relay.local_addr().map(|a| a.port()) else {
         return;
     };
@@ -794,6 +808,11 @@ fn handle_permission(
         let Some(chan_val) = find_attr(pkt, ATTR_CHANNEL_NUMBER) else {
             return;
         };
+        // 长度不足 2 的 CHANNEL-NUMBER 是畸形包：不能索引 [0]/[1]，否则 panic。
+        if chan_val.len() < 2 {
+            send_error(server, sink, txid, method, 400, false, shared);
+            return;
+        }
         let chan = u16::from_be_bytes([chan_val[0], chan_val[1]]);
         if !(CHANNEL_BASE..=CHANNEL_MAX).contains(&chan) {
             send_error(server, sink, txid, method, 400, false, shared);
@@ -915,6 +934,19 @@ mod tests {
 
     // env 是进程全局的：设置 env 的测试（配额/deny/IPv6）串行化，避免并行互踩。
     static TESTS_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn frame_reader_rejects_bad_length_without_growing() {
+        let mut fr = FrameReader::new();
+        // 长度前缀 <20 是畸形帧：必须返回 Err（否则 pending 永不 drain 无界增长）。
+        fr.push(&[0x00, 0x13]);
+        assert!(fr.next_frame().is_err());
+        // 合法帧可取出。
+        let mut fr2 = FrameReader::new();
+        fr2.push(&[0x00, 0x14]);
+        fr2.push(&[0u8; 20]);
+        assert_eq!(fr2.next_frame().unwrap().unwrap().len(), 20);
+    }
 
     // ---------- 公共测试工具 ----------
 

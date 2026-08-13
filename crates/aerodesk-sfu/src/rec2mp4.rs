@@ -155,10 +155,13 @@ fn normalize_start_codes(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + 16);
     let mut i = 0;
     while i < data.len() {
+        // 仅把「独立」的 3 字节起始码升级为 4 字节：前一字节必须是 0（否则会
+        // 把已有的 00 00 00 01 从中间拆成 00 00 00 00 01，损坏 AnnexB）。
         if i + 3 <= data.len()
             && data[i] == 0
             && data[i + 1] == 0
             && data[i + 2] == 1
+            && (i == 0 || data[i - 1] != 0)
             && (i + 3 == data.len() || data[i + 3] != 0)
         {
             out.extend_from_slice(&[0, 0, 0, 1]);
@@ -382,14 +385,18 @@ fn mux_mp4(
         };
         cmd.args(["-map", "1:a:0", "-c:a", acodec]);
     }
-    let status = cmd
+    // -nostats -loglevel error 压低 stderr，避免大文件进度输出把管道填满；用
+    // output() 收集 stderr（而非 piped 后不读），失败时带出尾部日志便于排障。
+    cmd.args(["-nostats", "-loglevel", "error"]);
+    let out = cmd
         .arg(out)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .status()
+        .output()
         .map_err(|e| format!("ffmpeg 启动失败（需安装 ffmpeg）: {e}"))?;
-    if !status.success() {
-        return Err(format!("ffmpeg 复用失败（exit={status}）"));
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let tail = stderr.lines().rev().take(6).collect::<Vec<_>>().join(" | ");
+        return Err(format!("ffmpeg 复用失败（exit={}）: {tail}", out.status));
     }
     Ok(())
 }
@@ -482,6 +489,16 @@ mod tests {
         let mut v = vec![0, 0, 0, 1];
         v.extend_from_slice(nal);
         v
+    }
+
+    #[test]
+    fn normalize_start_codes_preserves_four_byte_and_upgrades_three_byte() {
+        // 4 字节起始码必须原样保留（审查修复：此前会被改写成 00 00 00 00 01）。
+        let four = [0, 0, 0, 1, 0x65, 0x88];
+        assert_eq!(normalize_start_codes(&four), vec![0, 0, 0, 1, 0x65, 0x88]);
+        // 独立 3 字节起始码升级为 4 字节。
+        let three = [0, 0, 1, 0x65, 0x88];
+        assert_eq!(normalize_start_codes(&three), vec![0, 0, 0, 1, 0x65, 0x88]);
     }
 
     /// 合成 ADREC2：SPS/PPS + IDR 同 rtp_ts，随后多个 P 帧。
