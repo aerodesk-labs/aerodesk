@@ -43,10 +43,10 @@ impl SystemWakeLock for LinuxSystemWakeLock {
             .spawn()
             .map_err(|e| format!("systemd-inhibit spawn failed: {e}"))?;
         let kind = if display { "显示器" } else { "系统" };
-        tracing::info!(
-            "已保持{kind}唤醒（systemd-inhibit --what={}，guard 释放时自动结束）",
-            if display { "sleep:idle" } else { "sleep" }
-        );
+        let what = if display { "sleep:idle" } else { "sleep" };
+        // 注意：不能把 `if display {...}` 作为 tracing 宏的位置参数——宏内部会引入
+        // 名为 `display` 的局部绑定（tracing::field::display），遮蔽本函数的 bool 参数。
+        tracing::info!("已保持{kind}唤醒（systemd-inhibit --what={what}，guard 释放时自动结束）");
         Ok(Box::new(InhibitGuard { child: Some(child) }))
     }
 }
