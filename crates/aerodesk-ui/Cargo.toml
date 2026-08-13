@@ -16,6 +16,8 @@ aerodesk-core = { path = "../aerodesk-core" }
 aerodesk-protocol = { path = "../aerodesk-protocol" }
 # 非 macOS 主控端真实媒体：OpenH264 软解（全平台）；macOS 用 VideoToolbox 不依赖。
 aerodesk-softenc = { path = "../aerodesk-softenc" }
+# #73 观看端 Opus 解码（generic_viewer 非 macOS 音频播放；macOS 由 macos_media 使用）。
+aerodesk-ffmpeg = { path = "../aerodesk-ffmpeg" }
 # 一次性密码/设备 ID 用系统 CSPRNG（wasm32 下由下方 target 依赖启用 js 后端）
 getrandom = "0.2"
 # macOS“显示主窗口”置前：经 raw-window-handle 拿到 NSView 做 makeKeyAndOrderFront/deminiaturize。
@@ -23,7 +25,6 @@ raw-window-handle = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 aerodesk-macos = { path = "../aerodesk-macos" }
-aerodesk-ffmpeg = { path = "../aerodesk-ffmpeg" }
 i-slint-backend-winit = "1.17"
 winit = "0.30"
 

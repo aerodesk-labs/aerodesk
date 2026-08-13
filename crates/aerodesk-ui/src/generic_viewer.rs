@@ -126,6 +126,8 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     let mut jitter = aerodesk_core::avsync::AudioJitterBuffer::new(0.08);
     let mut audio_frames: u64 = 0;
     let mut audio_played: u64 = 0;
+    // #73 Opus（48kHz）解码器（惰性创建；不可用时仅统计不播放）。
+    let mut opus_decoder: Option<aerodesk_ffmpeg::audio::OpusDecoder> = None;
     // #136 关键帧请求：首包/不连续/切层时向 SFU 发 PLI（节流 1s）。
     let mut last_kf_request: Option<std::time::Instant> = None;
     let mut last_kf_rid: Option<str0m::media::Rid> = None;
@@ -228,6 +230,27 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                         while let Some(f) = jitter.pop(avsync.audio_time_secs()) {
                             sink.push_pcm(&f);
                             audio_played += 1;
+                        }
+                    }
+                    continue;
+                }
+                if data.params.spec().codec == str0m::format::Codec::Opus {
+                    audio_frames += 1;
+                    if opus_decoder.is_none() {
+                        opus_decoder = aerodesk_ffmpeg::audio::OpusDecoder::new().ok();
+                    }
+                    if audio_sink.is_none() {
+                        audio_sink =
+                            aerodesk_core::audio_sink::AudioSink::new_with_rate(48_000).ok();
+                    }
+                    if let (Some(dec), Some(sink)) = (&mut opus_decoder, &mut audio_sink) {
+                        if let Some(pcm) = dec.decode(&data.data).ok().flatten() {
+                            avsync.on_audio(data.time.numer(), data.time.denom());
+                            jitter.push(avsync.audio_time_secs(), pcm);
+                            while let Some(f) = jitter.pop(avsync.audio_time_secs()) {
+                                sink.push_pcm(&f);
+                                audio_played += 1;
+                            }
                         }
                     }
                     continue;
