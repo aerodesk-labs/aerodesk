@@ -77,6 +77,10 @@ struct Config {
     /// SFU 池（按房间无状态哈希选路；长度 ≥1）。
     sfu_urls: Vec<String>,
     sfu_token: Option<String>,
+    /// SFU 负载轮询间隔（秒；仅池 >1 时启用）。
+    sfu_poll_interval_secs: u64,
+    /// SFU 探测失败后的冷却期（秒；期间不参与新房间分配）。
+    sfu_fail_cooldown_secs: u64,
     /// 跨 PoP 桥接编排（#216 M3）：BRIDGE_CMD 设置时启用；桥失败回退 Redirect。
     bridge: Option<Arc<BridgeManager>>,
     /// 桥空闲回收阈值（#246）：房间内无真实客户端超过该时长 → 停止桥。
@@ -106,6 +110,99 @@ static ROOMS: OnceLock<Rooms> = OnceLock::new();
 static TOTAL_CLIENTS: OnceLock<Arc<AtomicUsize>> = OnceLock::new();
 /// 按用户（JWT sub）在线连接数（#171）。
 static USER_CONNS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+/// SFU 池：无状态哈希回退 + 负载感知选路状态（#354 第二步）。
+struct SfuPool {
+    urls: Vec<String>,
+    /// 各 SFU 的负载评分（max shard_load ×10000，0..=10000）。
+    loads: Vec<AtomicU64>,
+    /// 各 SFU 的不可用截止时间戳（Unix 秒；0=可用）。
+    down_until: Vec<AtomicU64>,
+    /// 房间 → SFU 下标（粘性：新房间分配一次后固定；SFU 剔除时重选）。
+    room_sfu: Mutex<HashMap<String, usize>>,
+}
+
+static SFU_POOL: OnceLock<Arc<SfuPool>> = OnceLock::new();
+
+fn unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+impl SfuPool {
+    fn new(urls: Vec<String>) -> Self {
+        let n = urls.len().max(1);
+        Self {
+            urls,
+            loads: (0..n).map(|_| AtomicU64::new(0)).collect(),
+            down_until: (0..n).map(|_| AtomicU64::new(0)).collect(),
+            room_sfu: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn is_up(&self, i: usize, now: u64) -> bool {
+        self.down_until[i].load(Ordering::Relaxed) <= now
+    }
+
+    /// 选房间所在 SFU：粘性优先；否则选最闲健康 SFU 并记录；全挂回退哈希。
+    fn select(&self, room: &str) -> usize {
+        let now = unix_secs();
+        if let Some(i) = self.room_sfu.lock().unwrap().get(room).copied() {
+            if self.is_up(i, now) {
+                return i;
+            }
+        }
+        let chosen = (0..self.urls.len())
+            .filter(|&i| self.is_up(i, now))
+            .min_by_key(|&i| self.loads[i].load(Ordering::Relaxed))
+            .unwrap_or_else(|| sfu_for_room(&self.urls, room));
+        self.room_sfu
+            .lock()
+            .unwrap()
+            .insert(room.to_string(), chosen);
+        chosen
+    }
+}
+
+/// 从 /metrics/prometheus 解析各分片 shard_load 的最大值（×10000）。
+fn parse_max_shard_load(body: &str) -> u64 {
+    let mut max = 0.0f64;
+    for line in body.lines() {
+        if let Some(rest) = line.strip_prefix("aerodesk_sfu_shard_load{") {
+            if let Some(v) = rest.rsplit(' ').next().and_then(|s| s.parse::<f64>().ok()) {
+                max = max.max(v);
+            }
+        }
+    }
+    (max * 10_000.0).round() as u64
+}
+
+/// 后台轮询各 SFU 的负载；失败按冷却期标记下线。
+fn poll_sfu_pool(pool: Arc<SfuPool>, interval_secs: u64, cooldown_secs: u64) {
+    loop {
+        for i in 0..pool.urls.len() {
+            let url = format!("{}/metrics/prometheus", pool.urls[i]);
+            let result: Result<String, String> = ureq::get(&url)
+                .timeout(Duration::from_secs(3))
+                .call()
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.into_string().map_err(|e| e.to_string()));
+            match result {
+                Ok(body) => {
+                    pool.loads[i].store(parse_max_shard_load(&body), Ordering::Relaxed);
+                    pool.down_until[i].store(0, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    warn!("sfu pool: {url} unreachable ({e}); mark down");
+                    pool.down_until[i].store(unix_secs() + cooldown_secs, Ordering::Relaxed);
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_secs(interval_secs));
+    }
+}
 
 /// 用户配额检查（纯函数）：max=0 不限；已达上限拒绝；通过则计数 +1。
 fn user_quota_take(
@@ -260,6 +357,14 @@ fn sfu_for_room(pool: &[String], room: &str) -> usize {
     best
 }
 
+/// 选房间所在 SFU 下标：负载感知（粘性 + 最闲健康）优先；未初始化回退哈希。
+fn selected_sfu_idx(pool: &[String], room: &str) -> usize {
+    SFU_POOL
+        .get()
+        .map(|p| p.select(room))
+        .unwrap_or_else(|| sfu_for_room(pool, room))
+}
+
 /// 调 SFU 内部接口踢掉房间全部客户端（#249：桥死亡后触发 viewer --reconnect 恢复）。
 /// 返回是否成功（2xx）；失败由调用方决定重试（#249 review）。
 /// 注意：room 仅来自经过 sanitize_room 校验的房间名（[A-Za-z0-9._-]），
@@ -302,6 +407,19 @@ fn main() {
     let _ = ROOMS.set(rooms.clone());
     let _ = TOTAL_CLIENTS.set(Arc::new(AtomicUsize::new(0)));
     let _ = USER_CONNS.set(Mutex::new(HashMap::new()));
+    // SFU 池：初始化无状态哈希 + 负载感知状态；池 >1 时启动负载轮询。
+    {
+        let pool = Arc::new(SfuPool::new(config.sfu_urls.clone()));
+        let _ = SFU_POOL.set(pool.clone());
+        if config.sfu_urls.len() > 1 {
+            let interval = config.sfu_poll_interval_secs.max(1);
+            let cooldown = config.sfu_fail_cooldown_secs;
+            std::thread::Builder::new()
+                .name("sfu-poller".into())
+                .spawn(move || poll_sfu_pool(pool, interval, cooldown))
+                .ok();
+        }
+    }
 
     // #246 桥生命周期 monitor：房间无真实客户端超过 BRIDGE_IDLE_SECS → 停桥。
     // 空闲判定用纯函数 idle_rooms_to_stop（按 spawn 代数防旧时间戳误杀新桥）；
@@ -387,7 +505,7 @@ fn main() {
                         info!(
                             "bridge monitor: bridge died for room {room}; kicking SFU room to trigger client recovery"
                         );
-                        let sfu = &sfu_urls[sfu_for_room(&sfu_urls, &room)];
+                        let sfu = &sfu_urls[selected_sfu_idx(&sfu_urls, &room)];
                         if kick_sfu_room(sfu, sfu_token.as_deref(), &room) {
                             kick_retry.remove(&room);
                         } else {
@@ -409,7 +527,7 @@ fn main() {
                             *attempts = u32::MAX; // 放弃重试
                             continue;
                         }
-                        let sfu = &sfu_urls[sfu_for_room(&sfu_urls, room)];
+                        let sfu = &sfu_urls[selected_sfu_idx(&sfu_urls, room)];
                         if kick_sfu_room(sfu, sfu_token.as_deref(), room) {
                             *attempts = u32::MAX; // 成功，稍后清理
                         } else {
@@ -610,6 +728,14 @@ fn load_config() -> Config {
             }
         },
         sfu_token: std::env::var("SFU_TOKEN").ok(),
+        sfu_poll_interval_secs: std::env::var("SFU_POLL_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5),
+        sfu_fail_cooldown_secs: std::env::var("SFU_FAIL_COOLDOWN_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30),
         bridge,
         bridge_idle_secs: std::env::var("BRIDGE_IDLE_SECS")
             .ok()
@@ -1164,7 +1290,7 @@ fn proxy_to_sfu(
         Role::Publisher => "publisher",
         Role::Viewer => "viewer",
     };
-    let sfu = &config.sfu_urls[sfu_for_room(&config.sfu_urls, room)];
+    let sfu = &config.sfu_urls[selected_sfu_idx(&config.sfu_urls, room)];
     let url = format!("{sfu}/start?room={room}&role={role_name}");
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(10))
@@ -1212,6 +1338,8 @@ mod tests {
             turn: None,
             sfu_urls: vec!["http://127.0.0.1:3002".into()],
             sfu_token: None,
+            sfu_poll_interval_secs: 5,
+            sfu_fail_cooldown_secs: 30,
             bridge: None,
             bridge_idle_secs: Duration::from_secs(300),
             bridge_monitor_interval: Duration::from_secs(15),
@@ -1239,6 +1367,33 @@ mod tests {
             .map(|r| sfu_for_room(&pool, &format!("room-{r}")))
             .collect();
         assert!(hit.len() > 1, "100 个房间应分布到多个 SFU：{hit:?}");
+    }
+
+    #[test]
+    fn parse_max_shard_load_picks_hottest_shard() {
+        let body = "aerodesk_sfu_shard_load{shard=\"0\"} 0.2500\naerodesk_sfu_shard_load{shard=\"1\"} 0.9000\naerodesk_sfu_clients 5\n";
+        assert_eq!(parse_max_shard_load(body), 9000);
+        assert_eq!(parse_max_shard_load("no metric here"), 0);
+    }
+
+    #[test]
+    fn sfu_pool_select_is_sticky_load_aware_and_fails_over() {
+        let pool = SfuPool::new(vec![
+            "http://s1".to_string(),
+            "http://s2".to_string(),
+            "http://s3".to_string(),
+        ]);
+        pool.loads[0].store(9000, Ordering::Relaxed); // 高负载
+        pool.loads[1].store(1000, Ordering::Relaxed); // 最闲
+        pool.loads[2].store(5000, Ordering::Relaxed); // 中负载
+
+        let a = pool.select("room-a");
+        assert_eq!(a, 1, "新房间应选最闲 SFU");
+        assert_eq!(pool.select("room-a"), 1, "同房间应粘性");
+
+        // s2 下线 → 同房间重选到次闲的 s3。
+        pool.down_until[1].store(unix_secs() + 60, Ordering::Relaxed);
+        assert_eq!(pool.select("room-a"), 2);
     }
 
     #[test]
