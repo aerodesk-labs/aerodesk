@@ -165,10 +165,12 @@ impl FfmpegEncoder {
             dict.set("cpu-used", "4");
             dict.set("lag-in-frames", "0");
         } else if id == ffmpeg::codec::Id::AV1 {
-            // SVT-AV1：lookahead=0 降低编码延迟；仍有少量内部缓冲，
-            // 由 pending 队列吸收（见 encode_rgb）。
+            // SVT-AV1：仅设 preset=8。不要传 `svtav1-params: lookahead=0`——
+            // SVT 会忽略它并强制 lookahead=25（日志可见），且在部分 CPU 核数
+            // （如 4 核 runner）下会死锁导致编码永不返回（main CI 挂起根因，
+            // `decode::tests::av1_roundtrip` 卡 >60s）。默认 lookahead 下
+            // 编码器仍有少量内部缓冲，由 pending 队列吸收（见 encode_rgb）。
             dict.set("preset", "8");
-            dict.set("svtav1-params", "lookahead=0");
         } else if id == ffmpeg::codec::Id::H264 {
             dict.set("preset", "veryfast");
             // #3 晚加入 viewer 解码修复：libx264 默认 repeat-headers=0，
