@@ -10,6 +10,7 @@
 #[macro_use]
 extern crate tracing;
 
+mod cli_video_decoder;
 mod clipboard;
 mod cmd_exec;
 mod file_transfer;
@@ -375,15 +376,34 @@ fn run() {
                 info!("--encoder vt 仅 macOS（VideoToolbox）；Windows 请用 --encoder screen");
             }
         }
-        "publisher" if encoder == "ffmpeg" => publisher_ffmpeg(
-            &signal,
-            &room,
-            token.as_deref(),
-            audio,
-            audio_opus,
-            video_codec,
-            noisy,
-        ),
+        "publisher" if encoder == "ffmpeg" => {
+            // #8：参数化合成源（默认 640x360@30@1.5Mbps），支持 4K60 压测。
+            let w: u32 = arg(&args, "--width")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(640);
+            let h: u32 = arg(&args, "--height")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(360);
+            let fps: u32 = arg(&args, "--fps")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30);
+            let bitrate: u32 = arg(&args, "--bitrate")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1_500_000);
+            publisher_ffmpeg(
+                &signal,
+                &room,
+                token.as_deref(),
+                audio,
+                audio_opus,
+                video_codec,
+                noisy,
+                w,
+                h,
+                fps,
+                bitrate,
+            );
+        }
         "publisher" if encoder == "x264" => {
             #[cfg(not(target_os = "windows"))]
             publisher_x264(
@@ -1593,7 +1613,7 @@ fn viewer(
     let mut camera_frames = 0u64;
     let mut camera_bytes = 0u64;
     let mut camera_decoded = 0u64;
-    let mut camera_decoder: Option<aerodesk_ffmpeg::decode::FfmpegDecoder> = None;
+    let mut camera_decoder: Option<cli_video_decoder::CliVideoDecoder> = None;
     // #340：摄像头轨按 NAL 分片到达，需组装为完整访问单元再解码
     //（屏幕轨单 NAL/帧直接可解；摄像头 hevc_videotoolbox 多 NAL/帧）。
     let mut camera_assembler = AccessUnitAssembler::new();
@@ -1632,7 +1652,7 @@ fn viewer(
     let mut cmd_done = false;
     let mut last_cmd_send = Instant::now() - Duration::from_secs(1);
     // #74 解码端验证：FFmpeg 软解全部 codec（H264/H265/VP9/AV1），codec-e2e 断言。
-    let mut video_decoder: Option<aerodesk_ffmpeg::decode::FfmpegDecoder> = None;
+    let mut video_decoder: Option<cli_video_decoder::CliVideoDecoder> = None;
     // #136 关键帧请求：首包/不连续/切层时向 SFU 发 PLI（节流 1s）。
     let mut last_kf_request: Option<Instant> = None;
     let mut last_kf_rid: Option<str0m::media::Rid> = None;
@@ -1795,11 +1815,11 @@ fn viewer(
                             if let Some(cc) = core_codec {
                                 if camera_decoder
                                     .as_ref()
-                                    .map(|d| d.codec() != cc)
+                                    .map(|d| d.codec() != Some(cc))
                                     .unwrap_or(true)
                                 {
                                     camera_decoder =
-                                        aerodesk_ffmpeg::decode::FfmpegDecoder::new(cc).ok();
+                                        cli_video_decoder::CliVideoDecoder::new(cc).ok();
                                 }
                                 if let Some(dec) = &mut camera_decoder
                                     && let Some(au) = camera_assembler.push(
@@ -1814,7 +1834,7 @@ fn viewer(
                                         pts_ms: 0,
                                         rtp_timestamp: 0,
                                     };
-                                    if let Ok(Some(frame)) = dec.decode_unit(&unit)
+                                    if let Ok(Some(frame)) = dec.decode(&unit)
                                         && frame.raw.is_some()
                                     {
                                         camera_decoded += 1;
@@ -1832,11 +1852,11 @@ fn viewer(
                             if let Some(cc) = core_codec {
                                 if video_decoder
                                     .as_ref()
-                                    .map(|d| d.codec() != cc)
+                                    .map(|d| d.codec() != Some(cc))
                                     .unwrap_or(true)
                                 {
                                     video_decoder =
-                                        aerodesk_ffmpeg::decode::FfmpegDecoder::new(cc).ok();
+                                        cli_video_decoder::CliVideoDecoder::new(cc).ok();
                                 }
                                 if let Some(dec) = &mut video_decoder {
                                     let unit = aerodesk_core::media_pipeline::EncodedUnit {
@@ -1845,7 +1865,7 @@ fn viewer(
                                         pts_ms: 0,
                                         rtp_timestamp: 0,
                                     };
-                                    if let Ok(Some(frame)) = dec.decode_unit(&unit)
+                                    if let Ok(Some(frame)) = dec.decode(&unit)
                                         && frame.raw.is_some()
                                     {
                                         decoded_frames += 1;
@@ -2589,6 +2609,7 @@ fn publisher_generic<
 
 /// FFmpeg 软编发布端（合成源，全平台可用）：SyntheticSource + FfmpegEncoder，
 /// 走泛型 `publisher_generic`（#277 消费方泛型化证明）。
+#[allow(clippy::too_many_arguments)] // #8 参数化合成源（分辨率/fps/码率），与既有 publisher 系列同风格。
 fn publisher_ffmpeg(
     signal_url: &str,
     room: &str,
@@ -2597,19 +2618,19 @@ fn publisher_ffmpeg(
     audio_opus: bool,
     codec: Codec,
     noisy: bool,
+    w: u32,
+    h: u32,
+    fps: u32,
+    bitrate: u32,
 ) {
     use aerodesk_core::synthetic::SyntheticSource;
 
-    const W: u32 = 640;
-    const H: u32 = 360;
-    const FPS: u32 = 30;
-
-    let encoder = FfmpegEncoder::new(W, H, FPS, 1_500_000, codec).expect("ffmpeg encoder");
+    let encoder = FfmpegEncoder::new(w, h, fps, bitrate as u64, codec).expect("ffmpeg encoder");
     // #8：--noisy 高熵合成源（码率贴近目标档位，压测/高码率回归用）。
     let source = if noisy {
-        SyntheticSource::new_noisy(W, H)
+        SyntheticSource::new_noisy(w, h)
     } else {
-        SyntheticSource::new(W, H)
+        SyntheticSource::new(w, h)
     };
     publisher_generic(
         signal_url,
@@ -2618,7 +2639,7 @@ fn publisher_ffmpeg(
         audio,
         audio_opus,
         codec,
-        FPS,
+        fps,
         source,
         encoder,
         None::<NoAudioCapture>,
