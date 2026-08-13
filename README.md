@@ -28,7 +28,7 @@ aerodesk/
 │   ├── aerodesk-ios/        # iOS 适配器：VideoToolbox H.264 硬解（AnnexB→CVPixelBuffer）✅
 │   ├── aerodesk-android/    # Android 适配器骨架：MediaCodec/MediaProjection/Accessibility 🔨 P3
 │   ├── aerodesk-linux/      # Linux 适配器骨架：PipeWire/VAAPI/XTest 🔨 P4
-│   ├── aerodesk-windows/    # Windows 适配器骨架：WGC/DXGI + MF + SendInput 🔨 P4
+│   ├── aerodesk-windows/    # Windows 适配器：DXGI 采集+缩放 / MF 硬编 / WASAPI 音频 / SendInput / VDD ✅
 │   ├── aerodesk-ohos/       # HarmonyOS 适配器骨架：AVScreenCapture/OH_VideoDecoder/NAPI 🔨 P4
 │   └── x264/                # vendored x264 crate（+sliced_threads/threads 控制）
 ├── web/index.html           # 浏览器观看端（publisher=屏幕采集受限 / viewer=观看+输入）
@@ -118,7 +118,7 @@ CLI viewer 端到端收流、iOS 解码器（x264 关键帧 + P 帧全序列 8/8
 |---|---|---|---|
 | Web | ❌ | ✅ | P0 完成 |
 | macOS | ✅ | ✅ | P2 完成（采集/编码/注入） |
-| Windows | 🔨 | 🔨 | P4 骨架 |
+| Windows | ✅ | ✅ | 被控端+观看端可用（DXGI 采集/缩放、MF+OpenH264 编码、WASAPI 音频、SendInput、VDD；本机端到端验证） |
 | Linux | 🔨 | 🔨 | P4 骨架 |
 | Android | 🔨 | 🔨 | P3 骨架 |
 | iOS | ❌ | ✅ | P3 解码器完成（App 壳层待真机） |

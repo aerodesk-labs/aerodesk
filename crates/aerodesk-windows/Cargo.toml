@@ -1,6 +1,6 @@
 [package]
 name = "aerodesk-windows"
-description = "AeroDesk Windows adapter: DXGI/WGC capture, Media Foundation encode, SendInput injection (P4 skeleton)"
+description = "AeroDesk Windows adapter: DXGI capture/scale, MF+OpenH264 encode, WASAPI audio, SendInput injection, Parsec VDD"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
