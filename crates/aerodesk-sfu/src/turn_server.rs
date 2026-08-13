@@ -433,17 +433,25 @@ fn tcp_accept_loop(
     server: Arc<UdpSocket>,
     acceptor: Option<Arc<rustls::ServerConfig>>,
 ) {
-    for stream in listener.incoming() {
-        let Ok(stream) = stream else {
-            continue;
-        };
-        let conn_id = shared.next_conn.fetch_add(1, Ordering::SeqCst);
-        let shared = shared.clone();
-        let server = server.clone();
-        let acceptor = acceptor.clone();
-        std::thread::spawn(move || {
-            let _ = tcp_conn_loop(shared, server, conn_id, stream, acceptor);
-        });
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let conn_id = shared.next_conn.fetch_add(1, Ordering::SeqCst);
+                let shared = shared.clone();
+                let server = server.clone();
+                let acceptor = acceptor.clone();
+                std::thread::spawn(move || {
+                    let _ = tcp_conn_loop(shared, server, conn_id, stream, acceptor);
+                });
+            }
+            // 非阻塞 listener 在无连接时返回 WouldBlock：必须 sleep，否则空转烧满核。
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
     }
 }
 
