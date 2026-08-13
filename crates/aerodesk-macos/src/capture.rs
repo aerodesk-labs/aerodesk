@@ -60,34 +60,6 @@ fn ensure_displays() -> Result<SCShareableContent, String> {
     Ok(last)
 }
 
-/// 采集期间保持显示器唤醒（`caffeinate -d` 防显示器休眠）；Drop 时释放。
-/// 解决远控场景下显示器闲置休眠后 SCK 枚举不到显示器的问题（#315）。
-pub struct KeepAwake {
-    child: Option<std::process::Child>,
-}
-
-impl KeepAwake {
-    pub fn start() -> Self {
-        let child = std::process::Command::new("caffeinate")
-            .arg("-d")
-            .spawn()
-            .ok();
-        if child.is_some() {
-            tracing::info!("已保持显示器唤醒（caffeinate -d，会话结束自动释放）");
-        }
-        Self { child }
-    }
-}
-
-impl Drop for KeepAwake {
-    fn drop(&mut self) {
-        if let Some(mut c) = self.child.take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
-    }
-}
-
 /// 构建 SCContentFilter + SCStreamConfiguration（重建会话时复用）。
 /// width/height 传 0 表示按显示器原生尺寸等比缩放（保持宽高比）。
 fn build_capture(

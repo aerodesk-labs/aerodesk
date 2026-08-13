@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media::{Vp8Frame, parse_vp8_pcap};
 use aerodesk_core::media_socket::MediaSocket;
+use aerodesk_core::platform::SystemWakeLock;
 use aerodesk_core::turn_client::setup_turn;
 use aerodesk_core::{Endpoint, media_pipeline::Codec, signaling::WsSignalClient};
 use aerodesk_ffmpeg::encode::FfmpegEncoder;
@@ -2900,7 +2901,10 @@ fn publisher_capture_ffmpeg(
         }
     };
     // #315：采集会话期间保持显示器唤醒（防闲置休眠后 SCK 无显示器）。
-    let _keep_awake = aerodesk_macos::capture::KeepAwake::start();
+    let _keep_awake = aerodesk_macos::wake_lock::MacSystemWakeLock
+        .acquire(true)
+        .map_err(|e| warn!("保持显示器唤醒失败: {e}"))
+        .ok();
     // #75：输入注入坐标按被控显示器（不总是主屏）换算。
     aerodesk_macos::inject::set_active_display(Some(capture.display_id()));
     let mut encoder = FfmpegEncoder::new(W, H, FPS, 8_000_000, codec).expect("ffmpeg encoder");
@@ -3111,7 +3115,10 @@ fn publisher_capture(
         aerodesk_macos::inject::set_active_display(Some(layers[0].2.display_id()));
     }
     // #315：采集会话期间保持显示器唤醒（防闲置休眠后 SCK 无显示器）。
-    let _keep_awake = aerodesk_macos::capture::KeepAwake::start();
+    let _keep_awake = aerodesk_macos::wake_lock::MacSystemWakeLock
+        .acquire(true)
+        .map_err(|e| warn!("保持显示器唤醒失败: {e}"))
+        .ok();
 
     let mut connected = false;
     // #73 真实系统音频：SCK audio-only SCStream 采集本机正在播放的声音；

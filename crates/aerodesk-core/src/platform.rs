@@ -12,7 +12,7 @@
 //!
 //! 平台能力矩阵：MediaSource/Encoder/Decoder/Renderer/InputInjector/AudioSink/AudioCapturer/
 //! Clipboard/CursorSource/Permissions/CameraSource/FilePicker/AppShell/VirtualDisplay/Notifier/
-//! CommandExecutor（远程命令「bash」，策略层在 [`crate::cmd_exec`]）。
+//! CommandExecutor（远程命令「bash」，策略层在 [`crate::cmd_exec`]）/ SystemWakeLock（保持唤醒）。
 
 use std::any::Any;
 use std::sync::Arc;
@@ -207,6 +207,37 @@ pub trait CommandExecutor {
     fn kill_process(&self, pid: u32) -> Result<(), String>;
 }
 
+/// 唤醒锁句柄：Drop 即释放（平台实现负责 kill 子进程/恢复系统状态）。
+/// `release` 可显式提前释放；默认空实现，平台按需覆盖。
+pub trait WakeGuard {
+    fn release(&mut self) {}
+}
+
+/// 保持系统/显示器唤醒（流媒体采集/播放期间防止休眠，见 #334）。
+///
+/// 平台差异由各适配器实现：macOS `caffeinate -d`、Windows
+/// `SetThreadExecutionState`、Linux `systemd-inhibit`（后两者批次）。
+/// core 提供 [`NoopSystemWakeLock`] 默认实现，保证未接适配器的平台
+/// 编译与运行不受影响（可达性，见 `RULE_可达性`）。
+pub trait SystemWakeLock {
+    /// 获取唤醒锁；`display=true` 时同时阻止显示器休眠。
+    /// 返回的 guard 存活期间锁保持；Drop/release 后释放。
+    fn acquire(&self, display: bool) -> Result<Box<dyn WakeGuard>, String>;
+}
+
+/// 默认空实现：不做任何事（平台未接适配器时的安全回退）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopSystemWakeLock;
+
+impl SystemWakeLock for NoopSystemWakeLock {
+    fn acquire(&self, _display: bool) -> Result<Box<dyn WakeGuard>, String> {
+        Ok(Box::new(NoopWakeGuard))
+    }
+}
+
+struct NoopWakeGuard;
+impl WakeGuard for NoopWakeGuard {}
+
 /// 便捷 re-export：`use aerodesk_core::platform::*` 同时拿到 Codec/EncodedUnit。
 pub use crate::media_pipeline::{Codec, EncodedUnit};
 
@@ -245,5 +276,23 @@ mod tests {
         let mut inj = DummyInjector;
         InputInjector::set_active_display(&mut inj, Some(1));
         InputInjector::set_active_display(&mut inj, None);
+    }
+
+    /// #334：Noop 唤醒锁可获取、可显式释放、可 Drop（不 panic）。
+    #[test]
+    fn noop_wake_lock_acquire_release() {
+        let lock = NoopSystemWakeLock;
+        let mut guard = lock.acquire(true).unwrap();
+        guard.release();
+        drop(guard);
+        let _ = lock.acquire(false).unwrap();
+    }
+
+    /// #334：SystemWakeLock / WakeGuard 均可对象化（适配器扩展点）。
+    #[test]
+    fn wake_lock_traits_are_object_safe() {
+        let lock: Box<dyn SystemWakeLock> = Box::new(NoopSystemWakeLock);
+        let guard: Box<dyn WakeGuard> = lock.acquire(true).unwrap();
+        drop(guard);
     }
 }

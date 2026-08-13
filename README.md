@@ -25,7 +25,7 @@ aerodesk/
 │   ├── aerodesk-core/       # 客户端核心：Endpoint(SDP/ICE/DTLS/数据通道) + 信令客户端 + VP8 解析 ✅
 │   │                        #   platform trait：MediaSource/Encoder/Decoder/Renderer/InputInjector/
 │   │                        #   AudioSink/AudioCapturer/Clipboard/CursorSource/Permissions/CameraSource/
-│   │                        #   FilePicker/AppShell/VirtualDisplay/Notifier/CommandExecutor（#330 bash）
+│   │                        #   FilePicker/AppShell/VirtualDisplay/Notifier/CommandExecutor（#330）/SystemWakeLock（#334）
 │   ├── aerodesk-cli/        # CLI：publisher（pcap/x264/VT/screen 四种源）+ viewer ✅
 │   ├── aerodesk-macos/      # macOS 适配器：ScreenCaptureKit 采集 + VT 硬编 + x264 软编 + CGEvent 注入 ✅
 │   ├── aerodesk-ios/        # iOS 适配器：VideoToolbox H.264 硬解（AnnexB→CVPixelBuffer）✅

@@ -25,8 +25,9 @@
 | #6 HarmonyOS | NAPI 规约 ✅（docs/HARMONYOS.md，tmp/ohos-check） | DevEco + OHOS NDK + 鸿蒙真机（ring 交叉编译） |
 | #75 鼠标控制 | 远程光标渲染 ✅（#86）、输入全事件 e2e ✅（#95）、高 DPI/多显示器坐标映射 ✅（#105）、远端光标叠加默认关（对齐 RustDesk/TeamViewer，#274） | 多显示器真机高 DPI 验证 + Windows/Linux/Android 注入真机验收 |
 | #271 剪贴板 | **macOS/Windows/Linux 文本双向同步**（#281/#283 + 既有 macOS）；图片/富文本待做 | — |
-| #277 平台抽象 | **core `platform` trait 全部实现 + 平台重复 trait 收敛 + 消费方泛型化**（publisher_generic + run_viewer_generic，#278/#279）：MediaSource/Encoder/Decoder/Renderer/InputInjector/AudioSink/AudioCapturer/Clipboard/CursorSource/Permissions/CameraSource/FilePicker/AppShell/VirtualDisplay/Notifier；键盘映射 macOS/Windows VK/Linux keysym | 平台真机批次（Windows WASAPI→Windows Codex、Linux PipeWire、Android JNI、macOS AVFoundation 摄像头） |
+| #277 平台抽象 | **core `platform` trait 全部实现 + 平台重复 trait 收敛 + 消费方泛型化**（publisher_generic + run_viewer_generic，#278/#279）：MediaSource/Encoder/Decoder/Renderer/InputInjector/AudioSink/AudioCapturer/Clipboard/CursorSource/Permissions/CameraSource/FilePicker/AppShell/VirtualDisplay/Notifier/CommandExecutor（#330）；键盘映射 macOS/Windows VK/Linux keysym | 平台真机批次（Windows WASAPI→Windows Codex、Linux PipeWire、Android JNI、macOS AVFoundation 摄像头） |
 | #330 平台抽象第五轮 | **CommandExecutor（bash/远程命令）trait 化**（#330）：core `platform` 新增 CommandExecutor（run_command/read_file/write_file/list_processes/kill_process），`cmd_exec` 收敛为策略层（危险拦截/白名单/审计）+ 原始执行委托；core 提供 DefaultCommandExecutor（unix sh -c / Windows cmd /C），macOS 适配器 `MacCommandExecutor` 实现 trait；Windows/Linux 适配器由各自 agent 补充 | — |
+| #334 平台抽象第六轮 | **SystemWakeLock（保持唤醒）trait 化**（#334）：core `platform` 新增 SystemWakeLock/WakeGuard + 默认 Noop；macOS `MacSystemWakeLock`（caffeinate -d/-i）替代 `capture::KeepAwake`，CLI 发布端接入；Windows SetThreadExecutionState / Linux systemd-inhibit 由各自 agent 补充 | — |
 | #8 压测 | 工具链/报告 ✅（#38）、netem ✅ | 干净环境 4K60 基线 + 真机矩阵 |
 | #58 工具栏媒体控制 | 画质选层 ✅、音频链路 ✅（PCMU/Opus → SFU → viewer + UI 静音）、**真实系统音频采集已接入**（SCK audio → Opus/PCMU，#276）、显示器切换 ✅（viewer `--display N` → SFU control 转发 → publisher 重建采集，`scripts/display-e2e.sh` 守护）；e2e 已接入 macOS CI | 多显示器真机切换验收 |
 
