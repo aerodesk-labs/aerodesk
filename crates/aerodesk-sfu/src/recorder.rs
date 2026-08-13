@@ -138,7 +138,8 @@ impl Recording {
 /// 录制器（进程级单例，跨分片共享）。
 pub struct Recorder {
     root: PathBuf,
-    audit: Mutex<File>,
+    /// 审计日志句柄（轮转时短暂为 None，用于关闭文件后再 rename，Windows 兼容）。
+    audit: Mutex<Option<File>>,
     recordings: Mutex<HashMap<String, Recording>>,
     /// 按需模式（RECORD_ON_DEMAND=1）：只录显式 start() 的房间（#160）。
     on_demand: bool,
@@ -146,6 +147,8 @@ pub struct Recorder {
     max_bytes: u64,
     /// 单段时间上限（微秒，0=不限，#180 轮转）。
     max_secs: u64,
+    /// 审计日志轮转上限（0=不限；超限轮转为 audit.log.1 后重开）。
+    audit_max_bytes: u64,
 }
 
 fn now_micros() -> u64 {
@@ -174,11 +177,23 @@ fn safe_name(room: &str) -> String {
 
 impl Recorder {
     /// 创建录制器并打开审计日志（追加模式）。目录不存在会自动创建。
+    /// 审计日志不轮转（0=不限）。
     pub fn new(
         root: impl AsRef<Path>,
         on_demand: bool,
         max_bytes: u64,
         max_secs: u64,
+    ) -> std::io::Result<Recorder> {
+        Self::new_with_audit(root, on_demand, max_bytes, max_secs, 0)
+    }
+
+    /// 带审计日志轮转上限的构造（`AUDIT_MAX_BYTES`，0=不限）。
+    pub fn new_with_audit(
+        root: impl AsRef<Path>,
+        on_demand: bool,
+        max_bytes: u64,
+        max_secs: u64,
+        audit_max_bytes: u64,
     ) -> std::io::Result<Recorder> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)?;
@@ -188,11 +203,12 @@ impl Recorder {
             .open(root.join("audit.log"))?;
         Ok(Recorder {
             root,
-            audit: Mutex::new(audit),
+            audit: Mutex::new(Some(audit)),
             recordings: Mutex::new(HashMap::new()),
             on_demand,
             max_bytes,
             max_secs,
+            audit_max_bytes,
         })
     }
 
@@ -267,9 +283,37 @@ impl Recorder {
     }
 
     fn audit(&self, line: serde_json::Value) {
-        let mut f = self.audit.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = writeln!(f, "{line}");
-        let _ = f.flush();
+        let mut guard = self.audit.lock().unwrap_or_else(|e| e.into_inner());
+        let audit_path = self.root.join("audit.log");
+        if guard.is_none() {
+            *guard = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&audit_path)
+                .ok();
+        }
+        // 先轮转再写：超限的旧文件整体归档为 audit.log.1，新行写进空文件。
+        if self.audit_max_bytes > 0
+            && guard
+                .as_ref()
+                .and_then(|f| f.metadata().ok())
+                .map(|m| m.len() >= self.audit_max_bytes)
+                .unwrap_or(false)
+        {
+            let old_path = self.root.join("audit.log.1");
+            *guard = None; // 关闭句柄（Windows 需先关才能 rename）
+            let _ = fs::remove_file(&old_path);
+            let _ = fs::rename(&audit_path, &old_path);
+            *guard = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&audit_path)
+                .ok();
+        }
+        if let Some(f) = guard.as_mut() {
+            let _ = writeln!(f, "{line}");
+            let _ = f.flush();
+        }
     }
 
     /// 写一条审计事件（含按需录制 API 调用追责，#240）。
@@ -597,6 +641,29 @@ mod tests {
         assert!(audit.contains("\"status\":403"), "{audit}");
         assert!(audit.contains("\"event\":\"room_end\""), "{audit}");
         assert!(audit.contains("\"duration_us\""), "{audit}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audit_log_rotates_at_cap() {
+        let dir = tmpdir("audit-rot");
+        let rec = Recorder::new_with_audit(&dir, false, 0, 0, 128).unwrap();
+        // 第一条大事件：写后文件超限。
+        rec.audit_event(
+            "record_api",
+            serde_json::json!({ "action": "a", "detail": "x".repeat(200) }),
+        );
+        // 第二条：写前检测到超限 → 归档 audit.log.1，新行写进空 audit.log。
+        rec.audit_event("record_api", serde_json::json!({ "action": "b" }));
+
+        let audit = fs::read_to_string(dir.join("audit.log")).unwrap();
+        let old = fs::read_to_string(dir.join("audit.log.1")).unwrap();
+        assert!(old.contains("\"action\":\"a\""), "{old}");
+        assert!(audit.contains("\"action\":\"b\""), "{audit}");
+        assert!(
+            !audit.contains("\"action\":\"a\""),
+            "旧内容应归档到 .1，不在新文件：{audit}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -539,7 +539,18 @@ pub fn main() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0)
             * 1_000_000; // env 为秒，内部微秒
-        match aerodesk_sfu::recorder::Recorder::new(&dir, on_demand, max_bytes, max_secs) {
+        // 审计日志轮转上限（0=不限；超限归档为 audit.log.1）。
+        let audit_max_bytes: u64 = std::env::var("AUDIT_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        match aerodesk_sfu::recorder::Recorder::new_with_audit(
+            &dir,
+            on_demand,
+            max_bytes,
+            max_secs,
+            audit_max_bytes,
+        ) {
             Ok(rec) => {
                 let rec = Arc::new(rec);
                 // SIGINT（Ctrl+C）时先 finalize 录制再退出，保证 meta.json 落盘。
