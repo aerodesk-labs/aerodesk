@@ -133,8 +133,8 @@ signal.aerodesk.io {
   含 draining/抓取失败/客户端掉线/媒体停摆/丢包/RTT/质量样本缺失/TURN 容量/
   录制磁盘水位/无在录房间），用 `promtool check rules` 校验后挂载到 Prometheus
   `rule_files`，Alertmanager 按 `severity` 路由（page/warning）。丢包/RTT/质量
-  样本/媒体停摆规则按分片（`{shard=~".+"}`）告警——总序列是各分片求和不能直接
-  设阈值；`AeroDeskSFUNoActiveRecordings` 默认注释关闭（仅按需录制且期望持续录制
+  样本/媒体停摆规则按分片（`{shard=~".+"}`）告警——总量是跨分片加权平均，单一坏
+  分片会被摊薄，不宜直接设阈值；`AeroDeskSFUNoActiveRecordings` 默认注释关闭（仅按需录制且期望持续录制
   时启用）。磁盘水位依赖 node_exporter 暴露 RECORD_DIR 所在挂载点；分片 CPU 未
   导出，模板内置 pps 近似的注释示例（配合容量基线 scripts/sfu-capacity-bench.sh）。
 - **健康检查**：`GET /healthz` 返回 JSON（`status: ok|draining` + shards/clients）；
