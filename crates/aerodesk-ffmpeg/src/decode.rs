@@ -136,8 +136,18 @@ mod tests {
     use crate::encode::FfmpegEncoder;
 
     fn roundtrip(codec: Codec) {
+        crate::encode::init();
         let (w, h) = (320u32, 180u32);
-        let mut enc = FfmpegEncoder::new(w, h, 30, 1_000_000, codec).expect("encoder");
+        // 显式软编：hevc_mf 在部分 windows runner 上永久阻塞，自动选编码器
+        // 路径由 macOS/ubuntu CI 与真机覆盖；VP9/AV1 无 MF 路径，仍用软编。
+        let (enc_name, id) = match codec {
+            Codec::Hevc => ("libx265", ffmpeg_next::codec::Id::HEVC),
+            Codec::Vp9 => ("libvpx-vp9", ffmpeg_next::codec::Id::VP9),
+            Codec::Av1 => ("libsvtav1", ffmpeg_next::codec::Id::AV1),
+            _ => ("libx264", ffmpeg_next::codec::Id::H264),
+        };
+        let mut enc =
+            FfmpegEncoder::open_named(enc_name, id, w, h, 30, 1_000_000).expect("encoder");
         enc.request_keyframe();
         // 解码器必须跨帧复用：SPS/PPS/参考帧状态在关键帧建立，P 帧续解。
         let mut dec = FfmpegDecoder::new(codec).expect("decoder");
