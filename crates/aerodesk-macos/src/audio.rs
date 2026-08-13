@@ -319,16 +319,20 @@ mod tests {
 }
 
 /// 核心 `AudioSink` 实现（观看端 PCM 播放）。
+///
+/// 注意：`self.push_pcm(...)` 在这里会解析到 **trait 方法自身**（固有方法接收者
+/// 是 `&self`、trait 是 `&mut self`，解析优先 trait）→ 无限递归告警。用 UFCS
+/// `<AudioSink>::` 显式调固有实现。
 impl aerodesk_core::platform::AudioSink for AudioSink {
     fn push_pcm(&mut self, samples: &[i16]) {
-        self.push_pcm(samples);
+        <AudioSink>::push_pcm(self, samples);
     }
 
     fn set_muted(&mut self, muted: bool) {
-        self.set_muted(muted);
+        <AudioSink>::set_muted(self, muted);
     }
 
     fn set_volume(&mut self, volume: u16) {
-        self.set_volume(volume);
+        <AudioSink>::set_volume(self, volume);
     }
 }
