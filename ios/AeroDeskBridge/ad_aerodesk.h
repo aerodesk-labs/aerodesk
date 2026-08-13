@@ -45,16 +45,14 @@ int ad_viewer_send_input(void *viewer, const char *json);
 /// 取解码后的 PCM i16 音频样本（8kHz 单声道）。返回拷贝样本数（0=暂无，<0=错误）。
 int ad_viewer_take_audio(void *viewer, int16_t *dst, size_t max);
 
+/// 切换画面源：show=1 摄像头 / 0 屏幕（take_frame 按此返回对应轨）。返回 0=成功。
+int ad_viewer_set_show_camera(void *viewer, int show);
 
+/// 是否已收到摄像头轨。1=有，0=无。
+int ad_viewer_camera_available(void *viewer);
 
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* AD_AERODESK_H */
-
-/// 切换画面源：show=1 摄像头 / 0 屏幕（take_frame 按此返回对应轨）。返回 0=成功。
-int ad_viewer_set_show_camera(void *viewer, int show);
-
-/// 是否已收到摄像头轨。1=有，0=无。
-int ad_viewer_camera_available(void *viewer);
