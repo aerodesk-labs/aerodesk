@@ -152,7 +152,7 @@ impl SfuPool {
     /// 房间切成两半；新房间选最闲健康 SFU（负载相同时按 rendezvous 权重分摊），
     /// 全部下线回退哈希。锁贯穿「查/选/写」消除同房间并发首连的竞态。
     fn select(&self, room: &str) -> usize {
-        let mut reg = self.room_sfu.lock().unwrap();
+        let mut reg = self.room_sfu.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(i) = reg.get(room).copied() {
             return i;
         }
@@ -492,7 +492,7 @@ fn main() {
                     let mut alive_now: std::collections::HashSet<String> =
                         running.iter().map(|(r, _)| r.clone()).collect();
                     let real_peers: HashMap<String, usize> = {
-                        let rooms = rooms.lock().unwrap();
+                        let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
                         running
                             .iter()
                             .map(|(room, _)| {
@@ -515,7 +515,7 @@ fn main() {
                         // 记录为 monitor 主动停止（死亡检测排除），再二次确认 + 停桥。
                         monitor_stopped.insert(room.clone());
                         let stop = {
-                            let rooms = rooms.lock().unwrap();
+                            let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
                             let real = rooms
                                 .get(&room)
                                 .map(|peers| peers.iter().filter(|p| !p.bridge_leg).count())
@@ -879,7 +879,7 @@ fn handle(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
     // 可观测性（#180 后续）：信号服务器此前只有 /ws，无健康/指标端点。
     if request.method() == "GET" && request.url() == "/healthz" {
         let clients = total_clients();
-        let room_count = rooms.lock().unwrap().len();
+        let room_count = rooms.lock().unwrap_or_else(|e| e.into_inner()).len();
         let payload = serde_json::json!({
             "status": "ok",
             "clients": clients,
@@ -893,7 +893,7 @@ fn handle(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
     }
     if request.method() == "GET" && request.url() == "/metrics/prometheus" {
         let clients = total_clients();
-        let room_count = rooms.lock().unwrap().len();
+        let room_count = rooms.lock().unwrap_or_else(|e| e.into_inner()).len();
         let bridges = config
             .bridge
             .as_ref()
@@ -930,7 +930,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
     let mut own_peer_id: Option<String> = None;
 
     loop {
-        let msg = match ws.lock().unwrap().next() {
+        let msg = match ws.lock().unwrap_or_else(|e| e.into_inner()).next() {
             Some(Message::Text(t)) => t,
             Some(_) => continue,
             None => break,
@@ -1203,7 +1203,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 let peer_id = format!("{}-{}", room, fastrand_id());
                 // 房间配额检查 + peers 快照 + push 在同一 rooms 锁内（原子）。
                 let peers: Vec<PeerInfo> = {
-                    let mut r = rooms.lock().unwrap();
+                    let mut r = rooms.lock().unwrap_or_else(|e| e.into_inner());
                     let cur = r.get(&room).map(|peers| peers.len()).unwrap_or(0);
                     if !bridge_leg && config.max_room_clients > 0 && cur >= config.max_room_clients
                     {
@@ -1322,7 +1322,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
 
     // 断开：移除并广播 PeerLeft
     let found = {
-        let mut rooms = rooms.lock().unwrap();
+        let mut rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
         let mut found = None;
         for (room, peers) in rooms.iter_mut() {
             if let Some(idx) = peers.iter().position(|p| Arc::ptr_eq(&p.ws, &ws)) {
@@ -1358,7 +1358,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
     // #66：先快照同房间其它连接、释放 rooms 锁，再尽力广播 PeerLeft。
     // 不能在持有 rooms 锁时去锁其它连接的 ws（锁序反转 → 死锁）。
     let peers: Vec<Arc<Mutex<Websocket>>> = {
-        let rooms = rooms.lock().unwrap();
+        let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
         rooms
             .get(&room)
             .map(|peers| peers.iter().map(|p| p.ws.clone()).collect())
@@ -1392,7 +1392,7 @@ fn send(ws: Arc<Mutex<Websocket>>, msg: SignalMessage) {
 }
 
 fn find_room(rooms: &Rooms, peer_id: &str) -> Option<String> {
-    let rooms = rooms.lock().unwrap();
+    let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
     rooms
         .iter()
         .find(|(_, peers)| peers.iter().any(|p| p.id == peer_id))
@@ -1531,8 +1531,14 @@ mod tests {
         // TOTAL_CLIENTS 是进程级 OnceLock，本测试首个设置；其它测试不触碰。
         let _ = TOTAL_CLIENTS.set(Arc::new(AtomicUsize::new(3)));
         let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
-        rooms.lock().unwrap().insert("room-a".into(), Vec::new());
-        rooms.lock().unwrap().insert("room-b".into(), Vec::new());
+        rooms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert("room-a".into(), Vec::new());
+        rooms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert("room-b".into(), Vec::new());
         let config = Arc::new(cfg("s", None));
 
         let h = handle(
