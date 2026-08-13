@@ -661,10 +661,51 @@ fn handle(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
             Err(_) => Response::text("websocket upgrade required").with_status_code(400),
         };
     }
+    // 可观测性（#180 后续）：信号服务器此前只有 /ws，无健康/指标端点。
+    if request.method() == "GET" && request.url() == "/healthz" {
+        let clients = total_clients();
+        let room_count = rooms.lock().unwrap().len();
+        let payload = serde_json::json!({
+            "status": "ok",
+            "clients": clients,
+            "rooms": room_count,
+            "pop": config.pop_id,
+        });
+        return Response::from_data(
+            "application/json",
+            serde_json::to_vec(&payload).expect("serialize healthz"),
+        );
+    }
+    if request.method() == "GET" && request.url() == "/metrics/prometheus" {
+        let clients = total_clients();
+        let room_count = rooms.lock().unwrap().len();
+        let bridges = config
+            .bridge
+            .as_ref()
+            .map(|b| b.running_rooms().len())
+            .unwrap_or(0);
+        let body = format!(
+            "# TYPE aerodesk_signal_clients gauge\naerodesk_signal_clients {clients}\n\
+             # TYPE aerodesk_signal_rooms gauge\naerodesk_signal_rooms {room_count}\n\
+             # TYPE aerodesk_signal_bridges gauge\naerodesk_signal_bridges {bridges}\n"
+        );
+        return Response::from_data(
+            "text/plain; version=0.0.4; charset=utf-8",
+            body.into_bytes(),
+        );
+    }
     if request.method() == "GET" {
         return Response::text("aerodesk-signal: connect to /ws");
     }
     Response::text("method not allowed").with_status_code(405)
+}
+
+/// 当前全局在线客户端数（TOTAL_CLIENTS 未初始化时为 0，测试/异常兜底）。
+fn total_clients() -> usize {
+    TOTAL_CLIENTS
+        .get()
+        .map(|c| c.load(Ordering::Relaxed))
+        .unwrap_or(0)
 }
 
 fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, rooms: Rooms) {
@@ -1130,6 +1171,44 @@ mod tests {
             bridge_idle_secs: Duration::from_secs(300),
             bridge_monitor_interval: Duration::from_secs(15),
         }
+    }
+
+    #[test]
+    fn health_and_metrics_endpoints() {
+        use std::io::Read;
+        // TOTAL_CLIENTS 是进程级 OnceLock，本测试首个设置；其它测试不触碰。
+        let _ = TOTAL_CLIENTS.set(Arc::new(AtomicUsize::new(3)));
+        let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
+        rooms.lock().unwrap().insert("room-a".into(), Vec::new());
+        rooms.lock().unwrap().insert("room-b".into(), Vec::new());
+        let config = Arc::new(cfg("s", None));
+
+        let h = handle(
+            &Request::fake_http("GET", "/healthz", vec![], Vec::new()),
+            config.clone(),
+            rooms.clone(),
+        );
+        assert_eq!(h.status_code, 200);
+        let (mut reader, _size) = h.data.into_reader_and_size();
+        let mut body = String::new();
+        reader.read_to_string(&mut body).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["status"], "ok");
+        assert_eq!(v["clients"], 3);
+        assert_eq!(v["rooms"], 2);
+        assert_eq!(v["pop"], "pop-a");
+
+        let m = handle(
+            &Request::fake_http("GET", "/metrics/prometheus", vec![], Vec::new()),
+            config,
+            rooms,
+        );
+        let (mut reader, _size) = m.data.into_reader_and_size();
+        let mut body = String::new();
+        reader.read_to_string(&mut body).unwrap();
+        assert!(body.contains("aerodesk_signal_clients 3"), "{body}");
+        assert!(body.contains("aerodesk_signal_rooms 2"), "{body}");
+        assert!(body.contains("aerodesk_signal_bridges 0"), "{body}");
     }
 
     #[test]

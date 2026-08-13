@@ -141,6 +141,9 @@ signal.aerodesk.io {
   （配合容量基线 scripts/sfu-capacity-bench.sh）。
 - **健康检查**：`GET /healthz` 返回 JSON（`status: ok|draining` + shards/clients）；
   正常 200，**draining 中 503**，供 LB/探活与滚动发布判断。
+- **信号服务器探活/指标**：`GET /healthz`（JSON `status/clients/rooms/pop`）与
+  `GET /metrics/prometheus`（`aerodesk_signal_clients/rooms/bridges`）暴露于
+  信令端口（plain 与 WSS 同路径），供探活与 Prometheus 抓取。
 - **优雅关闭**：`SIGTERM`/`SIGINT` → 拒绝新房间（`/start` 503）→ 限时 3s drain
   现有客户端 → finalize 录制 → 退出；systemd `KillSignal=SIGTERM` 可安全停服。
 - **录制审计**：`RECORD_DIR` 落在独立数据盘（只读权限仅运维），
