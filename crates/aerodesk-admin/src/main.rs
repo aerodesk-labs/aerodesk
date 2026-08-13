@@ -90,36 +90,65 @@ fn proxy_post(base: &str, pq: &str, token: &str) -> Response {
     }
 }
 
-/// 从 Prometheus 文本里抽几个关键 gauge（dashboard 顶部展示）。
+/// 从 Prometheus 文本里抽关键 gauge：总量 + 分片维度（shard_load/clients_by_shard）。
 fn parse_metrics(prom: &str) -> serde_json::Value {
     let mut out = serde_json::Map::new();
-    let want = [
-        "aerodesk_sfu_clients",
-        "aerodesk_sfu_shard_load",
-        "aerodesk_sfu_turn_allocations",
-        "aerodesk_sfu_recordings_active",
-        "aerodesk_sfu_draining",
-    ];
+    let mut shard_load = serde_json::Map::new();
+    let mut clients_by_shard = serde_json::Map::new();
     for line in prom.lines() {
-        if line.starts_with('#') {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let Some((_name, rest)) = line.split_once('{') else {
-            let Some((name, val)) = line.split_once(' ') else {
-                continue;
-            };
-            if want.contains(&name) {
-                out.insert(name.to_string(), serde_json::json!(val));
-            }
+        let Some(space) = line.rfind(' ') else {
             continue;
         };
-        let name = line.split_once('{').map(|(n, _)| n).unwrap_or("");
-        if !want.contains(&name) {
-            continue;
+        let value = line[space + 1..].trim();
+        let name_labels = &line[..space];
+        let (name, shard) = match name_labels.split_once('{') {
+            Some((n, rest)) => {
+                let shard = rest
+                    .trim_end_matches('}')
+                    .split('=')
+                    .nth(1)
+                    .map(|s| s.trim_matches('"'));
+                (n, shard)
+            }
+            None => (name_labels, None),
+        };
+        match name {
+            "aerodesk_sfu_clients" => {
+                if let Some(shard) = shard {
+                    clients_by_shard.insert(shard.to_string(), serde_json::json!(value));
+                } else {
+                    out.insert("clients".to_string(), serde_json::json!(value));
+                }
+            }
+            "aerodesk_sfu_shard_load" => {
+                if let Some(shard) = shard {
+                    shard_load.insert(shard.to_string(), serde_json::json!(value));
+                }
+            }
+            "aerodesk_sfu_turn_allocations" => {
+                out.insert("turn_allocations".to_string(), serde_json::json!(value));
+            }
+            "aerodesk_sfu_recordings_active" => {
+                out.insert("recordings_active".to_string(), serde_json::json!(value));
+            }
+            "aerodesk_sfu_draining" => {
+                out.insert("draining".to_string(), serde_json::json!(value));
+            }
+            _ => {}
         }
-        let val = rest.split_once(' ').map(|(_, v)| v.trim()).unwrap_or("0");
-        out.insert(name.to_string(), serde_json::json!(val));
     }
+    out.insert(
+        "clients_by_shard".to_string(),
+        serde_json::Value::Object(clients_by_shard),
+    );
+    out.insert(
+        "shard_load".to_string(),
+        serde_json::Value::Object(shard_load),
+    );
     serde_json::Value::Object(out)
 }
 
