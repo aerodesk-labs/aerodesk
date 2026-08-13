@@ -61,6 +61,36 @@ fn env_ip(name: &str) -> Option<std::net::IpAddr> {
     std::env::var(name).ok().and_then(|v| parse_ip(&v))
 }
 
+/// 解析 `/proc/<pid>/stat` 的 utime+stime（字段 14/15，单位 clock ticks）。
+/// 纯函数便于单测（无需真实 /proc）。
+fn parse_thread_stat_ticks(stat: &str) -> Option<u64> {
+    let rp = stat.rfind(')')?;
+    // ") " 之后第一个字段是 state（字段 3），utime=字段 14、stime=字段 15。
+    let fields: Vec<&str> = stat[rp + 2..].split_whitespace().collect();
+    let utime: u64 = fields.get(11)?.parse().ok()?;
+    let stime: u64 = fields.get(12)?.parse().ok()?;
+    Some(utime + stime)
+}
+
+/// 读线程累计 CPU ticks（Linux；非法/失败返回 0）。
+#[cfg(target_os = "linux")]
+fn read_thread_ticks(tid: i32) -> u64 {
+    if tid <= 0 {
+        return 0;
+    }
+    std::fs::read_to_string(format!("/proc/self/task/{tid}/stat"))
+        .ok()
+        .and_then(|s| parse_thread_stat_ticks(&s))
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "linux")]
+fn clock_ticks_per_sec() -> u64 {
+    // SAFETY: `sysconf` 无失败语义；<=0 时回退常见的 100。
+    let v = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if v > 0 { v as u64 } else { 100 }
+}
+
 fn init_log() {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     let env_filter = EnvFilter::try_from_default_env()
@@ -217,6 +247,8 @@ fn prometheus_body(
         let qc = m.qos_clients.load(Ordering::Relaxed) as u64;
         // 分片负载评分（router 的 client+pps 加权，0..=1）——观测容量/级联。
         let load = loads.get(i).copied().unwrap_or(0.0);
+        // 分片线程 CPU（%×100 → 0.0..=100.0；非 Linux 恒 0）。
+        let cpu = m.cpu_percent_x100.load(Ordering::Relaxed) as f64 / 100.0;
         totals[0] += c;
         totals[1] += rxp;
         totals[2] += rxb;
@@ -240,7 +272,8 @@ fn prometheus_body(
              aerodesk_sfu_ingress_loss{{shard=\"{i}\"}} {il:.6}\n\
              aerodesk_sfu_bwe_tx_bps{{shard=\"{i}\"}} {bw}\n\
              aerodesk_sfu_qos_clients{{shard=\"{i}\"}} {qc}\n\
-             aerodesk_sfu_shard_load{{shard=\"{i}\"}} {load:.4}\n"
+             aerodesk_sfu_shard_load{{shard=\"{i}\"}} {load:.4}\n\
+             aerodesk_sfu_shard_cpu{{shard=\"{i}\"}} {cpu:.2}\n"
         ));
     }
     let turn_metrics = match turn {
@@ -278,6 +311,7 @@ fn prometheus_body(
          # TYPE aerodesk_sfu_bwe_tx_bps gauge\n\
          # TYPE aerodesk_sfu_qos_clients gauge\n\
          # TYPE aerodesk_sfu_shard_load gauge\n\
+         # TYPE aerodesk_sfu_shard_cpu gauge\n\
          # TYPE aerodesk_sfu_recordings_active gauge\n\
          # TYPE aerodesk_sfu_draining gauge\n\
          {per_shard}\
@@ -603,6 +637,8 @@ pub fn main() {
                 let mut clients = vec![0usize; shard_count];
                 let mut last_counters = vec![(0u64, 0u64); shard_count];
                 let mut last_sample = Instant::now();
+                #[cfg(target_os = "linux")]
+                let mut last_cpu_ticks = vec![0u64; shard_count];
                 loop {
                     for ev in tcp_rx.try_iter() {
                         match ev {
@@ -666,6 +702,26 @@ pub fn main() {
                                 .lock()
                                 .unwrap()
                                 .set_load(i, clients[i], rx_pps, tx_pps);
+                        }
+                        #[cfg(target_os = "linux")]
+                        {
+                            // 每分片线程 CPU（%×100）：/proc 累计 ticks 增量 / 墙钟增量。
+                            let tps = clock_ticks_per_sec() as f64;
+                            for i in 0..shard_count {
+                                let tid = shared.shard_tids[i].load(Ordering::Relaxed);
+                                let ticks = read_thread_ticks(tid);
+                                let cpu_x100 =
+                                    if last_cpu_ticks[i] > 0 && ticks >= last_cpu_ticks[i] {
+                                        let delta = (ticks - last_cpu_ticks[i]) as f64;
+                                        (delta * 10_000.0 / tps / dt).round() as u64
+                                    } else {
+                                        0
+                                    };
+                                last_cpu_ticks[i] = ticks;
+                                shared.metrics[i]
+                                    .cpu_percent_x100
+                                    .store(cpu_x100.min(10_000), Ordering::Relaxed);
+                            }
                         }
                         last_sample = now;
                     }
@@ -1395,6 +1451,16 @@ mod tests {
         assert_eq!(parse_ip("not-an-ip"), None);
         assert_eq!(parse_ip(""), None);
         assert_eq!(parse_ip("127.0.0.1:3478"), None);
+    }
+
+    #[test]
+    fn parse_thread_stat_ticks_reads_utime_stime() {
+        // /proc/<pid>/stat：字段 14=utime、15=stime；comm 可含空格/括号。
+        let stat = "1234 (rd-shard-0) R 0 0 0 0 0 0 0 0 0 0 1000 500 0 0 0 0";
+        assert_eq!(parse_thread_stat_ticks(stat), Some(1500));
+        let busy = "1234 (rd-shard-0 [busy]) S 0 0 0 0 0 0 0 0 0 0 200 300 0 0";
+        assert_eq!(parse_thread_stat_ticks(busy), Some(500));
+        assert_eq!(parse_thread_stat_ticks("garbage"), None);
     }
 
     #[test]

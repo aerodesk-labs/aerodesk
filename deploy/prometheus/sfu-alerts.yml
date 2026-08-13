@@ -134,6 +134,18 @@ groups:
           summary: "SFU {{ $labels.instance }} 分片 {{ $labels.shard }} 负载过高（{{ $value | humanizePercentage }}）"
           description: "分片负载超过 0.8 持续 10 分钟，路由将级联新房间到次优分片；检查容量/包率基线（PPS_CAPACITY=20 万）。"
 
+      # 分片线程 CPU 过高：单分片线程为单核模型，持续满核即成为吞吐瓶颈。
+      # 阈值 80%（默认），按部署容量基线调整。
+      - alert: AeroDeskSFUShardCPUHigh
+        expr: aerodesk_sfu_shard_cpu{shard=~".+"} > 80
+        for: 10m
+        labels:
+          severity: warning
+          team: infra
+        annotations:
+          summary: "SFU {{ $labels.instance }} 分片 {{ $labels.shard }} CPU 偏高（{{ $value }}%）"
+          description: "分片线程 CPU 超过 80% 持续 10 分钟，可能成为单核瓶颈；需扩容分片或降低负载。"
+
       # 内嵌 TURN allocation 逼近容量（单 PoP 默认阈值 5000，按部署调整）。
       - alert: AeroDeskSFUTurnAllocationsHigh
         expr: aerodesk_sfu_turn_allocations > 5000
@@ -169,8 +181,8 @@ groups:
       #     summary: "SFU {{ $labels.instance }} 有客户端但无在录房间"
       #     description: "在线客户端 {{ $value }} 个，recordings_active 为 0；若期望持续录制请检查按需 start 调用或 RECORD_DIR。"
 
-      # 分片 CPU/负载（示例，注释默认关闭）：SFU 未导出每分片 CPU，
-      # 用 node_exporter 的进程 CPU 近似，或按容量基准的 pps 阈值告警。
+      # 分片包率（示例，注释默认关闭）：包率上限是容量基线的一维，
+      # 与 aerodesk_sfu_shard_cpu（线程 CPU）配合判断是否 CPU 瓶颈。
       # - alert: AeroDeskSFUPpsHigh
       #   expr: rate(aerodesk_sfu_rx_packets_total[1m]) + rate(aerodesk_sfu_tx_packets_total[1m]) > 150000
       #   for: 10m
