@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use aerodesk_core::access_unit::AccessUnitAssembler;
-use aerodesk_sfu::recorder::{CODEC_H264, CODEC_H265, KIND_VIDEO, MAGIC, PACKET_HEADER_LEN};
+use aerodesk_sfu::recorder::{
+    CODEC_H264, CODEC_H265, CODEC_PCMU, KIND_AUDIO, KIND_VIDEO, MAGIC, PACKET_HEADER_LEN,
+};
 
 /// ADREC2 包：解析后的一帧/NAL 片段。
 struct Packet {
@@ -24,7 +26,16 @@ struct Packet {
     payload: Vec<u8>,
 }
 
-fn parse_adrec2(path: &Path) -> Result<Vec<Packet>, String> {
+/// ADREC2 原始记录（未按 kind/codec 过滤）。
+struct RawRecord {
+    kind: u8,
+    codec: u8,
+    keyframe: bool,
+    rtp_ts: u64,
+    payload: Vec<u8>,
+}
+
+fn read_adrec2(path: &Path) -> Result<Vec<RawRecord>, String> {
     let file = File::open(path).map_err(|e| format!("open {path:?}: {e}"))?;
     let mut r = BufReader::new(file);
     let mut magic = [0u8; 7];
@@ -33,7 +44,7 @@ fn parse_adrec2(path: &Path) -> Result<Vec<Packet>, String> {
     if &magic != MAGIC {
         return Err(format!("不是 ADREC2 文件（magic 不符）"));
     }
-    let mut packets = Vec::new();
+    let mut records = Vec::new();
     let mut header = [0u8; PACKET_HEADER_LEN];
     loop {
         let mut n = 0usize;
@@ -52,7 +63,7 @@ fn parse_adrec2(path: &Path) -> Result<Vec<Packet>, String> {
         }
         let kind = header[0];
         let codec = header[1];
-        let flags = header[2];
+        let keyframe = header[2] & 1 != 0;
         let rtp_ts = u64::from_le_bytes(header[12..20].try_into().unwrap());
         let len = u32::from_le_bytes(header[20..24].try_into().unwrap()) as usize;
         if len > 64 << 20 {
@@ -72,17 +83,41 @@ fn parse_adrec2(path: &Path) -> Result<Vec<Packet>, String> {
             eprintln!("rec2mp4: 尾部截断包跳过（期望 {len}B，实得 {got}B）");
             break;
         }
-        // 只要视频 H264/H265；音频暂不转封装（#266 聚焦视频帧正确性）。
-        if kind == KIND_VIDEO && (codec == CODEC_H264 || codec == CODEC_H265) {
-            packets.push(Packet {
-                codec,
-                keyframe: flags & 1 != 0,
-                rtp_ts,
-                payload,
-            });
-        }
+        records.push(RawRecord {
+            kind,
+            codec,
+            keyframe,
+            rtp_ts,
+            payload,
+        });
     }
-    Ok(packets)
+    Ok(records)
+}
+
+/// 提取视频 H264/H265 包（供访问单元聚合）。
+fn parse_adrec2(path: &Path) -> Result<Vec<Packet>, String> {
+    Ok(read_adrec2(path)?
+        .into_iter()
+        .filter(|r| r.kind == KIND_VIDEO && (r.codec == CODEC_H264 || r.codec == CODEC_H265))
+        .map(|r| Packet {
+            codec: r.codec,
+            keyframe: r.keyframe,
+            rtp_ts: r.rtp_ts,
+            payload: r.payload,
+        })
+        .collect())
+}
+
+/// 提取 PCMU（G.711 μ-law）音频包，按 RTP 时间戳排序（8kHz 时钟）。
+/// Opus 暂不转封装（需 Ogg/Opus 帧重组，见 #266）。
+fn parse_pcmu_audio(path: &Path) -> Result<Vec<(u64, Vec<u8>)>, String> {
+    let mut records: Vec<(u64, Vec<u8>)> = read_adrec2(path)?
+        .into_iter()
+        .filter(|r| r.kind == KIND_AUDIO && r.codec == CODEC_PCMU)
+        .map(|r| (r.rtp_ts, r.payload))
+        .collect();
+    records.sort_by_key(|(ts, _)| *ts);
+    Ok(records)
 }
 
 /// 估算帧率：取相邻访问单元 pts 差的众数区间（90kHz RTP 时间戳），默认 30。
@@ -180,17 +215,37 @@ fn aggregate_and_write_es(
     Ok((es_path, fps, aus.len(), duration_secs, codec_out))
 }
 
+/// 把 PCMU（μ-law）音频包按时间戳顺序拼成原始 μ-law 基本流（8kHz 单声道）。
+fn write_pcmu_es(records: &[(u64, Vec<u8>)], work_dir: &Path) -> Result<PathBuf, String> {
+    let path = work_dir.join("audio.ulaw");
+    let mut es = File::create(&path).map_err(|e| format!("create ulaw: {e}"))?;
+    for (_, payload) in records {
+        es.write_all(payload)
+            .map_err(|e| format!("write ulaw: {e}"))?;
+    }
+    Ok(path)
+}
+
 /// 调 ffmpeg 把 AnnexB 基本流复用为 MP4（-c copy，不重编码）。
 /// `fmt` 为 `-f` 输入格式：h264 / hevc（不指定时 ffmpeg 可能把 HEVC 误判成 H264，
 /// stsd 写 avc1 导致播放器/ffprobe 报错）。
-fn mux_mp4(es: &Path, out: &Path, fps: u32, fmt: &str) -> Result<(), String> {
-    let status = Command::new("ffmpeg")
-        // 输入侧 `-r fps` 强制裸流帧率（比 -framerate 更彻底）：ffmpeg 的裸
-        // HEVC demuxer 在 -framerate 下会在 ~51 帧后失步（帧时长变 1 tick），
-        // 导致 MP4 时长只有 1.7s；-r 输入则正确分配 1/fps 每帧。
-        .args(["-y", "-f", fmt, "-r", &fps.to_string(), "-i"])
-        .arg(es)
-        .args(["-c", "copy"])
+fn mux_mp4(es: &Path, out: &Path, fps: u32, fmt: &str, audio: Option<&Path>) -> Result<(), String> {
+    let mut cmd = Command::new("ffmpeg");
+    // 输入侧 `-r fps` 强制裸流帧率（比 -framerate 更彻底）：ffmpeg 的裸
+    // HEVC demuxer 在 -framerate 下会在 ~51 帧后失步（帧时长变 1 tick），
+    // 导致 MP4 时长只有 1.7s；-r 输入则正确分配 1/fps 每帧。
+    cmd.args(["-y", "-f", fmt, "-r", &fps.to_string(), "-i"])
+        .arg(es);
+    if let Some(audio_path) = audio {
+        // 原始 μ-law → MP4：转 AAC（MP4 不原生支持 μ-law），8kHz 单声道。
+        cmd.args(["-f", "mulaw", "-ar", "8000", "-ac", "1", "-i"])
+            .arg(audio_path);
+    }
+    cmd.args(["-map", "0:v:0", "-c:v", "copy"]);
+    if audio.is_some() {
+        cmd.args(["-map", "1:a:0", "-c:a", "aac"]);
+    }
+    let status = cmd
         .arg(out)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -209,17 +264,29 @@ pub fn convert(
     fps_override: Option<u32>,
 ) -> Result<ConvertStats, String> {
     let packets = parse_adrec2(input)?;
+    let pcmu = parse_pcmu_audio(input)?;
     let work_dir = std::env::temp_dir().join(format!("rec2mp4-{}", std::process::id()));
     std::fs::create_dir_all(&work_dir).map_err(|e| format!("tmp dir: {e}"))?;
     let (es_path, est_fps, au_count, duration_secs, codec) =
         aggregate_and_write_es(&packets, &work_dir)?;
+    let audio_path = if pcmu.is_empty() {
+        None
+    } else {
+        Some(write_pcmu_es(&pcmu, &work_dir)?)
+    };
     let fps = fps_override.unwrap_or(est_fps);
     let fmt = if codec == CODEC_H264 { "h264" } else { "hevc" };
-    mux_mp4(&es_path, output, fps, fmt)?;
+    mux_mp4(&es_path, output, fps, fmt, audio_path.as_deref())?;
     if std::env::var("REC2MP4_KEEP_ES").is_err() {
         let _ = std::fs::remove_file(&es_path);
+        if let Some(audio_path) = &audio_path {
+            let _ = std::fs::remove_file(audio_path);
+        }
     } else {
         eprintln!("rec2mp4: 保留 ES {}", es_path.display());
+        if let Some(audio_path) = &audio_path {
+            eprintln!("rec2mp4: 保留音频 ES {}", audio_path.display());
+        }
     }
     Ok(ConvertStats {
         frames: au_count,
@@ -334,6 +401,44 @@ mod tests {
             "关键帧 AU 含 SPS+IDR"
         );
         assert!(sps_pos.unwrap() < idr_pos.unwrap(), "SPS 在 IDR 前");
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    /// 追加一条 ADREC2 记录（kind/codec/rtp_ts/payload）。
+    fn push_record(buf: &mut Vec<u8>, kind: u8, codec: u8, rtp_ts: u64, payload: &[u8]) {
+        buf.push(kind);
+        buf.push(codec);
+        buf.push(0); // flags（音频无关键帧）
+        buf.push(0);
+        buf.extend_from_slice(&0u64.to_le_bytes()); // wall ts
+        buf.extend_from_slice(&rtp_ts.to_le_bytes());
+        buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        buf.extend_from_slice(payload);
+    }
+
+    #[test]
+    fn parses_pcmu_audio_sorted_by_rtp_ts() {
+        let work = std::env::temp_dir().join(format!("rec2mp4-aud-{}", std::process::id()));
+        std::fs::create_dir_all(&work).unwrap();
+        let mut data = MAGIC.to_vec();
+        // 乱序写入：先 rtp_ts=320，再视频，再 rtp_ts=160。
+        push_record(&mut data, KIND_AUDIO, CODEC_PCMU, 320, &[0x11, 0x22]);
+        push_record(&mut data, KIND_VIDEO, CODEC_H264, 3000, &[0, 0, 0, 1, 0x65]);
+        push_record(&mut data, KIND_AUDIO, CODEC_PCMU, 160, &[0x33, 0x44]);
+        let path = work.join("mix.adrec");
+        std::fs::write(&path, &data).unwrap();
+
+        let pcmu = parse_pcmu_audio(&path).unwrap();
+        assert_eq!(pcmu.len(), 2);
+        assert_eq!(pcmu[0].0, 160, "按 rtp_ts 升序");
+        assert_eq!(pcmu[0].1, vec![0x33, 0x44]);
+        assert_eq!(pcmu[1].0, 320);
+        assert_eq!(pcmu[1].1, vec![0x11, 0x22]);
+
+        // 视频仍正确解析，音频被过滤。
+        let video = parse_adrec2(&path).unwrap();
+        assert_eq!(video.len(), 1);
+        assert_eq!(video[0].codec, CODEC_H264);
         let _ = std::fs::remove_dir_all(&work);
     }
 }
