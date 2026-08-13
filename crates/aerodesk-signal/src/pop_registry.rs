@@ -73,19 +73,33 @@ impl PopRegistry {
     }
 
     /// 登记房间归属（幂等刷新 TTL）并持久化；先 merge 共享文件避免覆盖其它 PoP 条目。
+    /// 为降低共享文件的每次 join 全量重写：仅当归属变化或 TTL 过半时才落盘。
     pub fn register(&self, room: &str, pop: &str) {
         self.merge_file();
-        {
+        let now = Self::now();
+        let should_save = {
             let mut m = self.inner.lock().unwrap();
-            m.insert(
-                room.to_string(),
-                Entry {
-                    pop: pop.to_string(),
-                    updated_at: Self::now(),
-                },
-            );
+            match m.get(room) {
+                Some(e)
+                    if e.pop == pop && now.saturating_sub(e.updated_at) <= self.ttl_secs / 2 =>
+                {
+                    false
+                }
+                _ => {
+                    m.insert(
+                        room.to_string(),
+                        Entry {
+                            pop: pop.to_string(),
+                            updated_at: now,
+                        },
+                    );
+                    true
+                }
+            }
+        };
+        if should_save {
+            let _ = self.save();
         }
-        let _ = self.save();
     }
 
     /// 把共享文件里本进程没有的条目并入内存（本地同房间条目优先）。
@@ -100,8 +114,15 @@ impl PopRegistry {
             return;
         };
         let mut m = self.inner.lock().unwrap();
+        // 文件里的新条目应覆盖本地的过期/旧条目（or_insert 会保留本地旧值，导致
+        // 本地过期条目挡住文件里的新归属 → lookup 返回 None → 调用方误重新登记覆盖）。
         for (room, entry) in file_map {
-            m.entry(room).or_insert(entry);
+            match m.get(&room) {
+                Some(local) if local.updated_at >= entry.updated_at => {}
+                _ => {
+                    m.insert(room, entry);
+                }
+            }
         }
     }
 
@@ -164,6 +185,22 @@ mod tests {
             assert_eq!(reg.lookup("room-x"), Some("pop-a".into()));
             assert_eq!(reg.lookup("room-y"), Some("pop-b".into()));
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_local_entry_does_not_block_newer_file_entry() {
+        let dir = std::env::temp_dir().join(format!("popreg-test3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("reg.json");
+        let reg = PopRegistry::new(Some(path.clone()), 1); // TTL=1s
+        reg.register("room-x", "pop-a"); // 本地 + 文件登记
+        std::thread::sleep(std::time::Duration::from_secs(2)); // 本地条目过期
+        // 外部写入更新的有效归属（updated_at 更大）
+        let external = "{\"room-x\":{\"pop\":\"pop-b\",\"updated_at\":9999999999}}";
+        std::fs::write(&path, external).unwrap();
+        // 本地过期条目不应挡住文件里的新有效条目。
+        assert_eq!(reg.lookup("room-x"), Some("pop-b".into()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
