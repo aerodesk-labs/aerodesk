@@ -146,24 +146,21 @@ impl BridgeManager {
             }
         }
 
-        // 全局并发上限（防房间名轮换绕过 per-room 冷却的进程滥用）。
-        {
-            let running = self.running.lock().unwrap();
-            if running.len() >= self.max_running {
-                warn!(
-                    "bridge: running bridges {} >= max {}; fallback redirect",
-                    running.len(),
-                    self.max_running
-                );
-                return BridgeOutcome::Redirect;
-            }
-        }
-
-        // 缺桥 → spawn（单飞：持 running 锁完成「检查 + 启动 + 登记」，
-        // 保证同房间并发 Join 只 spawn 一次）。
+        // 缺桥 → spawn：在同一 running 锁内完成「上限检查 + 启动 + 登记」，
+        // 消除 max_running 竞态（并发 Join 不同房间此前可同时通过上限检查）；
+        // 同房间并发 Join 仍单飞（contains_key 检查 + insert 在同一锁）。
         {
             let mut running = self.running.lock().unwrap();
             if !running.contains_key(room) {
+                // 全局并发上限：仅对「新 spawn」生效，已运行房间不受限。
+                if running.len() >= self.max_running {
+                    warn!(
+                        "bridge: running bridges {} >= max {}; fallback redirect",
+                        running.len(),
+                        self.max_running
+                    );
+                    return BridgeOutcome::Redirect;
+                }
                 match self.start(room) {
                     Ok(rb) => {
                         running.insert(room.to_string(), rb);
@@ -274,10 +271,24 @@ impl BridgeManager {
     }
 
     fn mark_failed(&self, room: &str) {
-        self.failed
-            .lock()
-            .unwrap()
-            .insert(room.to_string(), Instant::now());
+        const MAX_FAILED: usize = 1024;
+        let mut failed = self.failed.lock().unwrap();
+        failed.insert(room.to_string(), Instant::now());
+        // 有界：超过上限先清掉已过冷却期的，再按时间淘汰最旧，防失败房间永久累积。
+        if failed.len() > MAX_FAILED {
+            failed.retain(|_, t| t.elapsed() < self.fail_cooldown);
+            while failed.len() > MAX_FAILED {
+                if let Some(oldest) = failed
+                    .iter()
+                    .min_by_key(|(_, t)| **t)
+                    .map(|(r, _)| r.clone())
+                {
+                    failed.remove(&oldest);
+                } else {
+                    break;
+                }
+            }
+        }
     }
 }
 
