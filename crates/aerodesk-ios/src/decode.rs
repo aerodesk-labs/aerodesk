@@ -401,7 +401,7 @@ impl HevcDecoder {
 
 /// YUV → RGB（BT.601；full_range=true 时 Y 全 0..255，否则 16..235 映射）。
 fn yuv_to_rgb(yv: f32, u: f32, v: f32, full_range: bool) -> (u8, u8, u8) {
-    let (mut yy, mut uu, mut vv) = (yv, u - 128.0, v - 128.0);
+    let (mut yy, uu, vv) = (yv, u - 128.0, v - 128.0);
     if !full_range {
         yy = (yy - 16.0) * (255.0 / 219.0);
     }
