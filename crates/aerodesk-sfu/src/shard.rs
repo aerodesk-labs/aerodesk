@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::ops::Deref;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -92,6 +92,8 @@ pub struct ShardMetrics {
     pub ingress_loss_ppm: AtomicU64,
     pub bwe_tx_bps: AtomicU64,
     pub qos_clients: AtomicUsize,
+    /// 分片线程 CPU 占用（百分比 ×100，0..=10000；非 Linux 恒 0）。
+    pub cpu_percent_x100: AtomicU64,
 }
 
 impl ShardMetrics {
@@ -107,6 +109,7 @@ impl ShardMetrics {
             ingress_loss_ppm: AtomicU64::new(0),
             bwe_tx_bps: AtomicU64::new(0),
             qos_clients: AtomicUsize::new(0),
+            cpu_percent_x100: AtomicU64::new(0),
         }
     }
 }
@@ -158,6 +161,8 @@ pub struct Shared {
     pub recorder: Option<Arc<Recorder>>,
     /// 会话注册表：client_id → 会话快照（会话管理 API 读取，#240）。
     pub sessions: Arc<RwLock<HashMap<u64, SessionInfo>>>,
+    /// 分片线程 TID（-1=未捕获/非 Linux），供 manager 按线程采样 CPU。
+    pub shard_tids: Arc<Vec<AtomicI32>>,
 }
 
 impl Shared {
@@ -175,6 +180,7 @@ impl Shared {
             max_room_clients: 0,
             max_total_clients: 0,
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            shard_tids: Arc::new((0..shard_count).map(|_| AtomicI32::new(-1)).collect()),
         }
     }
 
@@ -395,6 +401,18 @@ fn demux_client<'a>(
     Some(&mut clients[idx])
 }
 
+/// 当前线程 TID（Linux 用 gettid；其余平台返回 -1，CPU 指标恒 0）。
+#[cfg(target_os = "linux")]
+fn thread_tid() -> i32 {
+    // SAFETY: SYS_gettid 无参，永远成功。
+    unsafe { libc::syscall(libc::SYS_gettid) as i32 }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn thread_tid() -> i32 {
+    -1
+}
+
 pub struct Shard;
 
 impl Shard {
@@ -433,6 +451,8 @@ fn run_shard(
     let mut clients: Vec<Client> = vec![];
     let mut to_propagate: VecDeque<Propagated> = VecDeque::new();
     let mut buf = vec![0; 2000];
+    // 记录本分片线程 TID，供 manager 按线程采样 CPU（/proc/self/task/<tid>/stat）。
+    shared.shard_tids[index].store(thread_tid(), Ordering::Relaxed);
     // 本分片内每个房间的客户端数（用于清理 room_registry）。
     let mut room_counts: HashMap<String, usize> = HashMap::new();
 

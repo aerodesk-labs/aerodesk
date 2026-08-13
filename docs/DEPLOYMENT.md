@@ -135,8 +135,9 @@ signal.aerodesk.io {
   `rule_files`，Alertmanager 按 `severity` 路由（page/warning）。丢包/RTT/质量
   样本/媒体停摆规则按分片（`{shard=~".+"}`）告警——总量是跨分片加权平均，单一坏
   分片会被摊薄，不宜直接设阈值；`AeroDeskSFUNoActiveRecordings` 默认注释关闭（仅按需录制且期望持续录制
-  时启用）。磁盘水位依赖 node_exporter 暴露 RECORD_DIR 所在挂载点；分片 CPU 未
-  导出，模板内置 pps 近似的注释示例（配合容量基线 scripts/sfu-capacity-bench.sh）。
+  时启用）。磁盘水位依赖 node_exporter 暴露 RECORD_DIR 所在挂载点；分片线程 CPU
+  已导出为 `aerodesk_sfu_shard_cpu`（Linux，%/100），另有 pps 近似注释示例
+  （配合容量基线 scripts/sfu-capacity-bench.sh）。
 - **健康检查**：`GET /healthz` 返回 JSON（`status: ok|draining` + shards/clients）；
   正常 200，**draining 中 503**，供 LB/探活与滚动发布判断。
 - **优雅关闭**：`SIGTERM`/`SIGINT` → 拒绝新房间（`/start` 503）→ 限时 3s drain
