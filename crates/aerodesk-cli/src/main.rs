@@ -17,6 +17,7 @@ mod file_transfer;
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
+use aerodesk_core::access_unit::AccessUnitAssembler;
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media::{Vp8Frame, parse_vp8_pcap};
 use aerodesk_core::media_socket::MediaSocket;
@@ -1591,6 +1592,9 @@ fn viewer(
     let mut camera_bytes = 0u64;
     let mut camera_decoded = 0u64;
     let mut camera_decoder: Option<aerodesk_ffmpeg::decode::FfmpegDecoder> = None;
+    // #340：摄像头轨按 NAL 分片到达，需组装为完整访问单元再解码
+    //（屏幕轨单 NAL/帧直接可解；摄像头 hevc_videotoolbox 多 NAL/帧）。
+    let mut camera_assembler = AccessUnitAssembler::new();
     let mut audio_frames = 0u64;
     let mut audio_bytes = 0u64;
     let mut last_report = Instant::now();
@@ -1788,10 +1792,16 @@ fn viewer(
                                     camera_decoder =
                                         aerodesk_ffmpeg::decode::FfmpegDecoder::new(cc).ok();
                                 }
-                                if let Some(dec) = &mut camera_decoder {
+                                if let Some(dec) = &mut camera_decoder
+                                    && let Some(au) = camera_assembler.push(
+                                        data.data.as_ref(),
+                                        data.time.as_micros(),
+                                        data.is_keyframe(),
+                                    )
+                                {
                                     let unit = aerodesk_core::media_pipeline::EncodedUnit {
-                                        data: data.data.as_ref().to_vec(),
-                                        keyframe: data.is_keyframe(),
+                                        data: au.data,
+                                        keyframe: au.keyframe,
                                         pts_ms: 0,
                                         rtp_timestamp: 0,
                                     };
