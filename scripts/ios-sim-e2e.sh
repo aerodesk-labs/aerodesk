@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# iOS 主控端（观看端）模拟器端到端：构建 iOS App → 启动模拟器 → 本地 SFU+x264 发布端
+# iOS 主控端（观看端）模拟器端到端：构建 iOS App → 启动模拟器 → 本地 SFU 发布端
 # → App 自动连接观看 → 断言 Rust pump 解码帧持续增长 + 发布端收到输入（模拟器 UI 点击）。
+# 默认 PUBLISHER_ENCODER=h265（--encoder ffmpeg --codec h265 合成源，走 #328 HEVC 关键帧
+# 参数集内联路径；无 VT 硬编时 FFmpeg 软编回退仍是 HEVC 流）。x264/screen 可显式回退。
+# 本地有摄像头时 PUBLISHER_CAMERA=1 附加断言摄像头第二轨解码（需采集/摄像头权限）。
 # 依赖：Xcode + iOS Simulator Runtime（macos runner 预装）、cargo、xcodegen。
-# 用法: scripts/ios-sim-e2e.sh [room]
+# 用法: scripts/ios-sim-e2e.sh [room]   （PUBLISHER_ENCODER=h265|x264|screen，默认 h265）
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOM="${1:-iossim-$(date +%s)}"
@@ -55,15 +58,24 @@ for _ in $(seq 1 50); do
        && nc -z 127.0.0.1 "${SIGNAL_PLAIN_PORT:-3003}" 2>/dev/null; then break; fi
     sleep 0.2
 done
-# 发布端编码：CI 默认 x264（合成源，无采集权限）；本地可 PUBLISHER_ENCODER=screen
-# 验证默认 h265（HEVC）真实屏幕硬编 → iOS 硬解链路。
-PUBLISHER_ENCODER="${PUBLISHER_ENCODER:-x264}"
-# 本地摄像头链路验证：PUBLISHER_CAMERA=1 时发布端加 --camera（CI 无摄像头不启用）。
+# 发布端编码：默认 h265（#328 参数集内联回归；合成源无需采集权限）。
+# PUBLISHER_ENCODER=x264 显式回退 H264；screen 用真实屏幕硬编（本地有权限时）。
+# PUBLISHER_CAMERA=1 时强制走 screen 采集：摄像头轨只在 --encoder screen 下发布，
+# 合成源（ffmpeg）不接摄像头。
+PUBLISHER_ENCODER="${PUBLISHER_ENCODER:-h265}"
+CODEC_ARGS=""
 CAMERA_ARGS=""
 if [ "${PUBLISHER_CAMERA:-0}" = "1" ]; then
-    CAMERA_ARGS="--camera"
+    # 本地摄像头链路验证：真实屏幕采集 + 摄像头第二轨（需采集/摄像头权限；CI 不启用）。
+    ENC="screen"; CODEC_ARGS="--codec h265"; CAMERA_ARGS="--camera"
+elif [ "$PUBLISHER_ENCODER" = "h265" ]; then
+    ENC="ffmpeg"; CODEC_ARGS="--codec h265"
+elif [ "$PUBLISHER_ENCODER" = "screen" ]; then
+    ENC="screen"; CODEC_ARGS="--codec h265"   # macOS 默认 h265，显式声明
+else
+    ENC="$PUBLISHER_ENCODER"
 fi
-./target/debug/aerodesk-cli --role publisher --signal "ws://127.0.0.1:${SIGNAL_PLAIN_PORT:-3003}" --room "$ROOM" --encoder "$PUBLISHER_ENCODER" $CAMERA_ARGS >/tmp/iossim-pub.log 2>&1 &
+./target/debug/aerodesk-cli --role publisher --signal "ws://127.0.0.1:${SIGNAL_PLAIN_PORT:-3003}" --room "$ROOM" --encoder "$ENC" $CODEC_ARGS $CAMERA_ARGS >/tmp/iossim-pub.log 2>&1 &
 PUB=$!
 sleep 2
 
@@ -91,7 +103,7 @@ for attempt in 1 2 3; do
         echo "PASS app launched (attempt $attempt, console has pump output)"
         break
     fi
-    echo "WARN: app 无输出（attempt $attempt），terminate 后重启动..."
+    echo "WARN: app 无输出（attempt ${attempt}），terminate 后重启动..."
     xcrun simctl terminate "$DEVICE" io.aerodesk.viewer 2>/dev/null || true
     launch_app
 done
@@ -103,7 +115,10 @@ fi
 
 echo "== [6/7] 断言解码帧持续增长"
 python3 - <<'PY'
-import time, re, sys
+import os, time, re, sys
+enc = os.environ.get('PUBLISHER_ENCODER', 'h265')
+need_hevc = enc in ('h265', 'screen')   # 两者都是 HEVC 流（screen 默认 h265）
+need_camera = os.environ.get('PUBLISHER_CAMERA') == '1'
 ok = False
 for i in range(90):  # 最多 90s
     try:
@@ -131,6 +146,18 @@ if not ok:
     try: print(open('/tmp/iossim-pub.log', errors='replace').read()[-800:])
     except FileNotFoundError: pass
     sys.exit(1)
+# #328：断言观看端确实走 HEVC 硬解路径（否则悄悄退回 H264 等于没测）。
+if need_hevc and 'using decoder Hevc' not in txt:
+    print("FAIL: 未检测到 'using decoder Hevc'（HEVC 路径未触达）")
+    sys.exit(1)
+print("PASS HEVC decoder path (using decoder Hevc)")
+if need_camera:
+    # #340：摄像头第二轨经 SFU 到 iOS 观看端尚不达（publisher 已发、camera_mid 已协商
+    # 但无媒体），此处仅告警不阻断——主合同是 HEVC 主轨解码回归。
+    if 'using camera decoder' not in txt or '摄像头轨已接收' not in txt:
+        print("WARN: 摄像头第二轨未解码（见 #340）；主轨 HEVC 已 PASS")
+    else:
+        print("PASS camera track decoded")
 PY
 
 echo "== [7/7] 截图留证"

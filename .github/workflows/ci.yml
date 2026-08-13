@@ -362,7 +362,8 @@ jobs:
             ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build CODE_SIGNING_ALLOWED=NO
 
   # iOS 主控端模拟器自测：#1 观看端全链路（与 SFU 内嵌 web 同协议）——
-  # 构建 App → 启动模拟器 → 本地 SFU+x264 发布端 → App 自动连接观看 → 解码帧断言。
+  # 构建 App → 启动模拟器 → 本地 SFU 发布端（默认 h265 合成源，#328 HEVC 参数集
+  # 内联回归）→ App 自动连接观看 → 解码帧 + HEVC 解码路径断言。
   ios-sim-e2e:
     name: iOS simulator e2e (viewer)
     runs-on: macos-15
