@@ -222,10 +222,12 @@ fn prometheus_body(
         totals[2] += rxb;
         totals[3] += txp;
         totals[4] += txb;
-        totals[5] += rtt;
-        totals[6] += m.egress_loss_ppm.load(Ordering::Relaxed);
-        totals[7] += m.ingress_loss_ppm.load(Ordering::Relaxed);
-        totals[8] += bw;
+        // 总量按客户端数加权（跨分片语义正确）：rtt 按 qos_clients 加权、
+        // loss 按 clients 加权、bwe 汇总为分片总带宽（而非平均带宽之和）。
+        totals[5] += rtt * qc;
+        totals[6] += m.egress_loss_ppm.load(Ordering::Relaxed) * c;
+        totals[7] += m.ingress_loss_ppm.load(Ordering::Relaxed) * c;
+        totals[8] += bw * c;
         totals[9] += qc;
         per_shard.push_str(&format!(
             "aerodesk_sfu_clients{{shard=\"{i}\"}} {c}\n\
@@ -258,6 +260,12 @@ fn prometheus_body(
         .as_ref()
         .map(|r| r.active_count())
         .unwrap_or(0);
+    let total_clients = totals[0].max(1) as f64;
+    let total_qos = totals[9].max(1) as f64;
+    // 跨分片加权总量：与分片指标单位一致（rtt 微秒整数、loss 0..=1）。
+    let rtt_total_us = (totals[5] as f64 / total_qos).round() as u64;
+    let egress_total = totals[6] as f64 / total_clients / 1e6;
+    let ingress_total = totals[7] as f64 / total_clients / 1e6;
     format!(
         "# TYPE aerodesk_sfu_clients gauge\n\
          # TYPE aerodesk_sfu_rx_packets_total counter\n\
@@ -291,9 +299,9 @@ fn prometheus_body(
         totals[2],
         totals[3],
         totals[4],
-        totals[5],
-        totals[6] as f64 / 1e6,
-        totals[7] as f64 / 1e6,
+        rtt_total_us,
+        egress_total,
+        ingress_total,
         totals[8],
         totals[9],
         recordings_active,
@@ -1472,12 +1480,12 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("aerodesk_sfu_rtt_us 250"), "{body}");
-        assert!(body.contains("aerodesk_sfu_egress_loss 0.500000"), "{body}");
+        assert!(body.contains("aerodesk_sfu_egress_loss 0.214286"), "{body}");
         assert!(
-            body.contains("aerodesk_sfu_ingress_loss 1.000000"),
+            body.contains("aerodesk_sfu_ingress_loss 0.428571"),
             "{body}"
         );
-        assert!(body.contains("aerodesk_sfu_bwe_tx_bps 1200000"), "{body}");
+        assert!(body.contains("aerodesk_sfu_bwe_tx_bps 3600000"), "{body}");
         assert!(body.contains("aerodesk_sfu_qos_clients 2"), "{body}");
         assert!(body.contains("aerodesk_sfu_draining 1"), "{body}");
         // #240 录制 gauge：无 RECORD_DIR → 0

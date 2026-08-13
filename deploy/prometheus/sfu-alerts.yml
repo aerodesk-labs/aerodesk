@@ -74,7 +74,7 @@ groups:
           description: "分片 {{ $labels.shard }} 有 {{ $value }} 在线客户端但 5 分钟收包为 0，媒体转发可能卡死。"
 
       # 出向丢包过高（#238 聚合：0.0-1.0，5s 心跳均值）。
-      # 按分片告警：总序列是各分片求和，不能直接用于阈值。
+      # 按分片告警：总量是跨分片加权平均，单一坏分片会被摊薄，故按分片告警。
       - alert: AeroDeskSFUHighEgressLoss
         expr: aerodesk_sfu_egress_loss{shard=~".+"} > 0.05
         for: 5m
@@ -96,7 +96,7 @@ groups:
           summary: "SFU {{ $labels.instance }} 分片 {{ $labels.shard }} 入向丢包 {{ $value | humanizePercentage }}"
           description: "分片 {{ $labels.shard }} ingress loss 超过 5% 持续 5 分钟：检查发布端上行网络。"
 
-      # RTT 过高（微秒；500ms 已属严重劣化；按分片告警，总序列是求和）。
+      # RTT 过高（微秒；500ms 已属严重劣化；按分片告警，总量是加权平均）。
       - alert: AeroDeskSFUHighRTT
         expr: aerodesk_sfu_rtt_us{shard=~".+"} > 500000
         for: 5m
