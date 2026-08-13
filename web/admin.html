@@ -35,6 +35,10 @@ input { font-size: 12px; padding: 3px 6px; border: 1px solid #d0d7de; border-rad
 <header>
   <h1>AeroDesk Admin</h1>
   <span id="refresh">刷新中…</span>
+  <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
+    <input id="token" type="password" placeholder="ADMIN_TOKEN" style="width:160px" onchange="saveToken(this.value)">
+    <button onclick="saveToken($('token').value)">保存</button>
+  </span>
 </header>
 
 <div class="grid">
@@ -74,6 +78,19 @@ input { font-size: 12px; padding: 3px 6px; border: 1px solid #d0d7de; border-rad
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let adminToken = localStorage.getItem('adminToken') || '';
+if (adminToken) $('token').value = adminToken;
+function saveToken(v) { adminToken = v.trim(); localStorage.setItem('adminToken', adminToken); }
+async function apiFetch(url, opts = {}) {
+  opts.headers = Object.assign({}, opts.headers || {});
+  if (adminToken) opts.headers['X-Admin-Token'] = adminToken;
+  const r = await fetch(url, opts);
+  if (r.status === 401) {
+    const t = prompt('需要 ADMIN_TOKEN（401）：');
+    if (t !== null) { saveToken(t); opts.headers['X-Admin-Token'] = adminToken; return fetch(url, opts); }
+  }
+  return r;
+}
 const fmtUptime = us => { const s = Math.floor((us||0)/1e6); return `${Math.floor(s/3600)}h${Math.floor(s%3600/60)}m${s%60}s`; };
 
 const shardMap = (m) => {
@@ -85,12 +102,12 @@ async function load() {
   const t0 = Date.now();
   try {
     const [sfu, sig, rooms, clients, recs, metrics] = await Promise.all([
-      fetch('/api/health').then(r => r.json()).catch(() => null),
-      fetch('/api/signal-health').then(r => r.json()).catch(() => null),
-      fetch('/api/rooms').then(r => r.json()).catch(() => null),
-      fetch('/api/clients').then(r => r.json()).catch(() => null),
-      fetch('/api/recordings').then(r => r.json()).catch(() => null),
-      fetch('/api/metrics').then(r => r.json()).catch(() => null),
+      apiFetch('/api/health').then(r => r.json()).catch(() => null),
+      apiFetch('/api/signal-health').then(r => r.json()).catch(() => null),
+      apiFetch('/api/rooms').then(r => r.json()).catch(() => null),
+      apiFetch('/api/clients').then(r => r.json()).catch(() => null),
+      apiFetch('/api/recordings').then(r => r.json()).catch(() => null),
+      apiFetch('/api/metrics').then(r => r.json()).catch(() => null),
     ]);
 
     setHealth('s-sfu', sfu);
@@ -148,18 +165,18 @@ function renderRecordings(recs) {
 
 async function kickRoom(room) {
   if (!confirm(`踢出整个房间 ${room}？`)) return;
-  await fetch(`/api/kick?room=${encodeURIComponent(room)}`, { method: 'POST' });
+  await apiFetch(`/api/kick?room=${encodeURIComponent(room)}`, { method: 'POST' });
   load();
 }
 async function kickClient(room, client) {
   if (!confirm(`踢出 ${room} 的客户端 ${client}？`)) return;
-  await fetch(`/api/kick?room=${encodeURIComponent(room)}&client=${client}`, { method: 'POST' });
+  await apiFetch(`/api/kick?room=${encodeURIComponent(room)}&client=${client}`, { method: 'POST' });
   load();
 }
 async function record(action) {
   const room = $('rec-room').value.trim();
   if (!room) { alert('请填写房间名'); return; }
-  await fetch(`/api/record/${action}?room=${encodeURIComponent(room)}`, { method: 'POST' });
+  await apiFetch(`/api/record/${action}?room=${encodeURIComponent(room)}`, { method: 'POST' });
   load();
 }
 
