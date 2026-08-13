@@ -12,7 +12,7 @@ use windows::Win32::Media::KernelStreaming::KSDATAFORMAT_SUBTYPE_PCM;
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
 };
-use windows::core::{GUID, Interface};
+use windows::core::GUID;
 
 /// windows 0.58 未生成 CLSID_MMDeviceEnumerator / KSDATAFORMAT_SUBTYPE_IEEE_FLOAT，手动声明。
 const CLSID_MMDEVICE_ENUMERATOR: GUID = GUID::from_u128(0xBCDE0395_E52F_467C_8E3D_C4579291692E);
@@ -59,7 +59,7 @@ impl WasapiLoopbackCapture {
                     None,
                 )
                 .map_err(|e| format!("Initialize: {e}"))?;
-            let _ = CoTaskMemFree(Some(mix as *const _));
+            CoTaskMemFree(Some(mix as *const _));
             let capture: IAudioCaptureClient = client
                 .GetService()
                 .map_err(|e| format!("GetService IAudioCaptureClient: {e}"))?;
@@ -162,7 +162,8 @@ impl aerodesk_core::platform::AudioCapturer for WasapiLoopbackCapture {
 
 /// 解析 GetMixFormat 的 WAVEFORMATEX / WAVEFORMATEXTENSIBLE。
 unsafe fn parse_mix_format(mix: *const WAVEFORMATEX) -> (u16, u16, u16, bool) {
-    let wfx = &*mix;
+    // SAFETY: mix 来自 GetMixFormat，有效期至 CoTaskMemFree；调用点保证指针有效。
+    let wfx = unsafe { &*mix };
     let mut channels = wfx.nChannels;
     let mut bits = wfx.wBitsPerSample;
     let mut block_align = wfx.nBlockAlign;
@@ -170,7 +171,7 @@ unsafe fn parse_mix_format(mix: *const WAVEFORMATEX) -> (u16, u16, u16, bool) {
     if wfx.wFormatTag == 0xFFFE {
         // WAVEFORMATEXTENSIBLE：SubFormat 决定采样类型。
         // packed struct：addr_of! 取地址 + read_unaligned（避免未对齐引用）。
-        let ext = &*(mix as *const windows::Win32::Media::Audio::WAVEFORMATEXTENSIBLE);
+        let ext = unsafe { &*(mix as *const windows::Win32::Media::Audio::WAVEFORMATEXTENSIBLE) };
         let subformat = unsafe { std::ptr::read_unaligned(std::ptr::addr_of!(ext.SubFormat)) };
         channels = unsafe { std::ptr::read_unaligned(std::ptr::addr_of!(ext.Format.nChannels)) };
         bits = unsafe { std::ptr::read_unaligned(std::ptr::addr_of!(ext.Format.wBitsPerSample)) };
