@@ -61,15 +61,12 @@ impl PublisherSession {
             }
         }
         while let Some(ev) = live.endpoint.poll_event() {
-            match ev {
-                ClientEvent::ChannelData(cid, _, data) => {
-                    if live.endpoint.channel_label(cid).as_deref() == Some("input") {
-                        if let Ok(s) = String::from_utf8(data) {
-                            let _ = self.input_tx.send(s);
-                        }
-                    }
+            if let ClientEvent::ChannelData(cid, _, data) = ev {
+                if live.endpoint.channel_label(cid).as_deref() == Some("input")
+                    && let Ok(s) = String::from_utf8(data)
+                {
+                    let _ = self.input_tx.send(s);
                 }
-                _ => {}
             }
         }
     }

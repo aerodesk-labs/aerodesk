@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.IBinder
 
 /**
@@ -22,7 +23,12 @@ class ProjectionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val resultCode = intent?.getIntExtra("resultCode", 0) ?: 0
-        val data = intent?.getParcelableExtra<Intent>("data")
+        val data = if (Build.VERSION.SDK_INT >= 33) {
+            intent?.getParcelableExtra("data", Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent?.getParcelableExtra("data") as Intent?
+        }
         val server = intent?.getStringExtra("server") ?: ""
         val room = intent?.getStringExtra("room") ?: ""
 
