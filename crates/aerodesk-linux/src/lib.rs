@@ -12,6 +12,9 @@
 /// PipeWire 系统音频采集（仅 Linux + feature `pipewire`）。
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod audio;
+/// V4L2 摄像头（仅 Linux）。
+#[cfg(target_os = "linux")]
+pub mod camera;
 pub mod capture;
 pub mod encode;
 pub mod inject;
