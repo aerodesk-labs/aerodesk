@@ -342,6 +342,8 @@ impl Decoder for FfmpegHwDecoder {
         };
         if self.inner.is_none() {
             self.inner = Some(Inner::new(codec, self.device_ref)?);
+            // 记录嗅探结果，`codec()` 可反映当前解码器（CLI 按 codec 变化重建）。
+            self.codec = Some(codec);
         }
         let inner = self.inner.as_mut().expect("inner initialized");
         // SAFETY: pkt 为 Inner 持有的 AVPacket；先 unref 再 av_new_packet 分配
@@ -401,10 +403,9 @@ mod tests {
         assert_eq!(sniff_codec(&pframe), None);
     }
 
-    /// H.264 软编 → 硬件解码回环（D3D11VA/DXVA2）。
+    /// 软编 → 硬件解码回环（libx264/libx265 → D3D11VA/DXVA2）。
     /// 无 GPU/驱动的环境（如 CI）打印原因后返回，不制造假绿。
-    #[test]
-    fn h264_hw_roundtrip() {
+    fn hw_roundtrip(enc_name: &str, codec_id: ffmpeg_next::codec::Id, codec: Codec) {
         let mut dec = match FfmpegHwDecoder::new() {
             Ok(d) => d,
             Err(e) => {
@@ -413,10 +414,9 @@ mod tests {
             }
         };
         let (w, h) = (320u32, 180u32);
-        // 强制 libx264 软编（AnnexB + repeat-headers），保证测试与平台无关。
+        // 强制软编（AnnexB + repeat-headers），保证测试与平台无关。
         let mut enc =
-            FfmpegEncoder::open_named("libx264", ffmpeg_next::codec::Id::H264, w, h, 30, 800_000)
-                .expect("libx264 encoder");
+            FfmpegEncoder::open_named(enc_name, codec_id, w, h, 30, 800_000).expect("soft encoder");
         let mut decoded = None;
         let mut last_err = String::new();
         for i in 0..90u32 {
@@ -445,5 +445,16 @@ mod tests {
         };
         assert_eq!((dw, dh), (w, h));
         assert_eq!(rgba.len(), (w * h * 4) as usize);
+        assert_eq!(dec.codec(), Some(codec), "嗅探应记录实际 codec");
+    }
+
+    #[test]
+    fn h264_hw_roundtrip() {
+        hw_roundtrip("libx264", ffmpeg_next::codec::Id::H264, Codec::H264);
+    }
+
+    #[test]
+    fn hevc_hw_roundtrip() {
+        hw_roundtrip("libx265", ffmpeg_next::codec::Id::HEVC, Codec::Hevc);
     }
 }

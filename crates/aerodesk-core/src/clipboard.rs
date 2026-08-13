@@ -176,44 +176,110 @@ fn powershell_encoded(script: &str) -> Option<std::process::Output> {
         .ok()
 }
 
-/// Windows 读剪贴板：`Get-Clipboard -Raw` 写 UTF-8 临时文件后读回，
-/// 避免 PowerShell 管道输出编码（控制台代码页 / UTF-16）不确定。
+/// Windows 读剪贴板（原生 Win32 CF_UNICODETEXT，#271 修复）。
+///
+/// 原 PowerShell `Get-Clipboard` 子进程单次调用实测阻塞 ~1.3s（本机），而
+/// `maybe_poll_clipboard` 每轮轮询一次，把 publisher/viewer 主循环拖到 <1fps。
+/// 改 Win32 OpenClipboard/GetClipboardData：微秒级、无子进程。
 #[cfg(target_os = "windows")]
 fn windows_read() -> Option<String> {
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!("aerodesk-clip-{}.txt", std::process::id()));
-    let script = format!(
-        "Get-Clipboard -Raw | Set-Content -LiteralPath '{}' -Encoding UTF8",
-        path.to_string_lossy().replace('\'', "''")
-    );
-    let out = powershell_encoded(&script)?;
-    if !out.status.success() {
-        let _ = std::fs::remove_file(&path);
-        return None;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn OpenClipboard(hwnd: *mut std::ffi::c_void) -> i32;
+        fn CloseClipboard() -> i32;
+        fn GetClipboardData(fmt: u32) -> *mut std::ffi::c_void;
     }
-    let text = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-    // Set-Content -Encoding UTF8 输出带 BOM（U+FEFF），以及 PowerShell 追加的 CRLF。
-    let text = text.as_deref().unwrap_or("");
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let text = text.trim_end_matches(['\r', '\n']);
-    Some(text.to_string())
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalLock(h: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn GlobalUnlock(h: *mut std::ffi::c_void) -> i32;
+        fn GlobalSize(h: *mut std::ffi::c_void) -> usize;
+    }
+    const CF_UNICODETEXT: u32 = 13;
+    unsafe {
+        // SAFETY: OpenClipboard/CloseClipboard 成对调用；GetClipboardData 返回
+        // 的句柄仅在 Open..Close 窗口内有效，GlobalLock/Unlock 成对，且剪贴板
+        // CF_UNICODETEXT 内容为 NUL 结尾 UTF-16LE，GlobalSize 兜底越界。
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return None;
+        }
+        let h = GetClipboardData(CF_UNICODETEXT);
+        if h.is_null() {
+            CloseClipboard();
+            return None;
+        }
+        let ptr = GlobalLock(h);
+        if ptr.is_null() {
+            CloseClipboard();
+            return None;
+        }
+        let size = GlobalSize(h);
+        let mut len = 0usize;
+        while len + 1 < size && *((ptr as *const u16).add(len)) != 0 {
+            len += 1;
+        }
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr as *const u16, len));
+        GlobalUnlock(h);
+        CloseClipboard();
+        Some(text)
+    }
 }
 
-/// Windows 写剪贴板：`Set-Clipboard -Value <base64 解码出的文本>`。
+/// Windows 写剪贴板（原生 Win32 CF_UNICODETEXT，#271 修复）。
 #[cfg(target_os = "windows")]
 fn windows_write(text: &str) -> bool {
-    let b64 = Base64::encode_string(text.as_bytes());
-    // 文本本身经 Base64 进脚本，脚本再经 UTF-16LE Base64 进命令行，全程无转义面。
-    let script = format!(
-        "Set-Clipboard -Value ([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(\"{b64}\")))"
-    );
-    powershell_encoded(&script)
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn OpenClipboard(hwnd: *mut std::ffi::c_void) -> i32;
+        fn CloseClipboard() -> i32;
+        fn EmptyClipboard() -> i32;
+        fn SetClipboardData(fmt: u32, h: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalAlloc(flags: u32, bytes: usize) -> *mut std::ffi::c_void;
+        fn GlobalLock(h: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn GlobalUnlock(h: *mut std::ffi::c_void) -> i32;
+        fn GlobalFree(h: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    }
+    const CF_UNICODETEXT: u32 = 13;
+    const GMEM_MOVEABLE: u32 = 0x0002;
+    let mut utf16: Vec<u16> = text.encode_utf16().collect();
+    utf16.push(0);
+    unsafe {
+        // SAFETY: OpenClipboard 成功后 EmptyClipboard 清空，GlobalAlloc/MOVEABLE
+        // 分配后 GlobalLock 写入 UTF-16LE（含 NUL）；SetClipboardData 成功时接管
+        // h 所有权，失败时 GlobalFree 释放，CloseClipboard 收尾。
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return false;
+        }
+        if EmptyClipboard() == 0 {
+            CloseClipboard();
+            return false;
+        }
+        let h = GlobalAlloc(GMEM_MOVEABLE, utf16.len() * 2);
+        if h.is_null() {
+            CloseClipboard();
+            return false;
+        }
+        let dst = GlobalLock(h);
+        if dst.is_null() {
+            GlobalFree(h);
+            CloseClipboard();
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(utf16.as_ptr(), dst as *mut u16, utf16.len());
+        GlobalUnlock(h);
+        let set = SetClipboardData(CF_UNICODETEXT, h);
+        if set.is_null() {
+            // 失败时剪贴板未接管句柄，需自行释放。
+            GlobalFree(h);
+        }
+        CloseClipboard();
+        !set.is_null()
+    }
 }
 
-/// Windows 读剪贴板图片：`Clipboard.GetImage()` → PNG → base64 落临时文件读回。
 #[cfg(target_os = "windows")]
 fn windows_read_image() -> Option<Vec<u8>> {
     let dir = std::env::temp_dir();
