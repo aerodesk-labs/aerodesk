@@ -15,7 +15,8 @@ use std::process::Command;
 
 use aerodesk_core::access_unit::AccessUnitAssembler;
 use aerodesk_sfu::recorder::{
-    CODEC_H264, CODEC_H265, CODEC_PCMU, KIND_AUDIO, KIND_VIDEO, MAGIC, PACKET_HEADER_LEN,
+    CODEC_H264, CODEC_H265, CODEC_OPUS, CODEC_PCMU, KIND_AUDIO, KIND_VIDEO, MAGIC,
+    PACKET_HEADER_LEN,
 };
 
 /// ADREC2 包：解析后的一帧/NAL 片段。
@@ -109,11 +110,21 @@ fn parse_adrec2(path: &Path) -> Result<Vec<Packet>, String> {
 }
 
 /// 提取 PCMU（G.711 μ-law）音频包，按 RTP 时间戳排序（8kHz 时钟）。
-/// Opus 暂不转封装（需 Ogg/Opus 帧重组，见 #266）。
 fn parse_pcmu_audio(path: &Path) -> Result<Vec<(u64, Vec<u8>)>, String> {
     let mut records: Vec<(u64, Vec<u8>)> = read_adrec2(path)?
         .into_iter()
         .filter(|r| r.kind == KIND_AUDIO && r.codec == CODEC_PCMU)
+        .map(|r| (r.rtp_ts, r.payload))
+        .collect();
+    records.sort_by_key(|(ts, _)| *ts);
+    Ok(records)
+}
+
+/// 提取 Opus 音频包，按 RTP 时间戳排序（48kHz 时钟）。
+fn parse_opus_audio(path: &Path) -> Result<Vec<(u64, Vec<u8>)>, String> {
+    let mut records: Vec<(u64, Vec<u8>)> = read_adrec2(path)?
+        .into_iter()
+        .filter(|r| r.kind == KIND_AUDIO && r.codec == CODEC_OPUS)
         .map(|r| (r.rtp_ts, r.payload))
         .collect();
     records.sort_by_key(|(ts, _)| *ts);
@@ -226,24 +237,150 @@ fn write_pcmu_es(records: &[(u64, Vec<u8>)], work_dir: &Path) -> Result<PathBuf,
     Ok(path)
 }
 
+/// 音频轨输入（决定 ffmpeg 的输入 demuxer 与输出 codec）。
+enum AudioTrack {
+    /// 原始 μ-law → `-f mulaw` + 转 AAC（MP4 不原生支持 μ-law）。
+    Pcmu(PathBuf),
+    /// Ogg/Opus → `-f ogg` + `-c:a copy`。
+    Opus(PathBuf),
+}
+
+impl AudioTrack {
+    fn path(&self) -> &Path {
+        match self {
+            AudioTrack::Pcmu(p) | AudioTrack::Opus(p) => p,
+        }
+    }
+}
+
+/// Ogg CRC-32（多项式 0x04C11DB7，无反射，初值 0，无最终异或）。
+fn ogg_crc(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0;
+    for &b in data {
+        crc ^= (b as u32) << 24;
+        for _ in 0..8 {
+            crc = if crc & 0x8000_0000 != 0 {
+                (crc << 1) ^ 0x04C1_1DB7
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
+/// 构造一个 Ogg 页（单包；lacing 按 255 字节分段）。
+fn ogg_page(serial: u32, seq: u32, header_type: u8, granule: i64, packet: &[u8]) -> Vec<u8> {
+    let mut lacing = Vec::new();
+    let mut n = packet.len();
+    while n >= 255 {
+        lacing.push(255u8);
+        n -= 255;
+    }
+    lacing.push(n as u8);
+
+    let mut page = Vec::with_capacity(27 + lacing.len() + packet.len());
+    page.extend_from_slice(b"OggS");
+    page.push(0); // version
+    page.push(header_type);
+    page.extend_from_slice(&granule.to_le_bytes());
+    page.extend_from_slice(&serial.to_le_bytes());
+    page.extend_from_slice(&seq.to_le_bytes());
+    page.extend_from_slice(&[0u8; 4]); // CRC 占位
+    page.push(lacing.len() as u8);
+    page.extend_from_slice(&lacing);
+    page.extend_from_slice(packet);
+
+    // CRC 覆盖整页（含 "OggS"），CRC 字段置 0 后计算。
+    let crc = ogg_crc(&page);
+    page[22..26].copy_from_slice(&crc.to_le_bytes());
+    page
+}
+
+/// OpusHead：48kHz 双声道、pre-skip 312、mapping 0。
+fn opus_head() -> Vec<u8> {
+    let mut h = Vec::with_capacity(19);
+    h.extend_from_slice(b"OpusHead");
+    h.push(1); // version
+    h.push(2); // channels（立体声）
+    h.extend_from_slice(&312u16.to_le_bytes()); // pre-skip
+    h.extend_from_slice(&48_000u32.to_le_bytes()); // input sample rate
+    h.extend_from_slice(&0u16.to_le_bytes()); // output gain
+    h.push(0); // mapping family
+    h
+}
+
+/// OpusTags：空 vendor + 空 comment 列表。
+fn opus_tags() -> Vec<u8> {
+    let mut t = Vec::new();
+    t.extend_from_slice(b"OpusTags");
+    t.extend_from_slice(&0u32.to_le_bytes()); // vendor 长度 0
+    t.extend_from_slice(&0u32.to_le_bytes()); // comment 数 0
+    t
+}
+
+/// 把 Opus 音频包按时间戳顺序写成 Ogg/Opus（每包一页，20ms@48kHz = 960 样本）。
+fn write_opus_ogg(records: &[(u64, Vec<u8>)], work_dir: &Path) -> Result<PathBuf, String> {
+    let path = work_dir.join("audio.opus");
+    let mut f = File::create(&path).map_err(|e| format!("create opus: {e}"))?;
+    let serial: u32 = 0xAD_DEC0DE;
+    let mut seq = 0u32;
+    f.write_all(&ogg_page(serial, seq, 0x02, 0, &opus_head())) // BOS
+        .map_err(|e| format!("write OpusHead: {e}"))?;
+    seq += 1;
+    f.write_all(&ogg_page(serial, seq, 0x00, 0, &opus_tags()))
+        .map_err(|e| format!("write OpusTags: {e}"))?;
+    seq += 1;
+
+    let mut granule: i64 = 0;
+    let n = records.len();
+    for (i, (_, payload)) in records.iter().enumerate() {
+        granule += 960;
+        // 最后一页置 EOS。
+        let htype = if i + 1 == n { 0x04 } else { 0x00 };
+        f.write_all(&ogg_page(serial, seq, htype, granule, payload))
+            .map_err(|e| format!("write Opus page: {e}"))?;
+        seq += 1;
+    }
+    Ok(path)
+}
+
 /// 调 ffmpeg 把 AnnexB 基本流复用为 MP4（-c copy，不重编码）。
 /// `fmt` 为 `-f` 输入格式：h264 / hevc（不指定时 ffmpeg 可能把 HEVC 误判成 H264，
 /// stsd 写 avc1 导致播放器/ffprobe 报错）。
-fn mux_mp4(es: &Path, out: &Path, fps: u32, fmt: &str, audio: Option<&Path>) -> Result<(), String> {
+fn mux_mp4(
+    es: &Path,
+    out: &Path,
+    fps: u32,
+    fmt: &str,
+    audio: Option<&AudioTrack>,
+) -> Result<(), String> {
     let mut cmd = Command::new("ffmpeg");
     // 输入侧 `-r fps` 强制裸流帧率（比 -framerate 更彻底）：ffmpeg 的裸
     // HEVC demuxer 在 -framerate 下会在 ~51 帧后失步（帧时长变 1 tick），
     // 导致 MP4 时长只有 1.7s；-r 输入则正确分配 1/fps 每帧。
     cmd.args(["-y", "-f", fmt, "-r", &fps.to_string(), "-i"])
         .arg(es);
-    if let Some(audio_path) = audio {
-        // 原始 μ-law → MP4：转 AAC（MP4 不原生支持 μ-law），8kHz 单声道。
-        cmd.args(["-f", "mulaw", "-ar", "8000", "-ac", "1", "-i"])
-            .arg(audio_path);
+    if let Some(track) = audio {
+        match track {
+            // 原始 μ-law → MP4：转 AAC（MP4 不原生支持 μ-law），8kHz 单声道。
+            AudioTrack::Pcmu(p) => {
+                cmd.args(["-f", "mulaw", "-ar", "8000", "-ac", "1", "-i"])
+                    .arg(p);
+            }
+            // Ogg/Opus → MP4：-c:a copy（Opus 原生支持）。
+            AudioTrack::Opus(p) => {
+                cmd.args(["-f", "ogg", "-i"]).arg(p);
+            }
+        }
     }
     cmd.args(["-map", "0:v:0", "-c:v", "copy"]);
-    if audio.is_some() {
-        cmd.args(["-map", "1:a:0", "-c:a", "aac"]);
+    if let Some(track) = audio {
+        let acodec = match track {
+            AudioTrack::Pcmu(_) => "aac",
+            AudioTrack::Opus(_) => "copy",
+        };
+        cmd.args(["-map", "1:a:0", "-c:a", acodec]);
     }
     let status = cmd
         .arg(out)
@@ -265,27 +402,31 @@ pub fn convert(
 ) -> Result<ConvertStats, String> {
     let packets = parse_adrec2(input)?;
     let pcmu = parse_pcmu_audio(input)?;
+    let opus = parse_opus_audio(input)?;
     let work_dir = std::env::temp_dir().join(format!("rec2mp4-{}", std::process::id()));
     std::fs::create_dir_all(&work_dir).map_err(|e| format!("tmp dir: {e}"))?;
     let (es_path, est_fps, au_count, duration_secs, codec) =
         aggregate_and_write_es(&packets, &work_dir)?;
-    let audio_path = if pcmu.is_empty() {
-        None
+    // 音频轨优先 Opus（原生 copy）；否则 PCMU（转 AAC）。
+    let audio = if !opus.is_empty() {
+        Some(AudioTrack::Opus(write_opus_ogg(&opus, &work_dir)?))
+    } else if !pcmu.is_empty() {
+        Some(AudioTrack::Pcmu(write_pcmu_es(&pcmu, &work_dir)?))
     } else {
-        Some(write_pcmu_es(&pcmu, &work_dir)?)
+        None
     };
     let fps = fps_override.unwrap_or(est_fps);
     let fmt = if codec == CODEC_H264 { "h264" } else { "hevc" };
-    mux_mp4(&es_path, output, fps, fmt, audio_path.as_deref())?;
+    mux_mp4(&es_path, output, fps, fmt, audio.as_ref())?;
     if std::env::var("REC2MP4_KEEP_ES").is_err() {
         let _ = std::fs::remove_file(&es_path);
-        if let Some(audio_path) = &audio_path {
-            let _ = std::fs::remove_file(audio_path);
+        if let Some(track) = &audio {
+            let _ = std::fs::remove_file(track.path());
         }
     } else {
         eprintln!("rec2mp4: 保留 ES {}", es_path.display());
-        if let Some(audio_path) = &audio_path {
-            eprintln!("rec2mp4: 保留音频 ES {}", audio_path.display());
+        if let Some(track) = &audio {
+            eprintln!("rec2mp4: 保留音频 ES {}", track.path().display());
         }
     }
     Ok(ConvertStats {
@@ -414,6 +555,48 @@ mod tests {
         buf.extend_from_slice(&rtp_ts.to_le_bytes());
         buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         buf.extend_from_slice(payload);
+    }
+
+    #[test]
+    fn parses_opus_audio_sorted_by_rtp_ts() {
+        let work = std::env::temp_dir().join(format!("rec2mp4-opus-aud-{}", std::process::id()));
+        std::fs::create_dir_all(&work).unwrap();
+        let mut data = MAGIC.to_vec();
+        push_record(&mut data, KIND_AUDIO, CODEC_OPUS, 960, &[0x01, 0x02]);
+        push_record(&mut data, KIND_VIDEO, CODEC_H264, 3000, &[0, 0, 0, 1, 0x65]);
+        push_record(&mut data, KIND_AUDIO, CODEC_OPUS, 480, &[0x03, 0x04]);
+        let path = work.join("opus.adrec");
+        std::fs::write(&path, &data).unwrap();
+
+        let opus = parse_opus_audio(&path).unwrap();
+        assert_eq!(opus.len(), 2);
+        assert_eq!(opus[0].0, 480, "按 rtp_ts 升序");
+        assert_eq!(opus[0].1, vec![0x03, 0x04]);
+        assert_eq!(opus[1].0, 960);
+        assert_eq!(opus[1].1, vec![0x01, 0x02]);
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn ogg_page_basic_structure_and_lacing() {
+        // 单包 600 字节 → lacing 255+255+90；验证 magic/version/granule/serial/seq。
+        let payload = vec![0xABu8; 600];
+        let page = ogg_page(0xADDEC0DE, 3, 0x02, 960, &payload);
+        assert_eq!(&page[0..4], b"OggS");
+        assert_eq!(page[4], 0); // version
+        assert_eq!(page[5], 0x02); // BOS
+        assert_eq!(i64::from_le_bytes(page[6..14].try_into().unwrap()), 960);
+        assert_eq!(
+            u32::from_le_bytes(page[14..18].try_into().unwrap()),
+            0xADDEC0DE
+        );
+        assert_eq!(u32::from_le_bytes(page[18..22].try_into().unwrap()), 3);
+        assert_eq!(page[26], 3, "3 个 lacing 段");
+        assert_eq!(&page[27..30], &[255, 255, 90], "255/255/90 lacing");
+        assert_eq!(page.len(), 27 + 3 + 600);
+        // CRC 字段非零。
+        let crc = u32::from_le_bytes(page[22..26].try_into().unwrap());
+        assert_ne!(crc, 0);
     }
 
     #[test]
