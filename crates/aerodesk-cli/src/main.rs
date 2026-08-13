@@ -1588,6 +1588,8 @@ fn viewer(
     // 无法与本地协商 mid 直接比对；按「首个视频 mid=屏幕、第二个=摄像头」
     // 的到达顺序区分（SFU 按发布端 offer 顺序开轨）。
     let mut video_mids: Vec<str0m::media::Mid> = Vec::new();
+    // #340：远端（SFU）重协商 offer 的发送视频轨顺序（screen→camera），确定性
+    // 区分两轨；为空时回退到达顺序。
     let mut camera_frames = 0u64;
     let mut camera_bytes = 0u64;
     let mut camera_decoded = 0u64;
@@ -1755,7 +1757,14 @@ fn viewer(
                         if !video_mids.contains(&data.mid) {
                             video_mids.push(data.mid);
                         }
-                        let is_camera = camera && video_mids.len() > 1 && video_mids[1] == data.mid;
+                        let is_camera = camera && {
+                            let send_mids = endpoint.remote_send_video_mids();
+                            if send_mids.len() >= 2 {
+                                send_mids.get(1) == Some(&data.mid)
+                            } else {
+                                video_mids.len() > 1 && video_mids[1] == data.mid
+                            }
+                        };
                         // #136 首包 / 不连续 / 切层 → 请求关键帧（PLI，节流 1s）。
                         let now = Instant::now();
                         let rid_changed = last_kf_rid != data.rid;
