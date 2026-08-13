@@ -265,8 +265,9 @@ pub fn run_viewer(
     // 实际协商/正在解码的视频 codec（状态栏显示用；首包后才有值）。
     let mut current_codec: Option<Codec> = None;
     let mut frames: u64 = 0;
-    // 摄像头第二路视频轨：SFU 转发 mid 无法与本地协商 mid 直接比对，按
-    // 「首个视频 mid=屏幕、第二个=摄像头」到达顺序区分。
+    // 摄像头第二路视频轨：SFU 转发 mid 无法与本地协商 mid 直接比对。
+    // 优先按 SFU 重协商 offer 的发送轨顺序（screen→camera，#340 确定性）；
+    // 无该信息时回退「首个视频 mid=屏幕、第二个=摄像头」到达顺序。
     let mut video_mids: Vec<str0m::media::Mid> = Vec::new();
     // 摄像头与屏幕是两条独立 RTP 流，必须各自一个 AccessUnitAssembler。
     let mut camera_assembler = AccessUnitAssembler::new();
@@ -474,7 +475,15 @@ pub fn run_viewer(
                             if !video_mids.contains(&data.mid) {
                                 video_mids.push(data.mid);
                             }
-                            let is_camera = video_mids.len() > 1 && video_mids[1] == data.mid;
+                            let is_camera = {
+                                let send_mids = live.endpoint.remote_send_video_mids();
+                                if send_mids.len() >= 2 {
+                                    // #340：SFU offer 顺序确定 screen=mids[0]、camera=mids[1]。
+                                    send_mids.get(1) == Some(&data.mid)
+                                } else {
+                                    video_mids.len() > 1 && video_mids[1] == data.mid
+                                }
+                            };
                             if is_camera && !camera_seen {
                                 camera_seen = true;
                                 eprintln!(
