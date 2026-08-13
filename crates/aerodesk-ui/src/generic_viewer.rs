@@ -120,6 +120,12 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     let mut pkts: u64 = 0;
     let mut media_evts: u64 = 0;
     let mut last_stat = Instant::now();
+    // #73 观看端音频播放：PCMU 解码 → jitter buffer → cpal AudioSink（全平台）。
+    let mut audio_sink: Option<aerodesk_core::audio_sink::AudioSink> = None;
+    let mut avsync = aerodesk_core::avsync::AvSync::new();
+    let mut jitter = aerodesk_core::avsync::AudioJitterBuffer::new(0.08);
+    let mut audio_frames: u64 = 0;
+    let mut audio_played: u64 = 0;
     // #136 关键帧请求：首包/不连续/切层时向 SFU 发 PLI（节流 1s）。
     let mut last_kf_request: Option<std::time::Instant> = None;
     let mut last_kf_rid: Option<str0m::media::Rid> = None;
@@ -207,6 +213,25 @@ pub fn run_viewer_generic<D, R, DF, RF>(
             file_transfer.handle_event(&ev, &mut live.endpoint);
             if let ClientEvent::Media(data) = ev {
                 media_evts += 1;
+                // #73 音频识别：用协商 codec（PCMU/Opus）区分，不按 mid（SFU 转发
+                // 用本地 mid）。当前播放 PCMU（默认音频）；Opus 需 aerodesk-ffmpeg 非
+                // macOS 依赖，留后续。
+                if data.params.spec().codec == str0m::format::Codec::PCMU {
+                    audio_frames += 1;
+                    if audio_sink.is_none() {
+                        audio_sink = aerodesk_core::audio_sink::AudioSink::new_with_rate(8000).ok();
+                    }
+                    let pcm = aerodesk_core::pcmu::pcmu_decode(&data.data);
+                    avsync.on_audio(data.time.numer(), data.time.denom());
+                    jitter.push(avsync.audio_time_secs(), pcm);
+                    if let Some(sink) = &mut audio_sink {
+                        while let Some(f) = jitter.pop(avsync.audio_time_secs()) {
+                            sink.push_pcm(&f);
+                            audio_played += 1;
+                        }
+                    }
+                    continue;
+                }
                 // #136 首包 / 不连续 / 切层 → 请求关键帧（PLI，节流 1s）。
                 let now = std::time::Instant::now();
                 let rid_changed = last_kf_rid != data.rid;

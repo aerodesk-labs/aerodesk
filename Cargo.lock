@@ -93,6 +93,7 @@ dependencies = [
  "aerodesk-protocol",
  "arboard",
  "base64ct",
+ "cpal",
  "libc",
  "md-5",
  "pcap-file",
