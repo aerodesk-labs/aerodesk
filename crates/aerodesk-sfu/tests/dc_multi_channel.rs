@@ -302,8 +302,22 @@ fn channel_added_after_connect_renegotiates_and_forwards() {
 
 /// 3) 大消息（>256KiB）data channel 往返：#331 回归——SCTP max-message-size
 ///    提升到 1MiB 后，超过旧 256KiB 上限的 cmd 响应不应被静默丢弃。
+///
+/// str0m 的 DTLS/SCTP 解包调用链深，512KiB 消息又会被分片成大量 SCTP 块；
+/// 在默认 2MiB 测试线程栈上会 stack overflow（Windows 尤甚）。放到 8MiB 栈
+/// 线程运行——本测试验证的是 SCTP 消息上限，不是栈占用。
 #[test]
 fn large_data_channel_message_roundtrips() {
+    std::thread::Builder::new()
+        .name("large-dc-message".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(large_data_channel_message_roundtrips_inner)
+        .expect("spawn large-dc-message thread")
+        .join()
+        .expect("large-dc-message thread panicked");
+}
+
+fn large_data_channel_message_roundtrips_inner() {
     let now = Instant::now();
     let mut viewer = Node::new(now);
     let mut publisher = Node::new(now);
