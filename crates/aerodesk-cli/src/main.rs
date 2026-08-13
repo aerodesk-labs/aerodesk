@@ -2612,9 +2612,66 @@ fn publisher_ffmpeg(
 /// 屏幕采集 + FFmpeg 多 codec（#74）：ScreenCaptureKit → IOSurface → BGRA →
 /// FfmpegEncoder（H265/VP9/AV1）。H.264 走原 VtEncoder 零拷贝路径。
 /// 需要屏幕录制权限（TCC）。
-/// Windows 屏幕采集发布端（被控端）：DXGI Desktop Duplication → OpenH264 软编 → SFU。
+/// Windows 屏幕采集发布端（被控端）：DXGI Desktop Duplication → Media Foundation H.264
+/// 硬编优先（失败回退 OpenH264 软编）→ SFU。
 /// 输入注入走 SendInput（aerodesk-windows）；系统音频走 WASAPI loopback
 /// （采集系统正在播放的声音，失败回退合成音）；需要交互桌面会话（DXGI 输出可用）。
+/// Windows 屏幕编码器：Media Foundation H.264 硬编 / OpenH264 软编。
+#[cfg(target_os = "windows")]
+#[allow(clippy::large_enum_variant)]
+enum WindowsScreenEncoder {
+    MediaFoundation(aerodesk_windows::encode::MfH264Encoder),
+    Soft(aerodesk_softenc::openh264enc::OpenH264Encoder),
+}
+
+#[cfg(target_os = "windows")]
+impl aerodesk_core::platform::Encoder for WindowsScreenEncoder {
+    type Error = String;
+
+    fn configure(
+        &mut self,
+        codec: Codec,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> Result<(), Self::Error> {
+        match self {
+            Self::MediaFoundation(e) => {
+                aerodesk_core::platform::Encoder::configure(e, codec, width, height, fps)
+            }
+            Self::Soft(e) => {
+                aerodesk_core::platform::Encoder::configure(e, codec, width, height, fps)
+            }
+        }
+    }
+
+    fn encode(
+        &mut self,
+        frame: &aerodesk_core::platform::VideoFrame,
+    ) -> Result<Option<aerodesk_core::media_pipeline::EncodedUnit>, Self::Error> {
+        match self {
+            Self::MediaFoundation(e) => aerodesk_core::platform::Encoder::encode(e, frame),
+            Self::Soft(e) => aerodesk_core::platform::Encoder::encode(e, frame),
+        }
+    }
+
+    fn request_keyframe(&mut self) {
+        match self {
+            Self::MediaFoundation(e) => aerodesk_core::platform::Encoder::request_keyframe(e),
+            Self::Soft(e) => aerodesk_core::platform::Encoder::request_keyframe(e),
+        }
+    }
+
+    fn set_bitrate(&mut self, bitrate_bps: u64, fps: u32) {
+        match self {
+            Self::MediaFoundation(e) => {
+                aerodesk_core::platform::Encoder::set_bitrate(e, bitrate_bps, fps)
+            }
+            Self::Soft(e) => aerodesk_core::platform::Encoder::set_bitrate(e, bitrate_bps, fps),
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn publisher_capture_windows(
     signal_url: &str,
@@ -2630,6 +2687,7 @@ fn publisher_capture_windows(
     use aerodesk_core::platform::MediaSource;
     use aerodesk_softenc::openh264enc::OpenH264Encoder;
     use aerodesk_windows::capture::DxgiCapturer;
+    use aerodesk_windows::encode::MfH264Encoder;
 
     const FPS: u32 = 30;
 
@@ -2652,12 +2710,23 @@ fn publisher_capture_windows(
     }
     info!("Windows screen capture started at {w}x{h}");
     let _ = MediaSource::start(&mut capture, FPS, false);
-    // OpenH264 软编（BGRA raw 输入，全平台 aerodesk-softenc）。
-    let encoder = match OpenH264Encoder::new(w, h, FPS, 8_000) {
-        Ok(e) => e,
+    // Media Foundation H.264 硬编优先；初始化/枚举失败回退 OpenH264 软编。
+    let encoder = match MfH264Encoder::new(w, h, FPS, 8_000) {
+        Ok(e) => {
+            info!("Windows screen encoder: Media Foundation H.264 (hardware-first)");
+            WindowsScreenEncoder::MediaFoundation(e)
+        }
         Err(e) => {
-            error!("OpenH264 encoder init failed: {e}");
-            return;
+            warn!(
+                "Media Foundation H.264 encoder init failed ({e}), fallback to OpenH264 software encoder"
+            );
+            match OpenH264Encoder::new(w, h, FPS, 8_000) {
+                Ok(e) => WindowsScreenEncoder::Soft(e),
+                Err(e) => {
+                    error!("OpenH264 encoder init failed: {e}");
+                    return;
+                }
+            }
         }
     };
     // #3 Windows 系统音频：WASAPI loopback 采集系统播放的声音；失败回退合成音。
