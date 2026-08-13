@@ -41,9 +41,10 @@ input { font-size: 12px; padding: 3px 6px; border: 1px solid #d0d7de; border-rad
   <div class="card"><div class="k">SFU 健康</div><div class="v" id="s-sfu">-</div></div>
   <div class="card"><div class="k">Signal 健康</div><div class="v" id="s-sig">-</div></div>
   <div class="card"><div class="k">SFU 客户端</div><div class="v" id="m-clients">-</div></div>
+  <div class="card"><div class="k">客户端/分片</div><div class="v" id="m-clients-by-shard" style="font-size:13px">-</div></div>
   <div class="card"><div class="k">活跃录制</div><div class="v" id="m-recording">-</div></div>
   <div class="card"><div class="k">TURN 分配</div><div class="v" id="m-turn">-</div></div>
-  <div class="card"><div class="k">分片负载</div><div class="v" id="m-load">-</div></div>
+  <div class="card"><div class="k">分片负载</div><div class="v" id="m-load" style="font-size:13px">-</div></div>
   <div class="card"><div class="k">Draining</div><div class="v" id="m-draining">-</div></div>
 </div>
 
@@ -75,6 +76,11 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmtUptime = us => { const s = Math.floor((us||0)/1e6); return `${Math.floor(s/3600)}h${Math.floor(s%3600/60)}m${s%60}s`; };
 
+const shardMap = (m) => {
+  if (!m || !Object.keys(m).length) return '-';
+  return Object.entries(m).map(([k,v]) => `#${k}:${v}`).join(' ');
+};
+
 async function load() {
   const t0 = Date.now();
   try {
@@ -89,11 +95,12 @@ async function load() {
 
     setHealth('s-sfu', sfu);
     setHealth('s-sig', sig);
-    $('m-clients').textContent = metrics?.['aerodesk_sfu_clients'] ?? (sfu?.clients ?? '-');
-    $('m-recording').textContent = metrics?.['aerodesk_sfu_recordings_active'] ?? '-';
-    $('m-turn').textContent = metrics?.['aerodesk_sfu_turn_allocations'] ?? '-';
-    $('m-load').textContent = metrics?.['aerodesk_sfu_shard_load'] ?? '-';
-    $('m-draining').textContent = metrics?.['aerodesk_sfu_draining'] ?? (sfu?.status === 'draining' ? 'yes' : 'no');
+    $('m-clients').textContent = metrics?.clients ?? (sfu?.clients ?? '-');
+    $('m-clients-by-shard').textContent = shardMap(metrics?.clients_by_shard);
+    $('m-recording').textContent = metrics?.recordings_active ?? '-';
+    $('m-turn').textContent = metrics?.turn_allocations ?? '-';
+    $('m-load').textContent = shardMap(metrics?.shard_load);
+    $('m-draining').textContent = metrics?.draining ?? (sfu?.status === 'draining' ? 'yes' : 'no');
 
     renderRooms(rooms?.rooms || []);
     renderClients(clients?.clients || []);
