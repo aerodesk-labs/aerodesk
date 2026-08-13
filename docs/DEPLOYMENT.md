@@ -97,6 +97,39 @@ signal.aerodesk.io {
 }
 ```
 
+**nginx 反代 + 限流示例**（生产推荐：TLS 终止在 nginx，signal 明文 WS 只绑内网；
+限流覆盖连接/请求速率，防未授权客户端连接 DoS）：
+
+```nginx
+# 每 IP 并发连接 + 请求速率
+limit_conn_zone $binary_remote_addr zone=ws_conn:10m;
+limit_req_zone  $binary_remote_addr zone=ws_req:10m rate=10r/s;
+
+server {
+    listen 443 ssl;
+    server_name signal.aerodesk.io;
+    ssl_certificate     /etc/aerodesk/tls/cer.pem;
+    ssl_certificate_key /etc/aerodesk/tls/key.pem;
+
+    # HTTP 请求体上限（升级前的握手请求）
+    client_max_body_size 1m;
+
+    location /ws {
+        limit_conn ws_conn 5;      # 每 IP 最多 5 个 WS 并发
+        limit_req  zone=ws_req burst=20 nodelay;
+        proxy_pass http://127.0.0.1:3003;  # signal 明文端口
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+    }
+}
+```
+
+> 注意：nginx 反代 WS 是隧道转发，**无法限制单个 websocket 帧的 payload 大小**（#361 的
+> 帧级上限），只能限连接数/速率/握手请求体。帧级上限需换支持 `max_message_size` 的 ws 库，
+> 或接受 signal 侧 1MiB 事后 cap（挡 serde 解析开销）。
+
 **内部 CA（企业内网）**：用 `step-ca` 或 vault PKI 签发，客户端信任链预置；
 证书轮换走 **SIGHUP 热重载**（signal/SFU 均已实现：`kill -HUP <pid>` 重读
 `CERT_FILE`/`KEY_FILE` 并重建 TLS server，无需重启进程、旧连接不受影响）。
