@@ -1,4 +1,4 @@
-//! AeroDesk Windows 适配器（P4 骨架）。
+//! AeroDesk Windows 适配器（被控端 + 观看端）。
 //!
 //! 角色：被控端 + 观看端。
 //! - 采集：Windows Graphics Capture（Win11）/ DXGI Desktop Duplication（Win10 回退）
