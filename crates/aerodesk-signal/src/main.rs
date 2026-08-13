@@ -146,22 +146,29 @@ impl SfuPool {
         self.down_until[i].load(Ordering::Relaxed) <= now
     }
 
-    /// 选房间所在 SFU：粘性优先；否则选最闲健康 SFU 并记录；全挂回退哈希。
+    /// 选房间所在 SFU：已分配房间**永不重映射**（粘性），避免瞬态探测失败把活跃
+    /// 房间切成两半；新房间选最闲健康 SFU（负载相同时按 rendezvous 权重分摊），
+    /// 全部下线回退哈希。锁贯穿「查/选/写」消除同房间并发首连的竞态。
     fn select(&self, room: &str) -> usize {
-        let now = unix_secs();
-        if let Some(i) = self.room_sfu.lock().unwrap().get(room).copied() {
-            if self.is_up(i, now) {
-                return i;
-            }
+        let mut reg = self.room_sfu.lock().unwrap();
+        if let Some(i) = reg.get(room).copied() {
+            return i;
         }
+        let now = unix_secs();
         let chosen = (0..self.urls.len())
             .filter(|&i| self.is_up(i, now))
-            .min_by_key(|&i| self.loads[i].load(Ordering::Relaxed))
+            .min_by(|&a, &b| {
+                self.loads[a]
+                    .load(Ordering::Relaxed)
+                    .cmp(&self.loads[b].load(Ordering::Relaxed))
+                    .then_with(|| {
+                        rendezvous_weight(room, a)
+                            .partial_cmp(&rendezvous_weight(room, b))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            })
             .unwrap_or_else(|| sfu_for_room(&self.urls, room));
-        self.room_sfu
-            .lock()
-            .unwrap()
-            .insert(room.to_string(), chosen);
+        reg.insert(room.to_string(), chosen);
         chosen
     }
 }
@@ -176,7 +183,7 @@ fn parse_max_shard_load(body: &str) -> u64 {
             }
         }
     }
-    (max * 10_000.0).round() as u64
+    ((max * 10_000.0).round() as u64).min(10_000)
 }
 
 /// 后台轮询各 SFU 的负载；失败按冷却期标记下线。
@@ -184,15 +191,20 @@ fn poll_sfu_pool(pool: Arc<SfuPool>, interval_secs: u64, cooldown_secs: u64) {
     loop {
         for i in 0..pool.urls.len() {
             let url = format!("{}/metrics/prometheus", pool.urls[i]);
-            let result: Result<String, String> = ureq::get(&url)
-                .timeout(Duration::from_secs(3))
-                .call()
-                .map_err(|e| e.to_string())
-                .and_then(|r| r.into_string().map_err(|e| e.to_string()));
-            match result {
-                Ok(body) => {
-                    pool.loads[i].store(parse_max_shard_load(&body), Ordering::Relaxed);
-                    pool.down_until[i].store(0, Ordering::Relaxed);
+            match ureq::get(&url).timeout(Duration::from_secs(3)).call() {
+                Ok(resp) if resp.status() < 400 => match resp.into_string() {
+                    Ok(body) => {
+                        pool.loads[i].store(parse_max_shard_load(&body), Ordering::Relaxed);
+                        pool.down_until[i].store(0, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        warn!("sfu pool: {url} read body failed ({e}); mark down");
+                        pool.down_until[i].store(unix_secs() + cooldown_secs, Ordering::Relaxed);
+                    }
+                },
+                Ok(resp) => {
+                    warn!("sfu pool: {url} http {}", resp.status());
+                    pool.down_until[i].store(unix_secs() + cooldown_secs, Ordering::Relaxed);
                 }
                 Err(e) => {
                     warn!("sfu pool: {url} unreachable ({e}); mark down");
@@ -336,21 +348,36 @@ fn reload_tls(
     }
 }
 
+/// FNV-1a 64（稳定、跨 Rust 版本一致）：选路哈希必须稳定，不能用
+/// `DefaultHasher`（算法未指定，跨版本可能变，导致滚动发布重分片切分房间）。
+fn fnv1a64(room: &str, i: usize) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in room.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    for b in i.to_le_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// 房间在候选 i 上的 rendezvous 权重（0..1，稳定、确定性）。
+fn rendezvous_weight(room: &str, i: usize) -> f64 {
+    fnv1a64(room, i) as f64 / (u64::MAX as f64)
+}
+
 /// 无状态选路：按房间名 rendezvous 哈希到 SFU 池中的某一个。
 /// 同一房间 + 同一池顺序 → 恒同一下标（signal 重启/多实例一致，无需存映射）。
 fn sfu_for_room(pool: &[String], room: &str) -> usize {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
     debug_assert!(!pool.is_empty());
     let mut best = 0usize;
-    let mut best_hash = -1.0f64;
+    let mut best_w = -1.0f64;
     for (i, _) in pool.iter().enumerate() {
-        let mut h = DefaultHasher::new();
-        room.hash(&mut h);
-        i.hash(&mut h);
-        let v = (h.finish() as f64) / (u64::MAX as f64);
-        if v > best_hash {
-            best_hash = v;
+        let w = rendezvous_weight(room, i);
+        if w > best_w {
+            best_w = w;
             best = i;
         }
     }
@@ -407,18 +434,17 @@ fn main() {
     let _ = ROOMS.set(rooms.clone());
     let _ = TOTAL_CLIENTS.set(Arc::new(AtomicUsize::new(0)));
     let _ = USER_CONNS.set(Mutex::new(HashMap::new()));
-    // SFU 池：初始化无状态哈希 + 负载感知状态；池 >1 时启动负载轮询。
-    {
+    // SFU 池：仅池 >1 时初始化负载感知状态并启动轮询；池=1 走纯哈希回退，
+    // 不维护 room_sfu 注册表（避免单 SFU 部署下无界增长）。
+    if config.sfu_urls.len() > 1 {
         let pool = Arc::new(SfuPool::new(config.sfu_urls.clone()));
         let _ = SFU_POOL.set(pool.clone());
-        if config.sfu_urls.len() > 1 {
-            let interval = config.sfu_poll_interval_secs.max(1);
-            let cooldown = config.sfu_fail_cooldown_secs;
-            std::thread::Builder::new()
-                .name("sfu-poller".into())
-                .spawn(move || poll_sfu_pool(pool, interval, cooldown))
-                .ok();
-        }
+        let interval = config.sfu_poll_interval_secs.max(1);
+        let cooldown = config.sfu_fail_cooldown_secs;
+        std::thread::Builder::new()
+            .name("sfu-poller".into())
+            .spawn(move || poll_sfu_pool(pool, interval, cooldown))
+            .ok();
     }
 
     // #246 桥生命周期 monitor：房间无真实客户端超过 BRIDGE_IDLE_SECS → 停桥。
@@ -1391,9 +1417,17 @@ mod tests {
         assert_eq!(a, 1, "新房间应选最闲 SFU");
         assert_eq!(pool.select("room-a"), 1, "同房间应粘性");
 
-        // s2 下线 → 同房间重选到次闲的 s3。
+        // s2 下线：已分配房间**不重映射**（防瞬态失败切分活跃房间）。
         pool.down_until[1].store(unix_secs() + 60, Ordering::Relaxed);
-        assert_eq!(pool.select("room-a"), 2);
+        assert_eq!(
+            pool.select("room-a"),
+            1,
+            "已分配房间即使 SFU 下线也不重映射"
+        );
+
+        // 但新房间会避开下线 SFU，选次闲的 s3。
+        let b = pool.select("room-b");
+        assert_eq!(b, 2, "新房间应避开下线 SFU 选次闲");
     }
 
     #[test]
