@@ -121,14 +121,30 @@ impl FfmpegEncoder {
         let mut last_err = String::new();
         for name in names {
             match Self::open_named(name, id, width, height, fps, bitrate_bps) {
-                Ok(enc) => {
-                    tracing::info!(
-                        "ffmpeg encoder opened: {name} ({}x{}@{} {bitrate_bps}bps)",
-                        width,
-                        height,
-                        fps
-                    );
-                    return Ok(enc);
+                Ok(mut probe) => {
+                    // #3/#8：硬件 MFT（hevc_mf 等）可能 open 成功但 send_frame 失败
+                    // （本机 80004005）；用一次性实例探测一帧，失败回退下一候选。
+                    if !probe.probe_ok() {
+                        last_err = format!("{name}: probe encode failed");
+                        tracing::warn!("ffmpeg encoder {name} probe failed，回退下一候选");
+                        continue;
+                    }
+                    // 探测消耗了首个 IDR，重开一个干净编码器用于真实流。
+                    match Self::open_named(name, id, width, height, fps, bitrate_bps) {
+                        Ok(enc) => {
+                            tracing::info!(
+                                "ffmpeg encoder opened: {name} ({}x{}@{} {bitrate_bps}bps)",
+                                width,
+                                height,
+                                fps
+                            );
+                            return Ok(enc);
+                        }
+                        Err(e) => {
+                            last_err = format!("{name}: {e}");
+                            tracing::warn!("ffmpeg encoder {name} reopen failed: {e}");
+                        }
+                    }
                 }
                 Err(e) => {
                     last_err = format!("{name}: {e}");
@@ -337,6 +353,16 @@ impl FfmpegEncoder {
             });
         }
         Ok(self.pending.pop_front())
+    }
+
+    /// 探测编码器是否真实可用：部分硬件 MFT（如本机 hevc_mf）能 open 但在
+    /// `send_frame` 时报错（80004005），open 时探测一帧可让 `FfmpegEncoder::new`
+    /// 回退下一候选。探测会消耗首个 IDR，调用方（`new`）成功探测后用干净实例。
+    fn probe_ok(&mut self) -> bool {
+        let w = self.width;
+        let h = self.height;
+        let blank = vec![0u8; (w * h * 4) as usize];
+        self.encode_bgra(&blank).is_ok()
     }
 
     /// 请求关键帧（下一帧设为 I 帧）。
