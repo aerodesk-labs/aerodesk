@@ -113,7 +113,10 @@ impl FfmpegDecoder {
             }
             Err(e) => match e {
                 ffmpeg::Error::Eof => Ok(None),
-                ffmpeg::Error::Other { errno } if errno.abs() == 11 => Ok(None), // EAGAIN
+                // EAGAIN：解码器需要更多输入。errno 平台相关——Linux=11、macOS/BSD=35、
+                // Windows(MSVC)=11；此前只认 11，libx264/libx265 有 B 帧缓冲时
+                // macOS 会命中 35 被误报为错误（CLI 硬解批次暴露）。
+                ffmpeg::Error::Other { errno } if matches!(errno.abs(), 11 | 35) => Ok(None),
                 e => Err(format!("receive_frame: {e:?}")),
             },
         }
