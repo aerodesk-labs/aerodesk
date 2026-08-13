@@ -67,9 +67,11 @@ struct Recording {
     bytes: u64,
     /// #180 轮转：当前段编号（0 = `{room}.adrec`，N>0 = `{room}.adrec.{N}`）。
     segment: u32,
+    /// 当前段的包数/字节数（轮转/关闭时归零；`packets`/`bytes` 为跨段累计）。
+    segment_packets: u64,
     segment_bytes: u64,
     segment_started_at: u64,
-    /// 已关闭段（path, packets, bytes）。
+    /// 已关闭段（path, 本段 packets, 本段 bytes）。
     segments: Vec<(String, u64, u64)>,
     /// #15：创建/写入失败后标记为失败，本次会话跳过该房间录制（不 panic）。
     failed: bool,
@@ -105,6 +107,7 @@ impl Recording {
             packets: 0,
             bytes: 0,
             segment: 0,
+            segment_packets: 0,
             segment_bytes: 0,
             segment_started_at: ts,
             segments: Vec::new(),
@@ -123,6 +126,7 @@ impl Recording {
             packets: 0,
             bytes: 0,
             segment: 0,
+            segment_packets: 0,
             segment_bytes: 0,
             segment_started_at: ts,
             segments: Vec::new(),
@@ -201,20 +205,25 @@ impl Recorder {
             return;
         }
         let _ = entry.writer.flush();
-        entry
-            .segments
-            .push((entry.path.display().to_string(), entry.packets, entry.bytes));
         let next = entry.segment + 1;
         match Recording::open_segment_writer(&self.root, &entry.room, next) {
             Ok((path, writer)) => {
+                // 先关掉当前段并记录其「本段」计数（非跨段累计），再切换。
+                entry.segments.push((
+                    entry.path.display().to_string(),
+                    entry.segment_packets,
+                    entry.segment_bytes,
+                ));
                 entry.path = path;
                 entry.writer = writer;
                 entry.segment = next;
+                entry.segment_packets = 0;
                 entry.segment_bytes = 0;
                 entry.segment_started_at = ts;
                 debug!("recorder: room={} rotated to segment {next}", entry.room);
             }
             Err(e) => {
+                // 打开下一段失败：不关当前段，继续写（避免重复/丢失已写数据）。
                 warn!(
                     "recorder: room={} 轮转打开段 {next} 失败（{e}），保持当前段",
                     entry.room
@@ -226,8 +235,11 @@ impl Recorder {
     /// 关段 + 写 meta（stop/finalize 共用；segments 汇总每段 path/packets/bytes）。
     fn finalize_recording(&self, rec: &mut Recording, now: u64) {
         let _ = rec.writer.flush();
-        rec.segments
-            .push((rec.path.display().to_string(), rec.packets, rec.bytes));
+        rec.segments.push((
+            rec.path.display().to_string(),
+            rec.segment_packets,
+            rec.segment_bytes,
+        ));
         let meta = serde_json::json!({
             "room": rec.room,
             "started_at": rec.started_at,
@@ -332,6 +344,7 @@ impl Recorder {
         if entry.writer.write_all(&header).is_ok() && entry.writer.write_all(payload).is_ok() {
             entry.packets += 1;
             entry.bytes += len as u64;
+            entry.segment_packets += 1;
             entry.segment_bytes += len as u64;
             // 周期性落盘，避免崩溃丢太多。
             if entry.packets & 127 == 0 {
@@ -663,7 +676,13 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(dir.join("room-r.meta.json")).unwrap())
                 .unwrap();
         assert_eq!(meta["packets"], 3);
-        assert_eq!(meta["segments"].as_array().map(|a| a.len()), Some(2));
+        let segs = meta["segments"].as_array().unwrap();
+        assert_eq!(segs.len(), 2);
+        // 段元数据必须是「本段」计数，而非跨段累计。
+        assert_eq!(segs[0]["packets"], 2, "{segs:#?}");
+        assert_eq!(segs[0]["bytes"], 40, "{segs:#?}");
+        assert_eq!(segs[1]["packets"], 1, "{segs:#?}");
+        assert_eq!(segs[1]["bytes"], 20, "{segs:#?}");
         let _ = fs::remove_dir_all(&dir);
     }
 
