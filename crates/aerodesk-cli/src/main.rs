@@ -2762,6 +2762,11 @@ fn publisher_capture_linux(
             }
         }
     };
+    // #334：采集会话期间保持显示器唤醒（防系统/显示器休眠导致采集失效）。
+    let _keep_awake =
+        SystemWakeLock::acquire(&aerodesk_linux::wake_lock::LinuxSystemWakeLock, true)
+            .map_err(|e| warn!("保持显示器唤醒失败: {e}"))
+            .ok();
     // #316 Linux 系统音频（PipeWire sink 捕获）：可用则真实音频，失败回退合成音。
     let audio_cap: Option<aerodesk_linux::audio::SystemAudioCapture> = if audio {
         match aerodesk_linux::audio::SystemAudioCapture::new() {
