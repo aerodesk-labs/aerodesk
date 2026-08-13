@@ -73,6 +73,8 @@ struct Config {
     max_total_clients: usize,
     /// PoP → 客户端信令 URL（重定向目标）。
     pop_urls: HashMap<String, String>,
+    /// TURN REST secret（用于按 Join 现算临时凭证，避免 1h 过期）。
+    turn_secret: Option<String>,
     turn: Option<TurnConfig>,
     /// SFU 池（按房间无状态哈希选路；长度 ≥1）。
     sfu_urls: Vec<String>,
@@ -384,6 +386,20 @@ fn sfu_for_room(pool: &[String], room: &str) -> usize {
     best
 }
 
+/// 按 Join 现算 TURN 临时凭证（REST：username=过期时间戳，1h 有效），
+/// 避免启动时一次性生成导致 1 小时后新加入者拿到过期凭证。
+fn fresh_turn(config: &Config) -> Option<TurnConfig> {
+    let urls = config.turn.as_ref()?.urls.clone();
+    let secret = config.turn_secret.as_deref()?;
+    let creds =
+        aerodesk_protocol::turn::generate_turn_credentials(secret, "aerodesk", 3600, unix_secs());
+    Some(TurnConfig {
+        urls,
+        username: creds.username,
+        credential: creds.credential,
+    })
+}
+
 /// 选房间所在 SFU 下标：负载感知（粘性 + 最闲健康）优先；未初始化回退哈希。
 fn selected_sfu_idx(pool: &[String], room: &str) -> usize {
     SFU_POOL
@@ -405,6 +421,7 @@ fn kick_sfu_room(sfu_url: &str, token: Option<&str>, room: &str) -> bool {
     if let Some(token) = token {
         req = req.set("X-Internal-Token", token);
     }
+    // ureq 2 对 >=400 直接返回 Err(Status)，故 Ok 即成功。
     match req.call() {
         Ok(resp) => {
             info!("bridge monitor: SFU kick room {room} -> {}", resp.status());
@@ -624,7 +641,8 @@ fn load_config() -> Config {
         .map(|s| s.split(',').map(|t| t.to_string()).collect())
         .unwrap_or_default();
 
-    let turn = std::env::var("TURN_SECRET").ok().map(|secret| {
+    let turn_secret = std::env::var("TURN_SECRET").ok().filter(|s| !s.is_empty());
+    let turn = turn_secret.clone().map(|secret| {
         let urls = std::env::var("TURN_URLS").unwrap_or_default();
         let urls = if urls.is_empty() {
             vec![
@@ -733,6 +751,7 @@ fn load_config() -> Config {
         max_room_clients,
         max_total_clients,
         pop_urls,
+        turn_secret,
         turn,
         // SFU 池：SFU_URLS（逗号分隔）优先；未设置回退单值 SFU_URL（向后兼容）。
         sfu_urls: {
@@ -907,6 +926,8 @@ fn total_clients() -> usize {
 fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, rooms: Rooms) {
     let ws = Arc::new(Mutex::new(rx.recv().expect("websocket accepted")));
     info!("session open");
+    // 本连接加入时的 peer_id：用于校验 Description.from 属于本连接（防冒用）。
+    let mut own_peer_id: Option<String> = None;
 
     loop {
         let msg = match ws.lock().unwrap().next() {
@@ -914,6 +935,17 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
             Some(_) => continue,
             None => break,
         };
+
+        // 消息体上限：防恶意超大帧导致无界分配（信令消息远小于 1MiB）。
+        if msg.len() > 1 << 20 {
+            send(
+                ws.clone(),
+                SignalMessage::Error {
+                    message: "message too large".into(),
+                },
+            );
+            continue;
+        }
 
         let parsed: Result<SignalMessage, _> = serde_json::from_str(&msg);
         let Ok(msg) = parsed else {
@@ -932,6 +964,42 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 role,
                 auth_token,
             } => {
+                // 房间名校验（防 query 注入 + 注册表滥用）。
+                if !bridge::sanitize_room(&room) {
+                    send(
+                        ws.clone(),
+                        SignalMessage::Error {
+                            message: "invalid room".into(),
+                        },
+                    );
+                    continue;
+                }
+                // 单连接只允许 Join 一次（防重复 Join 泄漏 peer / 计数漂移）。
+                if own_peer_id.is_some() {
+                    send(
+                        ws.clone(),
+                        SignalMessage::Error {
+                            message: "already joined".into(),
+                        },
+                    );
+                    continue;
+                }
+                // 认证先行：任何 PopRegistry 变更之前先验权。
+                let claims = auth_result(&config, auth_token.as_deref(), &room, role);
+                let auth_ok = if config.jwt_secret.is_some() || !config.auth_tokens.is_empty() {
+                    claims.is_some()
+                } else {
+                    true
+                };
+                if !auth_ok {
+                    send(
+                        ws.clone(),
+                        SignalMessage::Error {
+                            message: "auth failed".into(),
+                        },
+                    );
+                    continue;
+                }
                 // 多 PoP（#146/#154）：先静态钉住，再查动态注册表；其它 PoP → 重定向。
                 let mut target_pop = pinned_pop(&config, &room).map(|s| s.to_string());
                 if target_pop.is_none()
@@ -1065,21 +1133,6 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                         }
                     }
                 }
-                let claims = auth_result(&config, auth_token.as_deref(), &room, role);
-                let auth_ok = if config.jwt_secret.is_some() || !config.auth_tokens.is_empty() {
-                    claims.is_some()
-                } else {
-                    true
-                };
-                if !auth_ok {
-                    send(
-                        ws.clone(),
-                        SignalMessage::Error {
-                            message: "auth failed".into(),
-                        },
-                    );
-                    break;
-                }
                 // 桥自身 publisher 腿判定（#246）：配额豁免 + Peer 标记 + 空闲回收共用。
                 let bridge_leg = config
                     .bridge
@@ -1169,18 +1222,31 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                     .expect("total initialized")
                     .fetch_add(1, Ordering::Relaxed);
                 info!("peer {peer_id} joined room {room} as {role:?}");
+                own_peer_id = Some(peer_id.clone());
                 send(
                     ws.clone(),
                     SignalMessage::Joined {
                         peer_id,
                         peers,
-                        turn: config.turn.clone(),
+                        turn: fresh_turn(&config),
                     },
                 );
             }
             SignalMessage::Description {
                 from, description, ..
             } => {
+                // 防冒用：Description.from 必须是本连接 Join 时分配的 peer_id，
+                // 否则 viewer 可用别人（尤其 publisher）的 peer_id 让信令以 publisher
+                // 角色代发 SDP，绕过 SFU 的 viewer 禁发媒体检查。
+                if own_peer_id.as_deref() != Some(from.as_str()) {
+                    send(
+                        ws.clone(),
+                        SignalMessage::Error {
+                            message: "description from mismatch".into(),
+                        },
+                    );
+                    continue;
+                }
                 let room = find_room(&rooms, &from);
                 let Some(room) = room else {
                     send(
@@ -1361,6 +1427,7 @@ mod tests {
             max_room_clients: 0,
             max_total_clients: 0,
             pop_urls: HashMap::new(),
+            turn_secret: None,
             turn: None,
             sfu_urls: vec!["http://127.0.0.1:3002".into()],
             sfu_token: None,

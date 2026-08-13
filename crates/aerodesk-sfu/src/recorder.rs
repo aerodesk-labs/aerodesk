@@ -18,7 +18,7 @@
 //! 媒体文件：`{RECORD_DIR}/{room}.adrec`；元数据：`{room}.meta.json`；
 //! 审计日志：`{RECORD_DIR}/audit.log`（JSON Lines）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write, sink};
 use std::path::{Path, PathBuf};
@@ -149,6 +149,8 @@ pub struct Recorder {
     max_secs: u64,
     /// 审计日志轮转上限（0=不限；超限轮转为 audit.log.1 后重开）。
     audit_max_bytes: u64,
+    /// 已显式 stop 的房间（auto 模式墓碑）：不再自动重开，防止覆盖已 finalize 的录像。
+    stopped: Mutex<HashSet<String>>,
 }
 
 fn now_micros() -> u64 {
@@ -209,6 +211,7 @@ impl Recorder {
             max_bytes,
             max_secs,
             audit_max_bytes,
+            stopped: Mutex::new(HashSet::new()),
         })
     }
 
@@ -345,6 +348,10 @@ impl Recorder {
         if self.on_demand && !recs.contains_key(room) {
             return;
         }
+        // 已显式 stop 的房间不再自动重开（否则会 truncate 刚 finalize 的录像）。
+        if self.stopped.lock().unwrap().contains(room) {
+            return;
+        }
 
         // 首次见到该房间：尝试创建录制文件。
         if !recs.contains_key(room) {
@@ -385,16 +392,23 @@ impl Recorder {
         header[4..12].copy_from_slice(&ts.to_le_bytes());
         header[12..20].copy_from_slice(&rtp_ts.unwrap_or(0).to_le_bytes());
         header[20..24].copy_from_slice(&len.to_le_bytes());
-        if entry.writer.write_all(&header).is_ok() && entry.writer.write_all(payload).is_ok() {
-            entry.packets += 1;
-            entry.bytes += len as u64;
-            entry.segment_packets += 1;
-            entry.segment_bytes += len as u64;
-            // 周期性落盘，避免崩溃丢太多。
-            if entry.packets & 127 == 0 {
-                let _ = entry.writer.flush();
+        match entry
+            .writer
+            .write_all(&header)
+            .and_then(|_| entry.writer.write_all(payload))
+        {
+            Ok(()) => {
+                entry.packets += 1;
+                entry.bytes += len as u64;
+                entry.segment_packets += 1;
+                entry.segment_bytes += len as u64;
+                // 周期性落盘，避免崩溃丢太多。
+                if entry.packets & 127 == 0 {
+                    let _ = entry.writer.flush();
+                }
+                self.maybe_rotate(entry, ts);
             }
-            self.maybe_rotate(entry, ts);
+            Err(e) => warn!("recorder: room={room} write failed ({e}); 该包未计入录制"),
         }
     }
 
@@ -429,6 +443,7 @@ impl Recorder {
                         "source": "api",
                     }),
                 );
+                self.stopped.lock().unwrap().remove(room);
                 recs.insert(room.to_string(), rec);
                 Ok(())
             }
@@ -461,6 +476,11 @@ impl Recorder {
                 "duration_us": now.saturating_sub(rec.started_at),
             }),
         );
+        // 墓碑：仅 auto 模式需要（on-demand 模式下 record() 已按需返回，不会重开）；
+        // 防止 auto 模式覆盖刚 finalize 的录像。
+        if !self.on_demand {
+            self.stopped.lock().unwrap().insert(room.to_string());
+        }
         true
     }
 
