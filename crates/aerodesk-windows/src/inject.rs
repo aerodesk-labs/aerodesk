@@ -89,8 +89,26 @@ pub fn vk_for_code(code: &str) -> Option<u16> {
 }
 
 /// SendInput 注入器（普通桌面会话可用）。
+///
+/// 多显示器：`set_active_display` 设置被控显示器在虚拟屏幕中的区域，
+/// 归一化坐标 (0..1) 映射到该显示器（#75），而非整个虚拟屏幕。
 #[cfg(windows)]
-pub struct SendInputInjector;
+pub struct SendInputInjector {
+    /// 活动显示器在虚拟屏幕中的区域（像素 x,y,w,h）；None = 整个虚拟屏幕。
+    display_rect: Option<(i32, i32, u32, u32)>,
+}
+
+#[cfg(windows)]
+impl SendInputInjector {
+    pub fn new() -> Self {
+        Self { display_rect: None }
+    }
+
+    /// 设置活动显示器在虚拟屏幕中的区域（像素）；None 回退整个虚拟屏幕。
+    pub fn set_active_display(&mut self, rect: Option<(i32, i32, u32, u32)>) {
+        self.display_rect = rect;
+    }
+}
 
 #[cfg(windows)]
 impl aerodesk_core::platform::InputInjector for SendInputInjector {
@@ -102,14 +120,14 @@ impl aerodesk_core::platform::InputInjector for SendInputInjector {
 
         unsafe {
             let inputs = match event {
-                InputEvent::MouseMove { x, y } => vec![mouse_move(*x as f32, *y as f32)],
+                InputEvent::MouseMove { x, y } => vec![self.mouse_move(*x as f32, *y as f32)],
                 InputEvent::MouseButton {
                     button: MouseButton::Left,
                     state,
                     x,
                     y,
                 } => vec![
-                    mouse_move(*x as f32, *y as f32),
+                    self.mouse_move(*x as f32, *y as f32),
                     mouse_button(*state == ButtonState::Pressed),
                 ],
                 InputEvent::MouseButton { .. } => {
@@ -177,23 +195,72 @@ impl aerodesk_core::platform::InputInjector for SendInputInjector {
 }
 
 #[cfg(windows)]
-fn mouse_move(x: f32, y: f32) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE, MOUSEINPUT,
-    };
-    INPUT {
-        r#type: INPUT_MOUSE,
-        Anonymous: INPUT_0 {
-            mi: MOUSEINPUT {
-                dx: (x.clamp(0.0, 1.0) * 65535.0) as i32,
-                dy: (y.clamp(0.0, 1.0) * 65535.0) as i32,
-                mouseData: 0,
-                dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
-                time: 0,
-                dwExtraInfo: 0,
+impl SendInputInjector {
+    /// 归一化坐标 (0..1) → 虚拟屏幕绝对坐标（0..65535）。
+    /// 映射到 `display_rect` 指定的活动显示器区域（多显示器，#75）。
+    fn mouse_move(&self, x: f32, y: f32) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE, MOUSEINPUT,
+        };
+        let virtual_rect = virtual_screen();
+        let (dx, dy) = map_to_virtual(x, y, self.display_rect, virtual_rect);
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx,
+                    dy,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
             },
-        },
+        }
     }
+}
+
+/// 虚拟屏幕（所有显示器并集）像素矩形。
+#[cfg(windows)]
+fn virtual_screen() -> (i32, i32, u32, u32) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
+    };
+    unsafe {
+        let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN).max(0) as u32;
+        let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN).max(0) as u32;
+        (vx, vy, vw, vh)
+    }
+}
+
+/// 归一化坐标 (0..1) → 虚拟屏幕绝对坐标（0..65535）。
+/// `display` 为活动显示器在虚拟屏幕中的区域；`virtual` 为虚拟屏幕矩形。
+fn map_to_virtual(
+    x: f32,
+    y: f32,
+    display: Option<(i32, i32, u32, u32)>,
+    virtual_rect: (i32, i32, u32, u32),
+) -> (i32, i32) {
+    let (vx, vy, vw, vh) = virtual_rect;
+    let (dx, dy, dw, dh) = display.unwrap_or((vx, vy, vw, vh));
+    let cx = x.clamp(0.0, 1.0) as f64;
+    let cy = y.clamp(0.0, 1.0) as f64;
+    let px = dx as f64 + cx * dw as f64;
+    let py = dy as f64 + cy * dh as f64;
+    let sx = if vw > 0 {
+        ((px - vx as f64) / vw as f64 * 65535.0).round() as i32
+    } else {
+        0
+    };
+    let sy = if vh > 0 {
+        ((py - vy as f64) / vh as f64 * 65535.0).round() as i32
+    } else {
+        0
+    };
+    (sx.clamp(0, 65535), sy.clamp(0, 65535))
 }
 
 #[cfg(windows)]
@@ -265,7 +332,7 @@ fn key(code: u32, down: bool) -> windows::Win32::UI::Input::KeyboardAndMouse::IN
 
 #[cfg(test)]
 mod tests {
-    use super::vk_for_code;
+    use super::*;
 
     #[test]
     fn vk_map_covers_letters_digits_and_common_keys() {
@@ -279,5 +346,33 @@ mod tests {
         assert_eq!(vk_for_code("ControlLeft"), Some(0x11));
         assert_eq!(vk_for_code("F12"), Some(0x7B));
         assert_eq!(vk_for_code("NotAKey"), None);
+    }
+
+    /// 多显示器坐标换算：#75 归一化坐标映射到活动显示器在虚拟屏幕中的区域。
+    #[test]
+    fn map_to_virtual_uses_active_display_rect() {
+        // 双显示器：左屏 1920x1080（0,0），右屏 1920x1080（1920,0），虚拟屏幕 3840x1080。
+        let virtual_rect = (0, 0, 3840, 1080);
+        // 未设置显示器：归一化到整个虚拟屏幕（x=0.5 → 虚拟屏中点）。
+        let (sx, sy) = map_to_virtual(0.5, 0.5, None, virtual_rect);
+        assert_eq!((sx, sy), (32768, 32768), "全虚拟屏幕映射");
+        // 活动显示器 = 右屏（1920,0,1920,1080）：x=0 → 右屏左缘 = 虚拟屏 50% 位置。
+        let right = Some((1920, 0, 1920, 1080));
+        let (sx0, _) = map_to_virtual(0.0, 0.0, right, virtual_rect);
+        assert_eq!(sx0, 32768, "右屏左缘应为虚拟屏中点");
+        // x=1 → 右屏右缘 = 虚拟屏 100%。
+        let (sx1, _) = map_to_virtual(1.0, 0.0, right, virtual_rect);
+        assert_eq!(sx1, 65535, "右屏右缘应为虚拟屏末端");
+        // x=0.5 → 右屏中点 = 虚拟屏 75%。
+        let (sx5, _) = map_to_virtual(0.5, 0.0, right, virtual_rect);
+        assert_eq!(sx5, 49151, "右屏中点应为虚拟屏 75%");
+    }
+
+    /// 归一化坐标越界应 clamp 到 0..65535。
+    #[test]
+    fn map_to_virtual_clamps_out_of_range() {
+        let virtual_rect = (0, 0, 1920, 1080);
+        let (sx, sy) = map_to_virtual(-1.0, 2.0, None, virtual_rect);
+        assert_eq!((sx, sy), (0, 65535));
     }
 }
