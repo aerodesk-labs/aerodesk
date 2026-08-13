@@ -6,6 +6,13 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[lib]
+# NAPI 模块最终以 .so 暴露给 ArkTS；本地无 OHOS NDK 时先以 rlib 通过
+# `cargo check/build` 验证 Rust 侧骨架，cdylib 链接需 OHOS NDK。
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 aerodesk-core = { path = "../aerodesk-core" }
+aerodesk-protocol.workspace = true
+str0m = { workspace = true, features = ["rust-crypto"] }
 tracing.workspace = true
