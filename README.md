@@ -23,6 +23,9 @@ aerodesk/
 │   ├── aerodesk-signal/     # 独立信令：WSS:3001 + WS:3003，房间/认证/TURN 凭证，代理 SFU 内部 API ✅
 │   ├── aerodesk-protocol/   # 共享协议：input/signal 消息 + coturn REST 凭证 ✅
 │   ├── aerodesk-core/       # 客户端核心：Endpoint(SDP/ICE/DTLS/数据通道) + 信令客户端 + VP8 解析 ✅
+│   │                        #   platform trait：MediaSource/Encoder/Decoder/Renderer/InputInjector/
+│   │                        #   AudioSink/AudioCapturer/Clipboard/CursorSource/Permissions/CameraSource/
+│   │                        #   FilePicker/AppShell/VirtualDisplay/Notifier/CommandExecutor（#330 bash）
 │   ├── aerodesk-cli/        # CLI：publisher（pcap/x264/VT/screen 四种源）+ viewer ✅
 │   ├── aerodesk-macos/      # macOS 适配器：ScreenCaptureKit 采集 + VT 硬编 + x264 软编 + CGEvent 注入 ✅
 │   ├── aerodesk-ios/        # iOS 适配器：VideoToolbox H.264 硬解（AnnexB→CVPixelBuffer）✅
@@ -64,6 +67,7 @@ cargo run -p aerodesk-cli -- --role viewer --reconnect
 # 多 codec：#74 --encoder ffmpeg --codec h264|h265|vp9|av1（FFmpeg，硬编优先；AV1 有 ~1s 编码延迟）
 # 输入注入：#75 viewer 输入 → SFU → publisher macOS CGEvent（坐标归一化→屏幕点，Wheel/修饰键/完整键码）
 # 远程命令：#109 viewer --run-command "ls -la" → SFU → 被控端执行并回传 stdout/stderr/exit
+#       （执行器按 platform::CommandExecutor 抽象：#330，core 默认 sh -c/cmd /C，macOS MacCommandExecutor）
 #       （危险命令默认拦截，白名单 $HOME/AeroDesk/cmd-allowlist.txt，审计 $HOME/AeroDesk/cmd-audit.jsonl）
 #       文件/进程：--read-file <path> / --write-file <path> <content> / --list-processes / --kill-pid <pid>
 #       （写文件敏感路径默认禁止；kill pid 0/1 默认禁止）

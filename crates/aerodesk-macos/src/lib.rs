@@ -12,6 +12,7 @@ pub mod audio;
 pub mod audio_capture;
 pub mod camera;
 pub mod capture;
+pub mod cmd;
 pub mod cursor;
 pub mod decode;
 pub mod dock;
