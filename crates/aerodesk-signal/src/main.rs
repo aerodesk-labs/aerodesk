@@ -421,17 +421,11 @@ fn kick_sfu_room(sfu_url: &str, token: Option<&str>, room: &str) -> bool {
     if let Some(token) = token {
         req = req.set("X-Internal-Token", token);
     }
+    // ureq 2 对 >=400 直接返回 Err(Status)，故 Ok 即成功。
     match req.call() {
-        Ok(resp) if resp.status() < 400 => {
+        Ok(resp) => {
             info!("bridge monitor: SFU kick room {room} -> {}", resp.status());
             true
-        }
-        Ok(resp) => {
-            warn!(
-                "bridge monitor: SFU kick room {room} -> http {}（非 2xx/3xx，视为失败）",
-                resp.status()
-            );
-            false
         }
         Err(e) => {
             warn!("bridge monitor: SFU kick room {room} failed: {e}");

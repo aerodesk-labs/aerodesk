@@ -476,8 +476,11 @@ impl Recorder {
                 "duration_us": now.saturating_sub(rec.started_at),
             }),
         );
-        // 墓碑：auto 模式不再自动重开同一路径（防止覆盖刚 finalize 的录像）。
-        self.stopped.lock().unwrap().insert(room.to_string());
+        // 墓碑：仅 auto 模式需要（on-demand 模式下 record() 已按需返回，不会重开）；
+        // 防止 auto 模式覆盖刚 finalize 的录像。
+        if !self.on_demand {
+            self.stopped.lock().unwrap().insert(room.to_string());
+        }
         true
     }
 

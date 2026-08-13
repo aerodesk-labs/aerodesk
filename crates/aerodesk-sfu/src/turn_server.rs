@@ -417,8 +417,9 @@ impl FrameReader {
             return Ok(None);
         }
         let len = u16::from_be_bytes([self.pending[0], self.pending[1]]) as usize;
-        if len < 20 {
-            // STUN 消息至少 20 字节；len<20 是畸形前缀，若不判错则永不 drain → 无界增长。
+        if len < 4 {
+            // 最小帧 4 字节（ChannelData 至少 channel+len；STUN 至少 20 由 handle_packet
+            // 校验）；len<4 是畸形前缀，若不判错则永不 drain → 无界增长。
             return Err(format!("bad frame length {len}"));
         }
         if self.pending.len() < 2 + len {
@@ -456,6 +457,13 @@ fn tcp_accept_loop(
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
+    }
+}
+
+/// 移除 allocation 并置 stop，让 relay 线程尽快退出（而非等到 expiry）。
+fn cleanup_allocation(shared: &Shared, key: &ClientKey) {
+    if let Some(a) = shared.allocations.lock().unwrap().remove(key) {
+        a.stop.store(true, Ordering::SeqCst);
     }
 }
 
@@ -512,13 +520,14 @@ fn tcp_conn_loop(
                 Ok(None) => break,
                 Err(e) => {
                     warn!("tcp turn frame error ({e}); closing conn {conn_id}");
+                    cleanup_allocation(&shared, &key);
                     return Err(io::Error::other(e));
                 }
             }
         }
     }
-    // 连接断开：清理该连接 allocation。
-    shared.allocations.lock().unwrap().remove(&key);
+    // 连接断开：清理该连接 allocation（并唤醒 relay 线程退出）。
+    cleanup_allocation(&shared, &key);
     Ok(())
 }
 
@@ -719,7 +728,9 @@ fn handle_allocate(
     };
     // relay 线程依赖 recv_from 周期性返回才能检测 stop/expires 退出；否则永久阻塞
     // 泄漏线程+socket（审查发现）。
-    let _ = relay.set_read_timeout(Some(POLL_TIMEOUT));
+    if let Err(e) = relay.set_read_timeout(Some(POLL_TIMEOUT)) {
+        warn!("TURN relay set_read_timeout failed: {e}");
+    }
     let Ok(relay_port) = relay.local_addr().map(|a| a.port()) else {
         return;
     };
@@ -938,8 +949,8 @@ mod tests {
     #[test]
     fn frame_reader_rejects_bad_length_without_growing() {
         let mut fr = FrameReader::new();
-        // 长度前缀 <20 是畸形帧：必须返回 Err（否则 pending 永不 drain 无界增长）。
-        fr.push(&[0x00, 0x13]);
+        // 长度前缀 <4 是畸形帧：必须返回 Err（否则 pending 永不 drain 无界增长）。
+        fr.push(&[0x00, 0x03]);
         assert!(fr.next_frame().is_err());
         // 合法帧可取出。
         let mut fr2 = FrameReader::new();
