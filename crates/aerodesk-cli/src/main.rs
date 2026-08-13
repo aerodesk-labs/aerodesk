@@ -163,9 +163,15 @@ fn run() {
                 println!("{}\t{}", c.id, c.name);
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
         {
-            eprintln!("--list-cameras 仅 macOS 支持");
+            for c in aerodesk_linux::camera::list_cameras() {
+                println!("{c}");
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            eprintln!("--list-cameras 仅 macOS/Linux 支持");
             std::process::exit(1);
         }
         return;
@@ -323,6 +329,8 @@ fn run() {
                     audio,
                     audio_opus,
                     video_codec,
+                    camera,
+                    camera_device.clone(),
                 );
                 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
                 {
@@ -915,6 +923,23 @@ impl AudioTicker {
             self.next += Duration::from_millis(20);
         }
     }
+}
+
+/// 无摄像头源占位（publisher_generic 泛型参数用；传 None 时不会构造实例）。
+struct NoCameraCapture;
+
+impl aerodesk_core::platform::CameraSource for NoCameraCapture {
+    type Error = String;
+
+    fn start(&mut self, _width: u32, _height: u32, _fps: u32) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn next_frame(&mut self) -> Result<Option<aerodesk_core::platform::CameraFrame>, String> {
+        Ok(None)
+    }
+
+    fn stop(&mut self) {}
 }
 
 /// 无真实音频源占位（publisher_generic 泛型参数用；传 None 时不会构造实例）。
@@ -2468,10 +2493,12 @@ fn publisher_vt(
 /// `--codec h264|h265|vp9|av1` 选择编码格式；AV1(SVT) 有 ~1s 编码延迟。
 /// 泛型发布循环（跨平台抽象落地 #277）：只依赖 core 的 `MediaSource` + `Encoder`，
 /// 平台具体采集器/编码器由调用方构造后传入。cfg 只出现在调用方（适配器工厂）。
+#[allow(clippy::too_many_arguments)]
 fn publisher_generic<
     S: aerodesk_core::platform::MediaSource,
     E: aerodesk_core::platform::Encoder,
     C: aerodesk_core::platform::AudioCapturer<Error = String>,
+    CC: aerodesk_core::platform::CameraSource<Error = String>,
 >(
     signal_url: &str,
     room: &str,
@@ -2483,13 +2510,24 @@ fn publisher_generic<
     mut source: S,
     mut encoder: E,
     audio_cap: Option<C>,
+    camera_cap: Option<CC>,
 ) {
-    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
-        connect_codec(signal_url, room, Role::Publisher, auth, audio, codec).expect("connect");
+    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) =
+        if camera_cap.is_some() {
+            connect_camera(signal_url, room, Role::Publisher, auth, audio, Some(codec))
+                .expect("connect")
+        } else {
+            connect_codec(signal_url, room, Role::Publisher, auth, audio, codec).expect("connect")
+        };
     let mut connected = false;
     // #316：有真实系统音频采集则优先（RealAudioSender），否则合成音 AudioTicker。
     let mut real_audio = audio_cap.map(|cap| RealAudioSender::new(cap, audio_opus));
     let mut audio_ticker = AudioTicker::new(audio_opus);
+    // #385：摄像头第二路视频轨（--camera，BGRA → FFmpeg 软编 → camera_mid）。
+    let mut camera_cap = camera_cap;
+    let mut camera_enc: Option<aerodesk_ffmpeg::encode::FfmpegEncoder> = None;
+    let mut camera_pts = 0i64;
+    let mut next_camera = Instant::now();
     let mut next_frame = Instant::now();
     let mut pts = 0i64;
     // #8 端到端延迟：合成光标轨迹（30Hz）。
@@ -2582,6 +2620,46 @@ fn publisher_generic<
             pts += 1;
         }
 
+        // #385 摄像头第二路视频轨：30fps 节拍，BGRA → FfmpegEncoder → camera_mid。
+        // ICE 未连通（connected=false）时不轮询摄像头，避免空转与 send 失败刷屏。
+        if connected
+            && let Some(cmid) = camera_mid
+            && let Some(cap) = &mut camera_cap
+            && Instant::now() >= next_camera
+        {
+            next_camera += Duration::from_millis(33);
+            match aerodesk_core::platform::CameraSource::next_frame(cap) {
+                Ok(Some(frame)) => {
+                    if camera_enc.is_none() {
+                        camera_enc = Some(
+                            aerodesk_ffmpeg::encode::FfmpegEncoder::new(
+                                frame.width,
+                                frame.height,
+                                30,
+                                8_000_000,
+                                codec,
+                            )
+                            .expect("camera encoder"),
+                        );
+                    }
+                    if let Some(enc) = &mut camera_enc
+                        && let Ok(Some(unit)) = enc.encode_bgra(&frame.raw)
+                    {
+                        let rtp_time = str0m::media::MediaTime::new(
+                            camera_pts as u64 * 3000,
+                            str0m::media::Frequency::NINETY_KHZ,
+                        );
+                        if let Err(e) = endpoint.send_video_frame(cmid, unit.data, rtp_time) {
+                            warn!("send camera frame failed: {e:?}");
+                        }
+                        camera_pts += 1;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => warn!("camera next_frame: {e}"),
+            }
+        }
+
         std::thread::sleep(Duration::from_millis(2));
         let _ = &mut signal;
     }
@@ -2622,6 +2700,7 @@ fn publisher_ffmpeg(
         source,
         encoder,
         None::<NoAudioCapture>,
+        None::<NoCameraCapture>,
     );
 }
 
@@ -2695,7 +2774,17 @@ fn publisher_capture_windows(
         None
     };
     publisher_generic(
-        signal_url, room, auth, audio, audio_opus, codec, FPS, capture, encoder, audio_cap,
+        signal_url,
+        room,
+        auth,
+        audio,
+        audio_opus,
+        codec,
+        FPS,
+        capture,
+        encoder,
+        audio_cap,
+        None::<NoCameraCapture>,
     );
 }
 
@@ -2711,11 +2800,39 @@ fn publisher_capture_linux(
     audio: bool,
     audio_opus: bool,
     codec: Codec,
+    camera: bool,
+    camera_device: Option<String>,
 ) {
     use aerodesk_core::platform::MediaSource;
     use aerodesk_linux::capture::{WaylandPortalCapturer, X11Capturer};
 
     const FPS: u32 = 30;
+
+    // #385 摄像头（V4L2）：--camera 时启动本地摄像头，失败仅告警（视频轨照常）。
+    let camera_cap: Option<aerodesk_linux::camera::V4l2Camera> = if camera {
+        let dev = camera_device.unwrap_or_else(|| "/dev/video0".to_string());
+        match aerodesk_linux::camera::V4l2Camera::new(&dev) {
+            Ok(mut cam) => {
+                use aerodesk_core::platform::CameraSource;
+                match CameraSource::start(&mut cam, 1280, 720, 30) {
+                    Ok(()) => {
+                        info!("Linux camera started ({dev})");
+                        Some(cam)
+                    }
+                    Err(e) => {
+                        warn!("Linux camera start failed ({dev}): {e}");
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Linux camera open failed ({dev}): {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // DISPLAY 存在 → X11；否则 → Wayland portal（PipeWire，触发用户授权）。
     let mut capture = if std::env::var("DISPLAY").is_ok() {
@@ -2798,6 +2915,7 @@ fn publisher_capture_linux(
     };
     publisher_generic(
         signal_url, room, auth, audio, audio_opus, codec, FPS, capture, encoder, audio_cap,
+        camera_cap,
     );
 }
 
