@@ -15,6 +15,8 @@ pub mod capture;
 pub mod encode;
 pub mod inject;
 pub mod vdd;
+#[cfg(windows)]
+pub mod wake_lock;
 
 /// 采集帧（BGRA，DXGI 输出格式）。
 #[derive(Debug, Clone)]

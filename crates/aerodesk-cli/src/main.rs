@@ -2691,6 +2691,11 @@ fn publisher_capture_windows(
         return;
     }
     info!("Windows screen capture started at {w}x{h}");
+    // #334：采集会话期间保持系统/显示器唤醒（防闲置休眠后 DXGI 无输出）。
+    let _keep_awake = aerodesk_windows::wake_lock::WindowsSystemWakeLock
+        .acquire(true)
+        .map_err(|e| warn!("保持显示器唤醒失败: {e}"))
+        .ok();
     let _ = MediaSource::start(&mut capture, FPS, false);
     // OpenH264 软编（BGRA raw 输入，全平台 aerodesk-softenc）。
     let encoder = match OpenH264Encoder::new(w, h, FPS, 8_000) {
