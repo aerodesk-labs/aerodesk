@@ -10,6 +10,7 @@
 //! ```
 
 pub mod access_unit;
+pub mod audio_sink;
 pub mod avsync;
 pub mod clipboard;
 pub mod cmd_exec;
