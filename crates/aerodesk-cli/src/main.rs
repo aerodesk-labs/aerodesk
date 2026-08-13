@@ -304,6 +304,10 @@ fn run() {
                     let scale_h: u32 = arg(&args, "--height")
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(1080);
+                    // #8：屏幕采集编码码率（默认 8Mbps，与合成源/OpenH264 旧默认一致）。
+                    let bitrate: u32 = arg(&args, "--bitrate")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(8_000_000);
                     publisher_capture_windows(
                         &signal,
                         &room,
@@ -314,6 +318,7 @@ fn run() {
                         scale_w,
                         scale_h,
                         _display as u32,
+                        bitrate,
                     );
                 }
                 #[cfg(target_os = "linux")]
@@ -2656,6 +2661,7 @@ fn publisher_ffmpeg(
 /// 输入注入走 SendInput（aerodesk-windows）；系统音频走 WASAPI loopback
 /// （采集系统正在播放的声音，失败回退合成音）；需要交互桌面会话（DXGI 输出可用）。
 #[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)] // 采集参数（显示器/缩放/码率/编解码），与既有 publisher 系列同风格。
 fn publisher_capture_windows(
     signal_url: &str,
     room: &str,
@@ -2666,9 +2672,9 @@ fn publisher_capture_windows(
     target_w: u32,
     target_h: u32,
     display: u32,
+    bitrate: u32,
 ) {
     use aerodesk_core::platform::MediaSource;
-    use aerodesk_softenc::openh264enc::OpenH264Encoder;
     use aerodesk_windows::capture::DxgiCapturer;
 
     const FPS: u32 = 30;
@@ -2697,14 +2703,17 @@ fn publisher_capture_windows(
         .map_err(|e| warn!("保持显示器唤醒失败: {e}"))
         .ok();
     let _ = MediaSource::start(&mut capture, FPS, false);
-    // OpenH264 软编（BGRA raw 输入，全平台 aerodesk-softenc）。
-    let encoder = match OpenH264Encoder::new(w, h, FPS, 8_000) {
-        Ok(e) => e,
-        Err(e) => {
-            error!("OpenH264 encoder init failed: {e}");
-            return;
-        }
-    };
+    // #3/#8：屏幕采集改用 FFmpeg 编码器——Windows h264_mf/hevc_mf 硬件编码
+    // （2560x1440/4K 源头不再受 OpenH264 软编瓶颈），不可用时自动回退
+    // libx264/libx265 软编；同时让 --codec h265/vp9/av1 在屏幕采集路径真实生效。
+    let encoder =
+        match aerodesk_ffmpeg::encode::FfmpegEncoder::new(w, h, FPS, bitrate as u64, codec) {
+            Ok(e) => e,
+            Err(e) => {
+                error!("FFmpeg encoder init failed: {e}");
+                return;
+            }
+        };
     // #3 Windows 系统音频：WASAPI loopback 采集系统播放的声音；失败回退合成音。
     let audio_cap: Option<aerodesk_windows::audio_capture::WasapiLoopbackCapture> = if audio {
         match aerodesk_windows::audio_capture::WasapiLoopbackCapture::start() {
