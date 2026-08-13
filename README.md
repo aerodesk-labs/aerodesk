@@ -9,6 +9,7 @@
 > 产品决策记录（平台角色/选型/风险/踩坑）：[Wiki](https://github.com/aerodesk-labs/aerodesk/wiki)
 > TURN 中继部署见 [`docs/TURN.md`](docs/TURN.md)。
 > 服务端生产化部署（JWT/TLS/多 PoP/录制审计）见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
+> 运维 dashboard（房间/客户端/录制/负载/TURN 可视化）见 [`docs/ADMIN.md`](docs/ADMIN.md)。
 > PulseBeam 架构借鉴见 [`docs/borrow-from-pulsebeam.md`](docs/borrow-from-pulsebeam.md)。
 
 服务端与客户端共用 str0m（aerodesk-labs 派生：PulseBeam bwe-fixes + dimpl DTLS 接收队列扩容，pin `a9c8de7`，见 `Cargo.toml` 注释）作为协议底座。
