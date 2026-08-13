@@ -37,6 +37,60 @@ impl Node {
         }
     }
 
+    fn on_event(&mut self, e: Event) {
+        match e {
+            Event::ChannelOpen(cid, label) => self.opened.push((cid, label)),
+            Event::ChannelData(d) => {
+                let label = self
+                    .opened
+                    .iter()
+                    .rev()
+                    .find(|(c, _)| *c == d.id)
+                    .map(|(_, l)| l.clone())
+                    .unwrap_or_else(|| format!("cid{:?}", d.id));
+                self.received.push((label, d.data.to_vec()));
+            }
+            _ => {}
+        }
+    }
+
+    fn drain_outputs(&mut self) {
+        while let Ok(output) = self.rtc.poll_output() {
+            match output {
+                Output::Transmit(t) => {
+                    if let Some(peer) = self.peer {
+                        let _ = self.sock.send_to(&t.contents, peer);
+                    }
+                }
+                // 遇到 Timeout 必须退出本轮排空，否则反复返回同一 Timeout
+                Output::Timeout(_) => break,
+                Output::Event(e) => self.on_event(e),
+            }
+        }
+    }
+
+    /// 收一个包并处理（不批量）：str0m `handle_input` 调用链深，批量收包会把
+    /// 多个 DTLS/SCTP 解包叠在同一栈上导致 stack overflow（见 LESSON）。
+    fn pump_once(&mut self, now: Instant) {
+        let local = self.sock.local_addr().unwrap();
+        let mut buf = [0u8; 4096];
+        if let Ok((n, source)) = self.sock.recv_from(&mut buf) {
+            if let Ok(contents) = buf[..n].try_into() {
+                let _ = self.rtc.handle_input(Input::Receive(
+                    now,
+                    str0m::net::Receive {
+                        proto: Protocol::Udp,
+                        source,
+                        destination: local,
+                        contents,
+                    },
+                ));
+            }
+        }
+        let _ = self.rtc.handle_input(Input::Timeout(now));
+        self.drain_outputs();
+    }
+
     fn pump(&mut self, now: Instant) {
         let local = self.sock.local_addr().unwrap();
         let mut buf = [0u8; 4096];
@@ -54,31 +108,7 @@ impl Node {
             }
         }
         let _ = self.rtc.handle_input(Input::Timeout(now));
-        while let Ok(output) = self.rtc.poll_output() {
-            match output {
-                Output::Transmit(t) => {
-                    if let Some(peer) = self.peer {
-                        let _ = self.sock.send_to(&t.contents, peer);
-                    }
-                }
-                // 遇到 Timeout 必须退出本轮排空，否则反复返回同一 Timeout
-                Output::Timeout(_) => break,
-                Output::Event(e) => match e {
-                    Event::ChannelOpen(cid, label) => self.opened.push((cid, label)),
-                    Event::ChannelData(d) => {
-                        let label = self
-                            .opened
-                            .iter()
-                            .rev()
-                            .find(|(c, _)| *c == d.id)
-                            .map(|(_, l)| l.clone())
-                            .unwrap_or_else(|| format!("cid{:?}", d.id));
-                        self.received.push((label, d.data.to_vec()));
-                    }
-                    _ => {}
-                },
-            }
-        }
+        self.drain_outputs();
     }
 
     fn is_connected(&self) -> bool {
@@ -267,5 +297,56 @@ fn channel_added_after_connect_renegotiates_and_forwards() {
         }
         assert!(Instant::now() < deadline, "重协商 file 数据未转发");
         std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// 3) 大消息（>256KiB）data channel 往返：#331 回归——SCTP max-message-size
+///    提升到 1MiB 后，超过旧 256KiB 上限的 cmd 响应不应被静默丢弃。
+///
+/// str0m 的 DTLS/SCTP 解包调用链深，512KiB 消息又会被分片成大量 SCTP 块；
+/// 在默认 2MiB 测试线程栈上会 stack overflow（Windows 尤甚）。放到 8MiB 栈
+/// 线程运行——本测试验证的是 SCTP 消息上限，不是栈占用。
+#[test]
+fn large_data_channel_message_roundtrips() {
+    std::thread::Builder::new()
+        .name("large-dc-message".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(large_data_channel_message_roundtrips_inner)
+        .expect("spawn large-dc-message thread")
+        .join()
+        .expect("large-dc-message thread panicked");
+}
+
+fn large_data_channel_message_roundtrips_inner() {
+    let now = Instant::now();
+    let mut viewer = Node::new(now);
+    let mut publisher = Node::new(now);
+    connect_pair(&mut viewer, &mut publisher, now);
+
+    // 512KiB：复现 #331 list-processes 真实响应量级（>256KiB 旧上限，<1MiB 新上限）。
+    let payload: Vec<u8> = (0..(512 * 1024)).map(|i| (i % 251) as u8).collect();
+    assert!(
+        viewer.send("cmd", &payload),
+        "512KiB 消息应被接受（send=true），否则 SCTP 消息上限未提升"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let t = Instant::now();
+        // 大消息会分片成大量 UDP 包：逐包处理（pump_once），避免批量 handle_input
+        // 叠栈导致 stack overflow（见 LESSON_SFU主循环改批量UDP收包会栈溢出）。
+        viewer.pump_once(t);
+        publisher.pump_once(t);
+        if publisher
+            .received
+            .iter()
+            .any(|(l, d)| l == "cmd" && d.as_slice() == payload.as_slice())
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "512KiB data channel 消息未完整到达 publisher（#331 回归）"
+        );
     }
 }

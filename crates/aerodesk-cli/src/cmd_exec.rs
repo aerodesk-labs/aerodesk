@@ -150,7 +150,15 @@ pub fn tick(endpoint: &mut Endpoint) {
         while let Ok(resp) = rx.try_recv() {
             if let Ok(json) = serde_json::to_string(&resp) {
                 tracing::info!("cmd response #{}: {:?}", resp.id, resp.result);
-                endpoint.send_channel_data("cmd", false, json.as_bytes());
+                // #331：send 返回 false 表示超 SCTP 消息上限被拒（此前静默丢弃），
+                // 至少留告警日志，避免大响应无痕丢失。
+                if !endpoint.send_channel_data("cmd", false, json.as_bytes()) {
+                    tracing::warn!(
+                        "cmd response #{} dropped by data channel (bytes={}, 可能超 SCTP 消息上限)",
+                        resp.id,
+                        json.len()
+                    );
+                }
             }
         }
     }
