@@ -1170,29 +1170,34 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 }
                 // #171 用户配额：JWT max_conns（0=不限）。
                 let user = claims.as_ref().map(|c| c.sub.clone());
+                let mut user_quota_inc = false;
                 if let Some(sub) = &user {
                     let max_conns = claims
                         .as_ref()
                         .map(|c| c.max_conns.unwrap_or(0))
                         .unwrap_or(0);
-                    let mut uc = USER_CONNS
-                        .get()
-                        .expect("user conns initialized")
-                        .lock()
-                        .unwrap();
-                    if let Err(reason) = user_quota_take(&mut uc, sub, max_conns) {
-                        TOTAL_CLIENTS
+                    // max_conns==0 时 user_quota_take 不占位，回滚时不能 release。
+                    if max_conns > 0 {
+                        let mut uc = USER_CONNS
                             .get()
-                            .expect("total initialized")
-                            .fetch_sub(1, Ordering::Relaxed);
-                        info!("reject join user={sub}: {reason}");
-                        send(
-                            ws.clone(),
-                            SignalMessage::Error {
-                                message: reason.to_string(),
-                            },
-                        );
-                        continue;
+                            .expect("user conns initialized")
+                            .lock()
+                            .unwrap();
+                        if let Err(reason) = user_quota_take(&mut uc, sub, max_conns) {
+                            TOTAL_CLIENTS
+                                .get()
+                                .expect("total initialized")
+                                .fetch_sub(1, Ordering::Relaxed);
+                            info!("reject join user={sub}: {reason}");
+                            send(
+                                ws.clone(),
+                                SignalMessage::Error {
+                                    message: reason.to_string(),
+                                },
+                            );
+                            continue;
+                        }
+                        user_quota_inc = true;
                     }
                 }
                 let peer_id = format!("{}-{}", room, fastrand_id());
@@ -1206,7 +1211,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                             .get()
                             .expect("total initialized")
                             .fetch_sub(1, Ordering::Relaxed);
-                        if let Some(sub) = &user {
+                        if user_quota_inc && let Some(sub) = &user {
                             let mut uc = USER_CONNS
                                 .get()
                                 .expect("user conns initialized")
