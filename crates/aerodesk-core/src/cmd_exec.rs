@@ -1,7 +1,9 @@
 //! 远程命令执行（#109）：危险命令拦截 + 白名单 + 超时 + 输出截断 + 审计。
 //!
-//! 被控端执行器：unix 用 `sh -c`，Windows 用 `cmd /C`。默认禁止破坏性/交互式
-//! 命令（白名单前缀可放行）；单流输出上限 1MB；超时强杀；审计写 JSONL。
+//! 分层：**原始执行**在 [`platform::CommandExecutor`]（各平台适配器实现，
+//! 本模块提供平台无关默认实现 [`DefaultCommandExecutor`]：unix `sh -c`，
+//! Windows `cmd /C`）；**策略层**（危险命令拦截/白名单/审计）在本模块。
+//! 单流输出上限 1MB；超时强杀；审计写 JSONL。
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -11,6 +13,11 @@ use std::time::{Duration, Instant};
 
 use aerodesk_protocol::cmd::{ProcessInfo, decode_b64, encode_b64};
 
+use crate::platform::CommandExecutor;
+
+/// 命令执行结果（类型定义收敛在 `platform`，此处 re-export 保持旧路径可用）。
+pub use crate::platform::CmdOutput;
+
 /// 单流（stdout/stderr）输出上限。
 pub const MAX_OUTPUT_BYTES: usize = 1 << 20;
 /// 默认超时。
@@ -19,16 +26,6 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_READ_MAX_BYTES: usize = 4 << 20;
 /// 读文件硬上限（防内存失控）。
 pub const MAX_READ_BYTES: usize = 16 << 20;
-
-/// 命令执行结果。
-#[derive(Debug, Clone, Default)]
-pub struct CmdOutput {
-    pub exit_code: Option<i32>,
-    pub stdout: String,
-    pub stderr: String,
-    pub truncated: bool,
-    pub error: Option<String>,
-}
 
 /// 危险/交互式命令模式（默认禁止）。命中即拦截，除非命令以白名单前缀开头。
 pub fn is_dangerous(command: &str) -> bool {
@@ -240,8 +237,8 @@ fn read_with_cap<R: Read>(
     }
 }
 
-/// 执行命令（含策略/超时/截断/审计）。allowlist 为命令前缀放行清单。
-/// 执行命令（含策略/超时/截断），审计写到显式路径（None = 不审计）。
+/// 执行命令（策略 + 原始执行 + 审计）。allowlist 为命令前缀放行清单，
+/// 审计写到显式路径（None = 不审计）。原始执行委托 [`DefaultCommandExecutor`]。
 pub fn run_command_with(
     command: &str,
     cwd: Option<&str>,
@@ -268,111 +265,206 @@ pub fn run_command_with(
         audit_opt(audit_path, &command, cwd, &out);
         return out;
     }
-
-    let timeout = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).max(100));
-
-    let mut cmd = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.arg("/C").arg(&command);
-        c
-    } else {
-        let mut c = Command::new("sh");
-        c.arg("-c").arg(&command);
-        c
-    };
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            let out = CmdOutput {
-                error: Some(format!("spawn failed: {e}")),
-                ..Default::default()
-            };
-            audit_opt(audit_path, &command, cwd, &out);
-            return out;
-        }
-    };
-
-    // 两个读线程：并行读 stdout/stderr，各带上限，避免管道写满死锁。
-    let stdout_buf: std::sync::Arc<Mutex<Vec<u8>>> = Default::default();
-    let stderr_buf: std::sync::Arc<Mutex<Vec<u8>>> = Default::default();
-    let stdout_trunc = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let stderr_trunc = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-    let stop_reading = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let h1 = std::thread::spawn({
-        let buf = stdout_buf.clone();
-        let trunc = stdout_trunc.clone();
-        let stop = stop_reading.clone();
-        move || read_with_cap(stdout_pipe, buf, trunc, stop)
-    });
-    let h2 = std::thread::spawn({
-        let buf = stderr_buf.clone();
-        let trunc = stderr_trunc.clone();
-        let stop = stop_reading.clone();
-        move || read_with_cap(stderr_pipe, buf, trunc, stop)
-    });
-    let handles = vec![h1, h2];
-
-    // 轮询退出 + 超时强杀。
-    let deadline = Instant::now() + timeout;
-    let mut exit_code: Option<i32> = None;
-    let mut timed_out = false;
-    loop {
-        match child.try_wait() {
-            Ok(Some(st)) => {
-                exit_code = st.code();
-                break;
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    timed_out = true;
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(e) => {
-                let out = CmdOutput {
-                    error: Some(format!("wait failed: {e}")),
-                    ..Default::default()
-                };
-                audit_opt(audit_path, &command, cwd, &out);
-                return out;
-            }
-        }
-    }
-    // 子进程退出后给读线程 200ms 排空窗口，随后停止（后台进程继承管道时
-    // 不会 EOF，必须主动停，否则 run_command 卡死）。
-    std::thread::sleep(Duration::from_millis(200));
-    stop_reading.store(true, std::sync::atomic::Ordering::SeqCst);
-    for h in handles {
-        let _ = h.join();
-    }
-
-    let stdout_truncated = stdout_trunc.load(std::sync::atomic::Ordering::SeqCst);
-    let stderr_truncated = stderr_trunc.load(std::sync::atomic::Ordering::SeqCst);
-    let stdout = String::from_utf8_lossy(&stdout_buf.lock().unwrap()).into_owned();
-    let stderr = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).into_owned();
-    let out = CmdOutput {
-        exit_code,
-        stdout,
-        stderr,
-        truncated: stdout_truncated || stderr_truncated,
-        error: if timed_out {
-            Some(format!("timeout after {}ms", timeout.as_millis()))
-        } else {
-            None
-        },
-    };
+    let out = DefaultCommandExecutor.run_command(&command, cwd, timeout_ms);
     audit_opt(audit_path, &command, cwd, &out);
     out
+}
+
+/// 平台无关默认命令执行器：unix `sh -c`，Windows `cmd /C`。
+///
+/// 实现 [`CommandExecutor`]（#330）；策略层（危险拦截/白名单/审计）不在本实现。
+/// 各平台适配器可自行实现 trait（macOS 见 `aerodesk-macos::cmd`），本默认实现
+/// 保证未接适配器的平台（Windows/Linux 等）行为与旧版完全一致。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultCommandExecutor;
+
+impl CommandExecutor for DefaultCommandExecutor {
+    fn run_command(&self, command: &str, cwd: Option<&str>, timeout_ms: Option<u64>) -> CmdOutput {
+        let command = command.trim().to_string();
+        if command.is_empty() {
+            return CmdOutput {
+                error: Some("empty command".into()),
+                ..Default::default()
+            };
+        }
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).max(100));
+
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(&command);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.arg("-c").arg(&command);
+            c
+        };
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                return CmdOutput {
+                    error: Some(format!("spawn failed: {e}")),
+                    ..Default::default()
+                };
+            }
+        };
+
+        // 两个读线程：并行读 stdout/stderr，各带上限，避免管道写满死锁。
+        let stdout_buf: std::sync::Arc<Mutex<Vec<u8>>> = Default::default();
+        let stderr_buf: std::sync::Arc<Mutex<Vec<u8>>> = Default::default();
+        let stdout_trunc = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stderr_trunc = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+        let stop_reading = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let h1 = std::thread::spawn({
+            let buf = stdout_buf.clone();
+            let trunc = stdout_trunc.clone();
+            let stop = stop_reading.clone();
+            move || read_with_cap(stdout_pipe, buf, trunc, stop)
+        });
+        let h2 = std::thread::spawn({
+            let buf = stderr_buf.clone();
+            let trunc = stderr_trunc.clone();
+            let stop = stop_reading.clone();
+            move || read_with_cap(stderr_pipe, buf, trunc, stop)
+        });
+        let handles = vec![h1, h2];
+
+        // 轮询退出 + 超时强杀。
+        let deadline = Instant::now() + timeout;
+        let mut exit_code: Option<i32> = None;
+        let mut timed_out = false;
+        loop {
+            match child.try_wait() {
+                Ok(Some(st)) => {
+                    exit_code = st.code();
+                    break;
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        timed_out = true;
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => {
+                    return CmdOutput {
+                        error: Some(format!("wait failed: {e}")),
+                        ..Default::default()
+                    };
+                }
+            }
+        }
+        // 子进程退出后给读线程 200ms 排空窗口，随后停止（后台进程继承管道时
+        // 不会 EOF，必须主动停，否则 run_command 卡死）。
+        std::thread::sleep(Duration::from_millis(200));
+        stop_reading.store(true, std::sync::atomic::Ordering::SeqCst);
+        for h in handles {
+            let _ = h.join();
+        }
+
+        let stdout_truncated = stdout_trunc.load(std::sync::atomic::Ordering::SeqCst);
+        let stderr_truncated = stderr_trunc.load(std::sync::atomic::Ordering::SeqCst);
+        let stdout = String::from_utf8_lossy(&stdout_buf.lock().unwrap()).into_owned();
+        let stderr = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).into_owned();
+        CmdOutput {
+            exit_code,
+            stdout,
+            stderr,
+            truncated: stdout_truncated || stderr_truncated,
+            error: if timed_out {
+                Some(format!("timeout after {}ms", timeout.as_millis()))
+            } else {
+                None
+            },
+        }
+    }
+
+    fn read_file(&self, path: &str, max_bytes: Option<usize>) -> Result<Vec<u8>, String> {
+        let cap = max_bytes
+            .unwrap_or(DEFAULT_READ_MAX_BYTES)
+            .min(MAX_READ_BYTES);
+        let data = std::fs::read(path).map_err(|e| format!("read failed: {e}"))?;
+        if data.len() > cap {
+            return Err(format!("file too large ({}B > {}B)", data.len(), cap));
+        }
+        Ok(data)
+    }
+
+    fn write_file(&self, path: &str, data: &[u8]) -> Result<(), String> {
+        if let Some(parent) = Path::new(path).parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
+        }
+        std::fs::write(path, data).map_err(|e| format!("write failed: {e}"))
+    }
+
+    fn list_processes(&self) -> Result<Vec<ProcessInfo>, String> {
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new("tasklist");
+            c.arg("/FO").arg("CSV");
+            c
+        } else {
+            let mut c = Command::new("ps");
+            c.arg("-axo").arg("pid=,comm=");
+            c
+        };
+        let out = cmd.output().map_err(|e| format!("ps failed: {e}"))?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut procs = Vec::new();
+        if cfg!(windows) {
+            // tasklist /FO CSV：`"image.exe","PID","Session",...`（PID 在第二列）。
+            for line in text.lines().skip(1) {
+                let mut parts = line.split("\",\"");
+                let name = parts.next().unwrap_or("?").trim_matches('"').to_string();
+                let pid_s = parts.next().unwrap_or("").trim_matches('"');
+                if let Ok(pid) = pid_s.parse::<u32>() {
+                    procs.push(ProcessInfo { pid, name });
+                }
+            }
+        } else {
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let mut it = line.splitn(2, char::is_whitespace);
+                let pid = it.next().and_then(|p| p.trim().parse::<u32>().ok());
+                let name = it.next().unwrap_or("?").trim().to_string();
+                if let Some(pid) = pid {
+                    procs.push(ProcessInfo { pid, name });
+                }
+            }
+        }
+        Ok(procs)
+    }
+
+    fn kill_process(&self, pid: u32) -> Result<(), String> {
+        let status = if cfg!(windows) {
+            Command::new("taskkill")
+                .arg("/PID")
+                .arg(pid.to_string())
+                .arg("/F")
+                .status()
+                .map_err(|e| format!("taskkill failed: {e}"))?
+        } else {
+            Command::new("kill")
+                .arg(pid.to_string())
+                .status()
+                .map_err(|e| format!("kill failed: {e}"))?
+        };
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("kill pid {pid} exit {:?}", status.code()))
+        }
+    }
 }
 
 /// 执行命令（审计写入默认路径 `$AERODESK_CMD_AUDIT` 或 `~/AeroDesk/cmd-audit.jsonl`）。
@@ -447,19 +539,13 @@ pub fn is_forbidden_write_path(path: &str) -> bool {
     FORBIDDEN_PREFIXES.iter().any(|f| norm.starts_with(f)) || norm.contains("/../") || norm == "/"
 }
 
-/// 读文件（上限 max_bytes，默认 4MB，硬上限 16MB）。
+/// 读文件（上限 max_bytes，默认 4MB，硬上限 16MB）。委托 [`DefaultCommandExecutor`]。
 pub fn read_file(path: &str, max_bytes: Option<usize>) -> Result<Vec<u8>, String> {
-    let cap = max_bytes
-        .unwrap_or(DEFAULT_READ_MAX_BYTES)
-        .min(MAX_READ_BYTES);
-    let data = std::fs::read(path).map_err(|e| format!("read failed: {e}"))?;
-    if data.len() > cap {
-        return Err(format!("file too large ({}B > {}B)", data.len(), cap));
-    }
-    Ok(data)
+    DefaultCommandExecutor.read_file(path, max_bytes)
 }
 
 /// 写文件（敏感路径默认禁止，白名单前缀放行；data 为 base64）。
+/// 策略检查后委托 [`DefaultCommandExecutor`] 原始写入。
 pub fn write_file(path: &str, data_b64: &str, allowlist: &[String]) -> Result<(), String> {
     let allowed = allowlist
         .iter()
@@ -468,54 +554,16 @@ pub fn write_file(path: &str, data_b64: &str, allowlist: &[String]) -> Result<()
         return Err(format!("blocked by policy: write {path}"));
     }
     let data = decode_b64(data_b64).ok_or_else(|| "invalid base64".to_string())?;
-    if let Some(parent) = Path::new(path).parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
-    }
-    std::fs::write(path, data).map_err(|e| format!("write failed: {e}"))
+    DefaultCommandExecutor.write_file(path, &data)
 }
 
-/// 列出进程（unix：`ps -axo pid=,comm=`；Windows：tasklist）。
+/// 列出进程（unix：`ps -axo pid=,comm=`；Windows：tasklist）。委托 [`DefaultCommandExecutor`]。
 pub fn list_processes() -> Result<Vec<ProcessInfo>, String> {
-    let mut cmd = if cfg!(windows) {
-        let mut c = Command::new("tasklist");
-        c.arg("/FO").arg("CSV");
-        c
-    } else {
-        let mut c = Command::new("ps");
-        c.arg("-axo").arg("pid=,comm=");
-        c
-    };
-    let out = cmd.output().map_err(|e| format!("ps failed: {e}"))?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut procs = Vec::new();
-    if cfg!(windows) {
-        // tasklist /FO CSV：`"image.exe","PID","Session",...`（PID 在第二列）。
-        for line in text.lines().skip(1) {
-            let mut parts = line.split("\",\"");
-            let name = parts.next().unwrap_or("?").trim_matches('"').to_string();
-            let pid_s = parts.next().unwrap_or("").trim_matches('"');
-            if let Ok(pid) = pid_s.parse::<u32>() {
-                procs.push(ProcessInfo { pid, name });
-            }
-        }
-    } else {
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let mut it = line.splitn(2, char::is_whitespace);
-            let pid = it.next().and_then(|p| p.trim().parse::<u32>().ok());
-            let name = it.next().unwrap_or("?").trim().to_string();
-            if let Some(pid) = pid {
-                procs.push(ProcessInfo { pid, name });
-            }
-        }
-    }
-    Ok(procs)
+    DefaultCommandExecutor.list_processes()
 }
 
-/// 结束进程（unix：`kill`；Windows：taskkill）。pid 0/1 默认禁止。
+/// 结束进程（unix：`kill`；Windows：taskkill）。pid 0/1 默认禁止；
+/// 策略检查后委托 [`DefaultCommandExecutor`] 原始执行。
 pub fn kill_process(pid: u32, allowlist: &[String]) -> Result<(), String> {
     let allowed = allowlist
         .iter()
@@ -523,24 +571,7 @@ pub fn kill_process(pid: u32, allowlist: &[String]) -> Result<(), String> {
     if (pid == 0 || pid == 1) && !allowed {
         return Err(format!("blocked by policy: kill pid {pid}"));
     }
-    let status = if cfg!(windows) {
-        Command::new("taskkill")
-            .arg("/PID")
-            .arg(pid.to_string())
-            .arg("/F")
-            .status()
-            .map_err(|e| format!("taskkill failed: {e}"))?
-    } else {
-        Command::new("kill")
-            .arg(pid.to_string())
-            .status()
-            .map_err(|e| format!("kill failed: {e}"))?
-    };
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("kill pid {pid} exit {:?}", status.code()))
-    }
+    DefaultCommandExecutor.kill_process(pid)
 }
 
 /// 指定审计文件尾部 n 行。
@@ -742,5 +773,44 @@ mod tests {
         assert!(is_forbidden_write_path("/tmp/a/../b"));
         assert!(!is_forbidden_write_path("/tmp/aerodesk-test.txt"));
         assert!(!is_forbidden_write_path("relative/path.txt"));
+    }
+
+    /// #330：trait 原始执行与自由函数（策略层）行为等价。
+    #[test]
+    fn default_executor_matches_free_function() {
+        let via_fn = run_command("echo trait-equivalence", None, Some(2000), &[]);
+        let via_trait =
+            DefaultCommandExecutor.run_command("echo trait-equivalence", None, Some(2000));
+        assert_eq!(via_fn.exit_code, via_trait.exit_code);
+        assert_eq!(via_fn.stdout, via_trait.stdout);
+        assert_eq!(via_fn.stderr, via_trait.stderr);
+        assert_eq!(via_fn.error, via_trait.error);
+        assert_eq!(via_fn.exit_code, Some(0));
+        assert!(via_trait.stdout.contains("trait-equivalence"));
+    }
+
+    /// #330：trait 可对象化——平台适配器扩展点（Box<dyn CommandExecutor>）。
+    #[test]
+    fn default_executor_is_object_safe() {
+        let ex: Box<dyn CommandExecutor> = Box::new(DefaultCommandExecutor);
+        let out = ex.run_command("true", None, Some(1000));
+        assert_eq!(out.exit_code, Some(0));
+        assert!(out.error.is_none());
+    }
+
+    /// #330：trait 读写文件（原始字节）往返。
+    #[test]
+    fn default_executor_read_write_file() {
+        let dir = std::env::temp_dir().join(format!("aerodesk-cmd-trait-{}", std::process::id()));
+        let path = dir.join("payload.bin");
+        let payload = b"\x00\x01\x02aerodesk-command-executor";
+        DefaultCommandExecutor
+            .write_file(path.to_str().unwrap(), payload)
+            .unwrap();
+        let got = DefaultCommandExecutor
+            .read_file(path.to_str().unwrap(), None)
+            .unwrap();
+        assert_eq!(got, payload);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

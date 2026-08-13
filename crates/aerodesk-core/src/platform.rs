@@ -9,6 +9,10 @@
 //! - HarmonyOS: AVScreenCapture + 硬件编码 + OH_Input_*
 //!
 //! 所有实现方必须实现本模块 trait；禁止在各平台 crate 重复定义同名 trait。
+//!
+//! 平台能力矩阵：MediaSource/Encoder/Decoder/Renderer/InputInjector/AudioSink/AudioCapturer/
+//! Clipboard/CursorSource/Permissions/CameraSource/FilePicker/AppShell/VirtualDisplay/Notifier/
+//! CommandExecutor（远程命令「bash」，策略层在 [`crate::cmd_exec`]）。
 
 use std::any::Any;
 use std::sync::Arc;
@@ -171,6 +175,36 @@ pub trait VirtualDisplay {
 /// 系统通知（收到连接/文件等事件时提示用户）。
 pub trait Notifier {
     fn notify(&self, title: &str, body: &str);
+}
+
+/// 命令执行结果（远程命令「bash」抽象，见 [`CommandExecutor`]）。
+#[derive(Debug, Clone, Default)]
+pub struct CmdOutput {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub truncated: bool,
+    pub error: Option<String>,
+}
+
+/// 远程命令/文件/进程执行器（被控端；「bash」抽象）。
+///
+/// 平台差异（shell 选择、进程枚举格式、结束进程方式）由各适配器实现：
+/// unix 默认 `sh -c` / `ps` / `kill`，Windows 默认 `cmd /C` / `tasklist` / `taskkill`。
+/// 本 trait 只负责**原始执行**；危险命令拦截、白名单、审计等策略在
+/// [`crate::cmd_exec`]（平台中立，核心统一入口）。
+pub trait CommandExecutor {
+    /// 执行命令（shell 由平台选择）。返回值自包含：spawn/wait/超时/截断
+    /// 错误放入 [`CmdOutput::error`]，不向调用方抛错。
+    fn run_command(&self, command: &str, cwd: Option<&str>, timeout_ms: Option<u64>) -> CmdOutput;
+    /// 读文件（`max_bytes` 为上限；超出返回错误）。
+    fn read_file(&self, path: &str, max_bytes: Option<usize>) -> Result<Vec<u8>, String>;
+    /// 写文件（`data` 为原始字节）。
+    fn write_file(&self, path: &str, data: &[u8]) -> Result<(), String>;
+    /// 列出进程（平台格式差异收敛于此）。
+    fn list_processes(&self) -> Result<Vec<aerodesk_protocol::cmd::ProcessInfo>, String>;
+    /// 结束进程。
+    fn kill_process(&self, pid: u32) -> Result<(), String>;
 }
 
 /// 便捷 re-export：`use aerodesk_core::platform::*` 同时拿到 Codec/EncodedUnit。
