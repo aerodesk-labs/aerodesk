@@ -41,6 +41,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aerodesk-admin"
+version = "0.1.0"
+dependencies = [
+ "rouille",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "aerodesk-android"
 version = "0.1.0"
 dependencies = [
