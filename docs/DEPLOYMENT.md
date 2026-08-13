@@ -39,7 +39,7 @@
 | sfu | `SFU_HOST_ADDRESS` | 对外通告地址（ICE 候选/TURN/web 地址；默认自动选择首个非回环 IPv4，#216）。NAT/带 docker0 等虚拟网卡的服务器必须设公网 IP，否则外部客户端连不上媒体 |
 | sfu | `SFU_BIND_ADDRESS` | 媒体 socket 绑定地址（未设时：显式 `SFU_HOST_ADDRESS` 则默认 `0.0.0.0`，否则跟随通告地址，#216） |
 | sfu | `SFU_SHARD_COUNT` | 媒体分片数（默认 CPU 核数，上限 8；1..=64 可覆盖）。大规格机器可上调利用更多核，小容器可下调到 1 |
-| signal | `SFU_URL` / `SFU_TOKEN` | SFU 内部接口 + 内部 token |
+| signal | `SFU_URLS` / `SFU_URL` / `SFU_TOKEN` | SFU 池（逗号分隔，可选）+ 单值回退 + 内部 token。设 `SFU_URLS` 时按房间名无状态哈希选路到池中某个 SFU（同房间恒同 SFU）；未设回退 `SFU_URL`（单 SFU，向后兼容） |
 | sfu | `RECORD_DIR` | 录制/审计目录（可选） |
 | sfu | `RECORD_ON_DEMAND` | `1` 时只录显式 start() 的房间（配合内部 API 按需录制，#160） |
 | sfu | `MAX_ROOM_CLIENTS` / `MAX_TOTAL_CLIENTS` | `/start` 准入配额（0=不限，#180，信令层 #163/#171 之外 SFU 侧纵深防御）；超限 503 `room full`/`server full` |

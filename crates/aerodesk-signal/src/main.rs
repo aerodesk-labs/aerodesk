@@ -13,6 +13,8 @@
 //!   TURN_SECRET   coturn REST secret（空则不下发 TURN）
 //!   TURN_URLS     逗号分隔 TURN URL（默认 127.0.0.1:3478）
 //!   SFU_URL       SFU 内部接口（默认 http://127.0.0.1:3002）
+//!   SFU_URLS      SFU 池（逗号分隔，可选）：设置后按房间无状态哈希选路到其中一个 SFU；
+//!                 未设置回退单值 SFU_URL（向后兼容）
 //!   SFU_TOKEN     SFU 内部接口 token（可选）
 //!
 //! 多 PoP（#146）：
@@ -72,7 +74,8 @@ struct Config {
     /// PoP → 客户端信令 URL（重定向目标）。
     pop_urls: HashMap<String, String>,
     turn: Option<TurnConfig>,
-    sfu_url: String,
+    /// SFU 池（按房间无状态哈希选路；长度 ≥1）。
+    sfu_urls: Vec<String>,
     sfu_token: Option<String>,
     /// 跨 PoP 桥接编排（#216 M3）：BRIDGE_CMD 设置时启用；桥失败回退 Redirect。
     bridge: Option<Arc<BridgeManager>>,
@@ -236,6 +239,27 @@ fn reload_tls(
     }
 }
 
+/// 无状态选路：按房间名 rendezvous 哈希到 SFU 池中的某一个。
+/// 同一房间 + 同一池顺序 → 恒同一下标（signal 重启/多实例一致，无需存映射）。
+fn sfu_for_room(pool: &[String], room: &str) -> usize {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    debug_assert!(!pool.is_empty());
+    let mut best = 0usize;
+    let mut best_hash = -1.0f64;
+    for (i, _) in pool.iter().enumerate() {
+        let mut h = DefaultHasher::new();
+        room.hash(&mut h);
+        i.hash(&mut h);
+        let v = (h.finish() as f64) / (u64::MAX as f64);
+        if v > best_hash {
+            best_hash = v;
+            best = i;
+        }
+    }
+    best
+}
+
 /// 调 SFU 内部接口踢掉房间全部客户端（#249：桥死亡后触发 viewer --reconnect 恢复）。
 /// 返回是否成功（2xx）；失败由调用方决定重试（#249 review）。
 /// 注意：room 仅来自经过 sanitize_room 校验的房间名（[A-Za-z0-9._-]），
@@ -287,7 +311,7 @@ fn main() {
         let rooms = rooms.clone();
         let idle = config.bridge_idle_secs;
         let monitor_interval = config.bridge_monitor_interval;
-        let sfu_url = config.sfu_url.clone();
+        let sfu_urls = config.sfu_urls.clone();
         let sfu_token = config.sfu_token.clone();
         std::thread::Builder::new()
             .name("bridge-monitor".into())
@@ -363,7 +387,8 @@ fn main() {
                         info!(
                             "bridge monitor: bridge died for room {room}; kicking SFU room to trigger client recovery"
                         );
-                        if kick_sfu_room(&sfu_url, sfu_token.as_deref(), &room) {
+                        let sfu = &sfu_urls[sfu_for_room(&sfu_urls, &room)];
+                        if kick_sfu_room(sfu, sfu_token.as_deref(), &room) {
                             kick_retry.remove(&room);
                         } else {
                             // 首次失败计入 1：下一次 tick 再重试（同 tick 不立即重复踢）。
@@ -384,7 +409,8 @@ fn main() {
                             *attempts = u32::MAX; // 放弃重试
                             continue;
                         }
-                        if kick_sfu_room(&sfu_url, sfu_token.as_deref(), room) {
+                        let sfu = &sfu_urls[sfu_for_room(&sfu_urls, room)];
+                        if kick_sfu_room(sfu, sfu_token.as_deref(), room) {
                             *attempts = u32::MAX; // 成功，稍后清理
                         } else {
                             *attempts += 1;
@@ -564,7 +590,25 @@ fn load_config() -> Config {
         max_total_clients,
         pop_urls,
         turn,
-        sfu_url: std::env::var("SFU_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into()),
+        // SFU 池：SFU_URLS（逗号分隔）优先；未设置回退单值 SFU_URL（向后兼容）。
+        sfu_urls: {
+            let list = std::env::var("SFU_URLS")
+                .ok()
+                .map(|v| {
+                    v.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .filter(|v| !v.is_empty());
+            match list {
+                Some(urls) => urls,
+                None => vec![
+                    std::env::var("SFU_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into()),
+                ],
+            }
+        },
         sfu_token: std::env::var("SFU_TOKEN").ok(),
         bridge,
         bridge_idle_secs: std::env::var("BRIDGE_IDLE_SECS")
@@ -1120,7 +1164,8 @@ fn proxy_to_sfu(
         Role::Publisher => "publisher",
         Role::Viewer => "viewer",
     };
-    let url = format!("{}/start?room={}&role={}", config.sfu_url, room, role_name);
+    let sfu = &config.sfu_urls[sfu_for_room(&config.sfu_urls, room)];
+    let url = format!("{sfu}/start?room={room}&role={role_name}");
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(10))
         .build();
@@ -1165,12 +1210,35 @@ mod tests {
             max_total_clients: 0,
             pop_urls: HashMap::new(),
             turn: None,
-            sfu_url: "http://127.0.0.1:3002".into(),
+            sfu_urls: vec!["http://127.0.0.1:3002".into()],
             sfu_token: None,
             bridge: None,
             bridge_idle_secs: Duration::from_secs(300),
             bridge_monitor_interval: Duration::from_secs(15),
         }
+    }
+
+    #[test]
+    fn sfu_for_room_is_stateless_and_deterministic() {
+        let pool = vec![
+            "http://sfu-1:3002".to_string(),
+            "http://sfu-2:3002".to_string(),
+            "http://sfu-3:3002".to_string(),
+        ];
+        // 同房间恒同一下标（无状态：signal 重启/多实例一致）。
+        let a = sfu_for_room(&pool, "room-a");
+        for _ in 0..100 {
+            assert_eq!(sfu_for_room(&pool, "room-a"), a);
+        }
+        // 落在合法范围。
+        for r in 0..100 {
+            assert!(sfu_for_room(&pool, &format!("room-{r}")) < pool.len());
+        }
+        // 多房间应分布到多个 SFU（rendezvous 哈希不会全挤一个）。
+        let hit: std::collections::HashSet<usize> = (0..100)
+            .map(|r| sfu_for_room(&pool, &format!("room-{r}")))
+            .collect();
+        assert!(hit.len() > 1, "100 个房间应分布到多个 SFU：{hit:?}");
     }
 
     #[test]
