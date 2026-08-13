@@ -643,10 +643,18 @@ pub fn main() {
                     for ev in tcp_rx.try_iter() {
                         match ev {
                             tcp::TcpEvent::New { source, stream } => {
-                                shared.tcp_streams.lock().unwrap().insert(source, stream);
+                                shared
+                                    .tcp_streams
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .insert(source, stream);
                             }
                             tcp::TcpEvent::Close { source } => {
-                                shared.tcp_streams.lock().unwrap().remove(&source);
+                                shared
+                                    .tcp_streams
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .remove(&source);
                                 shared
                                     .route_table
                                     .write()
@@ -1264,7 +1272,7 @@ fn web_request(
     if request.method() == "GET" && request.url() == "/metrics" {
         let metrics = shared.metrics.clone();
         let loads: Vec<f64> = {
-            let r = router.lock().unwrap();
+            let r = router.lock().unwrap_or_else(|e| e.into_inner());
             (0..metrics.len()).map(|i| r.load(i)).collect()
         };
         let shards: Vec<serde_json::Value> = metrics
@@ -1314,7 +1322,7 @@ fn web_request(
 
     if request.method() == "GET" && request.url() == "/metrics/prometheus" {
         let loads: Vec<f64> = {
-            let r = router.lock().unwrap();
+            let r = router.lock().unwrap_or_else(|e| e.into_inner());
             (0..shared.metrics.len()).map(|i| r.load(i)).collect()
         };
         let body = prometheus_body(
@@ -1419,7 +1427,10 @@ fn web_request(
     }
 
     // 房间 → 分片路由（哈希 locality + 负载级联）
-    let shard = router.lock().unwrap().choose(&room);
+    let shard = router
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .choose(&room);
     info!("POST /start room={room} -> shard {shard}");
     let room_for_release = room.clone();
     let res = shard_txs[shard].send(ShardCommand::AddClient { rtc, room, role });
@@ -1465,7 +1476,7 @@ mod tests {
 
     #[test]
     fn resolve_shard_count_env_override_and_fallback() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 有效覆盖（1..=64）
         unsafe { std::env::set_var("SFU_SHARD_COUNT", "3") };
         assert_eq!(resolve_shard_count(), 3);
@@ -1575,7 +1586,7 @@ mod tests {
 
     #[test]
     fn healthz_endpoint_ok() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let shared = Shared::new(1);
         let router = Arc::new(Mutex::new(crate::router::ShardRouter::new(1)));
         let req = Request::fake_http("GET", "/healthz", vec![], Vec::new());
@@ -1845,7 +1856,7 @@ mod tests {
 
     #[test]
     fn start_rejected_while_draining() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         DRAINING.store(true, Ordering::Relaxed);
         let shared = Shared::new(1);
         let router = Arc::new(Mutex::new(crate::router::ShardRouter::new(1)));

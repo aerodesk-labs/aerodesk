@@ -191,7 +191,7 @@ impl Shared {
         room_cap: usize,
         total_cap: usize,
     ) -> Result<(), &'static str> {
-        let mut m = self.room_clients.lock().unwrap();
+        let mut m = self.room_clients.lock().unwrap_or_else(|e| e.into_inner());
         if room_cap > 0 && m.get(room).copied().unwrap_or(0) >= room_cap {
             return Err("room full");
         }
@@ -205,7 +205,7 @@ impl Shared {
 
     /// 释放一个连接（断线/AddClient 失败回滚，#180）。
     pub fn release(&self, room: &str) {
-        let mut m = self.room_clients.lock().unwrap();
+        let mut m = self.room_clients.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(n) = m.get_mut(room) {
             *n = n.saturating_sub(1);
             if *n == 0 {
@@ -251,7 +251,10 @@ impl Shared {
     }
 
     pub fn leave_room(&self, room: &str, shard: usize) {
-        let mut reg = self.room_registry.write().unwrap();
+        let mut reg = self
+            .room_registry
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(set) = reg.get_mut(room) {
             set.remove(&shard);
             if set.is_empty() {
@@ -259,7 +262,7 @@ impl Shared {
             }
         }
         // 订阅者分片同步清理：分片离开房间即不再是媒体转发目标。
-        let mut sub = self.subscribers.write().unwrap();
+        let mut sub = self.subscribers.write().unwrap_or_else(|e| e.into_inner());
         if let Some(set) = sub.get_mut(room) {
             set.remove(&shard);
             if set.is_empty() {
@@ -300,7 +303,10 @@ impl Shared {
 
     /// 注销单个客户端（分片清理断线时调用）。
     pub fn unregister_client(&self, room: &str, client_id: u64, shard: usize) {
-        let mut reg = self.client_shards.write().unwrap();
+        let mut reg = self
+            .client_shards
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         if reg.get(&(room.to_string(), client_id)) == Some(&shard) {
             reg.remove(&(room.to_string(), client_id));
         }
@@ -317,12 +323,15 @@ impl Shared {
 
     /// 登记会话（AddClient 成功后由分片调用，#240）。
     pub fn register_session(&self, info: SessionInfo) {
-        self.sessions.write().unwrap().insert(info.id, info);
+        self.sessions
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(info.id, info);
     }
 
     /// 注销会话（仅当 shard 匹配时删除，避免跨分片误删，#240）。
     pub fn unregister_session(&self, client_id: u64, shard: usize) {
-        let mut reg = self.sessions.write().unwrap();
+        let mut reg = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         if reg.get(&client_id).is_some_and(|s| s.shard == shard) {
             reg.remove(&client_id);
         }
@@ -330,12 +339,21 @@ impl Shared {
 
     /// 查询单个会话。
     pub fn session(&self, client_id: u64) -> Option<SessionInfo> {
-        self.sessions.read().unwrap().get(&client_id).cloned()
+        self.sessions
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&client_id)
+            .cloned()
     }
 
     /// 会话快照（会话管理 API：房间/客户端列表，#240）。
     pub fn session_snapshot(&self) -> Vec<SessionInfo> {
-        self.sessions.read().unwrap().values().cloned().collect()
+        self.sessions
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect()
     }
 }
 
@@ -584,7 +602,7 @@ fn run_shard(
             let (mut rtt_s, mut rtt_n, mut el_s, mut il_s, mut bw_s) =
                 (0u64, 0u64, 0u64, 0u64, 0u64);
             for c in &clients {
-                let q = c.qos.lock().unwrap();
+                let q = c.qos.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(r) = q.rtt {
                     rtt_s += r.as_nanos() as u64;
                     rtt_n += 1;
@@ -1159,7 +1177,7 @@ impl Client {
                             .expect("sending UDP data");
                     }
                     Protocol::Tcp | Protocol::SslTcp => {
-                        let mut streams = tcp_streams.lock().unwrap();
+                        let mut streams = tcp_streams.lock().unwrap_or_else(|e| e.into_inner());
                         let Some(stream) = streams.get_mut(&transmit.destination) else {
                             warn!(
                                 "No TCP stream for {}, dropping {} bytes",
@@ -1224,7 +1242,8 @@ impl Client {
                     let target = self.bwe.target();
                     self.rtc.bwe().set_current_bitrate(target);
                     // #238：BWE 目标码率进质量快照。
-                    self.qos.lock().unwrap().bwe_bps = target.as_f64() as u64;
+                    self.qos.lock().unwrap_or_else(|e| e.into_inner()).bwe_bps =
+                        target.as_f64() as u64;
                     trace!(
                         "client {} bwe estimate {estimate:?} target {target:?}",
                         *self.id
@@ -1269,7 +1288,7 @@ impl Client {
                 }
                 Event::PeerStats(data) => {
                     // #238：媒体质量快照（RTT/丢包），供 5s 心跳聚合到 metrics。
-                    let mut q = self.qos.lock().unwrap();
+                    let mut q = self.qos.lock().unwrap_or_else(|e| e.into_inner());
                     q.rtt = data.rtt;
                     q.egress_loss = data.egress_loss_fraction;
                     q.ingress_loss = data.ingress_loss_fraction;

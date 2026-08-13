@@ -66,7 +66,9 @@ impl ClientSink {
                 let mut framed = Vec::with_capacity(2 + bytes.len());
                 framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
                 framed.extend_from_slice(bytes);
-                w.lock().unwrap().write_all(&framed)
+                w.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .write_all(&framed)
             }
         }
     }
@@ -124,7 +126,11 @@ pub struct TurnServer {
 impl TurnServer {
     /// 当前活跃 allocation 数（#220：长稳/泄漏观测）。
     pub fn active_allocations(&self) -> usize {
-        self.shared.allocations.lock().unwrap().len()
+        self.shared
+            .allocations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     /// 累计创建 allocation 数（#220：churn 观测；Refresh 失败重连会增长）。
@@ -385,7 +391,7 @@ fn udp_run(shared: Arc<Shared>, server: Arc<UdpSocket>) {
 
 fn sweep(shared: &Shared) {
     let now = unix_now();
-    let mut allocs = shared.allocations.lock().unwrap();
+    let mut allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
     let expired: Vec<ClientKey> = allocs
         .iter()
         .filter(|(_, a)| now >= a.expires.load(Ordering::SeqCst))
@@ -480,7 +486,12 @@ fn tcp_accept_loop(
 
 /// 移除 allocation 并置 stop，让 relay 线程尽快退出（而非等到 expiry）。
 fn cleanup_allocation(shared: &Shared, key: &ClientKey) {
-    if let Some(a) = shared.allocations.lock().unwrap().remove(key) {
+    if let Some(a) = shared
+        .allocations
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(key)
+    {
         a.stop.store(true, Ordering::SeqCst);
     }
 }
@@ -516,7 +527,7 @@ fn tcp_conn_loop(
     let mut tmp = [0u8; 65535];
     loop {
         let n = {
-            let mut c = conn.lock().unwrap();
+            let mut c = conn.lock().unwrap_or_else(|e| e.into_inner());
             match c.read(&mut tmp) {
                 Ok(n) if n > 0 => n,
                 Ok(_) => break, // EOF
@@ -564,13 +575,18 @@ fn handle_packet(
         let len = u16::from_be_bytes([pkt[2], pkt[3]]) as usize;
         let payload = &pkt[4..(4 + len).min(pkt.len())];
         let peer = {
-            let allocs = shared.allocations.lock().unwrap();
-            allocs
-                .get(&key)
-                .and_then(|a| a.state.lock().unwrap().channels.get(&chan).copied())
+            let allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
+            allocs.get(&key).and_then(|a| {
+                a.state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .channels
+                    .get(&chan)
+                    .copied()
+            })
         };
         if let Some(peer) = peer {
-            let allocs = shared.allocations.lock().unwrap();
+            let allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(a) = allocs.get(&key) {
                 let _ = a.relay.send_to(payload, peer);
             }
@@ -690,7 +706,12 @@ fn handle_allocate(
     sink: &ClientSink,
     txid: [u8; 12],
 ) {
-    if shared.allocations.lock().unwrap().contains_key(&key) {
+    if shared
+        .allocations
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(&key)
+    {
         send_error(server, sink, txid, MSG_ALLOCATE, 437, false, shared);
         return;
     }
@@ -715,7 +736,7 @@ fn handle_allocate(
         ClientKey::Tcp { ip, .. } => ip,
     };
     {
-        let allocs = shared.allocations.lock().unwrap();
+        let allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
         if shared.max_allocs_total > 0 && allocs.len() >= shared.max_allocs_total {
             send_error(server, sink, txid, MSG_ALLOCATE, 486, false, shared);
             return;
@@ -774,17 +795,21 @@ fn handle_allocate(
         state.clone(),
     );
     shared.created_total.fetch_add(1, Ordering::Relaxed);
-    shared.allocations.lock().unwrap().insert(
-        key,
-        Allocation {
-            relay: relay_arc,
-            relayed,
-            client_ip,
-            expires,
-            stop,
-            state,
-        },
-    );
+    shared
+        .allocations
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            key,
+            Allocation {
+                relay: relay_arc,
+                relayed,
+                client_ip,
+                expires,
+                stop,
+                state,
+            },
+        );
     debug!("TURN allocation: {key:?} user={username} relayed={relayed}");
     let body = vec![
         (ATTR_XOR_RELAYED_ADDRESS, encode_xor_peer(relayed)),
@@ -828,11 +853,11 @@ fn handle_permission(
         send_error(server, sink, txid, method, 403, false, shared);
         return;
     }
-    let allocs = shared.allocations.lock().unwrap();
+    let allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
     let Some(alloc) = allocs.get(&key) else {
         return;
     };
-    let mut st = alloc.state.lock().unwrap();
+    let mut st = alloc.state.lock().unwrap_or_else(|e| e.into_inner());
     if channel_bind {
         let Some(chan_val) = find_attr(pkt, ATTR_CHANNEL_NUMBER) else {
             return;
@@ -875,11 +900,11 @@ fn handle_send(shared: &Shared, pkt: &[u8], key: ClientKey) {
     if peer_denied(shared, peer_val.ip()) {
         return;
     }
-    let allocs = shared.allocations.lock().unwrap();
+    let allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
     let Some(alloc) = allocs.get(&key) else {
         return;
     };
-    let st = alloc.state.lock().unwrap();
+    let st = alloc.state.lock().unwrap_or_else(|e| e.into_inner());
     let permitted = st.permissions.contains(&peer_val);
     drop(st);
     if permitted {
@@ -895,7 +920,7 @@ fn handle_refresh(
     sink: &ClientSink,
     txid: [u8; 12],
 ) {
-    let allocs = shared.allocations.lock().unwrap();
+    let allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
     let Some(alloc) = allocs.get(&key) else {
         return;
     };
@@ -931,7 +956,7 @@ fn spawn_relay(
                 return;
             }
             if let Ok((n, peer)) = relay.recv_from(&mut buf) {
-                let st = state.lock().unwrap();
+                let st = state.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(&chan) = st.peer_channel.get(&peer) {
                     let mut out = Vec::with_capacity(4 + n);
                     out.extend_from_slice(&chan.to_be_bytes());
@@ -1131,7 +1156,7 @@ mod tests {
 
     #[test]
     fn binding_returns_xor_mapped() {
-        let _g = TESTS_LOCK.lock().unwrap();
+        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (server_addr, _srv) = spawn_udp("testsecret");
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
         client
@@ -1151,7 +1176,7 @@ mod tests {
 
     #[test]
     fn allocate_relay_roundtrip_with_rest_credentials() {
-        let _g = TESTS_LOCK.lock().unwrap();
+        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let secret = "testsecret";
         let (server_addr, _srv) = spawn_udp(secret);
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1229,7 +1254,7 @@ mod tests {
 
     #[test]
     fn allocate_rejects_bad_credentials() {
-        let _g = TESTS_LOCK.lock().unwrap();
+        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let secret = "testsecret";
         let (server_addr, _srv) = spawn_udp(secret);
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1324,7 +1349,7 @@ mod tests {
 
     #[test]
     fn tcp_allocate_relay_roundtrip() {
-        let _g = TESTS_LOCK.lock().unwrap();
+        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let secret = "testsecret";
         let (tcp_addr, _tls, _srv) = setup_tcp(secret, false);
         let mut stream = TcpStream::connect(tcp_addr).expect("tcp connect");
@@ -1377,7 +1402,7 @@ mod tests {
 
     #[test]
     fn tls_allocate_relay_roundtrip() {
-        let _g = TESTS_LOCK.lock().unwrap();
+        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let secret = "testsecret";
         let (_tcp, tls_addr, _srv) = setup_tcp(secret, true);
         let cfg = rustls::ClientConfig::builder()
@@ -1472,7 +1497,7 @@ mod tests {
     /// #204：per-IP 配额超限 → 486。
     #[test]
     fn quota_per_ip_rejects_second_allocation() {
-        let _g = TESTS_LOCK.lock().unwrap();
+        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("MAX_TURN_ALLOCS_PER_IP", "1");
         }
@@ -1496,7 +1521,7 @@ mod tests {
     /// #222：TURN_LIFETIME_SEC 缩短 allocation lifetime（响应 ATTR_LIFETIME 生效）。
     #[test]
     fn lifetime_env_shortens_allocation() {
-        let _g = TESTS_LOCK.lock().unwrap();
+        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("TURN_LIFETIME_SEC", "60");
         }
@@ -1544,7 +1569,7 @@ mod tests {
     /// #204：全局配额超限 → 486（per-IP 放开）。
     #[test]
     fn quota_total_rejects_when_full() {
-        let _g = TESTS_LOCK.lock().unwrap();
+        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("MAX_TURN_ALLOCS_TOTAL", "1");
             std::env::set_var("MAX_TURN_ALLOCS_PER_IP", "0");
@@ -1566,7 +1591,7 @@ mod tests {
     /// #204：TURN_DENIED_PEER_CIDRS 内 peer → CreatePermission 403。
     #[test]
     fn denied_peer_returns_403() {
-        let _g = TESTS_LOCK.lock().unwrap();
+        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("TURN_DENIED_PEER_CIDRS", "192.0.2.0/24");
         }
@@ -1604,7 +1629,7 @@ mod tests {
     /// #204：IPv6（::1）allocate + relay 回环。
     #[test]
     fn ipv6_allocate_relay_roundtrip() {
-        let _g = TESTS_LOCK.lock().unwrap();
+        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("SFU_TURN_IPV6", "1");
         }

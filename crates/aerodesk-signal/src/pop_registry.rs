@@ -48,7 +48,7 @@ impl PopRegistry {
     /// 未命中且配置了共享文件时先刷新文件（其它 PoP 的登记），再查一次。
     pub fn lookup(&self, room: &str) -> Option<String> {
         let hit = {
-            let m = self.inner.lock().unwrap();
+            let m = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let now = Self::now();
             match m.get(room) {
                 Some(e) if now.saturating_sub(e.updated_at) <= self.ttl_secs => Some(e.pop.clone()),
@@ -60,7 +60,7 @@ impl PopRegistry {
             return hit;
         }
         self.merge_file();
-        let mut m = self.inner.lock().unwrap();
+        let mut m = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let now = Self::now();
         match m.get(room) {
             Some(e) if now.saturating_sub(e.updated_at) <= self.ttl_secs => Some(e.pop.clone()),
@@ -78,7 +78,7 @@ impl PopRegistry {
         self.merge_file();
         let now = Self::now();
         let should_save = {
-            let mut m = self.inner.lock().unwrap();
+            let mut m = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             match m.get(room) {
                 Some(e)
                     if e.pop == pop && now.saturating_sub(e.updated_at) <= self.ttl_secs / 2 =>
@@ -113,7 +113,7 @@ impl PopRegistry {
         let Ok(file_map) = serde_json::from_str::<HashMap<String, Entry>>(&text) else {
             return;
         };
-        let mut m = self.inner.lock().unwrap();
+        let mut m = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         // 文件里的新条目应覆盖本地的过期/旧条目（or_insert 会保留本地旧值，导致
         // 本地过期条目挡住文件里的新归属 → lookup 返回 None → 调用方误重新登记覆盖）。
         for (room, entry) in file_map {
@@ -128,7 +128,7 @@ impl PopRegistry {
 
     /// 当前条目数（测试/观测）。
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap().len()
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     fn load(&self) -> Result<(), String> {
@@ -136,7 +136,7 @@ impl PopRegistry {
         let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let data: HashMap<String, Entry> =
             serde_json::from_str(&text).map_err(|e| e.to_string())?;
-        *self.inner.lock().unwrap() = data;
+        *self.inner.lock().unwrap_or_else(|e| e.into_inner()) = data;
         Ok(())
     }
 
@@ -145,8 +145,9 @@ impl PopRegistry {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        let text = serde_json::to_string_pretty(&*self.inner.lock().unwrap())
-            .map_err(|e| e.to_string())?;
+        let text =
+            serde_json::to_string_pretty(&*self.inner.lock().unwrap_or_else(|e| e.into_inner()))
+                .map_err(|e| e.to_string())?;
         std::fs::write(path, text).map_err(|e| e.to_string())
     }
 }

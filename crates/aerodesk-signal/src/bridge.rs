@@ -95,7 +95,10 @@ impl BridgeManager {
     /// Join 免 Redirect、并发 viewer 直接放行（桥就绪后媒体自然到达）。
     pub fn is_running(&self, room: &str) -> bool {
         self.reap_dead();
-        self.running.lock().unwrap().contains_key(room)
+        self.running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(room)
     }
 
     /// 当前运行中（含等待就绪）的房间列表 + spawn 代数（生命周期 monitor 用，#246）。
@@ -112,7 +115,7 @@ impl BridgeManager {
     /// 停止指定房间的桥（kill + 回收 + 移除）。不存在/已退出返回 false。
     /// 不写失败冷却——运维/空闲回收触发，不应阻塞后续正常重建。
     pub fn stop(&self, room: &str) -> bool {
-        let mut running = self.running.lock().unwrap();
+        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(mut rb) = running.remove(room) {
             rb.kill();
             info!("bridge: stopped for room {room}");
@@ -133,7 +136,7 @@ impl BridgeManager {
 
         // 失败冷却期内不重试。
         {
-            let mut failed = self.failed.lock().unwrap();
+            let mut failed = self.failed.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(t) = failed.get(room) {
                 if t.elapsed() < self.fail_cooldown {
                     warn!(
@@ -150,7 +153,7 @@ impl BridgeManager {
         // 消除 max_running 竞态（并发 Join 不同房间此前可同时通过上限检查）；
         // 同房间并发 Join 仍单飞（contains_key 检查 + insert 在同一锁）。
         {
-            let mut running = self.running.lock().unwrap();
+            let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
             if !running.contains_key(room) {
                 // 全局并发上限：仅对「新 spawn」生效，已运行房间不受限。
                 if running.len() >= self.max_running {
@@ -179,7 +182,7 @@ impl BridgeManager {
         let deadline = Instant::now() + self.ready_timeout;
         loop {
             {
-                let mut running = self.running.lock().unwrap();
+                let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
                 match running.get_mut(room) {
                     Some(rb) if rb.is_ready() => {
                         info!("bridge: room {room} ready");
@@ -216,7 +219,7 @@ impl BridgeManager {
 
     /// 回收已退出（stdout EOF）的桥。
     fn reap_dead(&self) {
-        let mut running = self.running.lock().unwrap();
+        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         let dead: Vec<String> = running
             .iter()
             .filter(|(_, rb)| rb.is_exited())
@@ -272,7 +275,7 @@ impl BridgeManager {
 
     fn mark_failed(&self, room: &str) {
         const MAX_FAILED: usize = 1024;
-        let mut failed = self.failed.lock().unwrap();
+        let mut failed = self.failed.lock().unwrap_or_else(|e| e.into_inner());
         failed.insert(room.to_string(), Instant::now());
         // 有界：超过上限先清掉已过冷却期的，再按时间淘汰最旧，防失败房间永久累积。
         if failed.len() > MAX_FAILED {
@@ -294,7 +297,7 @@ impl BridgeManager {
 
 impl Drop for BridgeManager {
     fn drop(&mut self) {
-        let mut running = self.running.lock().unwrap();
+        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         for (_, mut rb) in running.drain() {
             rb.kill();
         }

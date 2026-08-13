@@ -349,7 +349,12 @@ impl Recorder {
             return;
         }
         // 已显式 stop 的房间不再自动重开（否则会 truncate 刚 finalize 的录像）。
-        if self.stopped.lock().unwrap().contains(room) {
+        if self
+            .stopped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(room)
+        {
             return;
         }
 
@@ -443,7 +448,10 @@ impl Recorder {
                         "source": "api",
                     }),
                 );
-                self.stopped.lock().unwrap().remove(room);
+                self.stopped
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(room);
                 recs.insert(room.to_string(), rec);
                 Ok(())
             }
@@ -479,7 +487,10 @@ impl Recorder {
         // 墓碑：仅 auto 模式需要（on-demand 模式下 record() 已按需返回，不会重开）；
         // 防止 auto 模式覆盖刚 finalize 的录像。
         if !self.on_demand {
-            self.stopped.lock().unwrap().insert(room.to_string());
+            self.stopped
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(room.to_string());
         }
         true
     }
