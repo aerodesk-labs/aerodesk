@@ -8,6 +8,7 @@
 //! - SFU_ADMIN_URL（默认 http://127.0.0.1:3002）
 //! - SIGNAL_ADMIN_URL（默认 http://127.0.0.1:3003）
 //! - INTERNAL_TOKEN（SFU 管理接口鉴权；未设置则后端 loopback 模式，仍可试）
+//! - ADMIN_TOKEN（dashboard 自身鉴权；设置后 /api/* 需 X-Admin-Token 头）
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -152,9 +153,24 @@ fn parse_metrics(prom: &str) -> serde_json::Value {
     serde_json::Value::Object(out)
 }
 
-fn admin_request(request: &Request, sfu: &str, signal: &str, token: &str) -> Response {
+fn admin_request(
+    request: &Request,
+    sfu: &str,
+    signal: &str,
+    token: &str,
+    admin_token: &str,
+) -> Response {
     let url = request.url();
     let qs = request.raw_query_string();
+    // 页面无需鉴权（静态 UI）；/api/* 在配置 ADMIN_TOKEN 时要求 X-Admin-Token。
+    if !admin_token.is_empty()
+        && url.starts_with("/api/")
+        && request.header("X-Admin-Token") != Some(admin_token)
+    {
+        return Response::text("unauthorized")
+            .with_status_code(401)
+            .with_unique_header("Access-Control-Allow-Origin", "*");
+    }
     // 页面
     if request.method() == "GET" && url == "/" {
         return Response::html(include_str!("../../../web/admin.html"));
@@ -199,7 +215,10 @@ fn admin_request(request: &Request, sfu: &str, signal: &str, token: &str) -> Res
         return Response::empty_204()
             .with_unique_header("Access-Control-Allow-Origin", "*")
             .with_unique_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            .with_unique_header("Access-Control-Allow-Headers", "Content-Type");
+            .with_unique_header(
+                "Access-Control-Allow-Headers",
+                "Content-Type, X-Admin-Token",
+            );
     }
     Response::text("not found").with_status_code(404)
 }
@@ -215,10 +234,14 @@ fn main() {
     let sfu = env_or("SFU_ADMIN_URL", "http://127.0.0.1:3002");
     let signal = env_or("SIGNAL_ADMIN_URL", "http://127.0.0.1:3003");
     let token = env_or("INTERNAL_TOKEN", "");
-    tracing::info!("aerodesk-admin listening on http://{bind} (sfu={sfu} signal={signal})");
+    let admin_token = env_or("ADMIN_TOKEN", "");
+    tracing::info!(
+        "aerodesk-admin listening on http://{bind} (sfu={sfu} signal={signal} auth={})",
+        if admin_token.is_empty() { "off" } else { "on" }
+    );
     let bind_url = bind.clone();
     let server = rouille::Server::new(bind, move |request| {
-        admin_request(request, &sfu, &signal, &token)
+        admin_request(request, &sfu, &signal, &token, &admin_token)
     })
     .expect("bind admin server");
     println!("Admin dashboard: http://{bind_url}");
