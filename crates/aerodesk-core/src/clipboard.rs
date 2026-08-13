@@ -76,7 +76,9 @@ pub fn read_image() -> Option<Vec<u8>> {
     let result: Option<Vec<u8>> = windows_read_image();
     #[cfg(target_os = "macos")]
     let result: Option<Vec<u8>> = macos_read_image();
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    let result: Option<Vec<u8>> = linux_read_image();
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     let result: Option<Vec<u8>> = None;
     result
 }
@@ -88,7 +90,9 @@ pub fn write_image(png: &[u8]) -> bool {
     let result: bool = windows_write_image(png);
     #[cfg(target_os = "macos")]
     let result: bool = macos_write_image(png);
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    let result: bool = linux_write_image(png);
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     let result: bool = {
         let _ = png;
         false
@@ -286,6 +290,101 @@ fn linux_write(text: &str) -> bool {
     cb.set_text(text).is_ok()
 }
 
+/// RGBA8 → PNG 字节（真机往返测试用；运行路径直接用 xclip/wl-copy 的 PNG MIME）。
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn rgba_to_png(rgba: &[u8], width: usize, height: usize) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut buf, width as u32, height as u32);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut writer = enc.write_header().ok()?;
+        writer.write_image_data(rgba).ok()?;
+    }
+    Some(buf)
+}
+
+/// PNG 字节 → RGBA8（支持 RGB/RGBA 8bit；其余格式返回 None）。
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn png_to_rgba(png: &[u8]) -> Option<(Vec<u8>, usize, usize)> {
+    let mut dec = png::Decoder::new(png);
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = dec.read_info().ok()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let bytes = &buf[..info.buffer_size()];
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => bytes.to_vec(),
+        png::ColorType::Rgb => bytes
+            .chunks_exact(3)
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect(),
+        _ => return None,
+    };
+    Some((rgba, info.width as usize, info.height as usize))
+}
+
+/// Linux 读剪贴板图片（PNG MIME）：
+/// Wayland → `wl-paste --type image/png`；X11 → `xclip -t image/png -o`。
+/// 与 macOS pbpaste/pbcopy 同思路的命令方案（#271）。
+#[cfg(target_os = "linux")]
+fn linux_read_image() -> Option<Vec<u8>> {
+    let out = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        std::process::Command::new("wl-paste")
+            .args(["--type", "image/png"])
+            .output()
+            .ok()?
+    } else {
+        std::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", "image/png", "-o"])
+            .output()
+            .ok()?
+    };
+    if !out.status.success() {
+        return None; // 剪贴板无图片或工具缺失
+    }
+    if out.stdout.is_empty() {
+        None
+    } else {
+        Some(out.stdout)
+    }
+}
+
+/// Linux 写剪贴板图片（PNG MIME）：
+/// Wayland → `wl-copy --type image/png`；X11 → `xclip -t image/png -i`。
+#[cfg(target_os = "linux")]
+fn linux_write_image(png: &[u8]) -> bool {
+    use std::io::Write;
+    let (cmd, args) = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        ("wl-copy", vec!["--type", "image/png"])
+    } else {
+        (
+            "xclip",
+            vec!["-selection", "clipboard", "-t", "image/png", "-i"],
+        )
+    };
+    let Some(mut child) = std::process::Command::new(cmd)
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .ok()
+    else {
+        return false;
+    };
+    let written = child
+        .stdin
+        .as_mut()
+        .map(|s| s.write_all(png).is_ok())
+        .unwrap_or(false);
+    if !written {
+        return false;
+    }
+    child.wait().map(|st| st.success()).unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +412,58 @@ mod tests {
         assert!(write(text), "arboard set_text 应成功");
         match read() {
             Some(got) => assert_eq!(got, text, "读回内容应与写入一致"),
+            None => eprintln!("SKIP: 剪贴板读回失败（无剪贴板管理器/受限环境）"),
+        }
+    }
+
+    /// Linux PNG 编解码往返（无剪贴板也运行，纯函数）。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_png_codec_roundtrip() {
+        let (w, h) = (4usize, 3usize);
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for i in 0..(w * h) {
+            rgba.extend_from_slice(&[(i * 37 % 256) as u8, 128, 64, 255]);
+        }
+        let png = rgba_to_png(&rgba, w, h).expect("encode");
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "PNG 魔数");
+        let (out, dw, dh) = png_to_rgba(&png).expect("decode");
+        assert_eq!((dw, dh), (w, h));
+        assert_eq!(out, rgba, "RGBA 往返一致");
+    }
+
+    /// Linux 真机图片剪贴板往返（#271）：写 PNG → 读回。
+    /// 显式 opt-in（`AERODESK_TEST_CLIPBOARD_IMAGE=1`）：CI runner 可能设了
+    /// WAYLAND_DISPLAY 但无 compositor，`wl-paste`/`xclip` 会阻塞挂死，
+    /// 故默认 SKIP；真机/有剪贴板管理器环境显式启用。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_clipboard_image_roundtrip() {
+        if std::env::var("AERODESK_TEST_CLIPBOARD_IMAGE").is_err() {
+            eprintln!(
+                "SKIP: 未设置 AERODESK_TEST_CLIPBOARD_IMAGE=1（需 X11/Wayland + xclip/wl-copy）"
+            );
+            return;
+        }
+        let has_display =
+            std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
+        if !has_display {
+            eprintln!("SKIP: 无 DISPLAY/WAYLAND_DISPLAY（headless）");
+            return;
+        }
+        let (w, h) = (8usize, 6usize);
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for i in 0..(w * h) {
+            rgba.extend_from_slice(&[(i * 13 % 256) as u8, 200, 100, 255]);
+        }
+        let png = rgba_to_png(&rgba, w, h).expect("encode");
+        assert!(write_image(&png), "xclip/wl-copy 写入应成功");
+        match read_image() {
+            Some(got) => {
+                assert!(got.starts_with(b"\x89PNG\r\n\x1a\n"), "读回应为 PNG");
+                let (_out, dw, dh) = png_to_rgba(&got).expect("decode");
+                assert_eq!((dw, dh), (w, h), "尺寸一致");
+            }
             None => eprintln!("SKIP: 剪贴板读回失败（无剪贴板管理器/受限环境）"),
         }
     }
