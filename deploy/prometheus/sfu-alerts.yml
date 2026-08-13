@@ -121,6 +121,19 @@ groups:
           summary: "SFU {{ $labels.instance }} 分片 {{ $labels.shard }} 无质量样本"
           description: "分片 {{ $labels.shard }} 在线客户端 {{ $value }} 个但 qos_clients 为 0，媒体质量指标失效。"
 
+      # 分片负载过高：shard_load（0..=1）是路由的 client+pps 加权评分，
+      # 超过 0.8 即触发级联（与 ShardRouter::MAX_LOAD 一致）——说明分片接近
+      # 容量上限，新房间会级联到次优分片，需扩容或调容量基线。
+      - alert: AeroDeskSFUShardOverload
+        expr: aerodesk_sfu_shard_load{shard=~".+"} > 0.8
+        for: 10m
+        labels:
+          severity: warning
+          team: infra
+        annotations:
+          summary: "SFU {{ $labels.instance }} 分片 {{ $labels.shard }} 负载过高（{{ $value | humanizePercentage }}）"
+          description: "分片负载超过 0.8 持续 10 分钟，路由将级联新房间到次优分片；检查容量/包率基线（PPS_CAPACITY=20 万）。"
+
       # 内嵌 TURN allocation 逼近容量（单 PoP 默认阈值 5000，按部署调整）。
       - alert: AeroDeskSFUTurnAllocationsHigh
         expr: aerodesk_sfu_turn_allocations > 5000

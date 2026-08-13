@@ -199,9 +199,10 @@ fn prometheus_body(
     shared: &Shared,
     draining: bool,
     turn: Option<&turn_server::TurnServer>,
+    loads: &[f64],
 ) -> String {
     let mut per_shard = String::new();
-    let mut totals = [0u64; 9];
+    let mut totals = [0u64; 10];
     for (i, m) in shared.metrics.iter().enumerate() {
         let c = m.clients.load(Ordering::Relaxed) as u64;
         let rxp = m.rx_packets.load(Ordering::Relaxed);
@@ -214,6 +215,8 @@ fn prometheus_body(
         let il = m.ingress_loss_ppm.load(Ordering::Relaxed) as f64 / 1e6;
         let bw = m.bwe_tx_bps.load(Ordering::Relaxed);
         let qc = m.qos_clients.load(Ordering::Relaxed) as u64;
+        // 分片负载评分（router 的 client+pps 加权，0..=1）——观测容量/级联。
+        let load = loads.get(i).copied().unwrap_or(0.0);
         totals[0] += c;
         totals[1] += rxp;
         totals[2] += rxb;
@@ -223,6 +226,7 @@ fn prometheus_body(
         totals[6] += m.egress_loss_ppm.load(Ordering::Relaxed);
         totals[7] += m.ingress_loss_ppm.load(Ordering::Relaxed);
         totals[8] += bw;
+        totals[9] += qc;
         per_shard.push_str(&format!(
             "aerodesk_sfu_clients{{shard=\"{i}\"}} {c}\n\
              aerodesk_sfu_rx_packets_total{{shard=\"{i}\"}} {rxp}\n\
@@ -233,7 +237,8 @@ fn prometheus_body(
              aerodesk_sfu_egress_loss{{shard=\"{i}\"}} {el:.6}\n\
              aerodesk_sfu_ingress_loss{{shard=\"{i}\"}} {il:.6}\n\
              aerodesk_sfu_bwe_tx_bps{{shard=\"{i}\"}} {bw}\n\
-             aerodesk_sfu_qos_clients{{shard=\"{i}\"}} {qc}\n"
+             aerodesk_sfu_qos_clients{{shard=\"{i}\"}} {qc}\n\
+             aerodesk_sfu_shard_load{{shard=\"{i}\"}} {load:.4}\n"
         ));
     }
     let turn_metrics = match turn {
@@ -264,6 +269,7 @@ fn prometheus_body(
          # TYPE aerodesk_sfu_ingress_loss gauge\n\
          # TYPE aerodesk_sfu_bwe_tx_bps gauge\n\
          # TYPE aerodesk_sfu_qos_clients gauge\n\
+         # TYPE aerodesk_sfu_shard_load gauge\n\
          # TYPE aerodesk_sfu_recordings_active gauge\n\
          # TYPE aerodesk_sfu_draining gauge\n\
          {per_shard}\
@@ -289,7 +295,7 @@ fn prometheus_body(
         totals[6] as f64 / 1e6,
         totals[7] as f64 / 1e6,
         totals[8],
-        totals[0],
+        totals[9],
         recordings_active,
         if draining { 1 } else { 0 }
     )
@@ -1170,12 +1176,17 @@ fn web_request(
     }
     if request.method() == "GET" && request.url() == "/metrics" {
         let metrics = shared.metrics.clone();
+        let loads: Vec<f64> = {
+            let r = router.lock().unwrap();
+            (0..metrics.len()).map(|i| r.load(i)).collect()
+        };
         let shards: Vec<serde_json::Value> = metrics
             .iter()
             .enumerate()
             .map(|(i, m)| {
                 serde_json::json!({
                     "shard": i,
+                    "shard_load": loads.get(i).copied().unwrap_or(0.0),
                     "clients": m.clients.load(std::sync::atomic::Ordering::Relaxed),
                     "rx_packets": m.rx_packets.load(std::sync::atomic::Ordering::Relaxed),
                     "rx_bytes": m.rx_bytes.load(std::sync::atomic::Ordering::Relaxed),
@@ -1215,10 +1226,15 @@ fn web_request(
     }
 
     if request.method() == "GET" && request.url() == "/metrics/prometheus" {
+        let loads: Vec<f64> = {
+            let r = router.lock().unwrap();
+            (0..shared.metrics.len()).map(|i| r.load(i)).collect()
+        };
         let body = prometheus_body(
             &shared,
             DRAINING.load(Ordering::Relaxed),
             turn_server.as_deref(),
+            &loads,
         );
         return Response::from_data(
             "text/plain; version=0.0.4; charset=utf-8",
@@ -1385,7 +1401,7 @@ mod tests {
             .store(1_200_000, Ordering::Relaxed);
         shared.metrics[0].qos_clients.store(2, Ordering::Relaxed);
 
-        let body = prometheus_body(&shared, true, None);
+        let body = prometheus_body(&shared, true, None, &[0.25, 0.9]);
         assert!(
             body.contains("aerodesk_sfu_clients{shard=\"0\"} 3"),
             "{body}"
@@ -1418,6 +1434,14 @@ mod tests {
             body.contains("aerodesk_sfu_qos_clients{shard=\"0\"} 2"),
             "{body}"
         );
+        assert!(
+            body.contains("aerodesk_sfu_shard_load{shard=\"0\"} 0.2500"),
+            "{body}"
+        );
+        assert!(
+            body.contains("aerodesk_sfu_shard_load{shard=\"1\"} 0.9000"),
+            "{body}"
+        );
         assert!(body.contains("aerodesk_sfu_rtt_us 250"), "{body}");
         assert!(body.contains("aerodesk_sfu_egress_loss 0.500000"), "{body}");
         assert!(
@@ -1425,11 +1449,12 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("aerodesk_sfu_bwe_tx_bps 1200000"), "{body}");
+        assert!(body.contains("aerodesk_sfu_qos_clients 2"), "{body}");
         assert!(body.contains("aerodesk_sfu_draining 1"), "{body}");
         // #240 录制 gauge：无 RECORD_DIR → 0
         assert!(body.contains("aerodesk_sfu_recordings_active 0"), "{body}");
 
-        let body = prometheus_body(&shared, false, None);
+        let body = prometheus_body(&shared, false, None, &[0.25, 0.9]);
         assert!(body.contains("aerodesk_sfu_draining 0"), "{body}");
         assert!(body.contains("aerodesk_sfu_recordings_active 0"), "{body}");
     }
