@@ -393,13 +393,25 @@ fn drain_and_exit(shared: &Shared, public: &Option<Server<fn(&Request) -> Respon
     std::process::exit(0);
 }
 
+/// 解析分片数：`SFU_SHARD_COUNT` 覆盖（1..=64），否则用 CPU 核数（上限 8）。
+/// 供不同规格机器/容器按容量基线调整并发分片（可扩展性旋钮）。
+fn resolve_shard_count() -> usize {
+    match std::env::var("SFU_SHARD_COUNT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        Some(n) if (1..=64).contains(&n) => n,
+        _ => std::thread::available_parallelism()
+            .map(|n| n.get().min(8))
+            .unwrap_or(1),
+    }
+}
+
 pub fn main() {
     init_log();
     from_feature_flags().install_process_default();
 
-    let shard_count = std::thread::available_parallelism()
-        .map(|n| n.get().min(8))
-        .unwrap_or(1);
+    let shard_count = resolve_shard_count();
     info!("Shards: {shard_count}");
 
     let tls = aerodesk_protocol::tls::TlsIdentity::load().unwrap_or_else(|e| {
@@ -1364,6 +1376,23 @@ mod tests {
         assert_eq!(parse_ip("not-an-ip"), None);
         assert_eq!(parse_ip(""), None);
         assert_eq!(parse_ip("127.0.0.1:3478"), None);
+    }
+
+    #[test]
+    fn resolve_shard_count_env_override_and_fallback() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        // 有效覆盖（1..=64）
+        unsafe { std::env::set_var("SFU_SHARD_COUNT", "3") };
+        assert_eq!(resolve_shard_count(), 3);
+        unsafe { std::env::set_var("SFU_SHARD_COUNT", "64") };
+        assert_eq!(resolve_shard_count(), 64);
+        // 非法/越界回退到 CPU 默认（1..=8）
+        for bad in ["0", "65", "abc", "-1", ""] {
+            unsafe { std::env::set_var("SFU_SHARD_COUNT", bad) };
+            let n = resolve_shard_count();
+            assert!((1..=8).contains(&n), "bad shard count {bad:?} -> {n}");
+        }
+        unsafe { std::env::remove_var("SFU_SHARD_COUNT") };
     }
 
     #[test]
