@@ -35,6 +35,10 @@ aerodesk-linux = { path = "../aerodesk-linux" }
 [build-dependencies]
 slint-build = "1"
 
+# #7 Windows 应用图标 + 版本资源（嵌入 exe；用 link-arg 直接传对象，确保资源被链接）。
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "2"
+
 [dev-dependencies]
 # 无头 Slint 测试后端：UI 链路 e2e（session_refresh_ui/present_frame/session_cleanup）。
 i-slint-backend-testing = "1.17"

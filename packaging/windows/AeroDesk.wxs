@@ -32,14 +32,14 @@
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder">
       <Component Id="C_StartMenu" Guid="b3d8f17e-6a20-4c95-8e4a-9d1f2c5a7b86">
-        <Shortcut Id="S_StartMenu" Name="AeroDesk" Description="AeroDesk remote desktop" Target="[INSTALLFOLDER]aerodesk-ui.exe" WorkingDirectory="INSTALLFOLDER"/>
+        <Shortcut Id="S_StartMenu" Name="AeroDesk" Description="AeroDesk remote desktop" Target="[INSTALLFOLDER]aerodesk-ui.exe" WorkingDirectory="INSTALLFOLDER" Icon="app.ico"/>
         <RemoveFolder Id="RemoveProgramMenuDir" Directory="ProgramMenuFolder" On="uninstall"/>
         <RegistryValue Root="HKCU" Key="Software\AeroDesk" Name="installed" Type="integer" Value="1" KeyPath="yes"/>
       </Component>
     </StandardDirectory>
     <StandardDirectory Id="DesktopFolder">
       <Component Id="C_Desktop" Guid="d5e0a9f3-1c74-4a62-b8d7-3f6a0e9c2d51">
-        <Shortcut Id="S_Desktop" Name="AeroDesk" Description="AeroDesk remote desktop" Target="[INSTALLFOLDER]aerodesk-ui.exe" WorkingDirectory="INSTALLFOLDER"/>
+        <Shortcut Id="S_Desktop" Name="AeroDesk" Description="AeroDesk remote desktop" Target="[INSTALLFOLDER]aerodesk-ui.exe" WorkingDirectory="INSTALLFOLDER" Icon="app.ico"/>
         <RegistryValue Root="HKCU" Key="Software\AeroDesk" Name="desktop" Type="integer" Value="1" KeyPath="yes"/>
       </Component>
     </StandardDirectory>
@@ -49,4 +49,7 @@
       <ComponentRef Id="C_Desktop"/>
     </Feature>
   </Package>
+  <Fragment>
+    <Icon Id="app.ico" SourceFile="$(var.IconPath)"/>
+  </Fragment>
 </Wix>

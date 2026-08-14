@@ -45,7 +45,7 @@ fi
 if command -v wix >/dev/null 2>&1; then
   wix build packaging/windows/AeroDesk.wxs \
     -o "dist/aerodesk-$VERSION-win64.msi" \
-    -d "Version=$VERSION" -d "BuildDir=$STAGE" \
+    -d "Version=$VERSION" -d "BuildDir=$STAGE" -d "IconPath=$ROOT/app-assets/aerodesk.ico" \
     >/tmp/aerodesk-wix.log 2>&1 \
     || { echo "wix build 失败："; tail -30 /tmp/aerodesk-wix.log; exit 1; }
 else
