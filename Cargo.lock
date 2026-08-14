@@ -203,6 +203,8 @@ name = "aerodesk-ohos"
 version = "0.1.0"
 dependencies = [
  "aerodesk-core",
+ "aerodesk-protocol",
+ "str0m",
  "tracing",
 ]
 
