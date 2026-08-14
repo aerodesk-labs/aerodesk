@@ -2862,6 +2862,8 @@ fn publisher_capture_windows(
         error!("DXGI capture: 无可用显示器输出");
         return;
     }
+    // #75 远程光标：真实光标按被控显示器区域归一化（在 capture 移入 publisher 前取值）。
+    let display_rect = capture.display_rect();
     info!("Windows screen capture started at {w}x{h}");
     // #334：采集会话期间保持系统/显示器唤醒（防闲置休眠后 DXGI 无输出）。
     let _keep_awake = aerodesk_windows::wake_lock::WindowsSystemWakeLock
@@ -2907,7 +2909,10 @@ fn publisher_capture_windows(
         encoder,
         audio_cap,
         None::<NoCameraCapture>,
-        None::<NoCursor>,
+        // #75 远程光标：Windows 被控端真实光标位置（GetCursorPos，活动显示器归一化）。
+        Some(aerodesk_windows::cursor::WindowsCursor::new(Some(
+            display_rect,
+        ))),
     );
 }
 
