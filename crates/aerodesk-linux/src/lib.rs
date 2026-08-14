@@ -16,6 +16,8 @@ pub mod audio;
 #[cfg(target_os = "linux")]
 pub mod camera;
 pub mod capture;
+/// Linux 远程命令执行器（#330「bash」平台抽象）。
+pub mod cmd;
 pub mod encode;
 pub mod inject;
 /// Wayland portal RemoteDesktop 输入注入（仅 Linux + feature `pipewire`）。
@@ -24,6 +26,9 @@ pub mod portal_inject;
 /// VAAPI 硬编/硬解（仅 Linux；设备不可用时上层回退软编/软解）。
 #[cfg(target_os = "linux")]
 pub mod vaapi;
+/// Linux 保持唤醒（#334「SystemWakeLock」平台抽象）。
+#[cfg(target_os = "linux")]
+pub mod wake_lock;
 
 /// 采集帧（BGRA32，core `VideoFrame.raw` 约定，与编码器输入对齐）。
 #[derive(Debug, Clone)]
