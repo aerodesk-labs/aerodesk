@@ -5,6 +5,8 @@
 slint::include_modules!();
 #[cfg(not(target_os = "macos"))]
 mod generic_media;
+#[cfg(not(target_os = "macos"))]
+mod generic_publisher;
 mod generic_viewer;
 mod keymap;
 #[cfg(target_os = "macos")]
@@ -564,6 +566,16 @@ fn pick_file_and_send(ui: slint::Weak<AppWindow>) {
             }
         }
     });
+}
+
+/// 「开启被控」开关接入：Windows 启动/停止屏幕发布线程；macOS 暂不实现。
+fn handle_toggle_inc(ui: &AppWindow) {
+    #[cfg(not(target_os = "macos"))]
+    crate::generic_publisher::toggle_publisher(ui);
+    #[cfg(target_os = "macos")]
+    {
+        let _ = ui;
+    }
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -1505,6 +1517,16 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // 「开启被控」开关：接入非 macOS（Windows）发布端；macOS 回调为 no-op。
+    ui.on_toggle_inc({
+        let ui = ui.as_weak();
+        move || {
+            if let Some(ui) = ui.upgrade() {
+                handle_toggle_inc(&ui);
+            }
+        }
+    });
+
     // ---- #29 被控端授权流程 ----
     ui.on_refresh_perms({
         let ui = ui.as_weak();
@@ -1576,6 +1598,17 @@ fn main() -> Result<(), slint::PlatformError> {
     });
     // 启动时刷一次权限状态
     ui.invoke_refresh_perms();
+
+    // Windows：上次退出前已开启被控，则事件循环起来后恢复发布（开关持久化）。
+    #[cfg(target_os = "windows")]
+    if ui.get_inc_enabled() {
+        let weak = ui.as_weak();
+        slint::Timer::single_shot(std::time::Duration::from_millis(800), move || {
+            if let Some(ui) = weak.upgrade() {
+                crate::generic_publisher::start_publisher(&ui);
+            }
+        });
+    }
 
     // macOS：点击 Dock 图标恢复隐藏窗口（配合托盘隐藏）。
     #[cfg(target_os = "macos")]

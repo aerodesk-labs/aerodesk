@@ -32,6 +32,10 @@ winit = "0.30"
 [target.'cfg(target_os = "linux")'.dependencies]
 aerodesk-linux = { path = "../aerodesk-linux" }
 
+# Windows 被控端（屏幕发布）：DXGI 采集 + OpenH264 软编 + SendInput 注入。
+[target.'cfg(windows)'.dependencies]
+aerodesk-windows = { path = "../aerodesk-windows" }
+
 [build-dependencies]
 slint-build = "1"
 

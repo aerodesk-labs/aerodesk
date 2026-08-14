@@ -274,6 +274,7 @@ dependencies = [
  "aerodesk-macos",
  "aerodesk-protocol",
  "aerodesk-softenc",
+ "aerodesk-windows",
  "embed-resource",
  "getrandom 0.2.17",
  "i-slint-backend-testing",

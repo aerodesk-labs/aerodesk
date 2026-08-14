@@ -518,6 +518,7 @@ export component AppWindow inherits Window {
     callback scan-lan();
     callback add-discovered(string);
     callback auto-save();
+    callback toggle-inc();
     callback refresh-perms();
     callback open-screen-perms();
     callback open-a11y-perms();
@@ -1184,7 +1185,7 @@ export component AppWindow inherits Window {
                         padding-bottom: 18px;
                         spacing: 10px;
                         Text { text: "接入设置"; font-size: 15px; font-weight: 600; color: #212121; height: 20px; vertical-stretch: 0; }
-                        Switch { text: "开启被控（允许被远程接入）"; checked <=> root.inc-enabled; toggled => { root.auto-save(); } }
+                        Switch { text: "开启被控（允许被远程接入）"; checked <=> root.inc-enabled; toggled => { root.auto-save(); root.toggle-inc(); } }
                         Switch { text: "允许声音（被控端采集系统音频）"; enabled: root.inc-enabled; checked <=> root.inc-audio; toggled => { root.auto-save(); } }
                         Switch { text: "仅观看（只读，禁止鼠标/键盘控制）"; enabled: root.inc-enabled; checked <=> root.inc-view-only; toggled => { root.auto-save(); } }
                         Text { text: "设置修改后自动保存；开关即时反映状态"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
