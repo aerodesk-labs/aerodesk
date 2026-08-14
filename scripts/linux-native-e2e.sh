@@ -64,6 +64,27 @@ if not ok:
     sys.exit(1)
 PY
 
+# #75 Linux 被控端真实光标（X11 QueryPointer → cursor 通道）：viewer 应打印 CURSOR。
+echo "== [5b/5] 断言远程光标到达（CURSOR 日志）"
+python3 - <<'PY'
+import time, sys
+ok = False
+for i in range(25):  # 最多 25s（viewer CURSOR 日志节流 1s/条）
+    try:
+        txt = open('/tmp/linux-native-view.log', errors='replace').read()
+    except FileNotFoundError:
+        txt = ''
+    if 'CURSOR:' in txt:
+        print("PASS native Linux controlled-side: viewer received remote cursor")
+        ok = True
+        break
+    time.sleep(1)
+if not ok:
+    print("FAIL: 25s 内未收到 CURSOR；viewer 日志尾：")
+    print(open('/tmp/linux-native-view.log', errors='replace').read()[-1500:])
+    sys.exit(1)
+PY
+
 # 发布端/SFU 无 panic
 if grep -qiE "panic|auth failed" /tmp/linux-native-pub.log /tmp/linux-native-sfu.log; then
     echo "FAIL: publisher/SFU panic/error"

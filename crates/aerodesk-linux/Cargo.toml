@@ -26,6 +26,8 @@ x11rb = { version = "0.13", features = ["xtest"] }
 libc = "0.2"
 # VAAPI 硬编/硬解：FFmpeg AVHWDeviceContext（CI ubuntu 已装 libavcodec-dev 等）
 ffmpeg-next = "8"
+# V4L2 摄像头（v4l 纯 Rust 绑定，需 linux-libc-dev 提供 videodev2.h）
+v4l = "0.14"
 # Wayland 采集（feature `pipewire` 启用时编译；CI 需 libpipewire-0.3-dev/libspa-0.2-dev）
 lamco-portal = { version = "0.4", optional = true }
 # audio：PipeWire 系统音频捕获（stream.capture.sink，无需 portal）

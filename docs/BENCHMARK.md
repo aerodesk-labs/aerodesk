@@ -60,6 +60,25 @@ BITRATE=10000000 REPORT_DIR=/tmp/bench-4k60 scripts/bench.sh 1 1 30 3840 2160 60
 - 高码率丢包从修复前 ~30% 降至 ~3.4%（剩余为事件处理窗口的短暂溢出，不影响关键帧送达）；
 - `scripts/highrate-e2e.sh` 已入 CI 防止回归（VT 不可用时 SKIP，与本仓库 VT 单测策略一致）。
 
+## 基线（2026-08-13/14 Windows 真机：MF 硬编 + D3D11VA 硬解）
+
+> 环境：Windows 10/11 真机（2560x1440 主显示器；DXGI 枚举含 3840x2160 输出），共享开发环境。
+> 工具：`--encoder ffmpeg`（合成源参数化，PR #383）+ `--codec h264`（h264_mf 硬编）/ `h265`
+> （hevc_mf 本机不可用自动回退 libx265，PR #390 编码器探测）+ CLI viewer D3D11VA/DXVA2 硬解。
+
+| 配置 | 编码器 | 观看端解码 | 结果 |
+|---|---|---|---|
+| 4K30（3840x2160@30 12Mbps） | h264_mf 硬编 | D3D11VA 硬解 | RECEIVED 326 / DECODED 307（94%）@30fps |
+| 1080p30 | h264_mf 硬编 | D3D11VA 硬解 | ~30fps，DECODED 630/661（95%） |
+| HEVC 1080p30 | libx265（hevc_mf 回退） | D3D11VA 硬解（Hevc） | RECEIVED 499 / DECODED 478（96%）@30fps |
+| 4K60 / 1080p60 | h264_mf 硬编 | D3D11VA 硬解 | ~29-41fps（发布端主循环固定开销封顶，非编码器；需干净/专用机达 60） |
+
+要点：
+- **Windows 4K 硬解打通**：MF 硬编（h264_mf 4K 可用）+ D3D11VA 硬解消除了 #3 原始「4K OpenH264 软解 0 帧」瓶颈；
+- 60fps 上不去已定位为发布端主循环每轮固定开销（UDP drain + 编码延迟 + 共享负载），软/硬编码器对照均 ~30fps，
+  正式 60fps 验收需干净/专用机（见 #8）；
+- 发布端合成源已参数化（--width/--height/--fps/--bitrate），`AERODESK_FORCE_SOFT_DECODE=1` 可 A/B 软硬解。
+
 ## 验收口径映射
 
 | 指标 | 证据 |

@@ -2,8 +2,7 @@
 //!
 //! 平台实现（#72 起保持零额外依赖的命令方案；Linux 用 arboard 纯 Rust 无外部命令）：
 //! - macOS：`pbpaste` / `pbcopy`
-//! - Windows：PowerShell `Get-Clipboard` / `Set-Clipboard`（Win10+ 内置；
-//!   经 UTF-16LE Base64 `-EncodedCommand` 传入，避免转义与编码坑）
+//! - Windows：原生 Win32（文本 CF_UNICODETEXT；图片 CF_DIB/CF_DIBV5），无子进程
 //! - Linux：arboard（X11 x11rb / Wayland data-control）
 //! - 其他平台 no-op
 //!
@@ -68,27 +67,31 @@ pub fn write(text: &str) -> bool {
     result
 }
 
-/// 读取剪贴板图片（PNG 编码；#271）。Windows 经 PowerShell
-/// System.Drawing/Windows.Forms；macOS 经 osascript NSPasteboard `«class PNGf»`
-/// （与 pbpaste/pbcopy 同思路，无额外依赖）；其他平台暂返回 None。
+/// 读取剪贴板图片（PNG 编码；#271）。Windows 经原生 Win32 DIB（CF_DIB/CF_DIBV5）；
+/// macOS 经 osascript NSPasteboard `«class PNGf»`（与 pbpaste/pbcopy 同思路，无额外依赖）；
+/// Linux 经 xclip/wl-copy；其他平台暂返回 None。
 pub fn read_image() -> Option<Vec<u8>> {
     #[cfg(target_os = "windows")]
     let result: Option<Vec<u8>> = windows_read_image();
     #[cfg(target_os = "macos")]
     let result: Option<Vec<u8>> = macos_read_image();
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    let result: Option<Vec<u8>> = linux_read_image();
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     let result: Option<Vec<u8>> = None;
     result
 }
 
-/// 写入剪贴板图片（PNG，#271）。Windows 经 PowerShell；macOS 经 osascript
-/// NSPasteboard PNGf；其他平台返回 false。
+/// 写入剪贴板图片（PNG，#271）。Windows 经原生 Win32 DIB（CF_DIB）；macOS 经
+/// osascript NSPasteboard PNGf；Linux 经 xclip/wl-copy；其他平台返回 false。
 pub fn write_image(png: &[u8]) -> bool {
     #[cfg(target_os = "windows")]
     let result: bool = windows_write_image(png);
     #[cfg(target_os = "macos")]
     let result: bool = macos_write_image(png);
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    let result: bool = linux_write_image(png);
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     let result: bool = {
         let _ = png;
         false
@@ -153,104 +156,290 @@ pub fn cached() -> Option<String> {
     CLIP_CACHE.lock().ok().and_then(|c| c.clone())
 }
 
-#[cfg(target_os = "windows")]
-use base64ct::{Base64, Encoding};
-
-/// Windows：PowerShell 命令经 UTF-16LE + Base64 的 `-EncodedCommand` 执行，
-/// 避免命令行转义（任意文本）与控制台代码页编码问题。
-#[cfg(target_os = "windows")]
-fn powershell_encoded(script: &str) -> Option<std::process::Output> {
-    let utf16: Vec<u16> = script.encode_utf16().collect();
-    let mut bytes = Vec::with_capacity(utf16.len() * 2);
-    for u in utf16 {
-        bytes.extend_from_slice(&u.to_le_bytes());
-    }
-    let encoded = Base64::encode_string(&bytes);
-    std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encoded])
-        .output()
-        .ok()
-}
-
-/// Windows 读剪贴板：`Get-Clipboard -Raw` 写 UTF-8 临时文件后读回，
-/// 避免 PowerShell 管道输出编码（控制台代码页 / UTF-16）不确定。
+/// Windows 读剪贴板（原生 Win32 CF_UNICODETEXT，#271 修复）。
+///
+/// 原 PowerShell `Get-Clipboard` 子进程单次调用实测阻塞 ~1.3s（本机），而
+/// `maybe_poll_clipboard` 每轮轮询一次，把 publisher/viewer 主循环拖到 <1fps。
+/// 改 Win32 OpenClipboard/GetClipboardData：微秒级、无子进程。
 #[cfg(target_os = "windows")]
 fn windows_read() -> Option<String> {
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!("aerodesk-clip-{}.txt", std::process::id()));
-    let script = format!(
-        "Get-Clipboard -Raw | Set-Content -LiteralPath '{}' -Encoding UTF8",
-        path.to_string_lossy().replace('\'', "''")
-    );
-    let out = powershell_encoded(&script)?;
-    if !out.status.success() {
-        let _ = std::fs::remove_file(&path);
-        return None;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn OpenClipboard(hwnd: *mut std::ffi::c_void) -> i32;
+        fn CloseClipboard() -> i32;
+        fn GetClipboardData(fmt: u32) -> *mut std::ffi::c_void;
     }
-    let text = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-    // Set-Content -Encoding UTF8 输出带 BOM（U+FEFF），以及 PowerShell 追加的 CRLF。
-    let text = text.as_deref().unwrap_or("");
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let text = text.trim_end_matches(['\r', '\n']);
-    Some(text.to_string())
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalLock(h: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn GlobalUnlock(h: *mut std::ffi::c_void) -> i32;
+        fn GlobalSize(h: *mut std::ffi::c_void) -> usize;
+    }
+    const CF_UNICODETEXT: u32 = 13;
+    unsafe {
+        // SAFETY: OpenClipboard/CloseClipboard 成对调用；GetClipboardData 返回
+        // 的句柄仅在 Open..Close 窗口内有效，GlobalLock/Unlock 成对，且剪贴板
+        // CF_UNICODETEXT 内容为 NUL 结尾 UTF-16LE，GlobalSize 兜底越界。
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return None;
+        }
+        let h = GetClipboardData(CF_UNICODETEXT);
+        if h.is_null() {
+            CloseClipboard();
+            return None;
+        }
+        let ptr = GlobalLock(h);
+        if ptr.is_null() {
+            CloseClipboard();
+            return None;
+        }
+        let size = GlobalSize(h);
+        let mut len = 0usize;
+        while len + 1 < size && *((ptr as *const u16).add(len)) != 0 {
+            len += 1;
+        }
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr as *const u16, len));
+        GlobalUnlock(h);
+        CloseClipboard();
+        Some(text)
+    }
 }
 
-/// Windows 写剪贴板：`Set-Clipboard -Value <base64 解码出的文本>`。
+/// Windows 写剪贴板（原生 Win32 CF_UNICODETEXT，#271 修复）。
 #[cfg(target_os = "windows")]
 fn windows_write(text: &str) -> bool {
-    let b64 = Base64::encode_string(text.as_bytes());
-    // 文本本身经 Base64 进脚本，脚本再经 UTF-16LE Base64 进命令行，全程无转义面。
-    let script = format!(
-        "Set-Clipboard -Value ([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(\"{b64}\")))"
-    );
-    powershell_encoded(&script)
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn OpenClipboard(hwnd: *mut std::ffi::c_void) -> i32;
+        fn CloseClipboard() -> i32;
+        fn EmptyClipboard() -> i32;
+        fn SetClipboardData(fmt: u32, h: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalAlloc(flags: u32, bytes: usize) -> *mut std::ffi::c_void;
+        fn GlobalLock(h: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn GlobalUnlock(h: *mut std::ffi::c_void) -> i32;
+        fn GlobalFree(h: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    }
+    const CF_UNICODETEXT: u32 = 13;
+    const GMEM_MOVEABLE: u32 = 0x0002;
+    let mut utf16: Vec<u16> = text.encode_utf16().collect();
+    utf16.push(0);
+    unsafe {
+        // SAFETY: OpenClipboard 成功后 EmptyClipboard 清空，GlobalAlloc/MOVEABLE
+        // 分配后 GlobalLock 写入 UTF-16LE（含 NUL）；SetClipboardData 成功时接管
+        // h 所有权，失败时 GlobalFree 释放，CloseClipboard 收尾。
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return false;
+        }
+        if EmptyClipboard() == 0 {
+            CloseClipboard();
+            return false;
+        }
+        let h = GlobalAlloc(GMEM_MOVEABLE, utf16.len() * 2);
+        if h.is_null() {
+            CloseClipboard();
+            return false;
+        }
+        let dst = GlobalLock(h);
+        if dst.is_null() {
+            GlobalFree(h);
+            CloseClipboard();
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(utf16.as_ptr(), dst as *mut u16, utf16.len());
+        GlobalUnlock(h);
+        let set = SetClipboardData(CF_UNICODETEXT, h);
+        if set.is_null() {
+            // 失败时剪贴板未接管句柄，需自行释放。
+            GlobalFree(h);
+        }
+        CloseClipboard();
+        !set.is_null()
+    }
 }
 
-/// Windows 读剪贴板图片：`Clipboard.GetImage()` → PNG → base64 落临时文件读回。
+#[cfg(target_os = "windows")]
+/// 解析 Windows 剪贴板 DIB（CF_DIB/CF_DIBV5）为 RGBA8。
+/// 支持 24/32bpp BI_RGB，上/下颠倒（biHeight 符号）；其余格式返回 None。
+#[cfg(target_os = "windows")]
+fn dib_to_rgba(dib: &[u8]) -> Option<(Vec<u8>, usize, usize)> {
+    if dib.len() < 40 {
+        return None;
+    }
+    let bi_size = u32::from_le_bytes(dib[0..4].try_into().ok()?) as usize;
+    if !(40..=dib.len()).contains(&bi_size) {
+        return None;
+    }
+    let width = i32::from_le_bytes(dib[4..8].try_into().ok()?);
+    let height = i32::from_le_bytes(dib[8..12].try_into().ok()?);
+    let planes = u16::from_le_bytes(dib[12..14].try_into().ok()?);
+    let bitcount = u16::from_le_bytes(dib[14..16].try_into().ok()?);
+    let compression = u32::from_le_bytes(dib[16..20].try_into().ok()?);
+    if planes != 1 || compression != 0 || width <= 0 || height == 0 {
+        return None; // 仅 BI_RGB，无压缩/位掩码
+    }
+    let bpp = match bitcount {
+        24 => 3usize,
+        32 => 4usize,
+        _ => return None,
+    };
+    let w = width as usize;
+    let h = height.unsigned_abs() as usize;
+    let row_padded = ((w * bpp) + 3) & !3;
+    let data = &dib[bi_size..];
+    if data.len() < row_padded * h {
+        return None;
+    }
+    let top_down = height < 0;
+    let mut rgba = vec![0u8; w * h * 4];
+    for y in 0..h {
+        let src_row = if top_down { y } else { h - 1 - y };
+        let row = &data[src_row * row_padded..src_row * row_padded + w * bpp];
+        for x in 0..w {
+            let si = x * bpp;
+            let di = (y * w + x) * 4;
+            rgba[di] = row[si + 2]; // BGR -> RGBA
+            rgba[di + 1] = row[si + 1];
+            rgba[di + 2] = row[si];
+            rgba[di + 3] = if bpp == 4 { row[si + 3] } else { 255 };
+        }
+    }
+    Some((rgba, w, h))
+}
+
+/// RGBA8 → Windows 剪贴板 DIB（BITMAPINFOHEADER 40 + BGRA 自底向上 32bpp）。
+#[cfg(target_os = "windows")]
+fn rgba_to_dib(rgba: &[u8], width: usize, height: usize) -> Option<Vec<u8>> {
+    if width == 0 || height == 0 || rgba.len() != width * height * 4 {
+        return None;
+    }
+    let mut dib = Vec::with_capacity(40 + width * height * 4);
+    dib.extend_from_slice(&40u32.to_le_bytes()); // biSize
+    dib.extend_from_slice(&(width as i32).to_le_bytes());
+    dib.extend_from_slice(&(height as i32).to_le_bytes()); // 正 = 自底向上
+    dib.extend_from_slice(&1u16.to_le_bytes()); // biPlanes
+    dib.extend_from_slice(&32u16.to_le_bytes()); // biBitCount
+    dib.extend_from_slice(&0u32.to_le_bytes()); // biCompression = BI_RGB
+    dib.extend_from_slice(&0u32.to_le_bytes()); // biSizeImage
+    dib.extend_from_slice(&0u32.to_le_bytes()); // biXPelsPerMeter
+    dib.extend_from_slice(&0u32.to_le_bytes()); // biYPelsPerMeter
+    dib.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
+    dib.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
+    for y in (0..height).rev() {
+        for x in 0..width {
+            let i = (y * width + x) * 4;
+            // 不透明 alpha（避免部分应用把透明当黑）。
+            dib.extend_from_slice(&[rgba[i + 2], rgba[i + 1], rgba[i], 255]);
+        }
+    }
+    Some(dib)
+}
+
+/// Windows 读剪贴板图片（原生 Win32 DIB → PNG，#271 修复）：
+/// 原 PowerShell `Clipboard.GetImage()` 子进程单次 ~1.3s，改
+/// OpenClipboard/GetClipboardData(CF_DIB/CF_DIBV5) → DIB → RGBA → PNG。
 #[cfg(target_os = "windows")]
 fn windows_read_image() -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!("aerodesk-clip-img-{}.txt", std::process::id()));
-    let script = format!(
-        "Add-Type -AssemblyName System.Drawing\nAdd-Type -AssemblyName System.Windows.Forms\n$ErrorActionPreference = 'Stop'\n$img = [System.Windows.Forms.Clipboard]::GetImage()\nif ($null -eq $img) {{ Set-Content -LiteralPath '{}' -Value '' -Encoding Ascii; exit 0 }}\n$ms = New-Object System.IO.MemoryStream\n$img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)\n$b64 = [Convert]::ToBase64String($ms.ToArray())\n$ms.Dispose()\n$img.Dispose()\nSet-Content -LiteralPath '{}' -Value $b64 -Encoding Ascii",
-        path.to_string_lossy().replace('\'', "''"),
-        path.to_string_lossy().replace('\'', "''"),
-    );
-    let out = powershell_encoded(&script)?;
-    if !out.status.success() {
-        let _ = std::fs::remove_file(&path);
-        return None;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn OpenClipboard(hwnd: *mut std::ffi::c_void) -> i32;
+        fn CloseClipboard() -> i32;
+        fn GetClipboardData(fmt: u32) -> *mut std::ffi::c_void;
     }
-    let b64 = std::fs::read_to_string(&path).ok();
-    let _ = std::fs::remove_file(&path);
-    let b64 = b64?;
-    let b64 = b64.trim();
-    if b64.is_empty() {
-        return None;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalLock(h: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn GlobalUnlock(h: *mut std::ffi::c_void) -> i32;
+        fn GlobalSize(h: *mut std::ffi::c_void) -> usize;
     }
-    use base64ct::{Base64, Encoding};
-    let bytes = Base64::decode_vec(b64).ok()?;
-    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return None;
+    const CF_DIB: u32 = 8;
+    const CF_DIBV5: u32 = 17;
+    unsafe {
+        // SAFETY: OpenClipboard/CloseClipboard 成对；GetClipboardData 句柄仅在
+        // Open..Close 窗口内有效，GlobalLock/Unlock 成对，GlobalSize 限定读取长度。
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return None;
+        }
+        let mut h = GetClipboardData(CF_DIB);
+        if h.is_null() {
+            h = GetClipboardData(CF_DIBV5);
+        }
+        if h.is_null() {
+            CloseClipboard();
+            return None;
+        }
+        let ptr = GlobalLock(h);
+        if ptr.is_null() {
+            CloseClipboard();
+            return None;
+        }
+        let size = GlobalSize(h);
+        let bytes = std::slice::from_raw_parts(ptr as *const u8, size);
+        let rgba = dib_to_rgba(bytes);
+        GlobalUnlock(h);
+        CloseClipboard();
+        rgba.and_then(|(rgba, w, hh)| rgba_to_png(&rgba, w, hh))
     }
-    Some(bytes)
 }
 
-/// Windows 写剪贴板图片：PNG 字节经 base64 内嵌脚本，`SetImage` 写入系统剪贴板。
+/// Windows 写剪贴板图片（原生 Win32 DIB，#271 修复）：
+/// PNG → RGBA → BITMAPINFOHEADER DIB → SetClipboardData(CF_DIB)。
 #[cfg(target_os = "windows")]
 fn windows_write_image(png: &[u8]) -> bool {
-    use base64ct::{Base64, Encoding};
-    let b64 = Base64::encode_string(png);
-    let script = format!(
-        "Add-Type -AssemblyName System.Drawing\nAdd-Type -AssemblyName System.Windows.Forms\n$ErrorActionPreference = 'Stop'\n$b64 = '{}'\n$bytes = [Convert]::FromBase64String($b64)\n$ms = New-Object System.IO.MemoryStream(,$bytes)\n$img = [System.Drawing.Image]::FromStream($ms)\n[System.Windows.Forms.Clipboard]::SetImage($img)\n$ms.Dispose()\n$img.Dispose()",
-        b64,
-    );
-    powershell_encoded(&script)
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+    let Some((rgba, w, h)) = png_to_rgba(png) else {
+        return false;
+    };
+    let Some(dib) = rgba_to_dib(&rgba, w, h) else {
+        return false;
+    };
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn OpenClipboard(hwnd: *mut std::ffi::c_void) -> i32;
+        fn CloseClipboard() -> i32;
+        fn EmptyClipboard() -> i32;
+        fn SetClipboardData(fmt: u32, h: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalAlloc(flags: u32, bytes: usize) -> *mut std::ffi::c_void;
+        fn GlobalLock(h: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn GlobalUnlock(h: *mut std::ffi::c_void) -> i32;
+        fn GlobalFree(h: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    }
+    const CF_DIB: u32 = 8;
+    const GMEM_MOVEABLE: u32 = 0x0002;
+    unsafe {
+        // SAFETY: OpenClipboard 成功后 EmptyClipboard 清空，GlobalAlloc/MOVEABLE
+        // 分配后 GlobalLock 拷贝 DIB；SetClipboardData 成功时接管 h，失败时释放。
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return false;
+        }
+        if EmptyClipboard() == 0 {
+            CloseClipboard();
+            return false;
+        }
+        let h = GlobalAlloc(GMEM_MOVEABLE, dib.len());
+        if h.is_null() {
+            CloseClipboard();
+            return false;
+        }
+        let dst = GlobalLock(h);
+        if dst.is_null() {
+            GlobalFree(h);
+            CloseClipboard();
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(dib.as_ptr(), dst as *mut u8, dib.len());
+        GlobalUnlock(h);
+        let set = SetClipboardData(CF_DIB, h);
+        if set.is_null() {
+            GlobalFree(h);
+        }
+        CloseClipboard();
+        !set.is_null()
+    }
 }
 
 /// Linux：arboard（X11 x11rb / Wayland data-control）。
@@ -286,6 +475,101 @@ fn linux_write(text: &str) -> bool {
     cb.set_text(text).is_ok()
 }
 
+/// RGBA8 → PNG 字节（Linux 测试 + Windows 原生 DIB 读回共用）。
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[allow(dead_code)]
+fn rgba_to_png(rgba: &[u8], width: usize, height: usize) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut buf, width as u32, height as u32);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut writer = enc.write_header().ok()?;
+        writer.write_image_data(rgba).ok()?;
+    }
+    Some(buf)
+}
+
+/// PNG 字节 → RGBA8（支持 RGB/RGBA 8bit；其余格式返回 None）。
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[allow(dead_code)]
+fn png_to_rgba(png: &[u8]) -> Option<(Vec<u8>, usize, usize)> {
+    let mut dec = png::Decoder::new(png);
+    dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = dec.read_info().ok()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let bytes = &buf[..info.buffer_size()];
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => bytes.to_vec(),
+        png::ColorType::Rgb => bytes
+            .chunks_exact(3)
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect(),
+        _ => return None,
+    };
+    Some((rgba, info.width as usize, info.height as usize))
+}
+
+/// Linux 读剪贴板图片（PNG MIME）：
+/// Wayland → `wl-paste --type image/png`；X11 → `xclip -t image/png -o`。
+/// 与 macOS pbpaste/pbcopy 同思路的命令方案（#271）。
+#[cfg(target_os = "linux")]
+fn linux_read_image() -> Option<Vec<u8>> {
+    let out = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        std::process::Command::new("wl-paste")
+            .args(["--type", "image/png"])
+            .output()
+            .ok()?
+    } else {
+        std::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", "image/png", "-o"])
+            .output()
+            .ok()?
+    };
+    if !out.status.success() {
+        return None; // 剪贴板无图片或工具缺失
+    }
+    if out.stdout.is_empty() {
+        None
+    } else {
+        Some(out.stdout)
+    }
+}
+
+/// Linux 写剪贴板图片（PNG MIME）：
+/// Wayland → `wl-copy --type image/png`；X11 → `xclip -t image/png -i`。
+#[cfg(target_os = "linux")]
+fn linux_write_image(png: &[u8]) -> bool {
+    use std::io::Write;
+    let (cmd, args) = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        ("wl-copy", vec!["--type", "image/png"])
+    } else {
+        (
+            "xclip",
+            vec!["-selection", "clipboard", "-t", "image/png", "-i"],
+        )
+    };
+    let Some(mut child) = std::process::Command::new(cmd)
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .ok()
+    else {
+        return false;
+    };
+    let written = child
+        .stdin
+        .as_mut()
+        .map(|s| s.write_all(png).is_ok())
+        .unwrap_or(false);
+    if !written {
+        return false;
+    }
+    child.wait().map(|st| st.success()).unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +601,58 @@ mod tests {
         }
     }
 
+    /// Linux PNG 编解码往返（无剪贴板也运行，纯函数）。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_png_codec_roundtrip() {
+        let (w, h) = (4usize, 3usize);
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for i in 0..(w * h) {
+            rgba.extend_from_slice(&[(i * 37 % 256) as u8, 128, 64, 255]);
+        }
+        let png = rgba_to_png(&rgba, w, h).expect("encode");
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "PNG 魔数");
+        let (out, dw, dh) = png_to_rgba(&png).expect("decode");
+        assert_eq!((dw, dh), (w, h));
+        assert_eq!(out, rgba, "RGBA 往返一致");
+    }
+
+    /// Linux 真机图片剪贴板往返（#271）：写 PNG → 读回。
+    /// 显式 opt-in（`AERODESK_TEST_CLIPBOARD_IMAGE=1`）：CI runner 可能设了
+    /// WAYLAND_DISPLAY 但无 compositor，`wl-paste`/`xclip` 会阻塞挂死，
+    /// 故默认 SKIP；真机/有剪贴板管理器环境显式启用。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_clipboard_image_roundtrip() {
+        if std::env::var("AERODESK_TEST_CLIPBOARD_IMAGE").is_err() {
+            eprintln!(
+                "SKIP: 未设置 AERODESK_TEST_CLIPBOARD_IMAGE=1（需 X11/Wayland + xclip/wl-copy）"
+            );
+            return;
+        }
+        let has_display =
+            std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
+        if !has_display {
+            eprintln!("SKIP: 无 DISPLAY/WAYLAND_DISPLAY（headless）");
+            return;
+        }
+        let (w, h) = (8usize, 6usize);
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for i in 0..(w * h) {
+            rgba.extend_from_slice(&[(i * 13 % 256) as u8, 200, 100, 255]);
+        }
+        let png = rgba_to_png(&rgba, w, h).expect("encode");
+        assert!(write_image(&png), "xclip/wl-copy 写入应成功");
+        match read_image() {
+            Some(got) => {
+                assert!(got.starts_with(b"\x89PNG\r\n\x1a\n"), "读回应为 PNG");
+                let (_out, dw, dh) = png_to_rgba(&got).expect("decode");
+                assert_eq!((dw, dh), (w, h), "尺寸一致");
+            }
+            None => eprintln!("SKIP: 剪贴板读回失败（无剪贴板管理器/受限环境）"),
+        }
+    }
+
     /// Windows 真机图片剪贴板往返（#271）：写入 PNG → 读回 → 幂等稳定。
     #[cfg(target_os = "windows")]
     #[test]
@@ -337,10 +673,86 @@ mod tests {
         }
         let got = read_image().expect("读回剪贴板图片");
         assert!(got.starts_with(b"\x89PNG\r\n\x1a\n"), "读回应为合法 PNG");
-        // 幂等：System.Drawing 重编码字节稳定（写回再读应一致）。
+        // 幂等：原生 DIB 往返确定性（写回再读应一致）。
         assert!(write_image(&got));
         let got2 = read_image().expect("再次读回");
         assert_eq!(got, got2, "重编码 PNG 应幂等");
+    }
+
+    /// #271 Windows DIB 编解码（无需真实剪贴板）：RGBA → DIB → RGBA 一致。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn dib_rgba_roundtrip() {
+        let (w, h) = (7usize, 5usize);
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                let v = (i * 29 % 256) as u8;
+                [v, v.wrapping_add(40), v.wrapping_add(80), 255]
+            })
+            .collect();
+        let dib = super::rgba_to_dib(&rgba, w, h).expect("dib");
+        let (out, dw, dh) = super::dib_to_rgba(&dib).expect("parse");
+        assert_eq!((dw, dh), (w, h));
+        assert_eq!(out, rgba, "DIB 往返应保持像素（含自底向上翻转）");
+    }
+
+    /// #271 24bpp 自底向上 + 负高度（自顶向下）DIB 解析。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn dib_parses_24bpp_and_top_down() {
+        let (w, h) = (4usize, 3usize);
+        let row_pad = (w * 3 + 3) & !3;
+        // 构造自底向上 24bpp：内存第一行 = 图像最后一行。
+        let mut pixels = vec![0u8; row_pad * h];
+        let mut image: Vec<[u8; 3]> = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let v = (y * 16 + x * 4) as u8;
+                image.push([v, v.wrapping_add(1), v.wrapping_add(2)]);
+            }
+        }
+        for y in 0..h {
+            let src = &image[(h - 1 - y) * w..(h - y) * w];
+            let row = &mut pixels[y * row_pad..y * row_pad + w * 3];
+            for (i, px) in src.iter().enumerate() {
+                // DIB 存 BGR：RGB 像素反转后写入。
+                row[i * 3..i * 3 + 3].copy_from_slice(&[px[2], px[1], px[0]]);
+            }
+        }
+        let mut dib = Vec::new();
+        dib.extend_from_slice(&40u32.to_le_bytes());
+        dib.extend_from_slice(&(w as i32).to_le_bytes());
+        dib.extend_from_slice(&(h as i32).to_le_bytes());
+        dib.extend_from_slice(&1u16.to_le_bytes());
+        dib.extend_from_slice(&24u16.to_le_bytes());
+        dib.extend_from_slice(&0u32.to_le_bytes());
+        dib.extend_from_slice(&0u32.to_le_bytes());
+        dib.extend_from_slice(&0u32.to_le_bytes());
+        dib.extend_from_slice(&0u32.to_le_bytes());
+        dib.extend_from_slice(&0u32.to_le_bytes());
+        dib.extend_from_slice(&0u32.to_le_bytes());
+        dib.extend_from_slice(&pixels);
+        let (out, dw, dh) = super::dib_to_rgba(&dib).expect("24bpp");
+        assert_eq!((dw, dh), (w, h));
+        for (i, px) in image.iter().enumerate() {
+            let o = i * 4;
+            assert_eq!(&out[o..o + 3], px, "24bpp 像素 {i} 应一致");
+            assert_eq!(out[o + 3], 255);
+        }
+        // 自顶向下（负高度）：内存第一行 = 图像第一行。
+        let mut pixels_top = vec![0u8; row_pad * h];
+        for y in 0..h {
+            let src = &image[y * w..(y + 1) * w];
+            let row = &mut pixels_top[y * row_pad..y * row_pad + w * 3];
+            for (i, px) in src.iter().enumerate() {
+                row[i * 3..i * 3 + 3].copy_from_slice(&[px[2], px[1], px[0]]);
+            }
+        }
+        let mut dib2 = dib[..40].to_vec();
+        dib2[8..12].copy_from_slice(&(-(h as i32)).to_le_bytes());
+        dib2.extend_from_slice(&pixels_top);
+        let (out2, _, _) = super::dib_to_rgba(&dib2).expect("top-down");
+        assert_eq!(out2, out, "自顶向下解析应得到同一图像");
     }
 
     /// macOS 真机图片剪贴板往返（#271）：写入 PNG → 读回 → 幂等稳定。
