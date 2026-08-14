@@ -967,6 +967,15 @@ impl aerodesk_core::platform::CameraSource for NoCameraCapture {
     fn stop(&mut self) {}
 }
 
+/// 无光标源占位（publisher_generic 泛型参数用；传 None 时用合成光标轨迹）。
+struct NoCursor;
+
+impl aerodesk_core::platform::CursorSource for NoCursor {
+    fn position_normalized(&mut self) -> Option<(f64, f64)> {
+        None
+    }
+}
+
 /// 无真实音频源占位（publisher_generic 泛型参数用；传 None 时不会构造实例）。
 struct NoAudioCapture;
 
@@ -1296,6 +1305,12 @@ fn send_cursor(endpoint: &mut Endpoint, x: f64, y: f64) {
     if let Ok(json) = serde_json::to_string(&pos) {
         endpoint.send_channel_data("cursor", false, json.as_bytes());
     }
+}
+
+/// #8 端到端延迟：合成光标轨迹（30Hz 正弦，e2e/延迟测量用）。
+fn synthetic_cursor_pos(start: std::time::Instant) -> (f64, f64) {
+    let t = start.elapsed().as_secs_f64();
+    (0.5 + 0.3 * t.sin(), 0.5 + 0.3 * t.cos())
 }
 
 /// 发布端公共事件处理：输入通道（观看端 → 被控端）。
@@ -2524,6 +2539,7 @@ fn publisher_generic<
     E: aerodesk_core::platform::Encoder,
     C: aerodesk_core::platform::AudioCapturer<Error = String>,
     CC: aerodesk_core::platform::CameraSource<Error = String>,
+    CS: aerodesk_core::platform::CursorSource,
 >(
     signal_url: &str,
     room: &str,
@@ -2536,6 +2552,7 @@ fn publisher_generic<
     mut encoder: E,
     audio_cap: Option<C>,
     camera_cap: Option<CC>,
+    mut cursor: Option<CS>,
 ) {
     let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) =
         if camera_cap.is_some() {
@@ -2609,11 +2626,17 @@ fn publisher_generic<
         }
         file_transfer::tick(&mut endpoint);
         cmd_exec::tick(&mut endpoint);
-        // #8 端到端延迟：合成光标轨迹（30Hz）。
+        // #8 端到端延迟：合成光标轨迹（30Hz）；#75 有真实 CursorSource（Linux X11）时
+        // 优先真实光标，真实源不可用（如 Wayland 无 X11）时回退合成轨迹，cursor 通道常活。
         if last_cursor.elapsed() >= Duration::from_millis(33) {
             last_cursor = Instant::now();
-            let t = cursor_start.elapsed().as_secs_f64();
-            send_cursor(&mut endpoint, 0.5 + 0.3 * t.sin(), 0.5 + 0.3 * t.cos());
+            let (x, y) = match &mut cursor {
+                Some(c) => c
+                    .position_normalized()
+                    .unwrap_or_else(|| synthetic_cursor_pos(cursor_start)),
+                None => synthetic_cursor_pos(cursor_start),
+            };
+            send_cursor(&mut endpoint, x, y);
         }
 
         if connected && Instant::now() >= next_frame {
@@ -2727,6 +2750,7 @@ fn publisher_ffmpeg(
         encoder,
         None::<NoAudioCapture>,
         None::<NoCameraCapture>,
+        None::<NoCursor>,
     );
 }
 
@@ -2820,6 +2844,7 @@ fn publisher_capture_windows(
         encoder,
         audio_cap,
         None::<NoCameraCapture>,
+        None::<NoCursor>,
     );
 }
 
@@ -2954,8 +2979,18 @@ fn publisher_capture_linux(
         None
     };
     publisher_generic(
-        signal_url, room, auth, audio, audio_opus, codec, FPS, capture, encoder, audio_cap,
+        signal_url,
+        room,
+        auth,
+        audio,
+        audio_opus,
+        codec,
+        FPS,
+        capture,
+        encoder,
+        audio_cap,
         camera_cap,
+        Some(aerodesk_linux::cursor::LinuxCursor::new()),
     );
 }
 
