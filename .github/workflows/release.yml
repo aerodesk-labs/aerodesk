@@ -1,14 +1,17 @@
 name: Build & Release
 
-# 打 tag v* 时自动构建 macOS（签名/公证）与 Linux（deb + tar.gz）桌面端，发 GitHub Release；
-# 也可手动触发（只出产物）。
+# 打 tag v* 时自动构建 macOS（签名/公证）、Linux 与 Windows 桌面端，发 GitHub Release；
+# 也可手动触发（只出产物）；创建 pre-release 时同样触发全平台打包并回传产物。
 # 参考 ../abb 项目的 release 流水线（.github/workflows/release.yml）。
-# macOS：DMG（Developer ID + notarytool）；Linux：cargo-deb .deb + 便携 tar.gz（scripts/package-linux.sh）。
-# Windows：待 UI/WiX 落地后按本文件同构补。
+# macOS：DMG（Developer ID + notarytool）；Linux：deb/tar.gz/rpm/AppImage（scripts/package-linux.sh）。
+# Windows：便携 ZIP + WiX MSI（scripts/package-windows.sh）。
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+  release:
+    # published 覆盖 pre-release 与正式 release 的发布（prereleased 不触发草稿转发布的 pre-release）
+    types: [published]
 
 permissions:
   contents: write
@@ -197,7 +200,8 @@ jobs:
   # ─────────────────────────── 汇总发 Release ───────────────────────────
   release:
     needs: [macos, linux, windows]
-    if: startsWith(github.ref, 'refs/tags/v') # 只有打 tag 才发 Release；手动跑只出产物
+    # tag v* 或创建 pre-release 时发 Release；workflow_dispatch 只出产物不发布
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -205,8 +209,20 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
+      # 打 tag v*：新建 Release 并自动生成 release notes
+      - name: Create release (tag push)
+        if: github.event_name != 'release'
+        uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
+          fail_on_unmatched_files: true
+
+      # release 事件（pre-release / 正式 release）：GitHub 已创建好 Release，这里只补传产物；
+      # 不设置 body/name/prerelease，softprops 会保留已有 Release 的原始信息。
+      - name: Attach assets to existing release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
           fail_on_unmatched_files: true
