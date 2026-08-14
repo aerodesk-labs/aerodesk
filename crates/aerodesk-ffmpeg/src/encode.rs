@@ -466,6 +466,7 @@ impl aerodesk_core::platform::Encoder for FfmpegEncoder {
                 enc.last_bitrate_bps = bitrate_bps;
                 enc.last_bitrate_at = now;
                 *self = enc;
+                tracing::info!("ffmpeg encoder rebuilt at {bitrate_bps}bps");
             } else {
                 tracing::warn!("ffmpeg set_bitrate rebuild failed");
             }
