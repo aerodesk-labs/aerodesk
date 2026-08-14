@@ -125,6 +125,69 @@ fn run() {
         probe_audio();
         return;
     }
+    // #3 Windows 被控端开机自启（HKCU Run，无需管理员）：安装/移除/查询。
+    if args.iter().any(|a| a == "--install-autostart") {
+        #[cfg(windows)]
+        {
+            let exe = std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "aerodesk-cli.exe".into());
+            let signal = arg(&args, "--signal").unwrap_or_else(|| "ws://127.0.0.1:3003/ws".into());
+            let room = arg(&args, "--room").unwrap_or_else(|| "default".into());
+            let cmd = aerodesk_windows::autostart::autostart_command(&exe, &signal, &room);
+            match aerodesk_windows::autostart::install(&cmd) {
+                Ok(()) => println!("autostart installed (HKCU Run): {cmd}"),
+                Err(e) => {
+                    eprintln!("autostart install failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--install-autostart 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.iter().any(|a| a == "--remove-autostart") {
+        #[cfg(windows)]
+        {
+            match aerodesk_windows::autostart::remove() {
+                Ok(true) => println!("autostart removed"),
+                Ok(false) => println!("autostart not installed"),
+                Err(e) => {
+                    eprintln!("autostart remove failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--remove-autostart 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.iter().any(|a| a == "--autostart-status") {
+        #[cfg(windows)]
+        {
+            match aerodesk_windows::autostart::installed() {
+                Ok(Some(cmd)) => println!("installed: {cmd}"),
+                Ok(None) => println!("not installed"),
+                Err(e) => {
+                    eprintln!("autostart query failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--autostart-status 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     let role = arg(&args, "--role").unwrap_or_else(|| "viewer".into());
     let signal = arg(&args, "--signal").unwrap_or_else(|| "ws://127.0.0.1:3003/ws".into());
