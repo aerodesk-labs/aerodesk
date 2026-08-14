@@ -51,6 +51,8 @@
 
 ## 硬件就绪后的验收 runbook
 
+> **可执行真机验收步骤见 [ACCEPTANCE_RUNBOOK.md](ACCEPTANCE_RUNBOOK.md)**（#4 Linux / #75 鼠标控制：命令、断言、关闭条件、常见问题）。
+
 > 通用：每项验收都要贴证据（截图/日志/报告链接）到对应 issue，填上表 ✅ 后关闭。
 > 信令地址 UI/CLI 会自动补协议与 `/ws` 路径（`aerodesk_core::signaling::normalize_signal_url`），
 > 可只填 `host:port`；公网默认 `wss://`，局域网明文自建请显式写 `ws://<LAN IP>:3003`。
