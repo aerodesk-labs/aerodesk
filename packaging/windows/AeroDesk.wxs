@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AeroDesk Windows MSI（#7 PACKAGING.md「WiX/MSIX 待补」）。
+     构建：wix build packaging/windows/AeroDesk.wxs -o dist/aerodesk-<ver>-win64.msi \
+           -d Version=<ver> -d BuildDir=<便携 stage 目录>
+     依赖 FFmpeg 共享 DLL 文件名（BtbN 8.1：avcodec-62 等）；FFmpeg 升级时同步更新。 -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="AeroDesk"
+           Manufacturer="AeroDesk Labs"
+           Version="$(var.Version)"
+           UpgradeCode="8f6d4b2e-3a91-4c7e-9d2f-1e5b8a6c4d3f"
+           Language="1033"
+           Scope="perMachine">
+    <SummaryInformation Description="AeroDesk remote desktop client (viewer/controller)" Keywords="AeroDesk,remote,desktop,Windows"/>
+    <MajorUpgrade DowngradeErrorMessage="检测到已安装更高版本的 AeroDesk，请先卸载后再降级。" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high"/>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="AeroDesk">
+        <Component Id="C_AppFiles" Guid="7a1c0e5d-9f42-4b81-a6c3-2e8d0f5a7b94">
+          <File Id="F_Ui" Source="$(var.BuildDir)\aerodesk-ui.exe" KeyPath="yes"/>
+          <File Id="F_Cli" Source="$(var.BuildDir)\aerodesk-cli.exe"/>
+          <File Id="F_Avcodec" Source="$(var.BuildDir)\avcodec-62.dll"/>
+          <File Id="F_Avdevice" Source="$(var.BuildDir)\avdevice-62.dll"/>
+          <File Id="F_Avfilter" Source="$(var.BuildDir)\avfilter-11.dll"/>
+          <File Id="F_Avformat" Source="$(var.BuildDir)\avformat-62.dll"/>
+          <File Id="F_Avutil" Source="$(var.BuildDir)\avutil-60.dll"/>
+          <File Id="F_Swresample" Source="$(var.BuildDir)\swresample-6.dll"/>
+          <File Id="F_Swscale" Source="$(var.BuildDir)\swscale-9.dll"/>
+          <File Id="F_Png" Source="$(var.BuildDir)\aerodesk.png"/>
+          <File Id="F_Readme" Source="$(var.BuildDir)\README.txt"/>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="C_StartMenu" Guid="b3d8f17e-6a20-4c95-8e4a-9d1f2c5a7b86">
+        <Shortcut Id="S_StartMenu" Name="AeroDesk" Description="AeroDesk remote desktop" Target="[INSTALLFOLDER]aerodesk-ui.exe" WorkingDirectory="INSTALLFOLDER"/>
+        <RemoveFolder Id="RemoveProgramMenuDir" Directory="ProgramMenuFolder" On="uninstall"/>
+        <RegistryValue Root="HKCU" Key="Software\AeroDesk" Name="installed" Type="integer" Value="1" KeyPath="yes"/>
+      </Component>
+    </StandardDirectory>
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="C_Desktop" Guid="d5e0a9f3-1c74-4a62-b8d7-3f6a0e9c2d51">
+        <Shortcut Id="S_Desktop" Name="AeroDesk" Description="AeroDesk remote desktop" Target="[INSTALLFOLDER]aerodesk-ui.exe" WorkingDirectory="INSTALLFOLDER"/>
+        <RegistryValue Root="HKCU" Key="Software\AeroDesk" Name="desktop" Type="integer" Value="1" KeyPath="yes"/>
+      </Component>
+    </StandardDirectory>
+    <Feature Id="MainFeature" Title="AeroDesk" Level="1">
+      <ComponentRef Id="C_AppFiles"/>
+      <ComponentRef Id="C_StartMenu"/>
+      <ComponentRef Id="C_Desktop"/>
+    </Feature>
+  </Package>
+</Wix>
