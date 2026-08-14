@@ -10,7 +10,7 @@
 | 被控端 \\ 观看端 | Web | macOS | iOS | Android | Windows | Linux | HarmonyOS |
 |---|---|---|---|---|---|---|---|
 | macOS | ✅（web-e2e：观看/发布/文件/重连） | ✅（smoke + UI e2e；默认 h265 硬编 + 真实系统音频 #274/#276） | ✅（iOS 模拟器 e2e：H.265 硬解观看 macOS 流 #275 + 摄像头第二轨 #328/#340） | ⬜ 待 Android | ⬜ 待 Win | ⬜ 待 Linux | ⬜ 待鸿蒙 |
-| Windows | ⬜（DXGI 采集 + SendInput 注入 + 剪贴板文本 #281，CI 编译/e2e 守护） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
+| Windows | ✅（Windows Edge e2e #409：观看+输入回传；DXGI 采集 + SendInput 注入 + 剪贴板 #281 + 远程光标 #406 + 显示器切换 #408 + BWE 码率反馈 #410 + 剪贴板注入 #411，CI 编译/e2e 守护） | ⬜ | ⬜ | ⬜ | ✅（真机） | ⬜ | ⬜ |
 | Linux | ⬜（X11/Wayland(PipeWire) 采集 + XTest/uinput/portal 注入 + VAAPI 硬编/硬解 + PipeWire 系统音频 + V4L2 摄像头 + 真实光标 + 剪贴板（文本/图片/注入）+ FilePicker/Notifier/SystemWakeLock/CommandExecutor #282/#283/#284/#286/#307/#311/#313/#317/#320/#323/#375/#386/#392/#394，CI 编译/e2e 守护） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 | Android | ⬜（MediaProjection + MediaCodec + 无障碍注入代码就绪；**模拟器经 TURN relay 已出帧解码（#201/#203）**，真机验收待设备） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 
@@ -20,7 +20,7 @@
 |---|---|---|
 | #1 iOS 壳层 | 壳 + **H.264/H.265 硬解 + 音视频分流 + PCMU 播放 + iPad 支持 + 设置持久化**（#275）；模拟器 e2e（含 h265 观看 macOS） | iPhone 真机（A12+）：观看 macOS 流 |
 | #2 Android 真机 | 观看端 MediaCodec 渲染 + 被控端 MediaProjection/硬编/无障碍注入 + Android 14 前台服务（#156/#165/#187）；APK CI 守护 | Android 真机（API 26+）：端到端画面 + 输入 |
-| #3 Windows | DXGI 采集 + SendInput 注入 + OpenH264 软编/软解 + VDD（#159/#188）；Windows UI e2e CI 守护 | Win10/11 真机：端到端 + 真机编解码器记录 |
+| #3 Windows | DXGI 采集/缩放 + MF(h264_mf/hevc_mf) 硬编 + DXVA2 硬解（#378/#383/#405）+ WASAPI 音频（#321）+ SendInput 注入 + 剪贴板文本/图片（#281/#383/#393）+ 远程光标（#406）+ 显示器切换（#408）+ BWE 码率反馈（#410）+ 剪贴板注入（#411）+ 开机自启（#402）+ VDD（#159/#188）；Windows UI e2e + Windows Edge e2e（#409）CI 守护 | Win10/11 真机：端到端 + 多显示器切换验收 |
 | #4 Linux | X11/Wayland(PipeWire) 采集 + XTest/uinput/portal 注入 + x264/OpenH264 回退 + **VAAPI 硬编/硬解优先（#282/#284）** + **Wayland/PipeWire 采集（#286）** + 剪贴板文本（#283）+ **CLI 被控端（#307/#311）** + **PipeWire 系统音频（#317）** + **portal 注入（#320）** + 图片剪贴板（#323）+ **SystemWakeLock/CommandExecutor（#375）** + **V4L2 摄像头（#386）** + **真实光标（#392）** + **FilePicker/Notifier/剪贴板注入（#394）** + linux-native-e2e（含 CURSOR 断言）CI 守护 | Linux 真机：X11/Wayland 端到端 + VAAPI/uinput 真机验收 |
 | #6 HarmonyOS | NAPI 规约 ✅（docs/HARMONYOS.md，tmp/ohos-check） | DevEco + OHOS NDK + 鸿蒙真机（ring 交叉编译） |
 | #75 鼠标控制 | 远程光标渲染 ✅（#86）、输入全事件 e2e ✅（#95）、高 DPI/多显示器坐标映射 ✅（#105）、远端光标叠加默认关（对齐 RustDesk/TeamViewer，#274） | 多显示器真机高 DPI 验证 + Windows/Linux/Android 注入真机验收 |
@@ -89,7 +89,7 @@ RECORD_DIR=/tmp/aerodesk-acceptance ./target/debug/aerodesk-sfu   # 分片服务
 ### 4. Windows 真机（#3，Win10/11）
 1. 构建：`cargo build -p aerodesk-cli --release`（Windows 工具链；OpenH264 软编/软解已接入）
 2. 被控：`aerodesk-cli.exe --role publisher --signal ws://<host>:3003 --room accept`（DXGI 采集 + SendInput 注入）
-3. 观看：`aerodesk-cli.exe --role viewer --signal ws://<host>:3003 --room accept`（OpenH264 软解，DXVA2 为后续）
+3. 观看：`aerodesk-cli.exe --role viewer --signal ws://<host>:3003 --room accept`（DXVA2 硬解优先 #405，OpenH264 软解回退）
 4. 验收：双向画面 + 输入回传；记录编码/解码器与帧率
 5. 证据：截图 + 日志 → 关 #3
 
