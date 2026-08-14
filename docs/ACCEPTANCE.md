@@ -9,7 +9,7 @@
 | macOS | Apple Silicon（本机已有） | 被控端采集/编码、SFU/signal 开发 | #1/#5 |
 | iOS | iPhone 真机（A12+） | 观看端验收（解码渲染） | #1 |
 | Android | 真机（API 26+，arm64） | 观看+被控验收；NDK 交叉编译已就绪 | #2 |
-| Windows | Win10/11 真机 | WGC/DXGI 采集、MF 编码、DXVA2 解码 | #3 |
+| Windows | Win10/11 真机 | DXGI 采集/缩放、MF(h264_mf/hevc_mf)+OpenH264 编码、**D3D11VA/DXVA2 解码（已落地）**、WASAPI 音频、SendInput、VDD | #3 |
 | Linux | 桌面真机（Wayland/X11） | PipeWire/VAAPI 采集编码 | #4 |
 | HarmonyOS | DevEco + 鸿蒙真机（API 12+） | NAPI 桥、AVScreenCapture、OH_VideoDecoder | #6 |
 | 服务器 | 多核 + 公网（含 TURN 端口段） | 4K60×N 压测、多 PoP | #5/#8 |
@@ -22,7 +22,7 @@
 | 被控端 \\ 观看端 | Web | macOS | iOS | Android | Windows | Linux |
 |---|---|---|---|---|---|---|
 | macOS | ✅(已有) | 待 | 待 | 待 | 待 | 待 |
-| Windows | 待 | 待 | 待 | 待 | 待 | 待 |
+| Windows | ✅(CI Chrome；本机 Edge↔str0m SCTP 待修) | 待 | 待 | 待 | ✅(真机) | 待 |
 | Linux | 待 | 待 | 待 | 待 | 待 | 待 |
 | Android | 待 | 待 | 待 | 待 | 待 | 待 |
 

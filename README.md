@@ -123,7 +123,7 @@ CLI viewer 端到端收流、iOS 解码器（x264 关键帧 + P 帧全序列 8/8
 |---|---|---|---|
 | Web | ❌ | ✅ | P0 完成 |
 | macOS | ✅ | ✅ | P2 完成（采集/编码/注入） |
-| Windows | ✅ | ✅ | 被控端+观看端可用（DXGI 采集/缩放、MF+OpenH264 编码、WASAPI 音频、SendInput、VDD；本机端到端验证） |
+| Windows | ✅ | ✅ | 被控端+观看端完整：DXGI 采集/缩放、MF(h264_mf/hevc_mf)+OpenH264 编码、WASAPI 音频、SendInput/VDD、唤醒锁、原生 Win32 剪贴板（文本/图片）、D3D11VA/DXVA2 硬解（UI+CLI）、Opus/PCMU 播放、远程光标；本机端到端（4K30 硬编→硬解）验证；便携 ZIP + MSI 安装器 |
 | Linux | 🔨 | 🔨 | P4 骨架 |
 | Android | 🔨 | 🔨 | P3 骨架 |
 | iOS | ❌ | ✅ | P3 解码器完成（App 壳层待真机） |
