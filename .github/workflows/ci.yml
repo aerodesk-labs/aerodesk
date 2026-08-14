@@ -314,6 +314,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/web-edge-e2e-win.ps1
+      # #58/#408 显示器切换 CLI 接线回归：viewer --display N → control → publisher 重建。
+      # DXGI 不可用的 runner 自动 SKIP（与 windows_runtime 容错一致）。
+      - name: e2e display switch (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/display-switch-e2e-win.ps1
       - name: linux adapter
         if: runner.os == 'Linux'
         run: cargo check -p aerodesk-linux -p aerodesk-ui
