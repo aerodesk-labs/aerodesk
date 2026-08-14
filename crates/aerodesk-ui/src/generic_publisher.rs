@@ -61,9 +61,10 @@ mod imp {
     use aerodesk_core::endpoint::ClientEvent;
     use aerodesk_core::media_pipeline::Codec;
     use aerodesk_core::media_socket::MediaSocket;
-    use aerodesk_core::platform::{Encoder, MediaSource, SystemWakeLock};
+    use aerodesk_core::platform::{Encoder, InputInjector, MediaSource, SystemWakeLock};
     use aerodesk_protocol::input::{InputEvent, InputFrame};
     use aerodesk_protocol::signal::Role;
+    use slint::ComponentHandle;
     use str0m::Output;
     use str0m::media::{Frequency, MediaTime, Mid};
     use str0m::net::Protocol;
@@ -131,7 +132,7 @@ mod imp {
         stop: Arc<AtomicBool>,
     ) {
         let stale = || stop.load(Ordering::SeqCst);
-        let auth = token.as_deref().filter(|t| !t.is_empty());
+        let auth = Some(token.as_str()).filter(|t| !t.is_empty());
 
         // 发布端连接：H.264 视频 + 音频 m-line（core 泛型连接，CLI 同款）。
         let mut live =
