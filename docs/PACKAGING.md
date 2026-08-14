@@ -7,7 +7,7 @@
 | 平台 | 产物 | 工具 | 签名 |
 |---|---|---|---|
 | macOS | `.app` / `.dmg` | `scripts/package-macos.sh` | Developer ID + 公证（notarytool） |
-| Windows | `.exe` 安装器 / MSIX | cargo-bundle / WiX / MSIX 打包 | 代码签名证书（EV 可选） |
+| Windows | 便携 ZIP（已接入）/ `.exe` 安装器 / MSIX（待补） | `scripts/package-windows.sh`（exe + FFmpeg DLL）/ WiX / MSIX | 代码签名证书（EV 可选） |
 | Linux | `.deb` / `.rpm` / AppImage / 便携 `tar.gz` | cargo-deb / rpmbuild / linuxdeploy | GPG 签名仓库（可选） |
 | Android | `.apk` / `.aab` | Gradle（`android/`） | Play App Signing（上传密钥） |
 | iOS | `.ipa` | Xcode Archive（`ios/`） | App Store / TestFlight（开发者证书） |
@@ -43,6 +43,9 @@ bash scripts/package-linux.sh      # dist/aerodesk_<版本>_amd64.deb + tar.gz +
 - **Linux**：`cargo build --release -p aerodesk-ui` → `scripts/package-linux.sh`
   → `cargo-deb` `.deb`（`depends=$auto` 自动探测）+ 便携 `tar.gz` + `rpmbuild` `.rpm` + `linuxdeploy` AppImage
   → 上传 Release（无签名，GPG 签名仓库可选）
+- **Windows**：`cargo build --release -p aerodesk-ui -p aerodesk-cli` → `scripts/package-windows.sh`
+  → 便携 ZIP（aerodesk-ui.exe + aerodesk-cli.exe + FFmpeg 共享 DLL + 图标 + README）
+  → 上传 Release（无签名；WiX/MSIX 安装器待补）
 - **所需 secrets**：`APPLE_CERT_P12`（Developer ID Application 证书 base64）、`APPLE_CERT_PASSWORD`、
   `APPLE_TEAM_ID`、`APPLE_ID`、`APPLE_APP_PASSWORD`
 - **Windows**：aerodesk-ui 非 macOS 分支已可观看（generic viewer），WiX/MSIX 打包 job 待补
@@ -52,12 +55,13 @@ bash scripts/package-linux.sh      # dist/aerodesk_<版本>_amd64.deb + tar.gz +
 ```sh
 scripts/package-macos.sh           # dist/AeroDesk.app
 scripts/package-macos.sh --dmg    # 额外产出 dist/AeroDesk-<版本>.dmg
+scripts/package-windows.sh       # dist/aerodesk-<版本>-win64.zip（需 FFMPEG_DIR + release 构建）
 ```
 
 ## 待接入
 
 - [ ] Web：完善 `web/index.html`（浏览器原生 WebRTC；观看/发布/输入与原生端互通）
-- [ ] Windows：MF/NVENC 编码 + WiX/MSIX 打包脚本 + release job
+- [x] Windows：便携 ZIP 打包脚本 + release job（#7/PACKAGING 补齐）；WiX/MSIX 安装器待补
 - [x] Linux：deb/tar.gz/rpm/AppImage 已接入 release job（#293/#312）
 - [ ] HarmonyOS：DevEco 打包（SDK 到位后）
 
