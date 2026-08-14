@@ -222,7 +222,7 @@ impl SendInputInjector {
 
 /// 虚拟屏幕（所有显示器并集）像素矩形。
 #[cfg(windows)]
-fn virtual_screen() -> (i32, i32, u32, u32) {
+pub(crate) fn virtual_screen() -> (i32, i32, u32, u32) {
     use windows::Win32::UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
         SM_YVIRTUALSCREEN,
