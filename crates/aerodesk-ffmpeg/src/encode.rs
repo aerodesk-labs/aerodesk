@@ -103,6 +103,9 @@ pub struct FfmpegEncoder {
     /// hevc_videotoolbox 等硬编不重复参数集，后续关键帧需要前置才能让晚加入
     /// viewer（iOS VideoToolbox 硬解）建出 format description。
     param_sets: Vec<Vec<u8>>,
+    /// 实际打开的编码器名（open_named 记录）：request_keyframe/set_bitrate 重建
+    /// 时沿用同名编码器，避免显式 libx265 被自动选路（如 hevc_mf）覆盖。
+    encoder_name: String,
 }
 
 impl FfmpegEncoder {
@@ -118,14 +121,30 @@ impl FfmpegEncoder {
         let mut last_err = String::new();
         for name in names {
             match Self::open_named(name, id, width, height, fps, bitrate_bps) {
-                Ok(enc) => {
-                    tracing::info!(
-                        "ffmpeg encoder opened: {name} ({}x{}@{} {bitrate_bps}bps)",
-                        width,
-                        height,
-                        fps
-                    );
-                    return Ok(enc);
+                Ok(mut probe) => {
+                    // #3/#8：硬件 MFT（hevc_mf 等）可能 open 成功但 send_frame 失败
+                    // （本机 80004005）；用一次性实例探测一帧，失败回退下一候选。
+                    if !probe.probe_ok() {
+                        last_err = format!("{name}: probe encode failed");
+                        tracing::warn!("ffmpeg encoder {name} probe failed，回退下一候选");
+                        continue;
+                    }
+                    // 探测消耗了首个 IDR，重开一个干净编码器用于真实流。
+                    match Self::open_named(name, id, width, height, fps, bitrate_bps) {
+                        Ok(enc) => {
+                            tracing::info!(
+                                "ffmpeg encoder opened: {name} ({}x{}@{} {bitrate_bps}bps)",
+                                width,
+                                height,
+                                fps
+                            );
+                            return Ok(enc);
+                        }
+                        Err(e) => {
+                            last_err = format!("{name}: {e}");
+                            tracing::warn!("ffmpeg encoder {name} reopen failed: {e}");
+                        }
+                    }
                 }
                 Err(e) => {
                     last_err = format!("{name}: {e}");
@@ -136,7 +155,7 @@ impl FfmpegEncoder {
         Err(format!("no encoder available for {codec:?}: {last_err}"))
     }
 
-    fn open_named(
+    pub(crate) fn open_named(
         name: &str,
         id: ffmpeg_next::codec::Id,
         width: u32,
@@ -165,10 +184,12 @@ impl FfmpegEncoder {
             dict.set("cpu-used", "4");
             dict.set("lag-in-frames", "0");
         } else if id == ffmpeg::codec::Id::AV1 {
-            // SVT-AV1：lookahead=0 降低编码延迟；仍有少量内部缓冲，
-            // 由 pending 队列吸收（见 encode_rgb）。
+            // SVT-AV1：仅设 preset=8。不要传 `svtav1-params: lookahead=0`——
+            // SVT 会忽略它并强制 lookahead=25（日志可见），且在部分 CPU 核数
+            // （如 4 核 runner）下会死锁导致编码永不返回（main CI 挂起根因，
+            // `decode::tests::av1_roundtrip` 卡 >60s）。默认 lookahead 下
+            // 编码器仍有少量内部缓冲，由 pending 队列吸收（见 encode_rgb）。
             dict.set("preset", "8");
-            dict.set("svtav1-params", "lookahead=0");
         } else if id == ffmpeg::codec::Id::H264 {
             dict.set("preset", "veryfast");
             // #3 晚加入 viewer 解码修复：libx264 默认 repeat-headers=0，
@@ -219,6 +240,7 @@ impl FfmpegEncoder {
             last_bitrate_bps: 0,
             last_bitrate_at: Instant::now(),
             param_sets: Vec::new(),
+            encoder_name: name.to_string(),
         })
     }
 
@@ -333,17 +355,27 @@ impl FfmpegEncoder {
         Ok(self.pending.pop_front())
     }
 
+    /// 探测编码器是否真实可用：部分硬件 MFT（如本机 hevc_mf）能 open 但在
+    /// `send_frame` 时报错（80004005），open 时探测一帧可让 `FfmpegEncoder::new`
+    /// 回退下一候选。探测会消耗首个 IDR，调用方（`new`）成功探测后用干净实例。
+    fn probe_ok(&mut self) -> bool {
+        let w = self.width;
+        let h = self.height;
+        let blank = vec![0u8; (w * h * 4) as usize];
+        self.encode_bgra(&blank).is_ok()
+    }
+
     /// 请求关键帧（下一帧设为 I 帧）。
     pub fn request_keyframe(&mut self) {
         // #3：libx264 对 frame->pict_type=I 的 PLI 提示在 FFmpeg 8.1 实测无效
         // （仍输出 P 帧）；重建编码器是最可靠强制 IDR 的方式（新 encoder 首帧
         // 必为 IDR，且 repeat-headers 带 SPS/PPS）。与 #267 set_bitrate 重建同模式。
-        let codec = self.codec();
         // 未调过 set_bitrate 时 last_bitrate_bps 为 0（open 参数未留存）；
         // 用与 open 相同的默认码率兜底（1.5 Mbps 参考值，见 FfmpegEncoder::new 调用方）。
         let bps = self.last_bitrate_bps.max(1_500_000);
         let (w, h, fps) = (self.width, self.height, self.fps);
-        match FfmpegEncoder::new(w, h, fps, bps, codec) {
+        let name = self.encoder_name.clone();
+        match Self::open_named(&name, self.ffmpeg_id, w, h, fps, bps) {
             Ok(enc) => *self = enc,
             Err(e) => tracing::warn!("ffmpeg keyframe rebuild failed: {e}"),
         }
@@ -363,7 +395,12 @@ impl FfmpegEncoder {
 impl Drop for FfmpegEncoder {
     fn drop(&mut self) {
         // 让编码器正常收尾（SVT-AV1 会在未 EOS 时打印告警）。
+        // 必须排空到 EOS：只 send_eof 不 drain 时 SVT-AV1 内部线程不释放，
+        // 同进程下一个 SVT 实例会死锁（main CI `av1_roundtrip` 挂起根因——
+        // loopback_all_codecs 的 AV1 实例 drop 后，av1_roundtrip 的新实例卡死）。
         let _ = self.encoder.send_eof();
+        let mut packet = Packet::empty();
+        while let Ok(()) = self.encoder.receive_packet(&mut packet) {}
     }
 }
 
@@ -418,11 +455,11 @@ impl aerodesk_core::platform::Encoder for FfmpegEncoder {
             && (self.last_bitrate_bps == 0
                 || now.duration_since(self.last_bitrate_at) >= Duration::from_secs(1))
         {
-            let codec = self.codec();
             let (w, h, fps) = (self.width, self.height, self.fps);
+            let name = self.encoder_name.clone();
             self.last_bitrate_bps = bitrate_bps;
             self.last_bitrate_at = now;
-            if let Ok(mut enc) = FfmpegEncoder::new(w, h, fps, bitrate_bps, codec) {
+            if let Ok(mut enc) = Self::open_named(&name, self.ffmpeg_id, w, h, fps, bitrate_bps) {
                 // 重建会替换 self，必须把节流状态带到新编码器：新编码器
                 // last_bitrate_bps=0 会把下一条反馈当首条免节流（#303），
                 // BWE 抖动时 1s 内多次重建打爆编码器（实测 0.2s 内连建两次）。
@@ -513,7 +550,16 @@ mod tests {
     fn hevc_keyframes_carry_parameter_sets() {
         // hevc_videotoolbox 不重复参数集；keyframe_data 需在后续关键帧前置
         // VPS/SPS/PPS（晚加入 viewer/iOS 硬解才能建 format description）。
-        let mut enc = FfmpegEncoder::new(320, 180, 30, 1_000_000, Codec::Hevc).expect("hevc");
+        // 显式 libx265：hevc_mf 在部分 windows runner 上 send_frame 永久阻塞。
+        let mut enc = FfmpegEncoder::open_named(
+            "libx265",
+            ffmpeg_next::codec::Id::HEVC,
+            320,
+            180,
+            30,
+            1_000_000,
+        )
+        .expect("hevc");
         let mut frame = vec![0u8; 320 * 180 * 4];
         let mut second: Option<Vec<u8>> = None;
         let mut keyframes = 0;

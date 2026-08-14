@@ -16,6 +16,13 @@ use aerodesk_core::platform::{Decoder, Renderer};
 use aerodesk_protocol::signal::Role;
 use str0m::net::Protocol;
 
+/// 解析 cursor 通道的 `CursorPos`（#75；返回归一化 0..1 坐标，与 macOS UI 一致）。
+fn cursor_pos(data: &[u8]) -> Option<(f32, f32)> {
+    serde_json::from_slice::<aerodesk_protocol::cursor::CursorPos>(data)
+        .ok()
+        .map(|p| (p.x as f32, p.y as f32))
+}
+
 /// 运行泛型观看会话（阻塞直到断开/代际失效）。
 ///
 /// - `decoder_label`：状态栏解码器显示名（如 "OpenH264 软解"）。
@@ -126,6 +133,8 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     let mut jitter = aerodesk_core::avsync::AudioJitterBuffer::new(0.08);
     let mut audio_frames: u64 = 0;
     let mut audio_played: u64 = 0;
+    // #73 Opus（48kHz）解码器（惰性创建；不可用时仅统计不播放）。
+    let mut opus_decoder: Option<aerodesk_ffmpeg::audio::OpusDecoder> = None;
     // #136 关键帧请求：首包/不连续/切层时向 SFU 发 PLI（节流 1s）。
     let mut last_kf_request: Option<std::time::Instant> = None;
     let mut last_kf_rid: Option<str0m::media::Rid> = None;
@@ -211,6 +220,15 @@ pub fn run_viewer_generic<D, R, DF, RF>(
         while let Some(ev) = live.endpoint.poll_event() {
             // #72 文件通道事件交给状态机（非 file 事件为 no-op）。
             file_transfer.handle_event(&ev, &mut live.endpoint);
+            // #75 远程光标：被控端经 cursor 通道广播位置 → UI 叠加（与 macOS UI 一致）。
+            if let ClientEvent::ChannelData(cid, _, data) = &ev
+                && live.endpoint.channel_label(*cid).as_deref() == Some("cursor")
+                && let Some((cx, cy)) = cursor_pos(data)
+            {
+                crate::with_session_ui_state(&ui_weak, session_idx, move |s| {
+                    s.cursor = Some((cx, cy));
+                });
+            }
             if let ClientEvent::Media(data) = ev {
                 media_evts += 1;
                 // #73 音频识别：用协商 codec（PCMU/Opus）区分，不按 mid（SFU 转发
@@ -228,6 +246,27 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                         while let Some(f) = jitter.pop(avsync.audio_time_secs()) {
                             sink.push_pcm(&f);
                             audio_played += 1;
+                        }
+                    }
+                    continue;
+                }
+                if data.params.spec().codec == str0m::format::Codec::Opus {
+                    audio_frames += 1;
+                    if opus_decoder.is_none() {
+                        opus_decoder = aerodesk_ffmpeg::audio::OpusDecoder::new().ok();
+                    }
+                    if audio_sink.is_none() {
+                        audio_sink =
+                            aerodesk_core::audio_sink::AudioSink::new_with_rate(48_000).ok();
+                    }
+                    if let (Some(dec), Some(sink)) = (&mut opus_decoder, &mut audio_sink) {
+                        if let Some(pcm) = dec.decode(&data.data).ok().flatten() {
+                            avsync.on_audio(data.time.numer(), data.time.denom());
+                            jitter.push(avsync.audio_time_secs(), pcm);
+                            while let Some(f) = jitter.pop(avsync.audio_time_secs()) {
+                                sink.push_pcm(&f);
+                                audio_played += 1;
+                            }
                         }
                     }
                     continue;
@@ -378,6 +417,19 @@ fn decide_clipboard_sync(
 
 #[cfg(test)]
 mod tests {
+
+    /// #75 远程光标 CursorPos JSON 解析（归一化坐标 + 旧端无 sent_ms 兼容）。
+    #[test]
+    fn cursor_pos_parses_normalized() {
+        let json = br#"{"x":0.5,"y":0.25,"sent_ms":123}"#;
+        assert_eq!(super::cursor_pos(json), Some((0.5, 0.25)));
+        // 旧端无 sent_ms（serde default）也能解析。
+        let old = br#"{"x":0.1,"y":0.9}"#;
+        assert_eq!(super::cursor_pos(old), Some((0.1, 0.9)));
+        assert_eq!(super::cursor_pos(b"not json"), None);
+        assert_eq!(super::cursor_pos(b""), None);
+    }
+
     use super::*;
 
     #[test]

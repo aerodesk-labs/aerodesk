@@ -17,6 +17,7 @@ members = [
     "crates/aerodesk-ffmpeg",
     "crates/aerodesk-bridge",
     "crates/aerodesk-mcp",
+    "crates/aerodesk-admin",
 ]
 
 [workspace.package]

@@ -519,6 +519,53 @@ impl i_slint_backend_winit::CustomApplicationHandler for FileDropHandler {
     }
 }
 
+/// #277 平台文件选择器（发送文件用）：macOS 原生 / Linux zenity-kdialog。
+fn pick_file() -> Result<Option<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        return aerodesk_macos::file_picker::MacFilePicker.pick_file();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return aerodesk_linux::file_picker::LinuxFilePicker.pick_file();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Err("发送文件仅 macOS/Linux 支持".into())
+    }
+}
+
+/// #277 后台线程选择文件并发送到被控端（选择器阻塞，避免卡 UI 事件循环）。
+fn pick_file_and_send(ui: slint::Weak<AppWindow>) {
+    std::thread::spawn(move || {
+        let picked = pick_file();
+        let Some(ui) = ui.upgrade() else {
+            return;
+        };
+        match picked {
+            Ok(Some(path)) => {
+                let path = path.clone();
+                let idx = ui.get_active_session() as usize;
+                let sessions = SESSIONS.lock().unwrap();
+                if let Some(s) = sessions.get(idx) {
+                    let _ = s.file_tx.send(FileCmd::SendFile(path.clone().into()));
+                    drop(sessions);
+                    ui.set_session_status(format!("发送文件：{path}").into());
+                } else {
+                    drop(sessions);
+                    ui.set_session_status("发送文件：未连接会话".into());
+                }
+            }
+            Ok(None) => {
+                ui.set_session_status("已取消选择文件".into());
+            }
+            Err(e) => {
+                ui.set_session_status(format!("发送文件：无法打开文件选择器（{e}）").into());
+            }
+        }
+    });
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     init_log();
     let drop_ui: std::sync::Arc<std::sync::Mutex<Option<slint::Weak<AppWindow>>>> =
@@ -1322,7 +1369,7 @@ fn main() -> Result<(), slint::PlatformError> {
             });
         }
     });
-    // 发文件：macOS 原生文件选择器（osascript choose file）→ file 通道 → 被控端。
+    // 发文件：平台文件选择器（macOS 原生 / Linux zenity-kdialog）→ file 通道 → 被控端。
     ui.on_send_file({
         let ui = ui.as_weak();
         move || {
@@ -1331,45 +1378,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 ui.set_session_status("发送文件：文件传输已关闭".into());
                 return;
             }
-            #[cfg(target_os = "macos")]
-            {
-                // #277 平台抽象：文件选择器走 core `FilePicker` trait。
-                // 选择器会阻塞等待用户选择，放后台线程避免卡 UI 事件循环。
-                let ui = ui.as_weak();
-                std::thread::spawn(move || {
-                    let picked = aerodesk_macos::file_picker::MacFilePicker.pick_file();
-                    let Some(ui) = ui.upgrade() else {
-                        return;
-                    };
-                    match picked {
-                        Ok(Some(path)) => {
-                            let path = path.clone();
-                            let idx = ui.get_active_session() as usize;
-                            let sessions = SESSIONS.lock().unwrap();
-                            if let Some(s) = sessions.get(idx) {
-                                let _ = s.file_tx.send(FileCmd::SendFile(path.clone().into()));
-                                drop(sessions);
-                                ui.set_session_status(format!("发送文件：{path}").into());
-                            } else {
-                                drop(sessions);
-                                ui.set_session_status("发送文件：未连接会话".into());
-                            }
-                        }
-                        Ok(None) => {
-                            ui.set_session_status("已取消选择文件".into());
-                        }
-                        Err(e) => {
-                            ui.set_session_status(
-                                format!("发送文件：无法打开文件选择器（{e}）").into(),
-                            );
-                        }
-                    }
-                });
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                ui.set_session_status("发送文件：仅 macOS 支持".into());
-            }
+            pick_file_and_send(ui.as_weak());
         }
     });
     // 发送本地剪贴板文本到被控端（macOS pbpaste / Windows Get-Clipboard / Linux arboard；其他平台 no-op）。
