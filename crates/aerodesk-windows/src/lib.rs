@@ -12,6 +12,7 @@
 #[cfg(windows)]
 pub mod audio_capture;
 pub mod capture;
+pub mod decode;
 pub mod encode;
 pub mod inject;
 pub mod vdd;
