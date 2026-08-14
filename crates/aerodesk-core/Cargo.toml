@@ -23,6 +23,8 @@ rustls-pemfile = "0.2"
 webpki-roots = "0.26"
 # #73 观看端音频播放（cpal：macOS CoreAudio / Windows WASAPI / Linux ALSA）。
 cpal = "0.15"
+# #271 剪贴板图片编解码（Linux 测试 + Windows 原生 DIB 路径共用）。
+png = "0.17"
 [target.'cfg(target_os = "linux")'.dependencies]
 # #271 Linux 剪贴板：arboard（X11 x11rb / Wayland data-control，纯 Rust 无外部命令依赖）。
 arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }

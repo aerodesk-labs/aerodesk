@@ -50,6 +50,13 @@ pub struct Endpoint {
     want_camera: bool,
     /// 摄像头方向（viewer 用 RecvOnly，publisher 用 SendRecv）。
     camera_direction: str0m::media::Direction,
+    /// SFU 重协商 offer 中「对端发送」视频 m-line 的 mid 顺序（screen→camera）。
+    /// 观看端据此确定性区分 screen/camera，而非依赖媒体到达顺序（#340：摄像头
+    /// 关键帧可能先于屏幕到达，到达序会互换）。
+    remote_send_video_mids: Vec<str0m::media::Mid>,
+    /// 本端 offer 中视频 m-line 的 mid 顺序（screen→camera，观看端 recvonly）。
+    /// 用于从远端重协商 offer 里剔除本端 m-line，得到对端新增的发送轨。
+    local_video_mids: Vec<str0m::media::Mid>,
 }
 
 impl Default for Endpoint {
@@ -79,6 +86,8 @@ impl Endpoint {
             audio_direction: str0m::media::Direction::SendRecv,
             want_camera: false,
             camera_direction: str0m::media::Direction::SendRecv,
+            remote_send_video_mids: Vec::new(),
+            local_video_mids: Vec::new(),
         }
     }
 
@@ -110,6 +119,8 @@ impl Endpoint {
             audio_direction: str0m::media::Direction::SendRecv,
             want_camera: false,
             camera_direction: str0m::media::Direction::SendRecv,
+            remote_send_video_mids: Vec::new(),
+            local_video_mids: Vec::new(),
         }
     }
 
@@ -152,6 +163,8 @@ impl Endpoint {
             audio_direction: str0m::media::Direction::SendRecv,
             want_camera: false,
             camera_direction: str0m::media::Direction::SendRecv,
+            remote_send_video_mids: Vec::new(),
+            local_video_mids: Vec::new(),
         }
     }
 
@@ -288,6 +301,8 @@ impl Endpoint {
         let (offer, pending) = change
             .apply()
             .ok_or(RtcError::Io(std::io::Error::other("no changes")))?;
+        // 记录本端视频 m-line 顺序（screen→camera），供远端重协商剔除（#340）。
+        self.local_video_mids = [video_mid, camera_mid].into_iter().flatten().collect();
         Ok((offer, pending, video_mid, audio_mid, camera_mid))
     }
 
@@ -483,11 +498,24 @@ impl Endpoint {
         self.rtc.is_alive()
     }
 
+    /// 远端（SFU）发送的视频轨 mid 顺序（screen→camera），观看端分类用。
+    pub fn remote_send_video_mids(&self) -> &[str0m::media::Mid] {
+        &self.remote_send_video_mids
+    }
+
     /// 处理数据通道里的 SDP 信令（offer/answer）。
     fn handle_signal_data(&mut self, cid: ChannelId, data: &[u8]) {
         use str0m::change::{SdpAnswer, SdpOffer};
 
         if let Ok(offer) = serde_json::from_slice::<SdpOffer>(data) {
+            // #340：SFU 重协商 offer 含「本端视频 m-line + 对端新增发送轨」。
+            // 剔除本端 mid 后，剩余视频 mid 顺序即 SFU 的 screen→camera 发送轨，
+            // 观看端据此确定性区分两条视频轨（媒体到达顺序不可靠）。
+            let sdp = offer.to_sdp_string();
+            self.remote_send_video_mids = parse_video_mids_in_order(&sdp)
+                .into_iter()
+                .filter(|m| !self.local_video_mids.contains(m))
+                .collect();
             match self.rtc.sdp_api().accept_offer(offer) {
                 Ok(answer) => {
                     let json = serde_json::to_string(&answer).expect("answer json");
@@ -542,6 +570,30 @@ impl Endpoint {
             _ => {}
         }
     }
+}
+
+/// 解析 SDP 字符串，返回视频 m-line 的 mid（按出现顺序，不论方向）。
+/// 用于配合 [`Endpoint::local_video_mids`] 剔除本端 m-line，得到远端新增发送轨。
+fn parse_video_mids_in_order(sdp: &str) -> Vec<str0m::media::Mid> {
+    use str0m::media::Mid;
+    let mut out = Vec::new();
+    let mut cur_video = false;
+    let mut cur_mid: Option<Mid> = None;
+    for line in sdp.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("m=") {
+            if cur_video && let Some(m) = cur_mid.take() {
+                out.push(m);
+            }
+            cur_video = rest.starts_with("video");
+        } else if cur_video && let Some(mid) = line.strip_prefix("a=mid:") {
+            cur_mid = Some(Mid::from(mid));
+        }
+    }
+    if cur_video && let Some(m) = cur_mid {
+        out.push(m);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -607,5 +659,22 @@ mod tests {
             sdp.contains("recvonly"),
             "viewer camera line should be recvonly"
         );
+    }
+
+    /// #340：解析视频 m-line 顺序（含本端与远端），配合剔除本端 mid 得到远端发送轨。
+    #[test]
+    fn parse_video_mids_in_order_keeps_sdp_order() {
+        let sdp = "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96 97\na=mid:MY_SCREEN\na=sendonly\n\
+m=video 9 UDP/TLS/RTP/SAVPF 102 103\na=mid:MY_CAM\na=sendonly\n\
+m=application 9 UDP/DTLS/SCTP webrtc\na=mid:data\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96 97\na=mid:SFU_SCREEN\na=sendonly\n\
+m=video 9 UDP/TLS/RTP/SAVPF 102 103\na=mid:SFU_CAM\na=sendonly\n";
+        let mids = parse_video_mids_in_order(sdp);
+        assert_eq!(mids.len(), 4);
+        assert_eq!(&*mids[0], "MY_SCREEN");
+        assert_eq!(&*mids[1], "MY_CAM");
+        assert_eq!(&*mids[2], "SFU_SCREEN");
+        assert_eq!(&*mids[3], "SFU_CAM");
     }
 }

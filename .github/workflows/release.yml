@@ -1,14 +1,17 @@
 name: Build & Release
 
-# 打 tag v* 时自动构建 macOS（签名/公证）与 Linux（deb + tar.gz）桌面端，发 GitHub Release；
-# 也可手动触发（只出产物）。
+# 打 tag v* 时自动构建 macOS（签名/公证）、Linux 与 Windows 桌面端，发 GitHub Release；
+# 也可手动触发（只出产物）；创建 pre-release 时同样触发全平台打包并回传产物。
 # 参考 ../abb 项目的 release 流水线（.github/workflows/release.yml）。
-# macOS：DMG（Developer ID + notarytool）；Linux：cargo-deb .deb + 便携 tar.gz（scripts/package-linux.sh）。
-# Windows：待 UI/WiX 落地后按本文件同构补。
+# macOS：DMG（Developer ID + notarytool）；Linux：deb/tar.gz/rpm/AppImage（scripts/package-linux.sh）。
+# Windows：便携 ZIP + WiX MSI（scripts/package-windows.sh）。
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+  release:
+    # published 覆盖 pre-release 与正式 release 的发布（prereleased 不触发草稿转发布的 pre-release）
+    types: [published]
 
 permissions:
   contents: write
@@ -132,7 +135,7 @@ jobs:
       # aerodesk-ui(Linux) → aerodesk-linux(VAAPI, ffmpeg-next) + softenc(x264)：
       # 与 CI test job 的 ubuntu System deps 一致。
       - name: System deps
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev libx264-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev libswresample-dev libpostproc-dev libavdevice-dev libpipewire-0.3-dev libspa-0.2-dev rpm
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev libasound2-dev libx264-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev libswresample-dev libpostproc-dev libavdevice-dev libpipewire-0.3-dev libspa-0.2-dev rpm
 
       - name: Build release
         run: cargo build --release -p aerodesk-ui
@@ -146,10 +149,59 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # ─────────────────────── Windows（x86_64，便携 ZIP）───────────────────────
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # workspace 里 aerodesk-sfu 的 dev-dep str0m-netem 是路径依赖（../../../str0m），
+      # cargo 解析 workspace 时必须能读到（与 CI test job 同款处理）。
+      - name: Checkout str0m (netem dev-dep)
+        shell: bash
+        run: |
+          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
+            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # aerodesk-ui/aerodesk-cli(Windows) 依赖 aerodesk-ffmpeg(ffmpeg-next)：与
+      # test job 同款 BtbN 8.1 预编译共享构建（FFMPEG_DIR + PATH）。
+      - name: System deps (Windows FFmpeg dev libs)
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-shared-8.1.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $dest = Join-Path $env:RUNNER_TEMP "ffmpeg"
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $root = (Get-ChildItem $dest -Directory | Select-Object -First 1).FullName
+          Add-Content $env:GITHUB_ENV "FFMPEG_DIR=$root"
+          Add-Content $env:GITHUB_PATH (Join-Path $root "bin")
+
+      - name: Build release (win64)
+        shell: bash
+        run: cargo build --release -p aerodesk-ui -p aerodesk-cli
+
+      - name: Package Windows (portable ZIP)
+        shell: bash
+        run: bash scripts/package-windows.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: |
+            dist/aerodesk-*-win64.zip
+            dist/aerodesk-*-win64.msi
+          if-no-files-found: error
+
   # ─────────────────────────── 汇总发 Release ───────────────────────────
   release:
-    needs: [macos, linux]
-    if: startsWith(github.ref, 'refs/tags/v') # 只有打 tag 才发 Release；手动跑只出产物
+    needs: [macos, linux, windows]
+    # tag v* 或创建 pre-release 时发 Release；workflow_dispatch 只出产物不发布
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -157,8 +209,20 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
+      # 打 tag v*：新建 Release 并自动生成 release notes
+      - name: Create release (tag push)
+        if: github.event_name != 'release'
+        uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
+          fail_on_unmatched_files: true
+
+      # release 事件（pre-release / 正式 release）：GitHub 已创建好 Release，这里只补传产物；
+      # 不设置 body/name/prerelease，softprops 会保留已有 Release 的原始信息。
+      - name: Attach assets to existing release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
           fail_on_unmatched_files: true

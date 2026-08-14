@@ -159,8 +159,9 @@ fn pump_media(
     // str0m 输出单条 AnnexB NAL；按 RTP 时间戳聚合为完整访问单元后再解码
     // （SPS/PPS 与 VCL 同帧，VideoToolbox 才能建 format description）。
     let mut assembler = AccessUnitAssembler::new();
-    // 屏幕/摄像头轨区分：SFU 转发 mid 无法与本地协商 mid 直接比对，按
-    // 「首个视频 mid=屏幕、第二个=摄像头」到达顺序区分（发布端 offer 顺序）。
+    // 屏幕/摄像头轨区分：SFU 转发 mid 无法与本地协商 mid 直接比对。
+    // 优先用 SFU 重协商 offer 的 sendonly 视频轨顺序（screen→camera，#340，
+    // 确定性）；无该信息时回退到「首个视频 mid=屏幕、第二个=摄像头」到达序。
     let mut video_mids: Vec<str0m::media::Mid> = Vec::new();
     // 冒烟诊断：ICE/收包/解码计数（模拟器 --console 可见）。
     let mut diag_pkts = 0u64;
@@ -244,7 +245,15 @@ fn pump_media(
                     if !video_mids.contains(&data.mid) {
                         video_mids.push(data.mid);
                     }
-                    let is_camera = video_mids.len() > 1 && video_mids[1] == data.mid;
+                    let is_camera = {
+                        let send_mids = session.endpoint.remote_send_video_mids();
+                        if send_mids.len() >= 2 {
+                            // #340：SFU offer 顺序确定 screen=mids[0]、camera=mids[1]。
+                            send_mids.get(1) == Some(&data.mid)
+                        } else {
+                            video_mids.len() > 1 && video_mids[1] == data.mid
+                        }
+                    };
                     let target_latest = if is_camera { &latest_camera } else { &latest };
                     let dec = if is_camera {
                         if let Some(kind) = detect_codec(data.data.as_ref()) {
