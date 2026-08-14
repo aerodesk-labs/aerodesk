@@ -233,9 +233,15 @@ fn run() {
                 println!("{c}");
             }
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
         {
-            eprintln!("--list-cameras 仅 macOS/Linux 支持");
+            for (id, name) in aerodesk_windows::camera::list_cameras() {
+                println!("{id}\t{name}");
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            eprintln!("--list-cameras 仅 macOS/Linux/Windows 支持");
             std::process::exit(1);
         }
         return;
@@ -388,6 +394,8 @@ fn run() {
                         scale_h,
                         _display as u32,
                         bitrate,
+                        camera,
+                        camera_device.clone(),
                     );
                 }
                 #[cfg(target_os = "linux")]
@@ -2876,6 +2884,8 @@ fn publisher_capture_windows(
     target_h: u32,
     display: u32,
     bitrate: u32,
+    camera: bool,
+    camera_device: Option<String>,
 ) {
     use aerodesk_core::platform::MediaSource;
     use aerodesk_windows::capture::DxgiCapturer;
@@ -2934,6 +2944,28 @@ fn publisher_capture_windows(
     } else {
         None
     };
+    // #385 摄像头（MF SourceReader）：--camera 时启动本地摄像头第二路视频轨，
+    // 失败仅告警（屏幕视频轨照常）；SourceReader 输出 RGB32/BGRA。
+    let camera_cap: Option<aerodesk_windows::camera::MfCamera> = if camera {
+        match aerodesk_windows::camera::MfCamera::new(camera_device.as_deref()) {
+            Ok(mut cam) => match cam.start(1280, 720, FPS) {
+                Ok(()) => {
+                    info!("Windows camera capture started (device={camera_device:?})");
+                    Some(cam)
+                }
+                Err(e) => {
+                    warn!("camera capture disabled: {e}");
+                    None
+                }
+            },
+            Err(e) => {
+                warn!("camera capture disabled: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     publisher_generic(
         signal_url,
         room,
@@ -2945,7 +2977,7 @@ fn publisher_capture_windows(
         capture,
         encoder,
         audio_cap,
-        None::<NoCameraCapture>,
+        camera_cap,
         // #75 远程光标：Windows 被控端真实光标位置（GetCursorPos，活动显示器归一化）。
         Some(aerodesk_windows::cursor::WindowsCursor::new(Some(
             display_rect,

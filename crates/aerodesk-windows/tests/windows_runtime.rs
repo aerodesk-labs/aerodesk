@@ -155,3 +155,39 @@ fn clipboard_text_inject_roundtrip() {
         Err(e) => eprintln!("SKIP: clipboard inject: {e}"),
     }
 }
+
+#[test]
+fn mf_camera_lists_and_captures() {
+    // #385 Windows 摄像头（MF SourceReader）：枚举 + 采集首帧（BGRA）。
+    // 无摄像头（CI/裸机）时 SKIP；有设备（如虚拟摄像头）必须出帧。
+    use aerodesk_core::platform::CameraSource;
+    let cams = aerodesk_windows::camera::list_cameras();
+    if cams.is_empty() {
+        eprintln!("SKIP: no camera device（真机/虚拟摄像头验证）");
+        return;
+    }
+    eprintln!("cameras: {cams:?}");
+    let mut cam = match aerodesk_windows::camera::MfCamera::new(Some("0")) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("SKIP: MfCamera::new: {e}");
+            return;
+        }
+    };
+    if let Err(e) = CameraSource::start(&mut cam, 640, 480, 30) {
+        eprintln!("SKIP: camera start: {e}");
+        return;
+    }
+    match CameraSource::next_frame(&mut cam) {
+        Ok(Some(f)) => {
+            assert_eq!(
+                f.raw.len() as u64,
+                f.width as u64 * f.height as u64 * 4,
+                "BGRA32 帧大小应匹配"
+            );
+            eprintln!("camera capture OK: {}x{}", f.width, f.height);
+        }
+        Ok(None) => eprintln!("SKIP: camera 首帧未就绪"),
+        Err(e) => eprintln!("SKIP: camera next_frame: {e}"),
+    }
+}
