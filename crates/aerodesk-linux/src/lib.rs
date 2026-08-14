@@ -18,6 +18,9 @@ pub mod camera;
 pub mod capture;
 /// Linux 远程命令执行器（#330「bash」平台抽象）。
 pub mod cmd;
+/// 被控端光标读取（仅 Linux；X11 QueryPointer，Wayland 无 X11 时返回 None）。
+#[cfg(target_os = "linux")]
+pub mod cursor;
 pub mod encode;
 pub mod inject;
 /// Wayland portal RemoteDesktop 输入注入（仅 Linux + feature `pipewire`）。
