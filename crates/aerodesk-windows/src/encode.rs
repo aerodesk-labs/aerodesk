@@ -154,7 +154,6 @@ impl MfH264Encoder {
             MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER,
             MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
         };
-        use windows::core::Interface;
 
         if width != self.width || height != self.height {
             return Err(format!(
@@ -386,32 +385,35 @@ unsafe fn enumerate_h264_encoder(
         std::ptr::null_mut();
     let mut count = 0u32;
     // SAFETY: MFTEnumEx 输出由 CoTaskMemFree 释放；actives 为 null 时不会解引用。
-    if MFTEnumEx(
-        windows::Win32::Media::MediaFoundation::MFT_CATEGORY_VIDEO_ENCODER,
-        flags,
-        Some(input_info as *const _),
-        Some(output_info as *const _),
-        &mut activates,
-        &mut count,
-    )
+    if unsafe {
+        MFTEnumEx(
+            windows::Win32::Media::MediaFoundation::MFT_CATEGORY_VIDEO_ENCODER,
+            flags,
+            Some(input_info as *const _),
+            Some(output_info as *const _),
+            &mut activates,
+            &mut count,
+        )
+    }
     .is_err()
     {
         return None;
     }
     // SAFETY: MFTEnumEx 成功后 activates 指向 count 个 IMFActivate 数组。
     let first = if count > 0 {
-        std::slice::from_raw_parts(activates, count as usize)
+        unsafe { std::slice::from_raw_parts(activates, count as usize) }
             .first()
             .and_then(|activate| activate.as_ref().cloned())
     } else {
         None
     };
     // SAFETY: 释放 MFTEnumEx 分配的数组。
-    CoTaskMemFree(Some(activates as *const core::ffi::c_void));
+    unsafe {
+        CoTaskMemFree(Some(activates as *const core::ffi::c_void));
+    }
     first.and_then(|activate| {
         // SAFETY: IMFActivate::ActivateObject 返回指定接口，调用后 COM 自动管理引用。
-        activate
-            .ActivateObject::<windows::Win32::Media::MediaFoundation::IMFTransform>()
+        unsafe { activate.ActivateObject::<windows::Win32::Media::MediaFoundation::IMFTransform>() }
             .ok()
     })
 }
@@ -420,21 +422,23 @@ unsafe fn enumerate_h264_encoder(
 unsafe fn read_sequence_header(
     transform: &windows::Win32::Media::MediaFoundation::IMFTransform,
 ) -> Option<Vec<u8>> {
-    let output_type = transform.GetOutputCurrentType(0).ok()?;
-    let size = output_type
-        .GetBlobSize(&windows::Win32::Media::MediaFoundation::MF_MT_MPEG_SEQUENCE_HEADER)
-        .ok()?;
+    let output_type = unsafe { transform.GetOutputCurrentType(0) }.ok()?;
+    let size = unsafe {
+        output_type.GetBlobSize(&windows::Win32::Media::MediaFoundation::MF_MT_MPEG_SEQUENCE_HEADER)
+    }
+    .ok()?;
     if size == 0 {
         return None;
     }
     let mut header = vec![0u8; size as usize];
-    output_type
-        .GetBlob(
+    unsafe {
+        output_type.GetBlob(
             &windows::Win32::Media::MediaFoundation::MF_MT_MPEG_SEQUENCE_HEADER,
             &mut header,
             None,
         )
-        .ok()?;
+    }
+    .ok()?;
     Some(header)
 }
 
