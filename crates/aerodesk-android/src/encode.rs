@@ -11,7 +11,7 @@ pub struct MediaCodecEncoder {
 }
 
 impl MediaCodecEncoder {
-    pub fn new(width: u32, height: u32, codec: Codec) -> Result<Self, String> {
+    pub fn new(_width: u32, _height: u32, _codec: Codec) -> Result<Self, String> {
         Err("android: MediaCodec encoder JNI bridge not implemented yet (P3)".into())
     }
 }

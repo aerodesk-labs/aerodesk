@@ -3,9 +3,6 @@
 //! 里程碑 1：版本 + 观看端连接（WSS 信令 + SDP 交换），供 Kotlin 壳在后台线程调用。
 //! 后续：媒体收发循环（解码帧回调）、采集、输入注入。
 
-use std::net::UdpSocket;
-use std::time::Duration;
-
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
 use jni::sys::jstring;
@@ -113,7 +110,7 @@ pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerSendInput<'loc
 /// 取最新 AnnexB H.264 帧（空数组表示暂无）。
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerTakeAnnexB<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     ptr: jlong,
 ) -> jbyteArray {
@@ -181,7 +178,7 @@ pub unsafe extern "system" fn Java_io_aerodesk_viewer_NativeBridge_publisherDest
 /// 发送一帧 AnnexB H.264（Kotlin MediaCodec 编码输出）。
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_publisherFeedAnnexB<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     ptr: jlong,
     frame: JByteArray<'local>,
@@ -213,7 +210,7 @@ pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_publisherFeedAnnexB<
 /// 取一条输入事件 JSON（观看端 → 本被控端）。空字符串表示暂无。
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_publisherTakeInput<'local>(
-    mut env: JNIEnv<'local>,
+    env: JNIEnv<'local>,
     _class: JClass<'local>,
     ptr: jlong,
 ) -> jstring {
