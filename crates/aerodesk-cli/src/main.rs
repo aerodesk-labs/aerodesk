@@ -2705,8 +2705,10 @@ fn publisher_generic<
                             }
                         }
                         if let Some(bps) = v.get("bitrate").and_then(|b| b.as_u64()) {
-                            // #267 码率反馈（与 handle_publisher_input 一致的日志语义）。
-                            info!("control: bitrate feedback -> {bps} bps");
+                            // #267 码率反馈：真实屏幕发布端（Windows/Linux）应用 BWE
+                            // 降/升档（对齐 macOS publisher_screen；FFmpeg 编码器按需重建）。
+                            encoder.set_bitrate(bps, fps);
+                            info!("control: bitrate feedback applied -> {bps} bps");
                         }
                     }
                 }
