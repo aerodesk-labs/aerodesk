@@ -118,8 +118,13 @@ async fn inject_one(
             }
         }
         InputEvent::Touch { .. } => Err("linux: portal touch injection not implemented".into()),
-        InputEvent::ClipboardText(_) => {
-            Err("linux: portal clipboard inject not implemented".into())
+        InputEvent::ClipboardText(text) => {
+            // portal 无剪贴板通道：直接写本地剪贴板（Wayland data-control / X11）。
+            if !aerodesk_core::clipboard::write(text) {
+                Err("linux: portal clipboard write failed".into())
+            } else {
+                Ok(())
+            }
         }
     }
 }

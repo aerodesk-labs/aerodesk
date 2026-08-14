@@ -22,7 +22,11 @@ pub mod cmd;
 #[cfg(target_os = "linux")]
 pub mod cursor;
 pub mod encode;
+/// 文件选择器（观看端「发送文件」；zenity/kdialog，零依赖）。
+pub mod file_picker;
 pub mod inject;
+/// 系统通知（notify-send）。
+pub mod notifier;
 /// Wayland portal RemoteDesktop 输入注入（仅 Linux + feature `pipewire`）。
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 pub mod portal_inject;
