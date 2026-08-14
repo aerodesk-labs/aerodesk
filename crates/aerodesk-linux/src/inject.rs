@@ -238,8 +238,11 @@ impl aerodesk_core::platform::InputInjector for XTestInjector {
             InputEvent::Touch { .. } => {
                 return Err("linux: touch injection not implemented".into());
             }
-            InputEvent::ClipboardText(_) => {
-                return Err("linux: clipboard inject not implemented".into());
+            InputEvent::ClipboardText(text) => {
+                // 远程剪贴板粘贴：把文本写入被控端本地剪贴板（X11/Wayland 均可，arboard）。
+                if !aerodesk_core::clipboard::write(text) {
+                    return Err("linux: clipboard write failed".into());
+                }
             }
         }
         Ok(())
@@ -827,8 +830,12 @@ impl aerodesk_core::platform::InputInjector for UinputInjector {
                 Ok(())
             }
             InputEvent::Touch { .. } => Err("linux: uinput touch injection not implemented".into()),
-            InputEvent::ClipboardText(_) => {
-                Err("linux: uinput clipboard inject not implemented".into())
+            InputEvent::ClipboardText(text) => {
+                if !aerodesk_core::clipboard::write(text) {
+                    Err("linux: uinput clipboard write failed".into())
+                } else {
+                    Ok(())
+                }
             }
         }
     }
