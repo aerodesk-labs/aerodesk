@@ -11,6 +11,8 @@
 
 #[cfg(windows)]
 pub mod audio_capture;
+#[cfg(windows)]
+pub mod autostart;
 pub mod capture;
 pub mod encode;
 pub mod inject;
