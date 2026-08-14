@@ -22,7 +22,7 @@
 | 被控端 \\ 观看端 | Web | macOS | iOS | Android | Windows | Linux |
 |---|---|---|---|---|---|---|
 | macOS | ✅(已有) | 待 | 待 | 待 | 待 | 待 |
-| Windows | ✅(CI Chrome；本机 Edge↔str0m SCTP 待修) | 待 | 待 | 待 | ✅(真机) | 待 |
+| Windows | ✅(CI Chrome + Windows Edge e2e 回归 2026-08-14) | 待 | 待 | 待 | ✅(真机) | 待 |
 | Linux | 待 | 待 | 待 | 待 | 待 | 待 |
 | Android | 待 | 待 | 待 | 待 | 待 | 待 |
 
