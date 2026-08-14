@@ -1,13 +1,16 @@
 name: Build & Release
 
 # 打 tag v* 时自动构建 macOS（签名/公证）与 Linux（deb + tar.gz）桌面端，发 GitHub Release；
+# GitHub 创建 pre-release 时同样触发三端打包，并把产物上传到该 pre-release（不新建 release）；
 # 也可手动触发（只出产物）。
 # 参考 ../abb 项目的 release 流水线（.github/workflows/release.yml）。
 # macOS：DMG（Developer ID + notarytool）；Linux：cargo-deb .deb + 便携 tar.gz（scripts/package-linux.sh）。
-# Windows：待 UI/WiX 落地后按本文件同构补。
+# Windows：便携 ZIP + WiX MSI（scripts/package-windows.sh，#7/#395）。
 on:
   push:
     tags: ["v*"]
+  release:
+    types: [prereleased]
   workflow_dispatch:
 
 permissions:
@@ -197,7 +200,8 @@ jobs:
   # ─────────────────────────── 汇总发 Release ───────────────────────────
   release:
     needs: [macos, linux, windows]
-    if: startsWith(github.ref, 'refs/tags/v') # 只有打 tag 才发 Release；手动跑只出产物
+    # tag 事件或 pre-release 事件才汇总发 Release；手动跑只出产物。
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -205,7 +209,19 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
+      # pre-release 事件：产物上传到已创建的 pre-release（不新建 tag release）。
+      - name: Upload assets to pre-release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          gh release upload "$TAG" dist/* --clobber
+
+      # tag 事件：创建正式 Release（含自动 notes）。
+      - name: Create Release
+        if: github.event_name != 'release'
+        uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
