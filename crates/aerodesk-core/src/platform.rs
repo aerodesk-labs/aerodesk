@@ -49,6 +49,14 @@ pub trait MediaSource {
     fn display_id(&self) -> Option<u32> {
         None
     }
+    /// 运行中切换采集显示器（viewer 经 control 通道请求，#58；默认不支持）。
+    fn switch_display(&mut self, _display: u32) -> Result<(), String> {
+        Err("display switch not implemented for this source".into())
+    }
+    /// 当前采集显示器在虚拟屏幕中的区域（像素 x,y,w,h；供注入/光标坐标基准同步）。
+    fn display_rect(&self) -> Option<(i32, i32, u32, u32)> {
+        None
+    }
 }
 
 /// 硬件/软件编码器（H.264 / HEVC / AV1，按平台能力选择）。
@@ -115,6 +123,8 @@ pub trait Clipboard {
 /// 光标位置源（被控端：真实光标归一化坐标 0..1，供观看端叠加层）。
 pub trait CursorSource {
     fn position_normalized(&mut self) -> Option<(f64, f64)>;
+    /// 设置坐标基准显示器区域（发布端切换显示器后由宿主同步；默认忽略）。
+    fn set_active_display(&mut self, _rect: Option<(i32, i32, u32, u32)>) {}
 }
 
 /// 系统权限能力（屏幕录制 / 辅助功能等；各平台实现）。
