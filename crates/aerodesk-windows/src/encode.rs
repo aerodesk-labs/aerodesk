@@ -223,15 +223,14 @@ impl MfH264Encoder {
                 None
             };
 
-        let mut out_buf = MFT_OUTPUT_DATA_BUFFER {
+        let mut out_bufs = [MFT_OUTPUT_DATA_BUFFER {
             dwStreamID: 0,
             pSample: std::mem::ManuallyDrop::new(output_sample),
             dwStatus: 0,
             pEvents: std::mem::ManuallyDrop::new(None),
-        };
+        }];
         let mut status = 0u32;
-        let process_result =
-            unsafe { self.transform.ProcessOutput(0, &mut [out_buf], &mut status) };
+        let process_result = unsafe { self.transform.ProcessOutput(0, &mut out_bufs, &mut status) };
         if let Err(e) = process_result {
             if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT {
                 return Ok(None);
@@ -242,7 +241,7 @@ impl MfH264Encoder {
         if (status & (MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE.0 as u32)) != 0 {
             return Ok(None);
         }
-        let sample = match (*out_buf.pSample).as_ref() {
+        let sample = match (*out_bufs[0].pSample).as_ref() {
             Some(sample) => sample.clone(),
             None => return Ok(None),
         };
