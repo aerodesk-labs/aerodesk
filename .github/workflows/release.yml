@@ -146,9 +146,55 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # ─────────────────────── Windows（x86_64，便携 ZIP）───────────────────────
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # workspace 里 aerodesk-sfu 的 dev-dep str0m-netem 是路径依赖（../../../str0m），
+      # cargo 解析 workspace 时必须能读到（与 CI test job 同款处理）。
+      - name: Checkout str0m (netem dev-dep)
+        shell: bash
+        run: |
+          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
+            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # aerodesk-ui/aerodesk-cli(Windows) 依赖 aerodesk-ffmpeg(ffmpeg-next)：与
+      # test job 同款 BtbN 8.1 预编译共享构建（FFMPEG_DIR + PATH）。
+      - name: System deps (Windows FFmpeg dev libs)
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-shared-8.1.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $dest = Join-Path $env:RUNNER_TEMP "ffmpeg"
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $root = (Get-ChildItem $dest -Directory | Select-Object -First 1).FullName
+          Add-Content $env:GITHUB_ENV "FFMPEG_DIR=$root"
+          Add-Content $env:GITHUB_PATH (Join-Path $root "bin")
+
+      - name: Build release (win64)
+        shell: bash
+        run: cargo build --release -p aerodesk-ui -p aerodesk-cli
+
+      - name: Package Windows (portable ZIP)
+        shell: bash
+        run: bash scripts/package-windows.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: dist/aerodesk-*-win64.zip
+          if-no-files-found: error
+
   # ─────────────────────────── 汇总发 Release ───────────────────────────
   release:
-    needs: [macos, linux]
+    needs: [macos, linux, windows]
     if: startsWith(github.ref, 'refs/tags/v') # 只有打 tag 才发 Release；手动跑只出产物
     runs-on: ubuntu-latest
     steps:
