@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Zig 作为 OHOS C 编译器的一个薄包装：cc-rs/CMake 会把 C 目标写为
+# `--target=aarch64-unknown-linux-ohos`，但 Zig 的 libc 只提供
+# aarch64-linux-musl，因此把 C 目标重写为 musl。
+#
+# 这仅用于让 ring/aws-lc-sys 的 C 编译步骤在没有 OHOS NDK 的机器上通过，
+# 支撑 `cargo check` / rlib 校验；最终 cdylib 链接仍需要 OHOS NDK。
+set -euo pipefail
+args=()
+for a in "$@"; do
+  case "$a" in
+    --target=aarch64-unknown-linux-ohos)
+      args+=("--target=aarch64-linux-musl")
+      ;;
+    # Zig 不支持 fortify 预处理参数；aws-lc-sys/jitterentropy 会传进来，直接丢弃。
+    -U_FORTIFY_SOURCE|-D_FORTIFY_SOURCE=*|-Wp,-U_FORTIFY_SOURCE|-Wp,-D_FORTIFY_SOURCE*)
+      ;;
+    *)
+      args+=("$a")
+      ;;
+  esac
+done
+exec zig cc "${args[@]}"

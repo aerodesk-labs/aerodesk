@@ -3,7 +3,7 @@
 //! #277：解码/渲染统一走 core `Decoder`/`Renderer` trait（泛型管线
 //! `generic_viewer::run_viewer_generic`），本模块只负责组装解码器 +
 //! SlintRenderer。Linux 优先 VAAPI 硬解（无 /dev/dri 时回退 OpenH264 软解），
-//! Windows 优先 D3D11VA/DXVA2 硬解（FFmpeg raw FFI，无 GPU 时回退 OpenH264 软解）。
+//! Windows 优先 DXVA2 硬解（无 GPU 时回退 OpenH264 软解）。
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -16,10 +16,10 @@ enum ViewerDecoder {
     Soft(aerodesk_softenc::decode::SoftDecoder),
     #[cfg(target_os = "linux")]
     Vaapi(aerodesk_linux::vaapi::VaapiDecoder),
-    // #3 Windows 观看端硬解（D3D11VA/DXVA2，FFmpeg raw FFI）；设备创建失败时
-    // 回退 OpenH264 软解（见 mk_viewer_decoder）。
+    // #3 Windows 观看端硬解（DXVA2）；设备创建失败时回退 OpenH264 软解
+    //（见 mk_viewer_decoder）。
     #[cfg(target_os = "windows")]
-    Hw(aerodesk_ffmpeg::hw_decode::FfmpegHwDecoder),
+    Dxva2(aerodesk_windows::decode::Dxva2Decoder),
 }
 
 impl aerodesk_core::platform::Decoder for ViewerDecoder {
@@ -36,7 +36,7 @@ impl aerodesk_core::platform::Decoder for ViewerDecoder {
             #[cfg(target_os = "linux")]
             Self::Vaapi(d) => aerodesk_core::platform::Decoder::configure(d, codec, width, height),
             #[cfg(target_os = "windows")]
-            Self::Hw(d) => aerodesk_core::platform::Decoder::configure(d, codec, width, height),
+            Self::Dxva2(d) => aerodesk_core::platform::Decoder::configure(d, codec, width, height),
         }
     }
 
@@ -49,7 +49,7 @@ impl aerodesk_core::platform::Decoder for ViewerDecoder {
             #[cfg(target_os = "linux")]
             Self::Vaapi(d) => aerodesk_core::platform::Decoder::decode(d, unit),
             #[cfg(target_os = "windows")]
-            Self::Hw(d) => aerodesk_core::platform::Decoder::decode(d, unit),
+            Self::Dxva2(d) => aerodesk_core::platform::Decoder::decode(d, unit),
         }
     }
 }
@@ -70,10 +70,10 @@ fn mk_viewer_decoder() -> Result<ViewerDecoder, String> {
     }
     #[cfg(target_os = "windows")]
     {
-        match aerodesk_ffmpeg::hw_decode::FfmpegHwDecoder::new() {
+        match aerodesk_windows::decode::Dxva2Decoder::new() {
             Ok(d) => {
-                tracing::info!("windows viewer: D3D11VA/DXVA2 硬解启用");
-                return Ok(ViewerDecoder::Hw(d));
+                tracing::info!("windows viewer: DXVA2 硬解启用");
+                return Ok(ViewerDecoder::Dxva2(d));
             }
             Err(e) => {
                 tracing::warn!("windows viewer: 硬件解码不可用（{e}），回退 OpenH264 软解");
@@ -93,7 +93,7 @@ fn decoder_label() -> &'static str {
     }
     #[cfg(target_os = "windows")]
     {
-        "D3D11 硬解/OpenH264 软解"
+        "DXVA2 硬解/OpenH264 软解"
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {

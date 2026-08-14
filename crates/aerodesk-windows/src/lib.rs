@@ -15,6 +15,7 @@ pub mod audio_capture;
 pub mod autostart;
 pub mod capture;
 pub mod cursor;
+pub mod decode;
 pub mod encode;
 pub mod inject;
 pub mod vdd;

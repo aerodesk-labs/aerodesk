@@ -47,9 +47,16 @@ class PublisherCapture(
                 running = false
                 return@Thread
             }
+            // 输入注入：把 Rust 发布会话指针交给已连接（或即将连接）的无障碍服务。
+            // 服务已启用时立即开始轮询；尚未启用时 onServiceConnected 会消费 pendingPtr。
+            InputInjectionService.pendingPtr = ptr
+            InputInjectionService.instance?.start(ptr)
             try {
                 runLoop(ptr)
             } finally {
+                // 必须先停输入轮询再销毁 Rust 会话，避免 publisherTakeInput 访问悬垂指针。
+                InputInjectionService.pendingPtr = 0L
+                InputInjectionService.instance?.stop()
                 bridge.publisherDestroy(ptr)
                 stop()
             }

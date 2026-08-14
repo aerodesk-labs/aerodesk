@@ -203,6 +203,8 @@ name = "aerodesk-ohos"
 version = "0.1.0"
 dependencies = [
  "aerodesk-core",
+ "aerodesk-protocol",
+ "str0m",
  "tracing",
 ]
 
@@ -274,6 +276,7 @@ dependencies = [
  "aerodesk-macos",
  "aerodesk-protocol",
  "aerodesk-softenc",
+ "aerodesk-windows",
  "embed-resource",
  "getrandom 0.2.17",
  "i-slint-backend-testing",
@@ -294,6 +297,7 @@ name = "aerodesk-windows"
 version = "0.1.0"
 dependencies = [
  "aerodesk-core",
+ "aerodesk-ffmpeg",
  "aerodesk-protocol",
  "aerodesk-softenc",
  "parsec-vdd-rust",
