@@ -135,3 +135,23 @@ fn dxgi_switch_display_invalid_keeps_capture() {
     let (w2, h2) = cap.size();
     assert_eq!((w, h), (w2, h2), "切换失败后采集应保持不变");
 }
+
+#[test]
+fn clipboard_text_inject_roundtrip() {
+    // #72/#271：SendInputInjector 的 ClipboardText 注入写入系统剪贴板（Win32）。
+    // 非交互会话 OpenClipboard 可能失败 → 跳过；成功则必须读回一致。
+    let mut inj = SendInputInjector::new();
+    let text = format!("aerodesk-clip-{}", std::process::id());
+    match InputInjector::inject(&mut inj, &InputEvent::ClipboardText(text.clone())) {
+        Ok(()) => {
+            let read = aerodesk_core::clipboard::read();
+            assert_eq!(
+                read.as_deref(),
+                Some(text.as_str()),
+                "系统剪贴板应等于注入文本"
+            );
+            eprintln!("clipboard inject roundtrip OK: {text}");
+        }
+        Err(e) => eprintln!("SKIP: clipboard inject: {e}"),
+    }
+}
