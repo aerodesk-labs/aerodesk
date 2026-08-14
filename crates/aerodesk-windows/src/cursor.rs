@@ -49,11 +49,6 @@ impl WindowsCursor {
     pub fn new(display_rect: Option<(i32, i32, u32, u32)>) -> Self {
         Self { display_rect }
     }
-
-    /// 设置活动显示器在虚拟屏幕中的区域；None 回退整个虚拟屏幕。
-    pub fn set_active_display(&mut self, rect: Option<(i32, i32, u32, u32)>) {
-        self.display_rect = rect;
-    }
 }
 
 #[cfg(windows)]
@@ -67,6 +62,11 @@ impl Default for WindowsCursor {
 impl CursorSource for WindowsCursor {
     fn position_normalized(&mut self) -> Option<(f64, f64)> {
         cursor_position_normalized(self.display_rect)
+    }
+
+    /// 切换显示器后同步坐标基准区域（#58 运行中切换；None 回退整个虚拟屏幕）。
+    fn set_active_display(&mut self, rect: Option<(i32, i32, u32, u32)>) {
+        self.display_rect = rect;
     }
 }
 

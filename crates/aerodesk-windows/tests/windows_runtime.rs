@@ -11,9 +11,15 @@ use aerodesk_core::platform::{InputInjector, MediaSource};
 use aerodesk_protocol::input::{ButtonState, InputEvent, Modifiers, MouseButton};
 use aerodesk_windows::capture::DxgiCapturer;
 use aerodesk_windows::inject::SendInputInjector;
+use std::sync::Mutex;
+
+/// 同一 output 同时只允许一个 duplication（DXGI 限制）：运行级 DXGI 测试
+/// 必须串行执行，否则并行建 duplication 的后建者会 E_INVALIDARG 假 SKIP。
+static DXGI_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn dxgi_capture_produces_frame() {
+    let _guard = DXGI_LOCK.lock().unwrap();
     let mut cap = match DxgiCapturer::new() {
         Ok(c) => c,
         Err(e) => {
@@ -91,4 +97,41 @@ fn sendinput_injects_mouse_key() {
     )
     .expect("key up");
     eprintln!("sendinput inject OK");
+}
+
+#[test]
+fn dxgi_switch_display_same_display_ok() {
+    // #58 运行中切换显示器：切到同一显示器应成功且输出尺寸保持。
+    let _guard = DXGI_LOCK.lock().unwrap();
+    let mut cap = match DxgiCapturer::new() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("SKIP: DXGI init failed: {e}");
+            return;
+        }
+    };
+    let (w, h) = cap.size();
+    // 同屏切换必须成功（先释放旧 duplication 再重建；失败视为缺陷，不跳过）。
+    cap.switch_display(0)
+        .expect("switch to same display should succeed");
+    let (w2, h2) = cap.size();
+    assert!(w2 > 0 && h2 > 0, "切换后输出尺寸应 > 0: {w2}x{h2}");
+    eprintln!("dxgi switch to same display OK: {w}x{h} -> {w2}x{h2}");
+}
+
+#[test]
+fn dxgi_switch_display_invalid_keeps_capture() {
+    // #58：切换失败必须保持原采集不变（不破坏进行中的会话）。
+    let _guard = DXGI_LOCK.lock().unwrap();
+    let mut cap = match DxgiCapturer::new_with_scale(640, 360) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("SKIP: DXGI init failed: {e}");
+            return;
+        }
+    };
+    let (w, h) = cap.size();
+    assert!(cap.switch_display(9999).is_err(), "无效显示器索引应报错");
+    let (w2, h2) = cap.size();
+    assert_eq!((w, h), (w2, h2), "切换失败后采集应保持不变");
 }

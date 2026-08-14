@@ -2675,6 +2675,41 @@ fn publisher_generic<
                 ClientEvent::KeyframeRequest(_) => {
                     encoder.request_keyframe();
                 }
+                // #58 显示器切换：viewer 经 control 通道请求 → 运行中切换采集源
+                // （Windows DxgiCapturer 重建；其余源默认不支持则告警保持现状）。
+                ClientEvent::ChannelData(cid, _, data)
+                    if endpoint.channel_label(cid).as_deref() == Some("control") =>
+                {
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&data) {
+                        if let Some(n) = v.get("display").and_then(|d| d.as_u64()) {
+                            match source.switch_display(n as u32) {
+                                Ok(()) => {
+                                    info!("display switch -> display {n}");
+                                    // #75：切换后同步注入坐标与光标基准到新显示器区域。
+                                    #[cfg(target_os = "windows")]
+                                    {
+                                        if let Some(rect) = source.display_rect() {
+                                            if let Ok(mut guard) = ACTIVE_DISPLAY_RECT.lock() {
+                                                *guard = Some(rect);
+                                            }
+                                            if let Some(c) = &mut cursor {
+                                                aerodesk_core::platform::CursorSource::
+                                                    set_active_display(c, Some(rect));
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("display switch failed（保持当前显示器）: {e}");
+                                }
+                            }
+                        }
+                        if let Some(bps) = v.get("bitrate").and_then(|b| b.as_u64()) {
+                            // #267 码率反馈（与 handle_publisher_input 一致的日志语义）。
+                            info!("control: bitrate feedback -> {bps} bps");
+                        }
+                    }
+                }
                 ev => handle_publisher_input(&mut endpoint, ev),
             }
         }
