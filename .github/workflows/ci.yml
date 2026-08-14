@@ -416,6 +416,22 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # #3/#378：aerodesk-ui 自全平台依赖 aerodesk-ffmpeg 起，Windows 构建需
+      # FFmpeg 开发库（与 test job 同款 BtbN 8.1 预编译包），否则 ffmpeg-sys-next
+      # build 失败（Windows UI e2e 无法验证观看端）。
+      - name: System deps (Windows FFmpeg dev libs)
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-shared-8.1.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $dest = Join-Path $env:RUNNER_TEMP "ffmpeg"
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $root = (Get-ChildItem $dest -Directory | Select-Object -First 1).FullName
+          Add-Content $env:GITHUB_ENV "FFMPEG_DIR=$root"
+          Add-Content $env:GITHUB_PATH (Join-Path $root "bin")
+
       - name: Run Windows UI e2e
         shell: bash
         run: bash scripts/windows-ui-e2e.sh

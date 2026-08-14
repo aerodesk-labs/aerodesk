@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AeroDesk Admin</title>
+<style>
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { font-family: -apple-system, "Segoe UI", sans-serif; margin: 0; padding: 16px; background: #f5f6f8; color: #1a1a1a; }
+header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+h1 { font-size: 18px; margin: 0; }
+#refresh { font-size: 12px; color: #666; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; margin: 16px 0; }
+.card { background: #fff; border: 1px solid #e1e4e8; border-radius: 8px; padding: 12px; }
+.card .k { font-size: 12px; color: #666; }
+.card .v { font-size: 22px; font-weight: 600; margin-top: 4px; }
+.card .v.ok { color: #1a7f37; }
+.card .v.bad { color: #cf222e; }
+.panel { background: #fff; border: 1px solid #e1e4e8; border-radius: 8px; padding: 12px; margin-bottom: 16px; }
+.panel h2 { font-size: 14px; margin: 0 0 8px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #eee; }
+th { color: #666; font-weight: 500; }
+button { font-size: 12px; padding: 3px 8px; border: 1px solid #d0d7de; background: #f6f8fa; border-radius: 5px; cursor: pointer; }
+button:hover { background: #eef1f4; }
+button.danger { color: #cf222e; border-color: #f0c8c8; }
+button.primary { background: #0969da; border-color: #0969da; color: #fff; }
+button.primary:hover { background: #0756b8; }
+input { font-size: 12px; padding: 3px 6px; border: 1px solid #d0d7de; border-radius: 5px; width: 120px; }
+.muted { color: #888; }
+</style>
+</head>
+<body>
+<header>
+  <h1>AeroDesk Admin</h1>
+  <span id="refresh">刷新中…</span>
+  <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
+    <input id="token" type="password" placeholder="ADMIN_TOKEN" style="width:160px" onchange="saveToken(this.value)">
+    <button onclick="saveToken($('token').value)">保存</button>
+  </span>
+</header>
+
+<div class="grid">
+  <div class="card"><div class="k">SFU 健康</div><div class="v" id="s-sfu">-</div></div>
+  <div class="card"><div class="k">Signal 健康</div><div class="v" id="s-sig">-</div></div>
+  <div class="card"><div class="k">SFU 客户端</div><div class="v" id="m-clients">-</div></div>
+  <div class="card"><div class="k">客户端/分片</div><div class="v" id="m-clients-by-shard" style="font-size:13px">-</div></div>
+  <div class="card"><div class="k">活跃录制</div><div class="v" id="m-recording">-</div></div>
+  <div class="card"><div class="k">TURN 分配</div><div class="v" id="m-turn">-</div></div>
+  <div class="card"><div class="k">分片负载</div><div class="v" id="m-load" style="font-size:13px">-</div></div>
+  <div class="card"><div class="k">Draining</div><div class="v" id="m-draining">-</div></div>
+</div>
+
+<div class="panel">
+  <h2>房间（每 5s 刷新）</h2>
+  <table><thead><tr><th>Room</th><th>Clients</th><th>Shards</th><th></th></tr></thead>
+  <tbody id="rooms"><tr><td colspan="4" class="muted">加载中…</td></tr></tbody></table>
+</div>
+
+<div class="panel">
+  <h2>客户端</h2>
+  <table><thead><tr><th>Room</th><th>ID</th><th>Role</th><th>Shard</th><th>Uptime</th><th></th></tr></thead>
+  <tbody id="clients"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody></table>
+</div>
+
+<div class="panel">
+  <h2>录制</h2>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+    <input id="rec-room" placeholder="房间名">
+    <button class="primary" onclick="record('start')">开始录制</button>
+    <button onclick="record('stop')">停止录制</button>
+  </div>
+  <table><thead><tr><th>Room</th><th>Path</th><th>Started</th><th>Packets</th><th>Bytes</th></tr></thead>
+  <tbody id="recordings"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody></table>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let adminToken = localStorage.getItem('adminToken') || '';
+if (adminToken) $('token').value = adminToken;
+function saveToken(v) { adminToken = v.trim(); localStorage.setItem('adminToken', adminToken); }
+async function apiFetch(url, opts = {}) {
+  opts.headers = Object.assign({}, opts.headers || {});
+  if (adminToken) opts.headers['X-Admin-Token'] = adminToken;
+  const r = await fetch(url, opts);
+  if (r.status === 401) {
+    const t = prompt('需要 ADMIN_TOKEN（401）：');
+    if (t !== null) { saveToken(t); opts.headers['X-Admin-Token'] = adminToken; return fetch(url, opts); }
+  }
+  return r;
+}
+const fmtUptime = us => { const s = Math.floor((us||0)/1e6); return `${Math.floor(s/3600)}h${Math.floor(s%3600/60)}m${s%60}s`; };
+
+const shardMap = (m) => {
+  if (!m || !Object.keys(m).length) return '-';
+  return Object.entries(m).map(([k,v]) => `#${k}:${v}`).join(' ');
+};
+
+async function load() {
+  const t0 = Date.now();
+  try {
+    const [sfu, sig, rooms, clients, recs, metrics] = await Promise.all([
+      apiFetch('/api/health').then(r => r.json()).catch(() => null),
+      apiFetch('/api/signal-health').then(r => r.json()).catch(() => null),
+      apiFetch('/api/rooms').then(r => r.json()).catch(() => null),
+      apiFetch('/api/clients').then(r => r.json()).catch(() => null),
+      apiFetch('/api/recordings').then(r => r.json()).catch(() => null),
+      apiFetch('/api/metrics').then(r => r.json()).catch(() => null),
+    ]);
+
+    setHealth('s-sfu', sfu);
+    setHealth('s-sig', sig);
+    $('m-clients').textContent = metrics?.clients ?? (sfu?.clients ?? '-');
+    $('m-clients-by-shard').textContent = shardMap(metrics?.clients_by_shard);
+    $('m-recording').textContent = metrics?.recordings_active ?? '-';
+    $('m-turn').textContent = metrics?.turn_allocations ?? '-';
+    $('m-load').textContent = shardMap(metrics?.shard_load);
+    $('m-draining').textContent = metrics?.draining ?? (sfu?.status === 'draining' ? 'yes' : 'no');
+
+    renderRooms(rooms?.rooms || []);
+    renderClients(clients?.clients || []);
+    renderRecordings(recs?.recordings || []);
+  } catch (e) {
+    console.error(e);
+  }
+  $('refresh').textContent = `刷新于 ${new Date().toLocaleTimeString()}（${Date.now()-t0}ms）`;
+}
+
+function setHealth(id, h) {
+  const el = $(id);
+  if (!h) { el.textContent = 'offline'; el.className = 'v bad'; return; }
+  el.textContent = h.status || 'ok';
+  el.className = 'v ' + (h.status === 'ok' ? 'ok' : 'bad');
+}
+
+function renderRooms(rooms) {
+  const tb = $('rooms');
+  if (!rooms.length) { tb.innerHTML = '<tr><td colspan="4" class="muted">无房间</td></tr>'; return; }
+  tb.innerHTML = rooms.map(r => `<tr>
+    <td>${esc(r.room)}</td><td>${r.clients ?? '-'}</td><td>${esc((r.shards||[]).join(','))}</td>
+    <td><button class="danger" onclick="kickRoom('${esc(r.room)}')">踢房间</button></td>
+  </tr>`).join('');
+}
+
+function renderClients(clients) {
+  const tb = $('clients');
+  if (!clients.length) { tb.innerHTML = '<tr><td colspan="6" class="muted">无客户端</td></tr>'; return; }
+  tb.innerHTML = clients.map(c => `<tr>
+    <td>${esc(c.room)}</td><td>${c.id}</td><td>${esc(c.role)}</td><td>${c.shard}</td>
+    <td>${fmtUptime(c.uptime_us)}</td>
+    <td><button class="danger" onclick="kickClient('${esc(c.room)}',${c.id})">踢出</button></td>
+  </tr>`).join('');
+}
+
+function renderRecordings(recs) {
+  const tb = $('recordings');
+  if (!recs.length) { tb.innerHTML = '<tr><td colspan="5" class="muted">无录制</td></tr>'; return; }
+  tb.innerHTML = recs.map(r => `<tr>
+    <td>${esc(r.room)}</td><td class="muted">${esc(r.path)}</td><td>${r.started_at ?? '-'}</td>
+    <td>${r.packets ?? '-'}</td><td>${r.bytes ?? '-'}</td>
+  </tr>`).join('');
+}
+
+async function kickRoom(room) {
+  if (!confirm(`踢出整个房间 ${room}？`)) return;
+  await apiFetch(`/api/kick?room=${encodeURIComponent(room)}`, { method: 'POST' });
+  load();
+}
+async function kickClient(room, client) {
+  if (!confirm(`踢出 ${room} 的客户端 ${client}？`)) return;
+  await apiFetch(`/api/kick?room=${encodeURIComponent(room)}&client=${client}`, { method: 'POST' });
+  load();
+}
+async function record(action) {
+  const room = $('rec-room').value.trim();
+  if (!room) { alert('请填写房间名'); return; }
+  await apiFetch(`/api/record/${action}?room=${encodeURIComponent(room)}`, { method: 'POST' });
+  load();
+}
+
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>
