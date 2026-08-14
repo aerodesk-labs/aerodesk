@@ -36,7 +36,23 @@ AeroDesk Windows 便携包（$VERSION）
   请保持 exe 与 DLL 同目录；Windows 10/11 x64。
 EOF
 
-echo "== [3/3] 压缩 ZIP"
+echo "== [3/4] 构建 MSI（WiX 4.0.5，dotnet tool wix；不可用时跳过仅出 ZIP）"
+if ! command -v wix >/dev/null 2>&1; then
+  # 固定 4.0.5：WiX v7 引入 OSMF 许可门禁，自动 CI 不可用；v4 为 MIT。
+  dotnet tool install --global wix --version 4.0.5 >/dev/null 2>&1 || true
+  export PATH="$HOME/.dotnet/tools:$PATH"
+fi
+if command -v wix >/dev/null 2>&1; then
+  wix build packaging/windows/AeroDesk.wxs \
+    -o "dist/aerodesk-$VERSION-win64.msi" \
+    -d "Version=$VERSION" -d "BuildDir=$STAGE" \
+    >/tmp/aerodesk-wix.log 2>&1 \
+    || { echo "wix build 失败："; tail -30 /tmp/aerodesk-wix.log; exit 1; }
+else
+  echo "WARN: wix 不可用，跳过 MSI（仅产 ZIP）"
+fi
+
+echo "== [4/4] 压缩 ZIP"
 if command -v python3 >/dev/null 2>&1; then
   python3 -m zipfile -c "dist/aerodesk-$VERSION-win64.zip" "$STAGE"
 else
@@ -44,4 +60,4 @@ else
 fi
 rm -rf "$STAGE"
 echo "== 产物 =="
-ls -lh dist/aerodesk-$VERSION-win64.zip
+ls -lh dist/aerodesk-$VERSION-win64.*
