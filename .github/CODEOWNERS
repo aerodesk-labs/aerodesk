@@ -1,0 +1,4 @@
+# 默认 code owner（#427）：gqf2008 + aerodesk-io 服务账号。
+# 任一 owner approve 即满足 code owner review；作者本人不能 approve 自己，
+# 双 owner 覆盖任一账号作为 PR 作者的情形。
+* @gqf2008 @aerodesk-io
