@@ -297,7 +297,14 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                         match mk_decoder() {
                             Ok(d) => decoder = Some(d),
                             Err(e) => {
+                                // 与正常退出路径一致：先清理会话注册表与 UI 槽位，
+                                // 否则会话残留（标签卡住、无法再次连接该槽位）。
                                 eprintln!("decoder init failed: {e}");
+                                crate::session_cleanup_weak(
+                                    &ui_weak,
+                                    session_idx,
+                                    Some(format!("解码器初始化失败：{e}")),
+                                );
                                 return;
                             }
                         }

@@ -56,12 +56,13 @@ impl UiDecoder {
     }
 
     fn matches(&self, codec: Codec) -> bool {
-        matches!(
-            (self, codec),
-            (UiDecoder::H264(_), Codec::H264)
-                | (UiDecoder::Hevc(_), Codec::Hevc)
-                | (UiDecoder::Ffmpeg(_), Codec::Vp9 | Codec::Av1 | Codec::Hevc)
-        )
+        match self {
+            UiDecoder::H264(_) => codec == Codec::H264,
+            UiDecoder::Hevc(_) => codec == Codec::Hevc,
+            // FfmpegDecoder 按单一 codec 打开：仅 codec 一致才可复用，
+            // 否则 VP9↔AV1↔H265 切换会误用旧解码器解出新流（花屏/失败）。
+            UiDecoder::Ffmpeg(d) => d.codec() == codec,
+        }
     }
 
     fn decode_rgba(
@@ -490,9 +491,8 @@ pub fn run_viewer(
                                     "macos viewer: 摄像头轨已接收 (mid={:?} codec={:?})",
                                     data.mid, cc
                                 );
-                                if let Some(fui) = ui_weak.upgrade() {
-                                    fui.set_camera_available(true);
-                                }
+                                // 跨线程 upgrade() 恒 None：经 with_ui 排队到 UI 线程。
+                                with_ui(&ui_weak, |ui| ui.set_camera_available(true));
                             }
                             // #136 首包 / 不连续 / 切层 → 请求关键帧（PLI，节流 1s）。
                             // SFU 收到后按当前 chosen_rid 转发给发布端强制 IDR。
@@ -610,11 +610,16 @@ pub fn run_viewer(
         }
         // #73 A/V 同步渲染：音频活跃时视频不超前 >50ms；无音频时立即渲染兜底。
         // 摄像头视图：优先展示摄像头帧（未出帧时回退屏幕帧，避免黑屏）。
+        // 未到渲染时间的帧必须放回「来源槽」：摄像头帧存回 camera_pending，
+        // 否则提前到达的摄像头帧会占住屏幕帧槽，下一轮被误当屏幕帧渲染。
         let show_cam = show_camera.load(Ordering::SeqCst);
-        let frame = if show_cam {
-            camera_pending.take().or_else(|| pending_frame.take())
+        let (frame, from_camera) = if show_cam {
+            match camera_pending.take() {
+                Some(f) => (Some(f), true),
+                None => (pending_frame.take(), false),
+            }
         } else {
-            pending_frame.take()
+            (pending_frame.take(), false)
         };
         if let Some((rgba, w, h, vtime)) = frame {
             let audio_active = last_audio.elapsed() < Duration::from_millis(500);
@@ -628,6 +633,8 @@ pub fn run_viewer(
                     session_idx,
                     &mut frames,
                 );
+            } else if from_camera {
+                camera_pending = Some((rgba, w, h, vtime));
             } else {
                 pending_frame = Some((rgba, w, h, vtime));
             }

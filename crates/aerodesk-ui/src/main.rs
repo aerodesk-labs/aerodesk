@@ -140,6 +140,10 @@ pub static ACTIVE_SESSION: std::sync::atomic::AtomicI32 = std::sync::atomic::Ato
 /// 文件传输总开关镜像（viewer 线程读；跨线程无法升级 UI 属性）。
 pub static FILE_TRANSFER_ENABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(true);
+/// 键鼠捕获开关镜像（on_toggle_input 写，输入转发回调读）：
+/// 工具栏「输入」按钮控制——未捕获时鼠标/键盘/滚轮不转发被控端（F3）。
+pub static INPUT_CAPTURING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 /// 会话相关测试共享锁：多会话 e2e 与无头 UI 状态测试都操作全局 SESSIONS，
 /// 必须串行执行避免互相污染。
 #[cfg(test)]
@@ -316,6 +320,8 @@ pub fn session_refresh_ui(ui: &AppWindow) {
         ui.set_in_session(false);
         ui.set_conn_state(0);
         ui.set_video_frame(slint::Image::default());
+        // 会话全部结束：键鼠捕获状态随标签文案一并复位。
+        INPUT_CAPTURING.store(false, Ordering::SeqCst);
         ui.set_input_mode("键鼠已释放".into());
         ui.set_remote_cursor_visible(false);
         ui.set_frame_w(0.0);
@@ -539,12 +545,9 @@ fn pick_file() -> Result<Option<String>, String> {
 fn pick_file_and_send(ui: slint::Weak<AppWindow>) {
     std::thread::spawn(move || {
         let picked = pick_file();
-        let Some(ui) = ui.upgrade() else {
-            return;
-        };
-        match picked {
+        // Slint 1.17 Weak::upgrade() 跨线程恒 None：选择结果经 with_ui 排队回 UI 线程。
+        with_ui(&ui, move |ui| match picked {
             Ok(Some(path)) => {
-                let path = path.clone();
                 let idx = ui.get_active_session() as usize;
                 let sessions = SESSIONS.lock().unwrap();
                 if let Some(s) = sessions.get(idx) {
@@ -562,7 +565,7 @@ fn pick_file_and_send(ui: slint::Weak<AppWindow>) {
             Err(e) => {
                 ui.set_session_status(format!("发送文件：无法打开文件选择器（{e}）").into());
             }
-        }
+        });
     });
 }
 
@@ -657,7 +660,9 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui = ui.as_weak();
         move || {
             let ui = ui.unwrap();
-            copy_to_clipboard(&ui.get_device_id().to_string());
+            let text = ui.get_device_id().to_string();
+            // pbcopy/xclip/clip 会阻塞，放后台线程避免卡 UI 事件循环。
+            std::thread::spawn(move || copy_to_clipboard(&text));
             ui.set_status("本机 ID 已复制".into());
         }
     });
@@ -665,7 +670,8 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui = ui.as_weak();
         move || {
             let ui = ui.unwrap();
-            copy_to_clipboard(&ui.get_device_pw().to_string());
+            let text = ui.get_device_pw().to_string();
+            std::thread::spawn(move || copy_to_clipboard(&text));
             ui.set_status("密码已复制".into());
         }
     });
@@ -776,9 +782,8 @@ fn main() -> Result<(), slint::PlatformError> {
                             stop,
                         );
                     }
-                    if let Some(ui) = weak2.upgrade() {
-                        ui.set_connecting(false);
-                    }
+                    // 跨线程 upgrade() 恒 None：经 with_ui 排队到 UI 线程复位连接中状态。
+                    with_ui(&weak2, |ui| ui.set_connecting(false));
                 })
                 .expect("spawn viewer thread");
         }
@@ -801,6 +806,7 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             if stopped {
                 ui.set_status("正在断开当前会话…".into());
+                INPUT_CAPTURING.store(false, Ordering::SeqCst);
                 ui.set_input_mode("键鼠已释放".into());
                 ui.set_remote_cursor_visible(false);
             } else {
@@ -822,21 +828,37 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     // #29 多会话：输入/控制/文件/静音/音量全部按“活动会话”路由（SESSIONS[idx]）。
+    // F3：键鼠未捕获时不转发（工具栏「输入」开关控制）；F4：转发实际按键（左/中/右）。
     ui.on_send_input({
         let weak = ui.as_weak();
-        move |kind: i32, mx: f32, my: f32, area_w: f32, area_h: f32, fw: f32, fh: f32| {
-            let ui = weak.unwrap();
+        move |kind: i32,
+              button: i32,
+              mx: f32,
+              my: f32,
+              area_w: f32,
+              area_h: f32,
+              fw: f32,
+              fh: f32| {
+            if !INPUT_CAPTURING.load(Ordering::SeqCst) {
+                return; // 键鼠已释放：本地操作不注入被控端
+            }
             // 主控/被控宽高比不同时视频区有 letterbox：先扣黑边再归一化。
             let (x, y) = viewer_to_remote_norm(mx, my, area_w, area_h, fw, fh);
+            // 按键：0=左键（默认，含 Move）1=中键 2=右键。
+            let button = match button {
+                1 => aerodesk_protocol::input::MouseButton::Middle,
+                2 => aerodesk_protocol::input::MouseButton::Right,
+                _ => aerodesk_protocol::input::MouseButton::Left,
+            };
             let event = match kind {
                 1 => aerodesk_protocol::input::InputEvent::MouseButton {
-                    button: aerodesk_protocol::input::MouseButton::Left,
+                    button,
                     state: aerodesk_protocol::input::ButtonState::Pressed,
                     x: x as f64,
                     y: y as f64,
                 },
                 2 => aerodesk_protocol::input::InputEvent::MouseButton {
-                    button: aerodesk_protocol::input::MouseButton::Left,
+                    button,
                     state: aerodesk_protocol::input::ButtonState::Released,
                     x: x as f64,
                     y: y as f64,
@@ -849,6 +871,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
             let frame = aerodesk_protocol::input::InputFrame::new(seq, event);
             if let Ok(json) = serde_json::to_string(&frame) {
+                let ui = weak.unwrap();
                 let sessions = SESSIONS.lock().unwrap();
                 let idx = ui.get_active_session() as usize;
                 if let Some(s) = sessions.get(idx) {
@@ -863,6 +886,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // modifiers.meta（builtin_structs），此处映射回协议语义（meta=Command）。
     ui.on_send_key({
         // 返回是否已处理：未映射的键 reject，让本地 UI 继续处理。
+        // F3：键鼠未捕获时不转发；捕获中 Esc 不转发、只用于释放键鼠。
         let weak = ui.as_weak();
         move |state: i32,
               text: slint::SharedString,
@@ -874,6 +898,14 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(code) = keymap::key_code_for_text(text.as_str()) else {
                 return false;
             };
+            if !INPUT_CAPTURING.load(Ordering::SeqCst) {
+                return false; // 键鼠已释放：按键不注入被控端，交回本地 UI
+            }
+            if code == "Escape" {
+                // 捕获中 Esc = 释放键鼠（与工具栏「输入」按钮同一动作），不转发被控端。
+                weak.unwrap().invoke_toggle_input();
+                return true;
+            }
             let state = if state == 0 {
                 aerodesk_protocol::input::ButtonState::Pressed
             } else {
@@ -916,6 +948,9 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_send_wheel({
         let weak = ui.as_weak();
         move |mx: f32, my: f32, area_w: f32, area_h: f32, fw: f32, fh: f32, dx: f32, dy: f32| {
+            if !INPUT_CAPTURING.load(Ordering::SeqCst) {
+                return; // 键鼠已释放：滚轮不注入被控端
+            }
             let (x, y) = viewer_to_remote_norm(mx, my, area_w, area_h, fw, fh);
             let event = aerodesk_protocol::input::InputEvent::Wheel {
                 x: x as f64,
@@ -1073,7 +1108,8 @@ fn main() -> Result<(), slint::PlatformError> {
             let weak = ui.as_weak();
             std::thread::spawn(move || {
                 let found = scan_lan();
-                if let Some(ui) = weak.upgrade() {
+                // 跨线程 upgrade() 恒 None：扫描结果经 with_ui 排队回 UI 线程。
+                with_ui(&weak, move |ui| {
                     let model = ui.get_discovered();
                     let mut items: Vec<String> = (0..model.row_count())
                         .filter_map(|i| model.row_data(i))
@@ -1087,7 +1123,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     let new: Vec<slint::SharedString> = items.iter().map(|s| s.into()).collect();
                     ui.set_discovered(slint::ModelRc::new(slint::VecModel::from(new.clone())));
                     ui.set_status(format!("扫描完成：发现 {} 台", found.len()).into());
-                }
+                });
             });
         }
     });
@@ -1321,6 +1357,9 @@ fn main() -> Result<(), slint::PlatformError> {
         move || {
             let ui = ui.unwrap();
             let captured = ui.get_input_mode().contains("捕获");
+            // F3：状态落全局镜像，鼠标/键盘/滚轮转发回调按此门控；
+            // 捕获中按 Esc 也走这里释放（on_send_key 转发 invoke_toggle_input）。
+            INPUT_CAPTURING.store(!captured, Ordering::SeqCst);
             ui.set_input_mode(if captured {
                 "键鼠已释放".into()
             } else {
@@ -1395,43 +1434,48 @@ fn main() -> Result<(), slint::PlatformError> {
                 // pbpaste/Get-Clipboard/arboard 会阻塞，放后台线程避免卡 UI 事件循环。
                 let ui = ui.as_weak();
                 std::thread::spawn(move || {
-                    let Some(ui) = ui.upgrade() else {
-                        return;
-                    };
                     // #271：剪贴板有图片时优先发图片（PNG），否则发文本。
+                    // 阻塞读取在本线程完成；UI 更新经 with_ui 排队回 UI 线程
+                    //（跨线程 upgrade() 恒 None）。
                     if let Some(png) = aerodesk_core::clipboard::read_image() {
-                        let idx = ui.get_active_session() as usize;
-                        let sessions = SESSIONS.lock().unwrap();
-                        if let Some(s) = sessions.get(idx) {
-                            let _ = s.file_tx.send(FileCmd::SendClipboardImage(png));
-                            drop(sessions);
-                            ui.set_session_status("已发送剪贴板图片到被控端".into());
-                        } else {
-                            drop(sessions);
-                            ui.set_session_status("剪贴板：未连接会话".into());
-                        }
-                        return;
-                    }
-                    match aerodesk_core::clipboard::read() {
-                        Some(text) if !text.is_empty() => {
+                        with_ui(&ui, move |ui| {
                             let idx = ui.get_active_session() as usize;
                             let sessions = SESSIONS.lock().unwrap();
                             if let Some(s) = sessions.get(idx) {
-                                let _ = s.file_tx.send(FileCmd::SendClipboard(text.clone()));
+                                let _ = s.file_tx.send(FileCmd::SendClipboardImage(png));
                                 drop(sessions);
-                                ui.set_session_status("已发送剪贴板到被控端".into());
+                                ui.set_session_status("已发送剪贴板图片到被控端".into());
                             } else {
                                 drop(sessions);
                                 ui.set_session_status("剪贴板：未连接会话".into());
                             }
+                        });
+                        return;
+                    }
+                    match aerodesk_core::clipboard::read() {
+                        Some(text) if !text.is_empty() => {
+                            with_ui(&ui, move |ui| {
+                                let idx = ui.get_active_session() as usize;
+                                let sessions = SESSIONS.lock().unwrap();
+                                if let Some(s) = sessions.get(idx) {
+                                    let _ = s.file_tx.send(FileCmd::SendClipboard(text));
+                                    drop(sessions);
+                                    ui.set_session_status("已发送剪贴板到被控端".into());
+                                } else {
+                                    drop(sessions);
+                                    ui.set_session_status("剪贴板：未连接会话".into());
+                                }
+                            });
                         }
                         _ => {
-                            ui.set_session_status("剪贴板为空".into());
+                            with_ui(&ui, |ui| {
+                                ui.set_session_status("剪贴板为空".into());
+                            });
                         }
                     }
                 });
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
             {
                 ui.set_session_status("剪贴板：仅 macOS/Windows/Linux 支持".into());
             }
