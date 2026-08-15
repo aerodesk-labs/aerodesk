@@ -13,6 +13,7 @@ use aerodesk_core::connect::connect_live_role_with_camera;
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media_pipeline::Codec;
 use aerodesk_macos::decode::{H264Decoder, HevcDecoder, to_rgba};
+use aerodesk_protocol::cmd::CmdRequest;
 use aerodesk_protocol::signal::Role;
 use str0m::net::Protocol;
 
@@ -174,6 +175,7 @@ pub fn run_viewer(
     session_idx: usize,
     control_rx: std::sync::mpsc::Receiver<String>,
     input_rx: std::sync::mpsc::Receiver<String>,
+    cmd_rx: std::sync::mpsc::Receiver<CmdRequest>,
     file_cmd_rx: std::sync::mpsc::Receiver<FileCmd>,
     muted: Arc<AtomicBool>,
     volume: Arc<AtomicU16>,
@@ -353,6 +355,14 @@ pub fn run_viewer(
                 .endpoint
                 .send_channel_data("control", false, req.as_bytes());
         }
+        // #109/#452 终端命令：UI 终端窗口 → cmd data channel → SFU → 被控端执行。
+        while let Ok(req) = cmd_rx.try_recv() {
+            if let Ok(json) = serde_json::to_string(&req) {
+                let _ = live
+                    .endpoint
+                    .send_channel_data("cmd", false, json.as_bytes());
+            }
+        }
         // #72 文件/剪贴板命令（UI 工具栏按钮）。
         while let Ok(cmd) = file_cmd_rx.try_recv() {
             match cmd {
@@ -399,6 +409,17 @@ pub fn run_viewer(
             // 开关关闭时跳过：不处理 Meta/Chunk/Done，绝不落盘。
             if ft_enabled {
                 file_transfer.handle_event(&ev, &mut live.endpoint);
+            }
+            // #109/#452 终端命令响应 → 终端独立窗口回显。
+            if let ClientEvent::ChannelData(cid, _, data) = &ev
+                && live.endpoint.channel_label(cid).as_deref() == Some("cmd")
+                && let Ok(response) =
+                    serde_json::from_slice::<aerodesk_protocol::cmd::CmdResponse>(data)
+            {
+                crate::append_terminal_output(
+                    session_idx,
+                    crate::generic_viewer::format_cmd_response(&response),
+                );
             }
             match ev {
                 ClientEvent::Media(data) => {
@@ -680,38 +701,60 @@ pub fn run_viewer(
                 last_file_status = Instant::now();
                 let st = file_transfer.status();
                 if let Some(msg) = st.message {
-                    with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                    with_ui(&ui_weak, move |ui| {
+                        ui.set_session_status(msg.clone().into())
+                    });
                     crate::with_session_ui_state(&ui_weak, session_idx, |s| {
                         s.file_progress = -1.0;
                         s.file_label.clear();
                     });
+                    crate::clear_file_window_progress(session_idx, Some(msg));
                 } else if let Some((name, done, total)) = st.sending {
                     let pct = done as f64 * 100.0 / total.max(1) as f64;
                     let status = format!("发送文件：{name} {done}/{total} ({pct:.0}%)");
                     let label = format!("发送 {name} {pct:.0}%");
-                    with_ui(&ui_weak, move |ui| ui.set_session_status(status.into()));
+                    let window_status = format!("正在发送：{name}");
+                    with_ui(&ui_weak, move |ui| {
+                        ui.set_session_status(status.clone().into())
+                    });
                     crate::with_session_ui_state(&ui_weak, session_idx, move |s| {
                         s.file_progress = (pct / 100.0) as f32;
                         s.file_label = label;
                     });
+                    crate::update_file_window_progress(
+                        session_idx,
+                        (pct / 100.0) as f32,
+                        window_status,
+                        status,
+                    );
                 } else if let Some((name, done, total)) = st.receiving {
                     let pct = done as f64 * 100.0 / total.max(1) as f64;
                     let status = format!("接收文件：{name} {done}/{total} ({pct:.0}%)");
                     let label = format!("接收 {name} {pct:.0}%");
+                    let window_status = format!("正在接收：{name}");
                     if done >= total && last_notified_file.as_deref() != Some(name.as_str()) {
                         notify_user("AeroDesk", &format!("收到文件：{name}"));
                         last_notified_file = Some(name.clone());
                     }
-                    with_ui(&ui_weak, move |ui| ui.set_session_status(status.into()));
+                    with_ui(&ui_weak, move |ui| {
+                        ui.set_session_status(status.clone().into())
+                    });
                     crate::with_session_ui_state(&ui_weak, session_idx, move |s| {
                         s.file_progress = (pct / 100.0) as f32;
                         s.file_label = label;
                     });
+                    crate::update_file_window_progress(
+                        session_idx,
+                        (pct / 100.0) as f32,
+                        window_status,
+                        status,
+                    );
                 } else {
                     crate::with_session_ui_state(&ui_weak, session_idx, |s| {
                         s.file_progress = -1.0;
                         s.file_label.clear();
                     });
+                    crate::clear_file_window_progress(session_idx, None);
                 }
             }
         }

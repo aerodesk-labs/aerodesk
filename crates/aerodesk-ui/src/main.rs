@@ -17,6 +17,7 @@ mod macos_media;
 use slint::Model;
 
 use aerodesk_core::platform::{AppShell, FilePicker, Permissions, Renderer};
+use aerodesk_protocol::cmd::CmdRequest;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -248,6 +249,7 @@ pub struct SessionHandle {
     pub server: String,
     pub input_tx: std::sync::mpsc::Sender<String>,
     pub control_tx: std::sync::mpsc::Sender<String>,
+    pub cmd_tx: std::sync::mpsc::Sender<CmdRequest>,
     pub file_tx: std::sync::mpsc::Sender<FileCmd>,
     pub muted: Arc<AtomicBool>,
     pub volume: Arc<AtomicU16>,
@@ -278,6 +280,18 @@ pub static ACTIVE_SESSION: std::sync::atomic::AtomicI32 = std::sync::atomic::Ato
 /// 文件传输总开关镜像（viewer 线程读；跨线程无法升级 UI 属性）。
 pub static FILE_TRANSFER_ENABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(true);
+
+/// #452 文件传输独立窗口状态：(关联会话 slot, 窗口弱引用)。主界面同一时间只允许
+/// 打开一个文件窗口，关闭或会话清理时移除。
+static FILE_WINDOW_STATE: std::sync::Mutex<Option<(usize, slint::Weak<FileTransferWindow>)>> =
+    std::sync::Mutex::new(None);
+/// #452 终端独立窗口状态：(关联会话 slot, 窗口弱引用)。
+static TERMINAL_WINDOW_STATE: std::sync::Mutex<Option<(usize, slint::Weak<TerminalWindow>)>> =
+    std::sync::Mutex::new(None);
+/// #452 终端命令请求 id（跨会话全局递增；响应按 id 回显即可）。
+static CMD_NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// 终端窗口输出上限：避免无限回显撑爆 UI 字符串。
+const MAX_TERMINAL_OUTPUT_CHARS: usize = 64 * 1024;
 /// 键鼠捕获开关镜像（on_toggle_input 写，输入转发回调读）：
 /// 工具栏「输入」按钮控制——未捕获时鼠标/键盘/滚轮不转发被控端（F3）。
 pub static INPUT_CAPTURING: std::sync::atomic::AtomicBool =
@@ -313,6 +327,117 @@ pub fn session_window_for_slot(slot: usize) -> Option<SessionWindow> {
         .iter()
         .find(|s| s.slot == slot)
         .and_then(|s| s.window.clone())
+}
+
+/// 当前活动会话的稳定 slot（独立功能窗口据此路由文件/终端命令）。
+fn active_session_slot(ui: &AppWindow) -> Option<usize> {
+    let idx = ui.get_active_session() as usize;
+    SESSIONS.lock().unwrap().get(idx).map(|s| s.slot)
+}
+
+/// 文件传输独立窗口状态读取/写入。窗口只在 UI 线程创建，状态由 Rust 静态保存。
+fn file_window_weak_for_slot(slot: usize) -> Option<slint::Weak<FileTransferWindow>> {
+    let state = FILE_WINDOW_STATE.lock().unwrap();
+    match state.as_ref() {
+        Some((s, weak)) if *s == slot => Some(weak.clone()),
+        _ => None,
+    }
+}
+
+fn register_file_window(slot: usize, weak: slint::Weak<FileTransferWindow>) {
+    *FILE_WINDOW_STATE.lock().unwrap() = Some((slot, weak));
+}
+
+fn unregister_file_window(slot: usize) {
+    let mut state = FILE_WINDOW_STATE.lock().unwrap();
+    if state.as_ref().is_some_and(|(s, _)| *s == slot) {
+        *state = None;
+    }
+}
+
+fn terminal_window_weak_for_slot(slot: usize) -> Option<slint::Weak<TerminalWindow>> {
+    let state = TERMINAL_WINDOW_STATE.lock().unwrap();
+    match state.as_ref() {
+        Some((s, weak)) if *s == slot => Some(weak.clone()),
+        _ => None,
+    }
+}
+
+fn register_terminal_window(slot: usize, weak: slint::Weak<TerminalWindow>) {
+    *TERMINAL_WINDOW_STATE.lock().unwrap() = Some((slot, weak));
+}
+
+fn unregister_terminal_window(slot: usize) {
+    let mut state = TERMINAL_WINDOW_STATE.lock().unwrap();
+    if state.as_ref().is_some_and(|(s, _)| *s == slot) {
+        *state = None;
+    }
+}
+
+/// 会话线程更新文件传输独立窗口的进度/文案（无窗口时 no-op）。
+pub fn update_file_window_progress(slot: usize, progress: f32, label: String, status: String) {
+    let Some(weak) = file_window_weak_for_slot(slot) else {
+        return;
+    };
+    let _ = weak.upgrade_in_event_loop(move |win| {
+        win.set_progress(progress);
+        win.set_progress_label(label.into());
+        win.set_status(status.into());
+    });
+}
+
+/// 会话线程清除文件传输独立窗口进度（传输结束/取消/失败后调用）。
+pub fn clear_file_window_progress(slot: usize, status: Option<String>) {
+    let Some(weak) = file_window_weak_for_slot(slot) else {
+        return;
+    };
+    let _ = weak.upgrade_in_event_loop(move |win| {
+        win.set_progress(-1.0);
+        win.set_progress_label("".into());
+        if let Some(status) = status {
+            win.set_status(status.into());
+        }
+    });
+}
+
+/// 会话线程向终端独立窗口追加输出（无窗口时 no-op）。
+pub fn append_terminal_output(slot: usize, text: String) {
+    let Some(weak) = terminal_window_weak_for_slot(slot) else {
+        return;
+    };
+    let _ = weak.upgrade_in_event_loop(move |win| {
+        let mut out = win.get_output().to_string();
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&text);
+        let chars = out.chars().count();
+        if chars > MAX_TERMINAL_OUTPUT_CHARS {
+            out = out
+                .chars()
+                .skip(chars - MAX_TERMINAL_OUTPUT_CHARS)
+                .collect();
+        }
+        win.set_output(out.into());
+    });
+}
+
+/// 会话清理时关闭与 slot 关联的文件/终端独立窗口并恢复主界面按钮。
+fn close_feature_windows_for_slot(ui: &AppWindow, slot: usize) {
+    if let Some(weak) = file_window_weak_for_slot(slot) {
+        if let Some(win) = weak.upgrade() {
+            let _ = win.hide();
+        }
+        unregister_file_window(slot);
+        ui.set_file_open(false);
+    }
+    if let Some(weak) = terminal_window_weak_for_slot(slot) {
+        if let Some(win) = weak.upgrade() {
+            let _ = win.hide();
+        }
+        unregister_terminal_window(slot);
+        ui.set_terminal_open(false);
+    }
 }
 
 /// 会话状态同步到独立窗口，同时兼容保留 AppWindow.session_status。
@@ -685,6 +810,33 @@ fn wire_control_window(win: &ControlWindow, slot: usize, ui_weak: slint::Weak<Ap
     });
 }
 
+/// #452 给摄像头独立窗口接上“摄像头/屏幕”切换回调（本地渲染选择，不下发控制指令）。
+fn wire_camera_window(win: &CameraWindow, slot: usize) {
+    let win_weak = win.as_weak();
+    win.on_toggle_camera(move || {
+        let Some(win) = win_weak.upgrade() else {
+            return;
+        };
+        let show_camera = {
+            let sessions = SESSIONS.lock().unwrap();
+            let Some(s) = sessions.iter().find(|s| s.slot == slot) else {
+                win.set_status("会话已结束".into());
+                return;
+            };
+            !s.show_camera.fetch_xor(true, Ordering::SeqCst)
+        };
+        win.set_camera_active(show_camera);
+        win.set_status(
+            if show_camera {
+                "画面：摄像头（若对端未发布摄像头轨，则回退屏幕画面）"
+            } else {
+                "画面：屏幕"
+            }
+            .into(),
+        );
+    });
+}
+
 /// #447 打开与 ConnectMode 对应的独立会话窗口。
 fn open_session_window(
     ui: &AppWindow,
@@ -715,6 +867,8 @@ fn open_session_window(
         ConnectMode::Camera => {
             let win = CameraWindow::new().map_err(|e| e.to_string())?;
             win.set_status(format!("连接 {room} 摄像头 …").into());
+            win.set_camera_active(true);
+            wire_camera_window(&win, slot);
             let kind = SessionWindow::Camera(win.as_weak());
             install_session_close_handler(ui.as_weak(), kind.clone(), slot);
             win.show().map_err(|e| e.to_string())?;
@@ -723,8 +877,79 @@ fn open_session_window(
     }
 }
 
-/// #447 打开文件传输骨架窗口。
+/// #452 在后台线程选择文件并写回文件传输独立窗口。
+fn pick_file_for_transfer_window(win_weak: slint::Weak<FileTransferWindow>) {
+    std::thread::spawn(move || {
+        let picked = pick_file();
+        let _ = win_weak.upgrade_in_event_loop(move |win| match picked {
+            Ok(Some(path)) => {
+                win.set_selected_file(path.clone().into());
+                win.set_status(format!("已选择文件：{path}").into());
+            }
+            Ok(None) => win.set_status("已取消选择文件".into()),
+            Err(e) => win.set_status(format!("无法打开文件选择器：{e}").into()),
+        });
+    });
+}
+
+/// #452 把文件传输窗口当前选中文件发送到其关联会话。
+fn send_selected_file_from_window(win_weak: slint::Weak<FileTransferWindow>, slot: usize) {
+    let _ = win_weak.upgrade_in_event_loop(move |win| {
+        let path = win.get_selected_file().to_string();
+        if path.trim().is_empty() {
+            win.set_status("未选择文件".into());
+            return;
+        }
+        let sent = {
+            let sessions = SESSIONS.lock().unwrap();
+            match sessions.iter().find(|s| s.slot == slot) {
+                Some(s) => {
+                    let _ = s.file_tx.send(FileCmd::SendFile(path.clone().into()));
+                    true
+                }
+                None => false,
+            }
+        };
+        if sent {
+            win.set_status(format!("开始发送文件：{path}").into());
+            // 先显示 0% 并禁用发送按钮，实际进度由 viewer 线程随后回写。
+            win.set_progress(0.0);
+            win.set_progress_label("等待文件通道建立…".into());
+        } else {
+            win.set_status("文件传输：会话已结束".into());
+        }
+    });
+}
+
+/// #452 取消文件传输窗口关联会话的当前发送任务。
+fn cancel_file_from_window(win_weak: slint::Weak<FileTransferWindow>, slot: usize) {
+    let _ = win_weak.upgrade_in_event_loop(move |win| {
+        let sent = {
+            let sessions = SESSIONS.lock().unwrap();
+            match sessions.iter().find(|s| s.slot == slot) {
+                Some(s) => {
+                    let _ = s.file_tx.send(FileCmd::Cancel);
+                    true
+                }
+                None => false,
+            }
+        };
+        if sent {
+            win.set_status("正在取消文件发送…".into());
+        } else {
+            win.set_status("取消发送：会话已结束".into());
+        }
+        win.set_progress(-1.0);
+        win.set_progress_label("".into());
+    });
+}
+
+/// #452 打开文件传输独立窗口并绑定到当前活动会话。
 fn open_file_transfer_window(ui: &AppWindow) {
+    let Some(slot) = active_session_slot(ui) else {
+        ui.set_status("文件传输：未连接会话".into());
+        return;
+    };
     let win = match FileTransferWindow::new() {
         Ok(win) => win,
         Err(e) => {
@@ -732,16 +957,45 @@ fn open_file_transfer_window(ui: &AppWindow) {
             return;
         }
     };
-    win.set_status("文件传输窗口建设中".into());
+    win.set_status("请选择要发送的文件".into());
+    win.set_selected_file("".into());
+    win.set_progress(-1.0);
+    win.set_progress_label("".into());
+    register_file_window(slot, win.as_weak());
     ui.set_file_open(true);
+
+    let win_weak = win.as_weak();
+    win.on_choose_file({
+        let win_weak = win_weak.clone();
+        move || pick_file_for_transfer_window(win_weak.clone())
+    });
+    win.on_send_file({
+        let win_weak = win_weak.clone();
+        move || send_selected_file_from_window(win_weak.clone(), slot)
+    });
+    win.on_cancel_file({
+        let win_weak = win_weak.clone();
+        move || cancel_file_from_window(win_weak.clone(), slot)
+    });
+
     let ui_weak = ui.as_weak();
-    win.window().on_close_requested(move || {
-        if let Some(ui) = ui_weak.upgrade() {
-            ui.set_file_open(false);
+    win.window().on_close_requested({
+        let win_weak = win_weak.clone();
+        move || {
+            // 关闭文件窗口只取消当前传输、恢复主按钮；不断开远程会话。
+            cancel_file_from_window(win_weak.clone(), slot);
+            unregister_file_window(slot);
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_file_open(false);
+            }
+            if let Some(win) = win_weak.upgrade() {
+                let _ = win.hide();
+            }
+            slint::CloseRequestResponse::HideWindow
         }
-        slint::CloseRequestResponse::HideWindow
     });
     if let Err(e) = win.show() {
+        unregister_file_window(slot);
         ui.set_file_open(false);
         ui.set_status(format!("打开文件传输窗口失败：{e}").into());
     }
@@ -771,8 +1025,57 @@ fn open_message_window(ui: &AppWindow) {
     }
 }
 
-/// #447 打开终端骨架窗口。
+/// #452 把命令文本发送到终端窗口关联的会话 cmd 通道。
+fn send_terminal_command_from_window(
+    win_weak: slint::Weak<TerminalWindow>,
+    slot: usize,
+    command: String,
+) {
+    let _ = win_weak.upgrade_in_event_loop(move |win| {
+        let command = command.trim().to_string();
+        if command.is_empty() {
+            win.set_status("请输入命令".into());
+            return;
+        }
+        let sent = {
+            let sessions = SESSIONS.lock().unwrap();
+            match sessions.iter().find(|s| s.slot == slot) {
+                Some(s) => {
+                    let id = CMD_NEXT.fetch_add(1, Ordering::SeqCst);
+                    let _ = s.cmd_tx.send(CmdRequest::run(id, command.clone()));
+                    true
+                }
+                None => false,
+            }
+        };
+        if sent {
+            let mut out = win.get_output().to_string();
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&format!("> {command}"));
+            let chars = out.chars().count();
+            if chars > MAX_TERMINAL_OUTPUT_CHARS {
+                out = out
+                    .chars()
+                    .skip(chars - MAX_TERMINAL_OUTPUT_CHARS)
+                    .collect();
+            }
+            win.set_output(out.into());
+            win.set_command("".into());
+            win.set_status("命令已发送，等待执行结果…".into());
+        } else {
+            win.set_status("终端：会话已结束".into());
+        }
+    });
+}
+
+/// #452 打开终端独立窗口并绑定到当前活动会话。
 fn open_terminal_window(ui: &AppWindow) {
+    let Some(slot) = active_session_slot(ui) else {
+        ui.set_status("终端：未连接会话".into());
+        return;
+    };
     let win = match TerminalWindow::new() {
         Ok(win) => win,
         Err(e) => {
@@ -780,16 +1083,45 @@ fn open_terminal_window(ui: &AppWindow) {
             return;
         }
     };
-    win.set_status("终端窗口建设中".into());
+    win.set_status("已连接到当前会话，输入命令后回车执行".into());
+    win.set_output("".into());
+    register_terminal_window(slot, win.as_weak());
     ui.set_terminal_open(true);
-    let ui_weak = ui.as_weak();
-    win.window().on_close_requested(move || {
-        if let Some(ui) = ui_weak.upgrade() {
-            ui.set_terminal_open(false);
+
+    let win_weak = win.as_weak();
+    win.on_send_command({
+        let win_weak = win_weak.clone();
+        move |command: slint::SharedString| {
+            send_terminal_command_from_window(win_weak.clone(), slot, command.to_string());
         }
-        slint::CloseRequestResponse::HideWindow
+    });
+    win.on_clear_output({
+        let win_weak = win_weak.clone();
+        move || {
+            if let Some(win) = win_weak.upgrade() {
+                win.set_output("".into());
+                win.set_status("输出已清空".into());
+            }
+        }
+    });
+
+    let ui_weak = ui.as_weak();
+    win.window().on_close_requested({
+        let win_weak = win_weak.clone();
+        move || {
+            // 终端窗口关闭只清理窗口状态；远程会话继续保持。
+            unregister_terminal_window(slot);
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_terminal_open(false);
+            }
+            if let Some(win) = win_weak.upgrade() {
+                let _ = win.hide();
+            }
+            slint::CloseRequestResponse::HideWindow
+        }
     });
     if let Err(e) = win.show() {
+        unregister_terminal_window(slot);
         ui.set_terminal_open(false);
         ui.set_status(format!("打开终端窗口失败：{e}").into());
     }
@@ -824,6 +1156,7 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
     set_main_window_open(ui, &window, true);
     let (control_tx, control_rx) = std::sync::mpsc::channel();
     let (input_tx, input_rx) = std::sync::mpsc::channel();
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<CmdRequest>();
     let (file_cmd_tx, file_cmd_rx) = std::sync::mpsc::channel();
     let muted = Arc::new(AtomicBool::new(false));
     let volume = Arc::new(AtomicU16::new(100));
@@ -838,6 +1171,7 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
             server: server.clone(),
             input_tx: input_tx.clone(),
             control_tx: control_tx.clone(),
+            cmd_tx: cmd_tx.clone(),
             file_tx: file_cmd_tx.clone(),
             muted: muted.clone(),
             volume: volume.clone(),
@@ -865,6 +1199,7 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
                     slot,
                     control_rx,
                     input_rx,
+                    cmd_rx,
                     file_cmd_rx,
                     muted,
                     volume,
@@ -881,6 +1216,7 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
                     weak2.clone(),
                     slot,
                     input_rx,
+                    cmd_rx,
                     file_cmd_rx,
                     stop,
                     view_only,
@@ -1098,6 +1434,8 @@ pub fn session_joined(ui: &AppWindow, slot: usize) {
 /// `terminal`：会话全部结束后要保留给用户的终态文案（如“连接失败：…”）；
 /// 为 None 时显示默认“已断开”。
 pub fn session_cleanup(ui: &AppWindow, slot: usize, terminal: Option<String>) {
+    // #452 关闭与该会话绑定的文件/终端独立窗口（它们不是会话窗口本身，需单独清理）。
+    close_feature_windows_for_slot(ui, slot);
     // #447 先关闭/恢复独立窗口，再从注册表移除会话。
     if let Some(window) = session_window_for_slot(slot) {
         set_main_window_open(ui, &window, false);
@@ -1282,7 +1620,8 @@ impl i_slint_backend_winit::CustomApplicationHandler for FileDropHandler {
     }
 }
 
-/// #277 平台文件选择器（发送文件用）：macOS 原生 / Linux zenity-kdialog。
+/// #277 平台文件选择器（发送文件用）：macOS 原生 / Linux zenity-kdialog /
+/// Windows PowerShell + WinForms 对话框（UI crate 不新增系统依赖）。
 fn pick_file() -> Result<Option<String>, String> {
     #[cfg(target_os = "macos")]
     {
@@ -1292,9 +1631,39 @@ fn pick_file() -> Result<Option<String>, String> {
     {
         return aerodesk_linux::file_picker::LinuxFilePicker.pick_file();
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
     {
-        Err("发送文件仅 macOS/Linux 支持".into())
+        // -NoProfile 避免加载用户 profile；OpenFileDialog 在 STA 单线程单元中运行。
+        // PowerShell 子进程只做文件选择，路径经 stdout 回传，避免把 WinForms 依赖
+        // 拉进 UI crate（与 Linux zenity/kdialog 的策略一致）。
+        let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$dlg = New-Object System.Windows.Forms.OpenFileDialog
+$dlg.Title = 'AeroDesk 发送文件'
+$dlg.Filter = '所有文件 (*.*)|*.*'
+if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    [Console]::Out.Write($dlg.FileName)
+}
+"#;
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-STA", "-Command", script])
+            .output()
+            .map_err(|e| format!("无法启动 PowerShell：{e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "PowerShell 文件选择器退出失败：{}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if path.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(path));
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Err("发送文件仅 macOS/Linux/Windows 支持".into())
     }
 }
 
@@ -2839,6 +3208,7 @@ mod tests {
     fn session_handle(slot: usize, room: &str) -> SessionHandle {
         let (input_tx, _) = std::sync::mpsc::channel();
         let (control_tx, _) = std::sync::mpsc::channel();
+        let (cmd_tx, _) = std::sync::mpsc::channel::<CmdRequest>();
         let (file_tx, _) = std::sync::mpsc::channel();
         SessionHandle {
             slot,
@@ -2846,6 +3216,7 @@ mod tests {
             server: "127.0.0.1:3003".into(),
             input_tx,
             control_tx,
+            cmd_tx,
             file_tx,
             muted: Arc::new(AtomicBool::new(false)),
             volume: Arc::new(AtomicU16::new(100)),
@@ -3488,6 +3859,7 @@ mod multi_session_e2e {
                 server: server.clone(),
                 input_tx: input_tx.clone(),
                 control_tx: std::sync::mpsc::channel().0,
+                cmd_tx: std::sync::mpsc::channel::<CmdRequest>().0,
                 file_tx: std::sync::mpsc::channel().0,
                 muted: Arc::new(AtomicBool::new(false)),
                 volume: Arc::new(AtomicU16::new(100)),
