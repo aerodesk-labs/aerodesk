@@ -58,3 +58,10 @@ iOS/iPad、Android、HarmonyOS 的端侧 UI/UX 统一走 Slint；native 层只�
 - Android APK 构建通过；真机启动进入 Slint UI，能连接观看/发布。
 - iOS 模拟器/真机启动进入 Slint UI，能连接观看；iPad 同一 target 适配。
 - OHOS HAP 构建通过；ArkTS 壳能调用 NAPI 并呈现 Slint 组件迁移后的 UI。
+
+## 已知坑
+
+- 当前 workspace 锁定 `slint 1.17.1`，但其 `backend-android-activity-06`
+  feature 要求 `i-slint-backend-android-activity = "=1.17.1"`，crates.io
+  尚未发布该后端 1.17.1（仅 1.10.0 等）。落地 Android Slint 前需先完成
+  Slint 与 Android 后端版本选型（降级 slint 或等待后端发布）。
