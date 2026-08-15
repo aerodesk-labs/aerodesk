@@ -89,6 +89,16 @@ impl WsSignalClient {
         Ok(Self { ws, peer_id: None })
     }
 
+    /// 返回服务器分配的 peer_id（Join 成功后可用）。
+    pub fn peer_id(&self) -> Option<&str> {
+        self.peer_id.as_deref()
+    }
+
+    /// 发送任意信令消息（呼叫/响铃/挂断等扩展消息）。
+    pub fn send_signal(&mut self, msg: SignalMessage) -> Result<(), String> {
+        self.send(msg)
+    }
+
     /// 加入房间，返回服务器分配的 peer_id 与 TURN 配置。
     ///
     /// 多 PoP（#146）：服务器返回 [`SignalMessage::Redirect`] 时自动断开并

@@ -60,6 +60,46 @@ pub enum SignalMessage {
     PeerLeft {
         peer_id: String,
     },
+    /// 呼叫目标设备（`target` 为设备 ID/房间名，即 presence 常驻房间）。
+    ///
+    /// #453：viewer 先通过该消息触发被叫端按需出流；媒体仍沿用现有
+    /// [`SignalMessage::Description`] 的 offer/answer 路径。
+    Call {
+        /// 呼叫方在信令服务器中的 peer_id。
+        from: String,
+        /// 被叫设备 ID（房间名）。
+        target: String,
+        /// 呼叫唯一标识，由呼叫方生成。
+        call_id: String,
+        /// 被叫端响铃/发布超时（毫秒）。`None` 表示使用被叫端默认值。
+        timeout_ms: Option<u64>,
+    },
+    /// 被叫端已收到呼叫并开始响铃。
+    CallRinging {
+        from: String,
+        to: String,
+        call_id: String,
+    },
+    /// 被叫端已接受呼叫（presence 自动接听或用户确认）。
+    CallAccepted {
+        from: String,
+        to: String,
+        call_id: String,
+    },
+    /// 呼叫被拒绝（被叫忙、离线或主动拒绝）。
+    CallRejected {
+        from: String,
+        to: String,
+        call_id: String,
+        reason: Option<String>,
+    },
+    /// 任一方挂断呼叫。
+    Hangup {
+        from: String,
+        to: String,
+        call_id: String,
+        reason: Option<String>,
+    },
     Error {
         message: String,
     },
@@ -117,5 +157,51 @@ mod tests {
         let back: SignalMessage =
             serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
         assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn roundtrip_call_and_friends() {
+        let messages = vec![
+            SignalMessage::Call {
+                from: "caller-peer".into(),
+                target: "device-1".into(),
+                call_id: "call-1".into(),
+                timeout_ms: Some(30_000),
+            },
+            SignalMessage::Call {
+                from: "caller-peer".into(),
+                target: "device-1".into(),
+                call_id: "call-2".into(),
+                timeout_ms: None,
+            },
+            SignalMessage::CallRinging {
+                from: "device-1-peer".into(),
+                to: "caller-peer".into(),
+                call_id: "call-1".into(),
+            },
+            SignalMessage::CallAccepted {
+                from: "device-1-peer".into(),
+                to: "caller-peer".into(),
+                call_id: "call-1".into(),
+            },
+            SignalMessage::CallRejected {
+                from: "signal".into(),
+                to: "caller-peer".into(),
+                call_id: "call-1".into(),
+                reason: Some("target offline".into()),
+            },
+            SignalMessage::Hangup {
+                from: "caller-peer".into(),
+                to: "device-1-peer".into(),
+                call_id: "call-1".into(),
+                reason: Some("done".into()),
+            },
+        ];
+
+        for msg in messages {
+            let json = serde_json::to_string(&msg).unwrap();
+            let back: SignalMessage = serde_json::from_str(&json).unwrap();
+            assert_eq!(msg, back);
+        }
     }
 }

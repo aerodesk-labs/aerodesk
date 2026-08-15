@@ -1497,6 +1497,129 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                     ),
                 }
             }
+            SignalMessage::Call {
+                from,
+                target,
+                call_id,
+                timeout_ms,
+            } => {
+                // #453：呼叫/响铃。Call.from 必须是本连接 peer_id（同 Description 防冒用）。
+                if own_peer_id.as_deref() != Some(from.as_str()) {
+                    send(
+                        ws.clone(),
+                        SignalMessage::Error {
+                            message: "call from mismatch".into(),
+                        },
+                    );
+                    continue;
+                }
+                if !bridge::sanitize_room(&target) {
+                    send(
+                        ws.clone(),
+                        SignalMessage::Error {
+                            message: "invalid target".into(),
+                        },
+                    );
+                    continue;
+                }
+                // 当前信令仍是房间 Join 模型：呼叫必须发生在被叫设备 ID/房间内，
+                // 避免只持有其它房间 token 的 viewer 跨房间骚扰任意设备。
+                if find_room(&rooms, &from).as_deref() != Some(target.as_str()) {
+                    send(
+                        ws.clone(),
+                        SignalMessage::Error {
+                            message: "call target must match joined room".into(),
+                        },
+                    );
+                    continue;
+                }
+                // 先快照目标 publisher 连接，再释放 rooms 锁逐个发送；
+                // 目标为设备 ID/房间名，presence 以 Role::Publisher 常驻该房间。
+                let targets = publisher_targets(&rooms, &target, &from);
+                if targets.is_empty() {
+                    send(
+                        ws.clone(),
+                        SignalMessage::CallRejected {
+                            from: "signal".into(),
+                            to: from,
+                            call_id,
+                            reason: Some("target offline".into()),
+                        },
+                    );
+                    continue;
+                }
+                for target_ws in targets {
+                    send(
+                        target_ws,
+                        SignalMessage::Call {
+                            from: from.clone(),
+                            target: target.clone(),
+                            call_id: call_id.clone(),
+                            timeout_ms,
+                        },
+                    );
+                }
+            }
+            SignalMessage::CallRinging { from, to, call_id } => {
+                if !forward_from_own(&ws, own_peer_id.as_deref(), &from) {
+                    continue;
+                }
+                forward_to_peer(
+                    &rooms,
+                    &to.clone(),
+                    SignalMessage::CallRinging { from, to, call_id },
+                );
+            }
+            SignalMessage::CallAccepted { from, to, call_id } => {
+                if !forward_from_own(&ws, own_peer_id.as_deref(), &from) {
+                    continue;
+                }
+                forward_to_peer(
+                    &rooms,
+                    &to.clone(),
+                    SignalMessage::CallAccepted { from, to, call_id },
+                );
+            }
+            SignalMessage::CallRejected {
+                from,
+                to,
+                call_id,
+                reason,
+            } => {
+                if !forward_from_own(&ws, own_peer_id.as_deref(), &from) {
+                    continue;
+                }
+                forward_to_peer(
+                    &rooms,
+                    &to.clone(),
+                    SignalMessage::CallRejected {
+                        from,
+                        to,
+                        call_id,
+                        reason,
+                    },
+                );
+            }
+            SignalMessage::Hangup {
+                from,
+                to,
+                call_id,
+                reason,
+            } => {
+                if !forward_from_own(&ws, own_peer_id.as_deref(), &from) {
+                    continue;
+                }
+                forward_to_peer(
+                    &rooms,
+                    &to.clone(),
+                    SignalMessage::Hangup {
+                        from,
+                        to,
+                        call_id,
+                        reason,
+                    },
+                );
+            }
             SignalMessage::IceCandidate { .. } => {
                 // v1 非 trickle：candidate 内嵌在 offer/answer 中
             }
@@ -1587,6 +1710,65 @@ fn find_room(rooms: &Rooms, peer_id: &str) -> Option<String> {
         .iter()
         .find(|(_, peers)| peers.iter().any(|p| p.id == peer_id))
         .map(|(room, _)| room.clone())
+}
+
+/// 校验信令消息的 `from` 是否属于当前连接；不匹配时回 `Error` 并返回 false。
+fn forward_from_own(ws: &Arc<Mutex<Websocket>>, own_peer_id: Option<&str>, from: &str) -> bool {
+    if own_peer_id == Some(from) {
+        return true;
+    }
+    send(
+        ws.clone(),
+        SignalMessage::Error {
+            message: "message from mismatch".into(),
+        },
+    );
+    false
+}
+
+/// 判断一个 peer 是否应收到呼叫（真实 publisher presence，而非桥腿）。
+fn is_callable_publisher(role: Role, peer_id: &str, bridge_leg: bool, exclude_peer: &str) -> bool {
+    role == Role::Publisher && peer_id != exclude_peer && !bridge_leg
+}
+
+/// 返回目标房间内所有 publisher 连接（排除发起呼叫的 peer）。
+///
+/// presence 被叫端以 [`Role::Publisher`] 常驻设备 ID 房间；该函数只收集连接快照，
+/// 调用方在释放 rooms 锁后逐条发送，避免跨连接锁序反转。
+fn publisher_targets(
+    rooms: &Rooms,
+    target: &str,
+    exclude_peer: &str,
+) -> Vec<Arc<Mutex<Websocket>>> {
+    let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
+    rooms
+        .get(target)
+        .map(|peers| {
+            peers
+                .iter()
+                .filter(|p| is_callable_publisher(p.role, &p.id, p.bridge_leg, exclude_peer))
+                .map(|p| p.ws.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 按 peer_id 转发一条信令消息；目标不存在时返回 false（不阻塞锁）。
+fn forward_to_peer(rooms: &Rooms, to: &str, msg: SignalMessage) -> bool {
+    let target_ws = {
+        let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
+        rooms
+            .values()
+            .flat_map(|peers| peers.iter())
+            .find(|p| p.id == to)
+            .map(|p| p.ws.clone())
+    };
+    let Some(target_ws) = target_ws else {
+        tracing::debug!("signal forward skipped: peer {to} not found");
+        return false;
+    };
+    send(target_ws, msg);
+    true
 }
 
 /// 调用 SFU 内部接口：POST /start?room=xxx&role=xxx（body = SDP offer JSON）
@@ -1896,6 +2078,34 @@ mod tests {
             let dup = !seen.insert(id.clone());
             assert!(!dup, "duplicate peer_id: {id}");
         }
+    }
+
+    #[test]
+    fn callable_publisher_filters_role_self_and_bridge_legs() {
+        assert!(is_callable_publisher(
+            Role::Publisher,
+            "device-1",
+            false,
+            "caller"
+        ));
+        assert!(!is_callable_publisher(
+            Role::Viewer,
+            "viewer-1",
+            false,
+            "caller"
+        ));
+        assert!(!is_callable_publisher(
+            Role::Publisher,
+            "caller",
+            false,
+            "caller"
+        ));
+        assert!(!is_callable_publisher(
+            Role::Publisher,
+            "bridge-leg",
+            true,
+            "caller"
+        ));
     }
 
     /// 极简 HTTP 假服务器：接受一个连接，读取请求头，回固定响应。

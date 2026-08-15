@@ -9,10 +9,12 @@
 //! Join 后不关闭 WebSocket。断开检测依赖 TCP read timeout，重连策略为指数退避 +
 //! 上限封顶。
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use crate::signal_call::{CallDecision, CallState, DEFAULT_CALL_TIMEOUT, IncomingCallInfo};
 use crate::signaling::{WsRecvError, WsSignalClient};
-use aerodesk_protocol::signal::Role;
+use aerodesk_protocol::signal::{Role, SignalMessage};
 
 /// 信令 presence 连接状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +50,29 @@ impl PresenceStatus {
     }
 }
 
+/// presence 收到的一条信令事件（被叫侧视角）。
+///
+/// 上层 UI 可周期性 [SignalPresence::take_events] 消费这些事件，并据此启动/停止
+/// 按需 publisher。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresenceEvent {
+    /// 收到 viewer 呼叫，`target` 为本机设备 ID（房间名）。
+    IncomingCall {
+        call_id: String,
+        from: String,
+        target: String,
+        timeout_ms: Option<u64>,
+    },
+    /// 呼叫方挂断。
+    Hangup {
+        call_id: String,
+        from: String,
+        reason: Option<String>,
+    },
+    /// 发布/响铃超时，presence 已代表本端挂断。
+    CallTimeout { call_id: String, from: String },
+}
+
 /// presence 连接配置。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresenceConfig {
@@ -60,6 +85,10 @@ pub struct PresenceConfig {
     pub role: Role,
     /// Join 认证 token（可选）。
     pub auth_token: Option<String>,
+    /// 收到呼叫后是否自动接听（默认 true，对应「被呼叫时再出流」）。
+    pub auto_accept: bool,
+    /// 呼叫缺省超时；Call.timeout_ms 未指定时使用（默认 30s）。
+    pub call_timeout: Duration,
     /// 首次重连退避（默认 1s）。
     pub initial_backoff: Duration,
     /// 最大重连退避（默认 30s）。
@@ -74,6 +103,8 @@ impl PresenceConfig {
             room: room.into(),
             role,
             auth_token: None,
+            auto_accept: true,
+            call_timeout: DEFAULT_CALL_TIMEOUT,
             initial_backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(30),
         }
@@ -89,6 +120,18 @@ impl PresenceConfig {
     /// 设置 Join 认证 token。
     pub fn with_auth_token(mut self, auth_token: impl Into<String>) -> Self {
         self.auth_token = Some(auth_token.into());
+        self
+    }
+
+    /// 设置收到呼叫后是否自动接听。
+    pub fn with_auto_accept(mut self, auto_accept: bool) -> Self {
+        self.auto_accept = auto_accept;
+        self
+    }
+
+    /// 设置呼叫缺省超时（Call.timeout_ms 未指定时生效）。
+    pub fn with_call_timeout(mut self, call_timeout: Duration) -> Self {
+        self.call_timeout = call_timeout;
         self
     }
 }
@@ -214,6 +257,8 @@ pub struct SignalPresence {
     retry_at: Option<Instant>,
     stopped: bool,
     read_timeout: Duration,
+    call: CallState,
+    events: VecDeque<PresenceEvent>,
 }
 
 impl SignalPresence {
@@ -225,6 +270,8 @@ impl SignalPresence {
             retry_at: None,
             stopped: true,
             read_timeout: Duration::from_millis(250),
+            call: CallState::default(),
+            events: VecDeque::new(),
         }
     }
 
@@ -246,10 +293,62 @@ impl SignalPresence {
         self.status().is_online()
     }
 
+    /// 取出并清空已收到的事件队列。
+    pub fn take_events(&mut self) -> Vec<PresenceEvent> {
+        self.events.drain(..).collect()
+    }
+
+    /// 当前待接听呼叫（仅在 `auto_accept=false` 时可能停留在 `Incoming`）。
+    pub fn incoming_call(&self) -> Option<&IncomingCallInfo> {
+        self.call.incoming()
+    }
+
+    /// 当前已接听呼叫。
+    pub fn active_call(&self) -> Option<&crate::signal_call::ActiveCallInfo> {
+        self.call.active()
+    }
+
+    /// 接听当前呼叫：发送 CallRinging + CallAccepted，并启动超时计时。
+    pub fn accept_call(&mut self) -> Result<(), String> {
+        let Some(active) = self.call.accept(Instant::now()) else {
+            return Err("no incoming call".into());
+        };
+        self.send_call_ringing(&active)?;
+        self.send_call_accepted(&active)
+    }
+
+    /// 拒绝当前待接听呼叫。
+    pub fn reject_call(&mut self, reason: Option<&str>) -> Result<(), String> {
+        let Some(incoming) = self.call.reject() else {
+            return Err("no incoming call".into());
+        };
+        self.send_signal(SignalMessage::CallRejected {
+            from: self.own_peer_id()?,
+            to: incoming.from,
+            call_id: incoming.call_id,
+            reason: reason.map(str::to_string),
+        })
+    }
+
+    /// 本端主动挂断当前呼叫（无进行中呼叫时为空操作）。
+    pub fn hangup_call(&mut self, reason: Option<&str>) -> Result<(), String> {
+        let Some(end) = self.call.hangup() else {
+            return Ok(());
+        };
+        self.send_signal(SignalMessage::Hangup {
+            from: self.own_peer_id()?,
+            to: end.from,
+            call_id: end.call_id,
+            reason: reason.map(str::to_string),
+        })
+    }
+
     /// 启动常驻连接；重复调用不会打断当前状态。
     pub fn start(&mut self) -> PresenceStatus {
         self.stopped = false;
         self.retry_at = None;
+        self.call = CallState::default();
+        self.events.clear();
         self.machine.start()
     }
 
@@ -258,6 +357,8 @@ impl SignalPresence {
         self.stopped = true;
         self.client = None;
         self.retry_at = None;
+        self.call = CallState::default();
+        self.events.clear();
         self.machine.stop()
     }
 
@@ -293,6 +394,9 @@ impl SignalPresence {
 
         match self.connect_once() {
             Ok(peer_id) => {
+                // 重连成功后清除上一连接的呼叫与事件，避免旧呼叫误触发按需 publisher。
+                self.call = CallState::default();
+                self.events.clear();
                 self.machine.on_online(peer_id);
                 self.retry_at = None;
             }
@@ -318,6 +422,7 @@ impl SignalPresence {
         let result = match self.client.as_mut() {
             Some(client) => client.recv_timeout(self.read_timeout),
             None => {
+                self.call = CallState::default();
                 let delay = self.machine.on_disconnected("presence transport missing");
                 self.retry_at = Some(Instant::now() + delay);
                 return;
@@ -325,14 +430,131 @@ impl SignalPresence {
         };
 
         match result {
-            Ok(_) => {}
-            Err(WsRecvError::Timeout) => {}
+            Ok(msg) => self.handle_signal_message(msg),
+            Err(WsRecvError::Timeout) => self.expire_call(Instant::now()),
             Err(WsRecvError::Closed(error)) => {
                 self.client = None;
+                self.call = CallState::default();
                 let delay = self.machine.on_disconnected(error);
                 self.retry_at = Some(Instant::now() + delay);
             }
         }
+    }
+
+    fn handle_signal_message(&mut self, msg: SignalMessage) {
+        match msg {
+            SignalMessage::Call {
+                from,
+                target,
+                call_id,
+                timeout_ms,
+            } => self.handle_incoming_call(call_id, from, target, timeout_ms),
+            SignalMessage::Hangup {
+                from,
+                call_id,
+                reason,
+                ..
+            } => {
+                if let Some(end) = self.call.remote_hangup(&call_id) {
+                    self.events.push_back(PresenceEvent::Hangup {
+                        call_id: end.call_id,
+                        from: end.from,
+                        reason,
+                    });
+                    let _ = from; // `to` 由服务器填充，presence 只需按 call_id 匹配。
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_incoming_call(
+        &mut self,
+        call_id: String,
+        from: String,
+        target: String,
+        timeout_ms: Option<u64>,
+    ) {
+        let incoming = IncomingCallInfo::new(call_id, from, timeout_ms, self.config().call_timeout);
+        match self.call.on_call(incoming) {
+            CallDecision::Accept(incoming) => {
+                self.events.push_back(PresenceEvent::IncomingCall {
+                    call_id: incoming.call_id.clone(),
+                    from: incoming.from.clone(),
+                    target,
+                    timeout_ms,
+                });
+                if self.config().auto_accept {
+                    match self.accept_call() {
+                        Ok(()) => {}
+                        Err(error) => {
+                            tracing::debug!("presence auto-accept call failed: {error}");
+                        }
+                    }
+                }
+            }
+            CallDecision::Busy(incoming) => {
+                // 已有进行中的呼叫：直接回 busy，不打断当前会话。
+                let _ = self.send_signal(SignalMessage::CallRejected {
+                    from: self.own_peer_id().unwrap_or_else(|_| "signal".into()),
+                    to: incoming.from,
+                    call_id: incoming.call_id,
+                    reason: Some("busy".into()),
+                });
+            }
+        }
+    }
+
+    fn send_call_ringing(
+        &mut self,
+        active: &crate::signal_call::ActiveCallInfo,
+    ) -> Result<(), String> {
+        self.send_signal(SignalMessage::CallRinging {
+            from: self.own_peer_id()?,
+            to: active.from.clone(),
+            call_id: active.call_id.clone(),
+        })
+    }
+
+    fn send_call_accepted(
+        &mut self,
+        active: &crate::signal_call::ActiveCallInfo,
+    ) -> Result<(), String> {
+        self.send_signal(SignalMessage::CallAccepted {
+            from: self.own_peer_id()?,
+            to: active.from.clone(),
+            call_id: active.call_id.clone(),
+        })
+    }
+
+    fn expire_call(&mut self, now: Instant) {
+        let Some(end) = self.call.expire(now) else {
+            return;
+        };
+        self.events.push_back(PresenceEvent::CallTimeout {
+            call_id: end.call_id.clone(),
+            from: end.from.clone(),
+        });
+        let _ = self.send_signal(SignalMessage::Hangup {
+            from: self.own_peer_id().unwrap_or_else(|_| "signal".into()),
+            to: end.from,
+            call_id: end.call_id,
+            reason: Some("timeout".into()),
+        });
+    }
+
+    fn own_peer_id(&self) -> Result<String, String> {
+        self.client
+            .as_ref()
+            .and_then(|client| client.peer_id().map(str::to_string))
+            .ok_or_else(|| "presence not joined".into())
+    }
+
+    fn send_signal(&mut self, msg: SignalMessage) -> Result<(), String> {
+        self.client
+            .as_mut()
+            .ok_or("presence not joined")?
+            .send_signal(msg)
     }
 }
 
@@ -443,6 +665,29 @@ mod tests {
         assert_eq!(presence.start(), PresenceStatus::Connecting { attempt: 1 });
         assert_eq!(presence.stop(), PresenceStatus::Stopped);
         assert_eq!(presence.poll(), PresenceStatus::Stopped);
+    }
+
+    #[test]
+    fn config_defaults_auto_accept_and_call_timeout() {
+        let config = test_config();
+        assert!(config.auto_accept, "被叫端默认应自动接听");
+        assert_eq!(config.call_timeout, DEFAULT_CALL_TIMEOUT);
+        assert!(!config.clone().with_auto_accept(false).auto_accept);
+        assert_eq!(
+            config
+                .clone()
+                .with_call_timeout(Duration::from_secs(5))
+                .call_timeout,
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn presence_starts_with_no_call_or_events() {
+        let mut presence = SignalPresence::new(test_config());
+        assert!(presence.take_events().is_empty());
+        assert!(presence.incoming_call().is_none());
+        assert!(presence.active_call().is_none());
     }
 
     #[test]
