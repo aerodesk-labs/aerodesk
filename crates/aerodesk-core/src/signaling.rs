@@ -1,6 +1,7 @@
 //! WSS 信令客户端（aerodesk-protocol::signal 消息）。
 
 use std::net::TcpStream;
+use std::time::Duration;
 
 use aerodesk_protocol::signal::{Role, SignalMessage};
 use tracing::info;
@@ -55,11 +56,47 @@ pub fn normalize_signal_url(input: &str) -> String {
     }
 }
 
+/// `WsSignalClient::recv_timeout` 的错误分类。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WsRecvError {
+    /// 在超时窗口内没有读到完整消息。
+    Timeout,
+    /// 连接已关闭、解析失败或其它不可恢复错误。
+    Closed(String),
+}
+
+impl std::fmt::Display for WsRecvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WsRecvError::Timeout => write!(f, "signal receive timed out"),
+            WsRecvError::Closed(message) => write!(f, "signal receive failed: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for WsRecvError {}
+
+impl From<std::io::Error> for WsRecvError {
+    fn from(value: std::io::Error) -> Self {
+        WsRecvError::Closed(value.to_string())
+    }
+}
+
 impl WsSignalClient {
     /// 连接信令服务器（ws:// 或 wss://），地址会自动归一化（补协议/路径）。
     pub fn connect(url: &str) -> Result<Self, tungstenite::Error> {
         let (ws, _) = connect(&normalize_signal_url(url))?;
         Ok(Self { ws, peer_id: None })
+    }
+
+    /// 返回服务器分配的 peer_id（Join 成功后可用）。
+    pub fn peer_id(&self) -> Option<&str> {
+        self.peer_id.as_deref()
+    }
+
+    /// 发送任意信令消息（呼叫/响铃/挂断等扩展消息）。
+    pub fn send_signal(&mut self, msg: SignalMessage) -> Result<(), String> {
+        self.send(msg)
     }
 
     /// 加入房间，返回服务器分配的 peer_id 与 TURN 配置。
@@ -110,6 +147,47 @@ impl WsSignalClient {
             SignalMessage::Description { description, .. } => Ok(description),
             SignalMessage::Error { message } => Err(message),
             other => Err(format!("unexpected description response: {other:?}")),
+        }
+    }
+
+    /// 带读取超时地读取一条消息。
+    ///
+    /// 用于常驻 presence 连接：`Timeout` 表示等待窗口内无消息（连接仍可能存活），
+    /// 上层可借此轮询停止标志；`Closed` 表示连接已不可用，应进入重连。
+    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<SignalMessage, WsRecvError> {
+        self.set_read_timeout(Some(timeout))?;
+        loop {
+            match self.ws.read() {
+                Ok(Message::Text(t)) => {
+                    return serde_json::from_str(&t)
+                        .map_err(|e| WsRecvError::Closed(e.to_string()));
+                }
+                Ok(Message::Binary(b)) => {
+                    return serde_json::from_slice(&b)
+                        .map_err(|e| WsRecvError::Closed(e.to_string()));
+                }
+                Ok(_) => continue,
+                Err(tungstenite::Error::Io(e))
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return Err(WsRecvError::Timeout);
+                }
+                Err(e) => return Err(WsRecvError::Closed(e.to_string())),
+            }
+        }
+    }
+
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+        match self.ws.get_mut() {
+            MaybeTlsStream::Plain(stream) => stream.set_read_timeout(timeout),
+            MaybeTlsStream::Rustls(stream) => stream.sock.set_read_timeout(timeout),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "unsupported websocket stream type for read timeout",
+            )),
         }
     }
 

@@ -109,8 +109,11 @@ pub fn run_generic_viewer(
     ui_weak: slint::Weak<crate::AppWindow>,
     session_idx: usize,
     input_rx: std::sync::mpsc::Receiver<String>,
+    cmd_rx: std::sync::mpsc::Receiver<aerodesk_protocol::cmd::CmdRequest>,
     file_cmd_rx: std::sync::mpsc::Receiver<crate::FileCmd>,
+    chat_cmd_rx: std::sync::mpsc::Receiver<crate::ChatCmd>,
     stop: Arc<AtomicBool>,
+    view_only: Arc<AtomicBool>,
 ) {
     let ui2 = ui_weak.clone();
     crate::generic_viewer::run_viewer_generic(
@@ -120,8 +123,11 @@ pub fn run_generic_viewer(
         ui_weak,
         session_idx,
         input_rx,
+        cmd_rx,
         file_cmd_rx,
+        chat_cmd_rx,
         stop,
+        view_only,
         decoder_label(),
         mk_viewer_decoder,
         move || crate::SlintRenderer::new(ui2.clone(), session_idx),

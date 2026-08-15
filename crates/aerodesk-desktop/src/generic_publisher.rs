@@ -95,6 +95,8 @@ mod imp {
         *STOP.lock().unwrap() = Some(stop.clone());
         let weak = ui.as_weak();
         ui.set_settings_status("正在启动被控端…".into());
+        ui.set_signal_status("正在连接信令…".into());
+        ui.set_signal_online(false);
         // 数据通道收发链（str0m/SCTP）调用栈深，放大线程栈防溢出（RULE 数据通道大块传输线程栈需放大默认2MB.md）。
         if std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)
@@ -111,13 +113,18 @@ mod imp {
             stop.store(true, Ordering::SeqCst);
         }
         ui.set_settings_status("被控端已停止".into());
+        ui.set_signal_status("信令未连接（未开启被控）".into());
+        ui.set_signal_online(false);
     }
 
     fn set_publisher_status(ui_weak: &slint::Weak<crate::AppWindow>, msg: String) {
         let ui_weak = ui_weak.clone();
+        let online = msg.contains("已在线");
         crate::with_ui(&ui_weak, move |ui| {
             ui.set_status(msg.clone().into());
-            ui.set_settings_status(msg.into());
+            ui.set_settings_status(msg.clone().into());
+            ui.set_signal_status(msg.into());
+            ui.set_signal_online(online);
         });
     }
 

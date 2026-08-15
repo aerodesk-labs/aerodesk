@@ -13,6 +13,7 @@ use aerodesk_core::connect::connect_live_role_with_camera;
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media_pipeline::Codec;
 use aerodesk_platform::macos::decode::{H264Decoder, HevcDecoder, to_rgba};
+use aerodesk_protocol::cmd::CmdRequest;
 use aerodesk_protocol::signal::Role;
 use str0m::net::Protocol;
 
@@ -174,7 +175,9 @@ pub fn run_viewer(
     session_idx: usize,
     control_rx: std::sync::mpsc::Receiver<String>,
     input_rx: std::sync::mpsc::Receiver<String>,
+    cmd_rx: std::sync::mpsc::Receiver<CmdRequest>,
     file_cmd_rx: std::sync::mpsc::Receiver<FileCmd>,
+    chat_cmd_rx: std::sync::mpsc::Receiver<crate::ChatCmd>,
     muted: Arc<AtomicBool>,
     volume: Arc<AtomicU16>,
     show_camera: Arc<AtomicBool>,
@@ -353,6 +356,14 @@ pub fn run_viewer(
                 .endpoint
                 .send_channel_data("control", false, req.as_bytes());
         }
+        // #109/#452 终端命令：UI 终端窗口 → cmd data channel → SFU → 被控端执行。
+        while let Ok(req) = cmd_rx.try_recv() {
+            if let Ok(json) = serde_json::to_string(&req) {
+                let _ = live
+                    .endpoint
+                    .send_channel_data("cmd", false, json.as_bytes());
+            }
+        }
         // #72 文件/剪贴板命令（UI 工具栏按钮）。
         while let Ok(cmd) = file_cmd_rx.try_recv() {
             match cmd {
@@ -394,11 +405,56 @@ pub fn run_viewer(
                 }
             }
         }
+        // #458 聊天消息：UI 聊天窗口 → chat data channel → SFU → 被控端。
+        while let Ok(cmd) = chat_cmd_rx.try_recv() {
+            match cmd {
+                crate::ChatCmd::Send(text) => {
+                    let text = text.trim().to_string();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let payload = serde_json::json!({
+                        "sender": "我",
+                        "text": text,
+                        "timestamp_ms": crate::system_time_millis(),
+                    });
+                    if let Ok(json) = serde_json::to_string(&payload) {
+                        let sent = live
+                            .endpoint
+                            .send_channel_data("chat", false, json.as_bytes());
+                        if !sent {
+                            crate::set_message_window_status(
+                                session_idx,
+                                "发送失败：chat 通道未就绪".to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
         while let Some(ev) = live.endpoint.poll_event() {
             // #72 文件通道事件交给状态机（非 file 事件为 no-op）。
             // 开关关闭时跳过：不处理 Meta/Chunk/Done，绝不落盘。
             if ft_enabled {
                 file_transfer.handle_event(&ev, &mut live.endpoint);
+            }
+            // #109/#452 终端命令响应 → 终端独立窗口回显。
+            if let ClientEvent::ChannelData(cid, _, data) = &ev
+                && live.endpoint.channel_label(cid).as_deref() == Some("cmd")
+                && let Ok(response) =
+                    serde_json::from_slice::<aerodesk_protocol::cmd::CmdResponse>(data)
+            {
+                crate::append_terminal_output(
+                    session_idx,
+                    crate::generic_viewer::format_cmd_response(&response),
+                );
+            }
+            // #458 聊天消息：被控端经 chat 通道回传 → 聊天窗口消息列表。
+            if let ClientEvent::ChannelData(cid, _, data) = &ev
+                && live.endpoint.channel_label(cid).as_deref() == Some("chat")
+                && let Some((sender, text)) = crate::decode_chat_text(data)
+            {
+                crate::append_chat_message(session_idx, sender, text, false);
             }
             match ev {
                 ClientEvent::Media(data) => {
@@ -630,10 +686,11 @@ pub fn run_viewer(
             if due {
                 if frames == 0 {
                     crate::session_joined_weak(&ui_weak, session_idx);
-                    with_ui(&ui_weak, |ui| {
-                        ui.set_in_session(true);
-                        ui.set_session_status("会话中 · 真实解码（H.264/H.265/VP9/AV1）".into());
-                    });
+                    crate::session_set_status(
+                        &ui_weak,
+                        session_idx,
+                        "会话中 · 真实解码（H.264/H.265/VP9/AV1）".to_string(),
+                    );
                 }
                 present_frame(
                     &ui_weak,
@@ -681,38 +738,60 @@ pub fn run_viewer(
                 last_file_status = Instant::now();
                 let st = file_transfer.status();
                 if let Some(msg) = st.message {
-                    with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                    with_ui(&ui_weak, move |ui| {
+                        ui.set_session_status(msg.clone().into())
+                    });
                     crate::with_session_ui_state(&ui_weak, session_idx, |s| {
                         s.file_progress = -1.0;
                         s.file_label.clear();
                     });
+                    crate::clear_file_window_progress(session_idx, Some(msg));
                 } else if let Some((name, done, total)) = st.sending {
                     let pct = done as f64 * 100.0 / total.max(1) as f64;
                     let status = format!("发送文件：{name} {done}/{total} ({pct:.0}%)");
                     let label = format!("发送 {name} {pct:.0}%");
-                    with_ui(&ui_weak, move |ui| ui.set_session_status(status.into()));
+                    let window_status = format!("正在发送：{name}");
+                    with_ui(&ui_weak, move |ui| {
+                        ui.set_session_status(status.clone().into())
+                    });
                     crate::with_session_ui_state(&ui_weak, session_idx, move |s| {
                         s.file_progress = (pct / 100.0) as f32;
                         s.file_label = label;
                     });
+                    crate::update_file_window_progress(
+                        session_idx,
+                        (pct / 100.0) as f32,
+                        window_status,
+                        status,
+                    );
                 } else if let Some((name, done, total)) = st.receiving {
                     let pct = done as f64 * 100.0 / total.max(1) as f64;
                     let status = format!("接收文件：{name} {done}/{total} ({pct:.0}%)");
                     let label = format!("接收 {name} {pct:.0}%");
+                    let window_status = format!("正在接收：{name}");
                     if done >= total && last_notified_file.as_deref() != Some(name.as_str()) {
                         notify_user("AeroDesk", &format!("收到文件：{name}"));
                         last_notified_file = Some(name.clone());
                     }
-                    with_ui(&ui_weak, move |ui| ui.set_session_status(status.into()));
+                    with_ui(&ui_weak, move |ui| {
+                        ui.set_session_status(status.clone().into())
+                    });
                     crate::with_session_ui_state(&ui_weak, session_idx, move |s| {
                         s.file_progress = (pct / 100.0) as f32;
                         s.file_label = label;
                     });
+                    crate::update_file_window_progress(
+                        session_idx,
+                        (pct / 100.0) as f32,
+                        window_status,
+                        status,
+                    );
                 } else {
                     crate::with_session_ui_state(&ui_weak, session_idx, |s| {
                         s.file_progress = -1.0;
                         s.file_label.clear();
                     });
+                    crate::clear_file_window_progress(session_idx, None);
                 }
             }
         }

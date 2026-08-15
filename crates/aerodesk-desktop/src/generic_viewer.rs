@@ -13,6 +13,7 @@ use aerodesk_core::access_unit::AccessUnitAssembler;
 use aerodesk_core::connect::connect_live_role;
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::platform::{Decoder, Renderer};
+use aerodesk_protocol::cmd::{CmdResponse, CmdResult};
 use aerodesk_protocol::signal::Role;
 use str0m::net::Protocol;
 
@@ -21,6 +22,71 @@ fn cursor_pos(data: &[u8]) -> Option<(f32, f32)> {
     serde_json::from_slice::<aerodesk_protocol::cursor::CursorPos>(data)
         .ok()
         .map(|p| (p.x as f32, p.y as f32))
+}
+
+/// 把终端命令响应格式化为窗口可读文本（stdout/stderr/错误/截断提示）。
+pub(crate) fn format_cmd_response(response: &CmdResponse) -> String {
+    match &response.result {
+        CmdResult::Run {
+            exit_code,
+            stdout,
+            stderr,
+            truncated,
+            error,
+        } => {
+            let mut out = String::new();
+            if let Some(error) = error {
+                out.push_str(&format!("[错误] {error}"));
+            }
+            if !stdout.is_empty() {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(stdout.trim_end_matches(['\r', '\n']));
+            }
+            if !stderr.is_empty() {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(stderr.trim_end_matches(['\r', '\n']));
+            }
+            if *truncated {
+                out.push_str("\n[输出已截断]");
+            }
+            if out.is_empty() {
+                out.push_str("(无输出)");
+            }
+            let code = exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "无退出码".to_string());
+            format!("{out}\n[exit={code}]")
+        }
+        CmdResult::File { size, error, .. } => {
+            if let Some(error) = error {
+                format!("[文件响应错误] {error}")
+            } else {
+                format!("[文件响应] {size} 字节")
+            }
+        }
+        CmdResult::ProcessList { processes, error } => {
+            if let Some(error) = error {
+                format!("[进程列表错误] {error}")
+            } else {
+                let mut out = String::from("[进程列表]");
+                for p in processes {
+                    out.push_str(&format!("\n  {} {}", p.pid, p.name));
+                }
+                out
+            }
+        }
+        CmdResult::Killed { pid, error } => {
+            if let Some(error) = error {
+                format!("[结束进程 {pid} 失败] {error}")
+            } else {
+                format!("[已结束进程 {pid}]")
+            }
+        }
+    }
 }
 
 /// 运行泛型观看会话（阻塞直到断开/代际失效）。
@@ -36,8 +102,11 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     ui_weak: slint::Weak<crate::AppWindow>,
     session_idx: usize,
     input_rx: std::sync::mpsc::Receiver<String>,
+    cmd_rx: std::sync::mpsc::Receiver<aerodesk_protocol::cmd::CmdRequest>,
     file_cmd_rx: std::sync::mpsc::Receiver<crate::FileCmd>,
+    chat_cmd_rx: std::sync::mpsc::Receiver<crate::ChatCmd>,
     stop: Arc<AtomicBool>,
+    view_only: Arc<AtomicBool>,
     decoder_label: &'static str,
     mut mk_decoder: DF,
     mut mk_renderer: RF,
@@ -97,8 +166,10 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     let ice = live.ice_connected;
     let room2 = room.clone();
     let server2 = server.clone();
+    let connected_status = format!("已连接：peer={peer} ice={ice}");
+    let main_status = connected_status.clone();
     with_ui(&ui_weak, move |ui| {
-        ui.set_status(format!("已连接：peer={peer} ice={ice}").into());
+        ui.set_status(main_status.into());
         ui.set_log(
             format!(
                 "设备: {room2}\n服务器: {server2}\nSDP 交换: OK\nICE: {}\n\n{decoder_label}渲染。",
@@ -113,6 +184,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
         crate::add_recent(ui, &room2, &server2);
         ui.set_conn_state(2);
     });
+    crate::session_set_status(&ui_weak, session_idx, connected_status);
     // #438：连上信令只表示设备已连接/可被找到，不进入观察页；
     // 收到首个渲染帧后才 session_joined_weak 进入会话视图。
 
@@ -123,6 +195,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     // last_clip_img 为最近一次已发送/已应用的图片字节，防回声（远端写回又发回）。
     let mut last_clip_poll: Option<Instant> = None;
     let mut last_clip_img: Option<Vec<u8>> = None;
+    let mut last_file_status = Instant::now();
     let mut decoder: Option<D> = None;
     let mut renderer: Option<R> = None;
     let mut frames: u64 = 0;
@@ -147,9 +220,26 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     let mut no_media_notified = false;
     while !stale() {
         // 输入事件：UI 键鼠 → input data channel → SFU → 被控端。
-        while let Ok(json) = input_rx.try_recv() {
-            live.endpoint
-                .send_channel_data("input", false, json.as_bytes());
+        // #441 观看模式（仅观看）不发送键鼠输入。
+        if !view_only.load(Ordering::SeqCst) {
+            while let Ok(json) = input_rx.try_recv() {
+                live.endpoint
+                    .send_channel_data("input", false, json.as_bytes());
+            }
+        }
+        // #109/#452 终端命令：UI 终端窗口 → cmd data channel → SFU → 被控端执行。
+        while let Ok(req) = cmd_rx.try_recv() {
+            if let Ok(json) = serde_json::to_string(&req) {
+                let sent = live
+                    .endpoint
+                    .send_channel_data("cmd", false, json.as_bytes());
+                if !sent {
+                    crate::append_terminal_output(
+                        session_idx,
+                        "[错误] cmd 通道未就绪，命令未送达".to_string(),
+                    );
+                }
+            }
         }
         // #72/#271 文件/剪贴板命令（UI 工具栏）：发送文件/剪贴板文本/图片、取消。
         while let Ok(cmd) = file_cmd_rx.try_recv() {
@@ -157,11 +247,11 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                 crate::FileCmd::SendFile(path) => match file_transfer.send_file(&path) {
                     Ok(()) => {
                         let msg = format!("开始发送文件：{}", path.display());
-                        with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                        crate::session_set_status(&ui_weak, session_idx, msg);
                     }
                     Err(e) => {
                         let msg = format!("发送失败：{e}");
-                        with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                        crate::session_set_status(&ui_weak, session_idx, msg);
                     }
                 },
                 crate::FileCmd::SendClipboard(text) => {
@@ -172,22 +262,49 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                     } else {
                         "剪贴板：file 通道未就绪".to_string()
                     };
-                    with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                    crate::session_set_status(&ui_weak, session_idx, msg);
                 }
                 crate::FileCmd::SendClipboardImage(png) => {
                     match file_transfer.send_clipboard_image(png) {
                         Ok(()) => {
                             let msg = "已发送剪贴板图片到被控端".to_string();
-                            with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                            crate::session_set_status(&ui_weak, session_idx, msg);
                         }
                         Err(e) => {
                             let msg = format!("剪贴板图片发送失败：{e}");
-                            with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                            crate::session_set_status(&ui_weak, session_idx, msg);
                         }
                     }
                 }
                 crate::FileCmd::Cancel => {
                     file_transfer.cancel_send(&mut live.endpoint);
+                }
+            }
+        }
+        // #458 聊天消息：UI 聊天窗口 → chat data channel → SFU → 被控端。
+        while let Ok(cmd) = chat_cmd_rx.try_recv() {
+            match cmd {
+                crate::ChatCmd::Send(text) => {
+                    let text = text.trim().to_string();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let payload = serde_json::json!({
+                        "sender": "我",
+                        "text": text,
+                        "timestamp_ms": crate::system_time_millis(),
+                    });
+                    if let Ok(json) = serde_json::to_string(&payload) {
+                        let sent = live
+                            .endpoint
+                            .send_channel_data("chat", false, json.as_bytes());
+                        if !sent {
+                            crate::set_message_window_status(
+                                session_idx,
+                                "发送失败：chat 通道未就绪".to_string(),
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -226,6 +343,13 @@ pub fn run_viewer_generic<D, R, DF, RF>(
         while let Some(ev) = live.endpoint.poll_event() {
             // #72 文件通道事件交给状态机（非 file 事件为 no-op）。
             file_transfer.handle_event(&ev, &mut live.endpoint);
+            // #109/#452 终端命令响应 → 终端独立窗口回显。
+            if let ClientEvent::ChannelData(cid, _, data) = &ev
+                && live.endpoint.channel_label(*cid).as_deref() == Some("cmd")
+                && let Ok(response) = serde_json::from_slice::<CmdResponse>(data)
+            {
+                crate::append_terminal_output(session_idx, format_cmd_response(&response));
+            }
             // #75 远程光标：被控端经 cursor 通道广播位置 → UI 叠加（与 macOS UI 一致）。
             if let ClientEvent::ChannelData(cid, _, data) = &ev
                 && live.endpoint.channel_label(*cid).as_deref() == Some("cursor")
@@ -234,6 +358,13 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                 crate::with_session_ui_state(&ui_weak, session_idx, move |s| {
                     s.cursor = Some((cx, cy));
                 });
+            }
+            // #458 聊天消息：被控端经 chat 通道回传 → 聊天窗口消息列表。
+            if let ClientEvent::ChannelData(cid, _, data) = &ev
+                && live.endpoint.channel_label(*cid).as_deref() == Some("chat")
+                && let Some((sender, text)) = crate::decode_chat_text(data)
+            {
+                crate::append_chat_message(session_idx, sender, text, false);
             }
             if let ClientEvent::Media(data) = ev {
                 media_evts += 1;
@@ -345,15 +476,13 @@ pub fn run_viewer_generic<D, R, DF, RF>(
         if !no_media_notified && media_evts == 0 && Instant::now() >= no_media_deadline {
             no_media_notified = true;
             let room_msg = format!("对方不在线或未开启被控（设备 {room}），等待对方上线后自动出流");
+            crate::session_set_status(&ui_weak, session_idx, room_msg.clone());
             with_ui(&ui_weak, move |ui| ui.set_status(room_msg.into()));
         }
         if frames > 0 && !session_ui_joined {
             session_ui_joined = true;
             crate::session_joined_weak(&ui_weak, session_idx);
-            with_ui(&ui_weak, move |ui| {
-                ui.set_in_session(true);
-                ui.set_session_status("会话中 · 媒体流已接通".into());
-            });
+            crate::session_set_status(&ui_weak, session_idx, "会话中 · 媒体流已接通".to_string());
         }
         if frames > 0 && no_media_notified {
             no_media_notified = false;
@@ -363,9 +492,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
         if let Some(text) = file_transfer.take_incoming_clipboard() {
             aerodesk_core::clipboard::set_cache(text.clone());
             aerodesk_core::clipboard::write(&text);
-            with_ui(&ui_weak, move |ui| {
-                ui.set_session_status("已应用远端剪贴板文本".into())
-            });
+            crate::session_set_status(&ui_weak, session_idx, "已应用远端剪贴板文本".to_string());
         }
         if let Some(png) = file_transfer.take_incoming_clipboard_image() {
             let ok = aerodesk_core::clipboard::write_image(&png);
@@ -376,7 +503,46 @@ pub fn run_viewer_generic<D, R, DF, RF>(
             } else {
                 "远端剪贴板图片写入失败".to_string()
             };
-            with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+            crate::session_set_status(&ui_weak, session_idx, msg);
+        }
+        // #452 文件传输进度：500ms 节流同步到会话状态和独立文件窗口。
+        if last_file_status.elapsed() >= Duration::from_millis(500) {
+            last_file_status = Instant::now();
+            let st = file_transfer.status();
+            if let Some(msg) = st.message {
+                crate::session_set_status(&ui_weak, session_idx, msg.clone());
+                crate::clear_file_window_progress(session_idx, Some(msg));
+            } else if let Some((name, done, total)) = st.sending {
+                let pct = done as f64 * 100.0 / total.max(1) as f64;
+                let label = format!("发送 {name} {pct:.0}%");
+                crate::session_set_status(
+                    &ui_weak,
+                    session_idx,
+                    format!("发送文件：{name} {done}/{total} ({pct:.0}%)"),
+                );
+                crate::update_file_window_progress(
+                    session_idx,
+                    (pct / 100.0) as f32,
+                    label,
+                    format!("正在发送：{name}"),
+                );
+            } else if let Some((name, done, total)) = st.receiving {
+                let pct = done as f64 * 100.0 / total.max(1) as f64;
+                let label = format!("接收 {name} {pct:.0}%");
+                crate::session_set_status(
+                    &ui_weak,
+                    session_idx,
+                    format!("接收文件：{name} {done}/{total} ({pct:.0}%)"),
+                );
+                crate::update_file_window_progress(
+                    session_idx,
+                    (pct / 100.0) as f32,
+                    label,
+                    format!("正在接收：{name}"),
+                );
+            } else {
+                crate::clear_file_window_progress(session_idx, None);
+            }
         }
         // #271 剪贴板自动同步（1s 节流）：图片优先，否则文本；变化才发，防回声。
         if last_clip_poll
@@ -462,6 +628,43 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn format_cmd_response_shows_run_output() {
+        let response = CmdResponse {
+            id: 1,
+            result: CmdResult::Run {
+                exit_code: Some(0),
+                stdout: "hello\n".into(),
+                stderr: String::new(),
+                truncated: false,
+                error: None,
+            },
+        };
+        let text = format_cmd_response(&response);
+        assert!(text.contains("hello"));
+        assert!(text.contains("[exit=0]"));
+        assert!(!text.contains("\n\n[exit=0]"));
+    }
+
+    #[test]
+    fn format_cmd_response_shows_errors_and_truncation() {
+        let response = CmdResponse {
+            id: 2,
+            result: CmdResult::Run {
+                exit_code: Some(1),
+                stdout: String::new(),
+                stderr: "denied".into(),
+                truncated: true,
+                error: Some("blocked by policy".into()),
+            },
+        };
+        let text = format_cmd_response(&response);
+        assert!(text.contains("[错误] blocked by policy"));
+        assert!(text.contains("denied"));
+        assert!(text.contains("[输出已截断]"));
+        assert!(text.contains("[exit=1]"));
+    }
 
     #[test]
     fn decide_sync_prefers_image_and_dedups() {
