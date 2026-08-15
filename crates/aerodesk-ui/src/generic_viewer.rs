@@ -98,8 +98,10 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     let ice = live.ice_connected;
     let room2 = room.clone();
     let server2 = server.clone();
+    let connected_status = format!("已连接：peer={peer} ice={ice}");
+    let main_status = connected_status.clone();
     with_ui(&ui_weak, move |ui| {
-        ui.set_status(format!("已连接：peer={peer} ice={ice}").into());
+        ui.set_status(main_status.into());
         ui.set_log(
             format!(
                 "设备: {room2}\n服务器: {server2}\nSDP 交换: OK\nICE: {}\n\n{decoder_label}渲染。",
@@ -114,6 +116,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
         crate::add_recent(ui, &room2, &server2);
         ui.set_conn_state(2);
     });
+    crate::session_set_status(&ui_weak, session_idx, connected_status);
     // #438：连上信令只表示设备已连接/可被找到，不进入观察页；
     // 收到首个渲染帧后才 session_joined_weak 进入会话视图。
 
@@ -161,11 +164,11 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                 crate::FileCmd::SendFile(path) => match file_transfer.send_file(&path) {
                     Ok(()) => {
                         let msg = format!("开始发送文件：{}", path.display());
-                        with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                        crate::session_set_status(&ui_weak, session_idx, msg);
                     }
                     Err(e) => {
                         let msg = format!("发送失败：{e}");
-                        with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                        crate::session_set_status(&ui_weak, session_idx, msg);
                     }
                 },
                 crate::FileCmd::SendClipboard(text) => {
@@ -176,17 +179,17 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                     } else {
                         "剪贴板：file 通道未就绪".to_string()
                     };
-                    with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                    crate::session_set_status(&ui_weak, session_idx, msg);
                 }
                 crate::FileCmd::SendClipboardImage(png) => {
                     match file_transfer.send_clipboard_image(png) {
                         Ok(()) => {
                             let msg = "已发送剪贴板图片到被控端".to_string();
-                            with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                            crate::session_set_status(&ui_weak, session_idx, msg);
                         }
                         Err(e) => {
                             let msg = format!("剪贴板图片发送失败：{e}");
-                            with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+                            crate::session_set_status(&ui_weak, session_idx, msg);
                         }
                     }
                 }
@@ -349,15 +352,13 @@ pub fn run_viewer_generic<D, R, DF, RF>(
         if !no_media_notified && media_evts == 0 && Instant::now() >= no_media_deadline {
             no_media_notified = true;
             let room_msg = format!("对方不在线或未开启被控（设备 {room}），等待对方上线后自动出流");
+            crate::session_set_status(&ui_weak, session_idx, room_msg.clone());
             with_ui(&ui_weak, move |ui| ui.set_status(room_msg.into()));
         }
         if frames > 0 && !session_ui_joined {
             session_ui_joined = true;
             crate::session_joined_weak(&ui_weak, session_idx);
-            with_ui(&ui_weak, move |ui| {
-                ui.set_in_session(true);
-                ui.set_session_status("会话中 · 媒体流已接通".into());
-            });
+            crate::session_set_status(&ui_weak, session_idx, "会话中 · 媒体流已接通".to_string());
         }
         if frames > 0 && no_media_notified {
             no_media_notified = false;
@@ -367,9 +368,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
         if let Some(text) = file_transfer.take_incoming_clipboard() {
             aerodesk_core::clipboard::set_cache(text.clone());
             aerodesk_core::clipboard::write(&text);
-            with_ui(&ui_weak, move |ui| {
-                ui.set_session_status("已应用远端剪贴板文本".into())
-            });
+            crate::session_set_status(&ui_weak, session_idx, "已应用远端剪贴板文本".to_string());
         }
         if let Some(png) = file_transfer.take_incoming_clipboard_image() {
             let ok = aerodesk_core::clipboard::write_image(&png);
@@ -380,7 +379,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
             } else {
                 "远端剪贴板图片写入失败".to_string()
             };
-            with_ui(&ui_weak, move |ui| ui.set_session_status(msg.into()));
+            crate::session_set_status(&ui_weak, session_idx, msg);
         }
         // #271 剪贴板自动同步（1s 节流）：图片优先，否则文本；变化才发，防回声。
         if last_clip_poll
