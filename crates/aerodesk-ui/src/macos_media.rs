@@ -628,10 +628,11 @@ pub fn run_viewer(
             if due {
                 if frames == 0 {
                     crate::session_joined_weak(&ui_weak, session_idx);
-                    with_ui(&ui_weak, |ui| {
-                        ui.set_in_session(true);
-                        ui.set_session_status("会话中 · 真实解码（H.264/H.265/VP9/AV1）".into());
-                    });
+                    crate::session_set_status(
+                        &ui_weak,
+                        session_idx,
+                        "会话中 · 真实解码（H.264/H.265/VP9/AV1）".to_string(),
+                    );
                 }
                 present_frame(
                     &ui_weak,

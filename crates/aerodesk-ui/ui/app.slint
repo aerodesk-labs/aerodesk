@@ -292,37 +292,6 @@ component RdInput {
     }
 }
 
-// 会话标签页（多会话）。
-component SessionTab {
-    in property <string> text;
-    in property <bool> selected: false;
-    callback clicked;
-    height: 28px;
-    min-width: 90px;
-    Rectangle {
-        width: 100%;
-        height: 100%;
-        border-radius: 6px;
-        background: root.selected ? #ffffff : #ececf0;
-        border-width: 1px;
-        border-color: #dedee2;
-        Text {
-            width: 100%;
-            height: 100%;
-            text: root.text;
-            font-size: 14px;
-            color: root.selected ? #0071ff : #4d4d52;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-        ta := TouchArea {
-            width: 100%;
-            height: 100%;
-            mouse-cursor: pointer;
-            clicked => { root.clicked(); }
-        }
-    }
-}
 
 // 被控端授权卡片（主页右侧 + 被控端页共用，保证视觉一致）。
 component PermissionCard {
@@ -425,6 +394,13 @@ export component AppWindow inherits Window {
     in-out property <string> device-pw: "—";
     // ---- 会话 ----
     in-out property <bool> in-session: false;
+    // #447 独立功能窗口：打开状态镜像（窗口关闭后恢复按钮）。
+    in-out property <bool> control-open: false;
+    in-out property <bool> view-open: false;
+    in-out property <bool> camera-open: false;
+    in-out property <bool> file-open: false;
+    in-out property <bool> message-open: false;
+    in-out property <bool> terminal-open: false;
     in-out property <image> video-frame: @image-url("");
     in-out property <[string]> session-tabs: [];
     in-out property <int> active-session: 0;
@@ -484,6 +460,10 @@ export component AppWindow inherits Window {
     callback connect();
     callback connect-view();
     callback connect-camera();
+    // #447 独立功能窗口入口。
+    callback open-file-window();
+    callback open-message-window();
+    callback open-terminal-window();
     callback disconnect();
     callback set-tab(int);
     callback connect-recent(string);
@@ -792,19 +772,19 @@ export component AppWindow inherits Window {
                                 HorizontalLayout {
                                     spacing: 8px;
                                     RdButton {
-                                        text: connecting ? "连接中…" : "远程控制";
-                                        enabled: !connecting && !root.in-session;
+                                        text: root.control-open ? "控制窗口已打开" : (connecting ? "连接中…" : "远程控制");
+                                        enabled: !connecting && !root.control-open;
                                         primary: true;
                                         clicked => { root.connect(); }
                                     }
                                     RdButton {
-                                        text: "观看";
-                                        enabled: !connecting && !root.in-session;
+                                        text: root.view-open ? "观看窗口已打开" : "观看";
+                                        enabled: !connecting && !root.view-open;
                                         clicked => { root.connect-view(); }
                                     }
                                     RdButton {
-                                        text: "摄像头";
-                                        enabled: !connecting && !root.in-session;
+                                        text: root.camera-open ? "摄像头窗口已打开" : "摄像头";
+                                        enabled: !connecting && !root.camera-open;
                                         clicked => { root.connect-camera(); }
                                     }
                                 }
@@ -812,18 +792,18 @@ export component AppWindow inherits Window {
                                     spacing: 8px;
                                     RdButton {
                                         text: "文件传输";
-                                        enabled: false;
-                                        clicked => { root.status = "文件传输建设中"; }
+                                        enabled: !root.file-open;
+                                        clicked => { root.open-file-window(); }
                                     }
                                     RdButton {
                                         text: "发消息";
-                                        enabled: false;
-                                        clicked => { root.status = "发消息建设中"; }
+                                        enabled: !root.message-open;
+                                        clicked => { root.open-message-window(); }
                                     }
                                     RdButton {
                                         text: "终端";
-                                        enabled: false;
-                                        clicked => { root.status = "终端建设中"; }
+                                        enabled: !root.terminal-open;
+                                        clicked => { root.open-terminal-window(); }
                                     }
                                     RdButton {
                                         text: "断开";
@@ -1252,223 +1232,304 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // ---- 会话视图（对齐 RustDesk remote_page：大视频区 + 悬浮工具栏） ----
-            if root.in-session: VerticalLayout {
-                spacing: 0px;
-                vertical-stretch: 1;
-                // 会话标签行（仅有多会话时显示）
-                // 标签数量与 Rust 侧 MAX_SESSIONS=4 耦合（见 main.rs const MAX_SESSIONS）。
-                if root.session-tabs.length > 0: HorizontalLayout {
-                    spacing: 0px;
-                    if root.session-tabs.length > 0: SessionTab { text: root.session-tabs[0]; selected: root.active-session == 0; clicked => { root.switch-session(0); } }
-                    if root.session-tabs.length > 1: SessionTab { text: root.session-tabs[1]; selected: root.active-session == 1; clicked => { root.switch-session(1); } }
-                    if root.session-tabs.length > 2: SessionTab { text: root.session-tabs[2]; selected: root.active-session == 2; clicked => { root.switch-session(2); } }
-                    if root.session-tabs.length > 3: SessionTab { text: root.session-tabs[3]; selected: root.active-session == 3; clicked => { root.switch-session(3); } }
+        }
+    }
+}
+
+
+// ============ #447 独立功能窗口 ============
+
+export component ControlWindow inherits Window {
+    in-out property <image> video-frame: @image-url("");
+    in-out property <float> frame-w: 0;
+    in-out property <float> frame-h: 0;
+    in-out property <string> status: "连接中…";
+    in-out property <string> input-mode: "键鼠已释放";
+    in-out property <bool> input-capturing: false;
+
+    callback send-input(int, int, float, float, float, float, float, float);
+    callback send-key(int, string, bool, bool, bool, bool) -> bool;
+    callback send-wheel(float, float, float, float, float, float, float, float);
+    callback toggle-input();
+    callback disconnect();
+
+    function cursor-pos(view-w: length, view-h: length, fw: float, fh: float, n: float, vertical: bool) -> length {
+        let scale = min(view-w / max(fw * 1px, 1px), view-h / max(fh * 1px, 1px));
+        let draw-w = fw * 1px * scale;
+        let draw-h = fh * 1px * scale;
+        if vertical { return (view-h - draw-h) / 2 + n * draw-h; }
+        return (view-w - draw-w) / 2 + n * draw-w;
+    }
+
+    title: "AeroDesk 远程控制";
+    width: 1000px;
+    height: 680px;
+
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            background: #000000;
+            vertical-stretch: 1;
+            fs := FocusScope {
+                focus-on-click: true;
+                init => { fs.focus(); }
+                key-pressed(event) => {
+                    if root.send-key(0, event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta) { accept } else { reject }
                 }
-                // 视频区（占满剩余空间，黑底）；TouchArea 捕获指针 → 输入通道（#75）
-                Rectangle {
-                    background: #000000;
-                    vertical-stretch: 1;
-                    // #75：键盘焦点——进入会话/点击视频区即聚焦，键码映射后走 send-key。
-                    fs := FocusScope {
-                        focus-on-click: true;
-                        init => { fs.focus(); }
-                        key-pressed(event) => {
-                            // 键码映射在 Rust 侧（keymap.rs），返回是否已处理。
-                            if root.send-key(
-                                0,
-                                event.text,
-                                event.modifiers.control,
-                                event.modifiers.shift,
-                                event.modifiers.alt,
-                                event.modifiers.meta
-                            ) { accept } else { reject }
-                        }
-                        key-released(event) => {
-                            if root.send-key(
-                                1,
-                                event.text,
-                                event.modifiers.control,
-                                event.modifiers.shift,
-                                event.modifiers.alt,
-                                event.modifiers.meta
-                            ) { accept } else { reject }
-                        }
-                    }
-                    TouchArea {
-                        width: 100%;
-                        height: 100%;
-                        enabled: root.in-session && root.session-frames[root.active-session].width > 0;
-                        pointer-event(event) => {
-                            if event.kind == PointerEventKind.down { fs.focus(); }
-                            // F4：转发实际按键（0=左 1=中 2=右；other 归左键）。
-                            root.send-input(
-                                event.kind == PointerEventKind.down ? 1 : (event.kind == PointerEventKind.up ? 2 : 0),
-                                event.button == PointerEventButton.middle ? 1 : (event.button == PointerEventButton.right ? 2 : 0),
-                                self.mouse-x / 1px,
-                                self.mouse-y / 1px,
-                                self.width / 1px,
-                                self.height / 1px,
-                                root.frame-w,
-                                root.frame-h
-                            );
-                        }
-                        // #75：滚轮 → send-wheel（原始坐标 + 尺寸 + 像素增量）。
-                        scroll-event(event) => {
-                            root.send-wheel(
-                                self.mouse-x / 1px,
-                                self.mouse-y / 1px,
-                                self.width / 1px,
-                                self.height / 1px,
-                                root.frame-w,
-                                root.frame-h,
-                                event.delta-x / 1px,
-                                event.delta-y / 1px
-                            );
-                            accept
-                        }
-                    }
-                    Image {
-                        source: root.session-frames[root.active-session];
-                        width: 100%;
-                        height: 100%;
-                        image-fit: contain;
-                    }
-                    // #75 远程光标叠加（蓝色半透明箭头，随被控端光标移动）。
-                    // 样式刻意区别于被控端真实鼠标（黑箭头），避免误认为光标被采集进视频。
-                    if root.show-remote-cursor && root.remote-cursor-visible && root.frame-w > 0: Path {
-                        x: root.cursor-pos(parent.width, parent.height, root.frame-w, root.frame-h, root.remote-cursor-x, false);
-                        y: root.cursor-pos(parent.width, parent.height, root.frame-w, root.frame-h, root.remote-cursor-y, true);
-                        width: 16px;
-                        height: 20px;
-                        commands: "M 0 0 L 0 20 L 5 15 L 8 19 L 10 17 L 7 13 L 12 13 Z";
-                        fill: #0a84ffb3;
-                        stroke: #ffffff;
-                        stroke-width: 1.5px;
-                    }
-                    // #72 文件传输进度条（发送/接收中显示）。
-                    if root.file-progress >= 0: Rectangle {
-                        x: 12px;
-                        y: parent.height - 34px;
-                        width: 280px;
-                        height: 24px;
-                        border-radius: 4px;
-                        background: #ffffffcc;
-                        HorizontalLayout {
-                            padding-left: 8px;
-                            padding-right: 8px;
-                            spacing: 8px;
-                            ProgressIndicator {
-                                width: 180px;
-                                height: 8px;
-                                progress: root.file-progress;
-                            }
-                            Text {
-                                text: root.file-label;
-                                font-size: 11px;
-                                color: #212121;
-                                vertical-alignment: center;
-                            }
-                            IconBtn { icon: "\u{e5cd}"; danger: true; width: 22px; height: 20px; tooltip: "取消发送"; clicked => { root.cancel-file(); } }
-                        }
-                    }
-                    if root.session-frames[root.active-session].width == 0: Text {
-                        text: "等待媒体流…（对方上线/接通后自动播放）";
-                        color: #888888;
+                key-released(event) => {
+                    if root.send-key(1, event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta) { accept } else { reject }
+                }
+            }
+            TouchArea {
+                width: 100%;
+                height: 100%;
+                enabled: root.video-frame.width > 0;
+                pointer-event(event) => {
+                    if event.kind == PointerEventKind.down { fs.focus(); }
+                    root.send-input(
+                        event.kind == PointerEventKind.down ? 1 : (event.kind == PointerEventKind.up ? 2 : 0),
+                        event.button == PointerEventButton.middle ? 1 : (event.button == PointerEventButton.right ? 2 : 0),
+                        self.mouse-x / 1px,
+                        self.mouse-y / 1px,
+                        self.width / 1px,
+                        self.height / 1px,
+                        root.frame-w,
+                        root.frame-h
+                    );
+                }
+                scroll-event(event) => {
+                    root.send-wheel(
+                        self.mouse-x / 1px,
+                        self.mouse-y / 1px,
+                        self.width / 1px,
+                        self.height / 1px,
+                        root.frame-w,
+                        root.frame-h,
+                        event.delta-x / 1px,
+                        event.delta-y / 1px
+                    );
+                    accept
+                }
+            }
+            Image {
+                source: root.video-frame;
+                width: 100%;
+                height: 100%;
+                image-fit: contain;
+            }
+            if root.video-frame.width == 0: Text {
+                text: "等待媒体流…（对方上线/接通后自动播放）";
+                color: #888888;
+                font-size: 14px;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+                width: 100%;
+                height: 100%;
+            }
+            Rectangle {
+                x: 12px;
+                y: 12px;
+                width: 290px;
+                height: 44px;
+                border-radius: 6px;
+                background: #ffffff;
+                border-width: 1px;
+                border-color: #d9d9de;
+                HorizontalLayout {
+                    cross-axis-alignment: center;
+                    padding-left: 4px;
+                    padding-right: 4px;
+                    spacing: 2px;
+                    IconBtn { icon: "\u{e312}"; active: root.input-capturing; tooltip: "输入"; clicked => { root.toggle-input(); } }
+                    IconBtn { icon: "\u{e5cd}"; danger: true; tooltip: "断开"; clicked => { root.disconnect(); } }
+                    Rectangle { width: 6px; }
+                    Text {
+                        text: root.status;
+                        color: #34a853;
                         font-size: 14px;
                         vertical-alignment: center;
-                        horizontal-alignment: center;
-                        width: 100%;
-                        height: 100%;
-                    }
-                    // #72 拖放发送：外部文件悬停时高亮提示（松开放入即发送）。
-                    if root.file-drop-hover: Rectangle {
-                        x: 0px;
-                        y: 0px;
-                        width: 100%;
-                        height: 100%;
-                        background: #34a85333;
-                        border-width: 2px;
-                        border-color: #34a853;
-                        border-radius: 6px;
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: 6px;
-                            Text {
-                                text: "松开发送文件";
-                                color: #34a853;
-                                font-size: 22px;
-                                font-weight: 700;
-                            }
-                            Text {
-                                text: "拖拽任意文件到会话窗口";
-                                color: #ffffff;
-                                font-size: 13px;
-                            }
-                        }
-                    }
-                    // 悬浮工具栏（对齐 RustDesk remote_toolbar：白底圆角、图标按钮）
-                    Rectangle {
-                        x: 12px;
-                        y: 12px;
-                        width: 470px;
-                        height: 44px;
-                        border-radius: 6px;
-                        background: #ffffff;
-                        border-width: 1px;
-                        border-color: #d9d9de;
-                        HorizontalLayout {
-                            cross-axis-alignment: center;
-                            padding-left: 4px;
-                            padding-right: 4px;
-                            spacing: 2px;
-                            IconBtn { icon: "\u{e5d0}"; tooltip: "全屏"; clicked => { root.toggle-fullscreen(); } }
-                            IconBtn { icon: "\u{e050}"; active: root.audio-muted; danger: root.audio-muted; tooltip: root.audio-muted ? "音频已静音（本会话）" : "音频"; clicked => { root.toggle-audio(); } }
-                            IconBtn { icon: "\u{e3b0}"; active: root.camera-active; enabled: root.camera-available; tooltip: "摄像头"; clicked => { root.toggle-camera(); } }
-                            Slider {
-                                width: 80px;
-                                minimum: 0;
-                                maximum: 1;
-                                value: root.volume;
-                                changed(value) => {
-                                    root.volume = value;
-                                    root.change-volume(value);
-                                }
-                            }
-                            IconBtn { icon: "\u{e30c}"; tooltip: "显示器"; clicked => { root.toggle-display(); } }
-                            IconBtn { icon: "\u{e429}"; tooltip: "画质"; clicked => { root.toggle-quality(); } }
-                            IconBtn { icon: "\u{e312}"; tooltip: "输入"; clicked => { root.toggle-input(); } }
-                            IconBtn { icon: "\u{e2c8}"; active: root.file-transfer-enabled; danger: !root.file-transfer-enabled; tooltip: root.file-transfer-enabled ? "文件传输：开" : "文件传输：关（点击开启）"; clicked => { root.toggle-file-transfer(); } }
-                            IconBtn { icon: "\u{e14f}"; enabled: root.file-transfer-enabled; tooltip: "发文件"; clicked => { root.send-file(); } }
-                            IconBtn { icon: "\u{e2c7}"; enabled: root.file-transfer-enabled; tooltip: "剪贴板"; clicked => { root.send-clipboard(); } }
-                            Rectangle { width: 1px; height: 22px; background: #dedee2; }
-                            IconBtn { icon: "\u{e5cd}"; danger: true; tooltip: "断开"; clicked => { root.disconnect(); } }
-                            Rectangle { width: 6px; }
-                            Text {
-                                text: root.session-status;
-                                color: #34a853;
-                                font-size: 14px;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-                }
-                // 底部状态行
-                Rectangle {
-                    height: 28px;
-                    background: #ffffff;
-                    HorizontalLayout {
-                        padding-left: 14px;
-                        spacing: 8px;
-                        Text {
-                            text: "输入模式：" + root.input-mode;
-                            color: #7d7d84;
-                            font-size: 14px;
-                            vertical-alignment: center;
-                        }
                     }
                 }
             }
+        }
+        Rectangle {
+            height: 28px;
+            background: #ffffff;
+            HorizontalLayout {
+                padding-left: 14px;
+                spacing: 8px;
+                Text {
+                    text: "输入模式：" + root.input-mode;
+                    color: #7d7d84;
+                    font-size: 14px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+export component ViewWindow inherits Window {
+    in-out property <image> video-frame: @image-url("");
+    in-out property <float> frame-w: 0;
+    in-out property <float> frame-h: 0;
+    in-out property <string> status: "连接中…";
+
+    title: "AeroDesk 观看";
+    width: 1000px;
+    height: 680px;
+
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            background: #000000;
+            vertical-stretch: 1;
+            Image {
+                source: root.video-frame;
+                width: 100%;
+                height: 100%;
+                image-fit: contain;
+            }
+            if root.video-frame.width == 0: Text {
+                text: "等待媒体流…（对方上线/接通后自动播放）";
+                color: #888888;
+                font-size: 14px;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+                width: 100%;
+                height: 100%;
+            }
+            Text {
+                x: 12px;
+                y: 12px;
+                text: root.status;
+                color: #34a853;
+                font-size: 14px;
+            }
+        }
+        Rectangle {
+            height: 28px;
+            background: #ffffff;
+            HorizontalLayout {
+                padding-left: 14px;
+                Text {
+                    text: root.status;
+                    color: #7d7d84;
+                    font-size: 14px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+export component CameraWindow inherits Window {
+    in-out property <image> video-frame: @image-url("");
+    in-out property <float> frame-w: 0;
+    in-out property <float> frame-h: 0;
+    in-out property <string> status: "连接中…";
+
+    title: "AeroDesk 摄像头";
+    width: 1000px;
+    height: 680px;
+
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            background: #000000;
+            vertical-stretch: 1;
+            Image {
+                source: root.video-frame;
+                width: 100%;
+                height: 100%;
+                image-fit: contain;
+            }
+            if root.video-frame.width == 0: Text {
+                text: "等待摄像头画面…";
+                color: #888888;
+                font-size: 14px;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+                width: 100%;
+                height: 100%;
+            }
+            Text {
+                x: 12px;
+                y: 12px;
+                text: root.status;
+                color: #34a853;
+                font-size: 14px;
+            }
+        }
+        Rectangle {
+            height: 28px;
+            background: #ffffff;
+            HorizontalLayout {
+                padding-left: 14px;
+                Text {
+                    text: root.status;
+                    color: #7d7d84;
+                    font-size: 14px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+export component FileTransferWindow inherits Window {
+    in-out property <string> status: "文件传输窗口建设中";
+    title: "AeroDesk 文件传输";
+    width: 640px;
+    height: 480px;
+    Rectangle {
+        background: #f5f5f7;
+        Text {
+            text: root.status;
+            color: #212121;
+            font-size: 16px;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            width: 100%;
+            height: 100%;
+        }
+    }
+}
+
+export component MessageWindow inherits Window {
+    in-out property <string> status: "发消息窗口建设中";
+    title: "AeroDesk 发消息";
+    width: 640px;
+    height: 480px;
+    Rectangle {
+        background: #f5f5f7;
+        Text {
+            text: root.status;
+            color: #212121;
+            font-size: 16px;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            width: 100%;
+            height: 100%;
+        }
+    }
+}
+
+export component TerminalWindow inherits Window {
+    in-out property <string> status: "终端窗口建设中";
+    title: "AeroDesk 终端";
+    width: 720px;
+    height: 520px;
+    Rectangle {
+        background: #1e1e1e;
+        Text {
+            text: root.status;
+            color: #e6e6e6;
+            font-size: 16px;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            width: 100%;
+            height: 100%;
         }
     }
 }

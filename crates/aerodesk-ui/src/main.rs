@@ -112,6 +112,135 @@ pub struct SessionFrame {
     pub h: u32,
 }
 
+/// #447 独立会话/功能窗口弱引用。窗口由 Slint 顶层组件创建；show() 后保持存活，
+/// 这里只保存弱引用用于跨线程状态同步。
+#[derive(Clone)]
+pub enum SessionWindow {
+    Control(slint::Weak<ControlWindow>),
+    View(slint::Weak<ViewWindow>),
+    Camera(slint::Weak<CameraWindow>),
+    File(slint::Weak<FileTransferWindow>),
+    Message(slint::Weak<MessageWindow>),
+    Terminal(slint::Weak<TerminalWindow>),
+}
+
+impl SessionWindow {
+    pub fn set_status(&self, text: String) {
+        let text = slint::SharedString::from(text);
+        match self {
+            Self::Control(w) => {
+                let _ = w.upgrade_in_event_loop(move |win| win.set_status(text.clone()));
+            }
+            Self::View(w) => {
+                let _ = w.upgrade_in_event_loop(move |win| win.set_status(text.clone()));
+            }
+            Self::Camera(w) => {
+                let _ = w.upgrade_in_event_loop(move |win| win.set_status(text.clone()));
+            }
+            Self::File(w) => {
+                let _ = w.upgrade_in_event_loop(move |win| win.set_status(text.clone()));
+            }
+            Self::Message(w) => {
+                let _ = w.upgrade_in_event_loop(move |win| win.set_status(text.clone()));
+            }
+            Self::Terminal(w) => {
+                let _ = w.upgrade_in_event_loop(move |win| win.set_status(text.clone()));
+            }
+        }
+    }
+
+    pub fn set_frame(&self, frame: &SessionFrame) {
+        let frame = frame.clone();
+        match self {
+            Self::Control(w) => {
+                let _ = w.upgrade_in_event_loop(move |win| {
+                    let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                        &frame.rgba,
+                        frame.w,
+                        frame.h,
+                    );
+                    win.set_video_frame(slint::Image::from_rgba8(buf));
+                    win.set_frame_w(frame.w as f32);
+                    win.set_frame_h(frame.h as f32);
+                });
+            }
+            Self::View(w) => {
+                let _ = w.upgrade_in_event_loop(move |win| {
+                    let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                        &frame.rgba,
+                        frame.w,
+                        frame.h,
+                    );
+                    win.set_video_frame(slint::Image::from_rgba8(buf));
+                    win.set_frame_w(frame.w as f32);
+                    win.set_frame_h(frame.h as f32);
+                });
+            }
+            Self::Camera(w) => {
+                let _ = w.upgrade_in_event_loop(move |win| {
+                    let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                        &frame.rgba,
+                        frame.w,
+                        frame.h,
+                    );
+                    win.set_video_frame(slint::Image::from_rgba8(buf));
+                    win.set_frame_w(frame.w as f32);
+                    win.set_frame_h(frame.h as f32);
+                });
+            }
+            Self::File(_) | Self::Message(_) | Self::Terminal(_) => {}
+        }
+    }
+
+    pub fn set_input_mode(&self, text: String) {
+        let text = slint::SharedString::from(text);
+        if let Self::Control(w) = self {
+            let _ = w.upgrade_in_event_loop(move |win| win.set_input_mode(text.clone()));
+        }
+    }
+
+    pub fn set_input_capturing(&self, active: bool) {
+        if let Self::Control(w) = self {
+            let _ = w.upgrade_in_event_loop(move |win| win.set_input_capturing(active));
+        }
+    }
+
+    pub fn hide(&self) {
+        match self {
+            Self::Control(w) => {
+                let _ = w.upgrade_in_event_loop(|win| {
+                    let _ = win.hide();
+                });
+            }
+            Self::View(w) => {
+                let _ = w.upgrade_in_event_loop(|win| {
+                    let _ = win.hide();
+                });
+            }
+            Self::Camera(w) => {
+                let _ = w.upgrade_in_event_loop(|win| {
+                    let _ = win.hide();
+                });
+            }
+            Self::File(w) => {
+                let _ = w.upgrade_in_event_loop(|win| {
+                    let _ = win.hide();
+                });
+            }
+            Self::Message(w) => {
+                let _ = w.upgrade_in_event_loop(|win| {
+                    let _ = win.hide();
+                });
+            }
+            Self::Terminal(w) => {
+                let _ = w.upgrade_in_event_loop(|win| {
+                    let _ = win.hide();
+                });
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SessionHandle {
     pub slot: usize,
@@ -127,6 +256,8 @@ pub struct SessionHandle {
     pub show_camera: Arc<AtomicBool>,
     /// 观看模式：true=仅观看不发送键鼠输入。
     pub view_only: Arc<AtomicBool>,
+    /// #447 会话对应的独立窗口（无窗口的旧测试句柄为 None）。
+    pub window: Option<SessionWindow>,
     /// 最近一帧（未收到帧时为 None，UI 显示空槽）。
     pub frame: Option<SessionFrame>,
     /// 远端光标最新位置（None = 尚未收到光标事件）。
@@ -160,6 +291,251 @@ pub static SESSION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub fn ui_set_active_session(ui: &AppWindow, idx: i32) {
     ACTIVE_SESSION.store(idx, Ordering::SeqCst);
     ui.set_active_session(idx);
+}
+
+/// #447 主窗口按钮打开状态镜像：窗口打开时置 true，关闭/清理时置 false。
+fn set_main_window_open(ui: &AppWindow, window: &SessionWindow, open: bool) {
+    match window {
+        SessionWindow::Control(_) => ui.set_control_open(open),
+        SessionWindow::View(_) => ui.set_view_open(open),
+        SessionWindow::Camera(_) => ui.set_camera_open(open),
+        SessionWindow::File(_) => ui.set_file_open(open),
+        SessionWindow::Message(_) => ui.set_message_open(open),
+        SessionWindow::Terminal(_) => ui.set_terminal_open(open),
+    }
+}
+
+/// 取会话对应的独立窗口弱引用。
+pub fn session_window_for_slot(slot: usize) -> Option<SessionWindow> {
+    SESSIONS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|s| s.slot == slot)
+        .and_then(|s| s.window.clone())
+}
+
+/// 会话状态同步到独立窗口，同时兼容保留 AppWindow.session_status。
+pub fn session_set_status(ui_weak: &slint::Weak<AppWindow>, slot: usize, msg: String) {
+    let main_msg = msg.clone();
+    with_ui(ui_weak, move |ui| ui.set_session_status(main_msg.into()));
+    if let Some(window) = session_window_for_slot(slot) {
+        window.set_status(msg);
+    }
+}
+
+/// 请求断开指定会话（独立窗口关闭/断开按钮共用）。
+pub fn request_session_stop(slot: usize) {
+    INPUT_CAPTURING.store(false, Ordering::SeqCst);
+    let sessions = SESSIONS.lock().unwrap();
+    if let Some(s) = sessions.iter().find(|s| s.slot == slot) {
+        s.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+/// 把会话句柄状态同步到其独立窗口（帧/输入捕获态/文案）。
+fn sync_session_window(window: &SessionWindow, s: &SessionHandle) {
+    if let Some(frame) = &s.frame {
+        window.set_frame(frame);
+    }
+}
+
+/// 在所有会话注册表变更后，刷新仍存活的独立窗口。
+fn sync_all_session_windows() {
+    let snapshots: Vec<(Option<SessionWindow>, Option<SessionFrame>)> = {
+        let sessions = SESSIONS.lock().unwrap();
+        sessions
+            .iter()
+            .map(|s| (s.window.clone(), s.frame.clone()))
+            .collect()
+    };
+    for (window, frame) in snapshots {
+        if let (Some(window), Some(frame)) = (window, frame) {
+            window.set_frame(&frame);
+        }
+    }
+}
+
+/// 把鼠标输入路由到指定会话。
+fn send_input_to_slot(
+    slot: usize,
+    kind: i32,
+    button: i32,
+    mx: f32,
+    my: f32,
+    area_w: f32,
+    area_h: f32,
+    fw: f32,
+    fh: f32,
+) {
+    if !INPUT_CAPTURING.load(Ordering::SeqCst) {
+        return;
+    }
+    let (x, y) = viewer_to_remote_norm(mx, my, area_w, area_h, fw, fh);
+    let button = match button {
+        1 => aerodesk_protocol::input::MouseButton::Middle,
+        2 => aerodesk_protocol::input::MouseButton::Right,
+        _ => aerodesk_protocol::input::MouseButton::Left,
+    };
+    let event = match kind {
+        1 => aerodesk_protocol::input::InputEvent::MouseButton {
+            button,
+            state: aerodesk_protocol::input::ButtonState::Pressed,
+            x: x as f64,
+            y: y as f64,
+        },
+        2 => aerodesk_protocol::input::InputEvent::MouseButton {
+            button,
+            state: aerodesk_protocol::input::ButtonState::Released,
+            x: x as f64,
+            y: y as f64,
+        },
+        _ => aerodesk_protocol::input::InputEvent::MouseMove {
+            x: x as f64,
+            y: y as f64,
+        },
+    };
+    let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    let frame = aerodesk_protocol::input::InputFrame::new(seq, event);
+    if let Ok(json) = serde_json::to_string(&frame) {
+        let sessions = SESSIONS.lock().unwrap();
+        if let Some(s) = sessions.iter().find(|s| s.slot == slot) {
+            let _ = s.input_tx.send(json);
+        }
+    }
+}
+
+/// 把键盘输入路由到指定会话；返回是否已处理。
+fn send_key_to_slot(
+    slot: usize,
+    state: i32,
+    text: slint::SharedString,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    meta: bool,
+) -> bool {
+    let Some(code) = keymap::key_code_for_text(text.as_str()) else {
+        return false;
+    };
+    if !INPUT_CAPTURING.load(Ordering::SeqCst) {
+        return false;
+    }
+    if code == "Escape" {
+        INPUT_CAPTURING.store(false, Ordering::SeqCst);
+        return true;
+    }
+    let state = if state == 0 {
+        aerodesk_protocol::input::ButtonState::Pressed
+    } else {
+        aerodesk_protocol::input::ButtonState::Released
+    };
+    #[cfg(target_os = "macos")]
+    let modifiers = aerodesk_protocol::input::Modifiers {
+        ctrl: meta,
+        shift,
+        alt,
+        meta: ctrl,
+    };
+    #[cfg(not(target_os = "macos"))]
+    let modifiers = aerodesk_protocol::input::Modifiers {
+        ctrl,
+        shift,
+        alt,
+        meta,
+    };
+    let event = aerodesk_protocol::input::InputEvent::Key {
+        code: code.to_string(),
+        state,
+        modifiers,
+    };
+    let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    let frame = aerodesk_protocol::input::InputFrame::new(seq, event);
+    if let Ok(json) = serde_json::to_string(&frame) {
+        let sessions = SESSIONS.lock().unwrap();
+        if let Some(s) = sessions.iter().find(|s| s.slot == slot) {
+            let _ = s.input_tx.send(json);
+        }
+    }
+    true
+}
+
+/// 把滚轮输入路由到指定会话。
+fn send_wheel_to_slot(
+    slot: usize,
+    mx: f32,
+    my: f32,
+    area_w: f32,
+    area_h: f32,
+    fw: f32,
+    fh: f32,
+    dx: f32,
+    dy: f32,
+) {
+    if !INPUT_CAPTURING.load(Ordering::SeqCst) {
+        return;
+    }
+    let (x, y) = viewer_to_remote_norm(mx, my, area_w, area_h, fw, fh);
+    let event = aerodesk_protocol::input::InputEvent::Wheel {
+        x: x as f64,
+        y: y as f64,
+        delta_x: dx as f64,
+        delta_y: dy as f64,
+    };
+    let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    let frame = aerodesk_protocol::input::InputFrame::new(seq, event);
+    if let Ok(json) = serde_json::to_string(&frame) {
+        let sessions = SESSIONS.lock().unwrap();
+        if let Some(s) = sessions.iter().find(|s| s.slot == slot) {
+            let _ = s.input_tx.send(json);
+        }
+    }
+}
+
+/// 为独立窗口安装“窗口关闭即恢复主按钮并断开会话”的处理器。
+fn install_session_close_handler(
+    ui_weak: slint::Weak<AppWindow>,
+    window: SessionWindow,
+    slot: usize,
+) {
+    let ui_weak2 = ui_weak.clone();
+    let kind = window.clone();
+    match window {
+        SessionWindow::Control(weak) => {
+            if let Some(win) = weak.upgrade() {
+                win.window().on_close_requested(move || {
+                    request_session_stop(slot);
+                    if let Some(ui) = ui_weak2.upgrade() {
+                        set_main_window_open(&ui, &kind, false);
+                    }
+                    slint::CloseRequestResponse::HideWindow
+                });
+            }
+        }
+        SessionWindow::View(weak) => {
+            if let Some(win) = weak.upgrade() {
+                win.window().on_close_requested(move || {
+                    request_session_stop(slot);
+                    if let Some(ui) = ui_weak2.upgrade() {
+                        set_main_window_open(&ui, &kind, false);
+                    }
+                    slint::CloseRequestResponse::HideWindow
+                });
+            }
+        }
+        SessionWindow::Camera(weak) => {
+            if let Some(win) = weak.upgrade() {
+                win.window().on_close_requested(move || {
+                    request_session_stop(slot);
+                    if let Some(ui) = ui_weak2.upgrade() {
+                        set_main_window_open(&ui, &kind, false);
+                    }
+                    slint::CloseRequestResponse::HideWindow
+                });
+            }
+        }
+        SessionWindow::File(_) | SessionWindow::Message(_) | SessionWindow::Terminal(_) => {}
+    }
 }
 
 /// macOS Dock 图标点击：主窗口弱引用（AppWindow::new 后设置，reopen 回调重显用）。
@@ -228,6 +604,197 @@ impl ConnectMode {
     }
 }
 
+/// #447 给控制窗口接上键鼠输入、输入捕获、断开等回调。
+fn wire_control_window(win: &ControlWindow, slot: usize, ui_weak: slint::Weak<AppWindow>) {
+    let win_weak = win.as_weak();
+    win.on_send_input(
+        move |kind: i32,
+              button: i32,
+              mx: f32,
+              my: f32,
+              area_w: f32,
+              area_h: f32,
+              fw: f32,
+              fh: f32| {
+            send_input_to_slot(slot, kind, button, mx, my, area_w, area_h, fw, fh);
+        },
+    );
+    win.on_send_wheel(
+        move |mx: f32, my: f32, area_w: f32, area_h: f32, fw: f32, fh: f32, dx: f32, dy: f32| {
+            send_wheel_to_slot(slot, mx, my, area_w, area_h, fw, fh, dx, dy);
+        },
+    );
+    win.on_send_key({
+        let win_weak = win_weak.clone();
+        move |state: i32,
+              text: slint::SharedString,
+              ctrl: bool,
+              shift: bool,
+              alt: bool,
+              meta: bool|
+              -> bool {
+            let Some(code) = keymap::key_code_for_text(text.as_str()) else {
+                return false;
+            };
+            let handled = send_key_to_slot(slot, state, text, ctrl, shift, alt, meta);
+            if handled && code == "Escape" {
+                if let Some(win) = win_weak.upgrade() {
+                    win.set_input_capturing(false);
+                    win.set_input_mode("键鼠已释放".into());
+                }
+            }
+            handled
+        }
+    });
+    win.on_toggle_input({
+        let win_weak = win_weak.clone();
+        let ui_weak = ui_weak.clone();
+        move || {
+            let capturing = !INPUT_CAPTURING.load(Ordering::SeqCst);
+            INPUT_CAPTURING.store(capturing, Ordering::SeqCst);
+            let mode = if capturing {
+                "键鼠已捕获（Esc 释放）"
+            } else {
+                "键鼠已释放"
+            };
+            if let Some(win) = win_weak.upgrade() {
+                win.set_input_capturing(capturing);
+                win.set_input_mode(mode.into());
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_input_mode(mode.into());
+            }
+        }
+    });
+    win.on_disconnect({
+        let win_weak = win_weak.clone();
+        let ui_weak = ui_weak.clone();
+        move || {
+            request_session_stop(slot);
+            INPUT_CAPTURING.store(false, Ordering::SeqCst);
+            if let Some(win) = win_weak.upgrade() {
+                win.set_input_capturing(false);
+                win.set_input_mode("键鼠已释放".into());
+                win.set_status("正在断开当前会话…".into());
+            }
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_status("正在断开当前会话…".into());
+                ui.set_input_mode("键鼠已释放".into());
+            }
+        }
+    });
+}
+
+/// #447 打开与 ConnectMode 对应的独立会话窗口。
+fn open_session_window(
+    ui: &AppWindow,
+    mode: ConnectMode,
+    slot: usize,
+    room: &str,
+) -> Result<SessionWindow, String> {
+    match mode {
+        ConnectMode::Control => {
+            let win = ControlWindow::new().map_err(|e| e.to_string())?;
+            win.set_status(format!("连接 {room} …").into());
+            win.set_input_mode("键鼠已释放".into());
+            win.set_input_capturing(false);
+            wire_control_window(&win, slot, ui.as_weak());
+            let kind = SessionWindow::Control(win.as_weak());
+            install_session_close_handler(ui.as_weak(), kind.clone(), slot);
+            win.show().map_err(|e| e.to_string())?;
+            Ok(kind)
+        }
+        ConnectMode::View => {
+            let win = ViewWindow::new().map_err(|e| e.to_string())?;
+            win.set_status(format!("连接 {room} …").into());
+            let kind = SessionWindow::View(win.as_weak());
+            install_session_close_handler(ui.as_weak(), kind.clone(), slot);
+            win.show().map_err(|e| e.to_string())?;
+            Ok(kind)
+        }
+        ConnectMode::Camera => {
+            let win = CameraWindow::new().map_err(|e| e.to_string())?;
+            win.set_status(format!("连接 {room} 摄像头 …").into());
+            let kind = SessionWindow::Camera(win.as_weak());
+            install_session_close_handler(ui.as_weak(), kind.clone(), slot);
+            win.show().map_err(|e| e.to_string())?;
+            Ok(kind)
+        }
+    }
+}
+
+/// #447 打开文件传输骨架窗口。
+fn open_file_transfer_window(ui: &AppWindow) {
+    let win = match FileTransferWindow::new() {
+        Ok(win) => win,
+        Err(e) => {
+            ui.set_status(format!("打开文件传输窗口失败：{e}").into());
+            return;
+        }
+    };
+    win.set_status("文件传输窗口建设中".into());
+    ui.set_file_open(true);
+    let ui_weak = ui.as_weak();
+    win.window().on_close_requested(move || {
+        if let Some(ui) = ui_weak.upgrade() {
+            ui.set_file_open(false);
+        }
+        slint::CloseRequestResponse::HideWindow
+    });
+    if let Err(e) = win.show() {
+        ui.set_file_open(false);
+        ui.set_status(format!("打开文件传输窗口失败：{e}").into());
+    }
+}
+
+/// #447 打开发消息骨架窗口。
+fn open_message_window(ui: &AppWindow) {
+    let win = match MessageWindow::new() {
+        Ok(win) => win,
+        Err(e) => {
+            ui.set_status(format!("打开发消息窗口失败：{e}").into());
+            return;
+        }
+    };
+    win.set_status("发消息窗口建设中".into());
+    ui.set_message_open(true);
+    let ui_weak = ui.as_weak();
+    win.window().on_close_requested(move || {
+        if let Some(ui) = ui_weak.upgrade() {
+            ui.set_message_open(false);
+        }
+        slint::CloseRequestResponse::HideWindow
+    });
+    if let Err(e) = win.show() {
+        ui.set_message_open(false);
+        ui.set_status(format!("打开发消息窗口失败：{e}").into());
+    }
+}
+
+/// #447 打开终端骨架窗口。
+fn open_terminal_window(ui: &AppWindow) {
+    let win = match TerminalWindow::new() {
+        Ok(win) => win,
+        Err(e) => {
+            ui.set_status(format!("打开终端窗口失败：{e}").into());
+            return;
+        }
+    };
+    win.set_status("终端窗口建设中".into());
+    ui.set_terminal_open(true);
+    let ui_weak = ui.as_weak();
+    win.window().on_close_requested(move || {
+        if let Some(ui) = ui_weak.upgrade() {
+            ui.set_terminal_open(false);
+        }
+        slint::CloseRequestResponse::HideWindow
+    });
+    if let Err(e) = win.show() {
+        ui.set_terminal_open(false);
+        ui.set_status(format!("打开终端窗口失败：{e}").into());
+    }
+}
+
 /// 发起观看/控制会话（#441 连接页功能按钮共用一个启动路径）。
 fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
     let server = ui.get_server_default().to_string();
@@ -244,6 +811,17 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
     ui.set_conn_state(1);
     ui.set_status(format!("连接 {} @ {} …", room, server).into());
     let slot = SESSION_NEXT.fetch_add(1, Ordering::SeqCst);
+    // #447 先创建独立会话窗口，再把窗口弱引用写入会话句柄；窗口关闭会触发 stop。
+    let window = match open_session_window(ui, mode, slot, &room) {
+        Ok(window) => window,
+        Err(e) => {
+            ui.set_connecting(false);
+            ui.set_conn_state(0);
+            ui.set_status(format!("打开会话窗口失败：{e}").into());
+            return;
+        }
+    };
+    set_main_window_open(ui, &window, true);
     let (control_tx, control_rx) = std::sync::mpsc::channel();
     let (input_tx, input_rx) = std::sync::mpsc::channel();
     let (file_cmd_tx, file_cmd_rx) = std::sync::mpsc::channel();
@@ -266,6 +844,7 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
             stop: stop.clone(),
             show_camera: show_camera.clone(),
             view_only: view_only.clone(),
+            window: Some(window.clone()),
             frame: None,
             cursor: None,
             file_progress: -1.0,
@@ -349,7 +928,7 @@ pub fn present_frame(
     let _ = ui_weak.upgrade_in_event_loop(move |fui| {
         // 读-改-写模型在 UI 线程 + SESSIONS 临界区内完成（多 viewer 线程
         // 的排队闭包在 UI 线程串行执行），保证帧归属与模型一致。
-        let (ui_idx, frames) = {
+        let (ui_idx, frames, window, frame) = {
             let mut sessions = SESSIONS.lock().unwrap();
             let Some(ui_idx) = sessions.iter().position(|s| s.slot == slot) else {
                 return; // 会话已移除（断开清理中），跳过渲染
@@ -359,7 +938,12 @@ pub fn present_frame(
                 w: w as u32,
                 h: h as u32,
             });
-            (ui_idx, build_tabs_frames(&sessions).1)
+            (
+                ui_idx,
+                build_tabs_frames(&sessions).1,
+                sessions[ui_idx].window.clone(),
+                sessions[ui_idx].frame.clone(),
+            )
         };
         fui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(frames.clone())));
         if fui.get_active_session() == ui_idx as i32 {
@@ -369,6 +953,10 @@ pub fn present_frame(
             if let Some(f) = frames.get(ui_idx) {
                 fui.set_video_frame(f.clone());
             }
+        }
+        // #447 独立窗口：无论主窗口 active 是否指向该会话，都把帧投递给它。
+        if let (Some(window), Some(frame)) = (window, frame) {
+            window.set_frame(&frame);
         }
     });
 }
@@ -444,9 +1032,10 @@ pub fn session_refresh_ui(ui: &AppWindow) {
         if let Some(f) = frames.get(new_active) {
             ui.set_video_frame(f.clone());
         }
-        ui.set_in_session(true);
+        // #447 主窗口不再进入会话页；会话状态显示在各自独立窗口中。
         // 活动会话可能因加入/离开变化：同步音量/光标/帧尺寸/文件进度。
         sync_active_session_ui(ui);
+        sync_all_session_windows();
     }
 }
 
@@ -463,6 +1052,12 @@ pub fn session_joined(ui: &AppWindow, slot: usize) {
 /// `terminal`：会话全部结束后要保留给用户的终态文案（如“连接失败：…”）；
 /// 为 None 时显示默认“已断开”。
 pub fn session_cleanup(ui: &AppWindow, slot: usize, terminal: Option<String>) {
+    // #447 先关闭/恢复独立窗口，再从注册表移除会话。
+    if let Some(window) = session_window_for_slot(slot) {
+        set_main_window_open(ui, &window, false);
+        window.set_status(terminal.clone().unwrap_or_else(|| "已断开".to_string()));
+        window.hide();
+    }
     {
         let mut sessions = SESSIONS.lock().unwrap();
         sessions.retain(|s| s.slot != slot);
@@ -530,14 +1125,23 @@ pub fn with_session_ui_state<F>(ui_weak: &slint::Weak<AppWindow>, slot: usize, f
 where
     F: FnOnce(&mut SessionHandle) + Send + 'static,
 {
-    let is_active = {
+    let (is_active, window) = {
         let mut sessions = SESSIONS.lock().unwrap();
         let Some(idx) = sessions.iter().position(|s| s.slot == slot) else {
             return;
         };
         f(&mut sessions[idx]);
-        ACTIVE_SESSION.load(Ordering::SeqCst) == idx as i32
+        (
+            ACTIVE_SESSION.load(Ordering::SeqCst) == idx as i32,
+            sessions[idx].window.clone(),
+        )
     };
+    if let Some(window) = window {
+        let sessions = SESSIONS.lock().unwrap();
+        if let Some(s) = sessions.iter().find(|s| s.slot == slot) {
+            sync_session_window(&window, s);
+        }
+    }
     if is_active {
         with_ui(ui_weak, |ui| sync_active_session_ui(ui));
     }
@@ -841,6 +1445,29 @@ fn main() -> Result<(), slint::PlatformError> {
         move || {
             let ui = ui.unwrap();
             start_viewer_session(&ui, ConnectMode::Camera);
+        }
+    });
+
+    // #447 文件传输/发消息/终端：独立骨架窗口入口。
+    ui.on_open_file_window({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            open_file_transfer_window(&ui);
+        }
+    });
+    ui.on_open_message_window({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            open_message_window(&ui);
+        }
+    });
+    ui.on_open_terminal_window({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            open_terminal_window(&ui);
         }
     });
 
@@ -2170,6 +2797,8 @@ mod tests {
             volume: Arc::new(AtomicU16::new(100)),
             stop: Arc::new(AtomicBool::new(false)),
             show_camera: Arc::new(AtomicBool::new(false)),
+            view_only: Arc::new(AtomicBool::new(false)),
+            window: None,
             frame: None,
             cursor: None,
             file_progress: -1.0,
@@ -2810,6 +3439,8 @@ mod multi_session_e2e {
                 volume: Arc::new(AtomicU16::new(100)),
                 stop: stop.clone(),
                 show_camera: Arc::new(AtomicBool::new(false)),
+                view_only: Arc::new(AtomicBool::new(false)),
+                window: None,
                 frame: None,
                 cursor: None,
                 file_progress: -1.0,
