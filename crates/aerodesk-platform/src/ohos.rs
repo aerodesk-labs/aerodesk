@@ -12,6 +12,5 @@
 pub mod capture;
 pub mod decode;
 pub mod inject;
-pub mod napi;
 pub mod publisher;
 pub mod viewer;

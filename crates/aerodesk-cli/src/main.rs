@@ -134,7 +134,8 @@ fn run() {
                 .unwrap_or_else(|_| "aerodesk-cli.exe".into());
             let signal = arg(&args, "--signal").unwrap_or_else(|| "ws://127.0.0.1:3003/ws".into());
             let room = arg(&args, "--room").unwrap_or_else(|| "default".into());
-            let cmd = aerodesk_platform::windows::autostart::autostart_command(&exe, &signal, &room);
+            let cmd =
+                aerodesk_platform::windows::autostart::autostart_command(&exe, &signal, &room);
             match aerodesk_platform::windows::autostart::install(&cmd) {
                 Ok(()) => println!("autostart installed (HKCU Run): {cmd}"),
                 Err(e) => {
@@ -336,7 +337,8 @@ fn run() {
             {
                 let vt_capable = video_codec == Codec::H264
                     || (video_codec == Codec::Hevc
-                        && aerodesk_platform::macos::vt_encoder::VtEncoder::hevc_encoder_available());
+                        && aerodesk_platform::macos::vt_encoder::VtEncoder::hevc_encoder_available(
+                        ));
                 if vt_capable {
                     // #74 硬编优先：H264/H265 走 VideoToolbox 硬编（HEVC 无硬编
                     // 时探针失败回退 FFmpeg）。
@@ -3006,20 +3008,21 @@ fn publisher_capture_windows(
             }
         };
     // #3 Windows 系统音频：WASAPI loopback 采集系统播放的声音；失败回退合成音。
-    let audio_cap: Option<aerodesk_platform::windows::audio_capture::WasapiLoopbackCapture> = if audio {
-        match aerodesk_platform::windows::audio_capture::WasapiLoopbackCapture::start() {
-            Ok(cap) => {
-                info!("Windows system audio capture started (WASAPI loopback)");
-                Some(cap)
+    let audio_cap: Option<aerodesk_platform::windows::audio_capture::WasapiLoopbackCapture> =
+        if audio {
+            match aerodesk_platform::windows::audio_capture::WasapiLoopbackCapture::start() {
+                Ok(cap) => {
+                    info!("Windows system audio capture started (WASAPI loopback)");
+                    Some(cap)
+                }
+                Err(e) => {
+                    warn!("WASAPI capture failed, fallback synthetic: {e}");
+                    None
+                }
             }
-            Err(e) => {
-                warn!("WASAPI capture failed, fallback synthetic: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
     // #385 摄像头（MF SourceReader）：--camera 时启动本地摄像头第二路视频轨，
     // 失败仅告警（屏幕视频轨照常）；SourceReader 输出 RGB32/BGRA。
     let camera_cap: Option<aerodesk_platform::windows::camera::MfCamera> = if camera {
@@ -3055,9 +3058,9 @@ fn publisher_capture_windows(
         audio_cap,
         camera_cap,
         // #75 远程光标：Windows 被控端真实光标位置（GetCursorPos，活动显示器归一化）。
-        Some(aerodesk_platform::windows::cursor::WindowsCursor::new(Some(
-            display_rect,
-        ))),
+        Some(aerodesk_platform::windows::cursor::WindowsCursor::new(
+            Some(display_rect),
+        )),
     );
 }
 
@@ -3143,7 +3146,13 @@ fn publisher_capture_linux(
     let encoder = match codec {
         Codec::H264 => {
             // VAAPI 硬编优先，失败回退 x264 软编。
-            match aerodesk_platform::linux::vaapi::VaapiEncoder::new(w, h, FPS, 8_000_000, Codec::H264) {
+            match aerodesk_platform::linux::vaapi::VaapiEncoder::new(
+                w,
+                h,
+                FPS,
+                8_000_000,
+                Codec::H264,
+            ) {
                 Ok(e) => {
                     info!("Linux screen encoder: VAAPI (h264_vaapi)");
                     LinuxScreenEncoder::Vaapi(e)
@@ -3172,10 +3181,12 @@ fn publisher_capture_linux(
         }
     };
     // #334：采集会话期间保持显示器唤醒（防系统/显示器休眠导致采集失效）。
-    let _keep_awake =
-        SystemWakeLock::acquire(&aerodesk_platform::linux::wake_lock::LinuxSystemWakeLock, true)
-            .map_err(|e| warn!("保持显示器唤醒失败: {e}"))
-            .ok();
+    let _keep_awake = SystemWakeLock::acquire(
+        &aerodesk_platform::linux::wake_lock::LinuxSystemWakeLock,
+        true,
+    )
+    .map_err(|e| warn!("保持显示器唤醒失败: {e}"))
+    .ok();
     // #316 Linux 系统音频（PipeWire sink 捕获）：可用则真实音频，失败回退合成音。
     let audio_cap: Option<aerodesk_platform::linux::audio::SystemAudioCapture> = if audio {
         match aerodesk_platform::linux::audio::SystemAudioCapture::new() {
@@ -3629,8 +3640,9 @@ fn publisher_capture(
     let mut connected = false;
     // #73 真实系统音频：SCK audio-only SCStream 采集本机正在播放的声音；
     // 采集失败/未开 --audio 时回退合成音 AudioTicker。
-    let mut real_audio: Option<RealAudioSender<aerodesk_platform::macos::audio_capture::SystemAudioCapture>> =
-        None;
+    let mut real_audio: Option<
+        RealAudioSender<aerodesk_platform::macos::audio_capture::SystemAudioCapture>,
+    > = None;
     if audio {
         match aerodesk_platform::macos::audio_capture::SystemAudioCapture::start() {
             Ok(cap) => {

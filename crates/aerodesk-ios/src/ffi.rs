@@ -6,7 +6,7 @@
 
 use std::ffi::{c_char, c_int, c_void};
 
-use crate::decode::H264Decoder;
+use aerodesk_platform::ios::decode::H264Decoder;
 
 const VERSION_C: &[u8] = concat!("aerodesk-ios ", env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 
@@ -117,7 +117,7 @@ pub unsafe extern "C" fn ad_free_string(s: *mut c_char) {
     }
 }
 
-use crate::viewer::ViewerSession;
+use aerodesk_platform::ios::viewer::ViewerSession;
 
 /// 创建观看会话：连接信令 + 启动后台收流解码线程。失败返回 null。
 ///
@@ -177,7 +177,7 @@ pub unsafe extern "C" fn ad_viewer_take_frame(
     if v.is_null() || out.is_null() {
         return -1;
     }
-    unsafe { crate::viewer::take_frame(&*v, out) }
+    unsafe { aerodesk_platform::ios::viewer::take_frame(&*v, out) }
 }
 
 /// 取解码后的 PCM i16 音频样本（8kHz 单声道）。返回拷贝样本数（0=暂无）。
@@ -193,7 +193,7 @@ pub unsafe extern "C" fn ad_viewer_take_audio(
     if v.is_null() || dst.is_null() {
         return -1;
     }
-    unsafe { crate::viewer::take_audio(&*v, dst, max) }
+    unsafe { aerodesk_platform::ios::viewer::take_audio(&*v, dst, max) }
 }
 
 /// 发送输入事件（JSON InputFrame）到 input 数据通道。

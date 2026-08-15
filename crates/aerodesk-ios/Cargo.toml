@@ -1,7 +1,7 @@
 [package]
 
 name = "aerodesk-ios"
-description = "AeroDesk iOS adapter: VideoToolbox H.264 hardware decode"
+description = "AeroDesk iOS/iPad FFI shell (platform implementation moved to aerodesk-platform)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,13 +10,6 @@ license.workspace = true
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
-videotoolbox = { version = "0.18", features = ["decompression"] }
-apple-cf = "0.9"
-aerodesk-core = { path = "../aerodesk-core" }
-aerodesk-protocol.workspace = true
-str0m = { workspace = true, features = ["rust-crypto"] }
-tracing.workspace = true
 
-[dev-dependencies]
-aerodesk-softenc = { path = "../aerodesk-softenc" }
-aerodesk-ffmpeg = { path = "../aerodesk-ffmpeg" }
+[target.'cfg(target_os = "ios")'.dependencies]
+aerodesk-platform = { path = "../aerodesk-platform" }

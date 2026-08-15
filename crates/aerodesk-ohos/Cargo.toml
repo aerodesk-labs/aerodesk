@@ -1,6 +1,6 @@
 [package]
 name = "aerodesk-ohos"
-description = "AeroDesk HarmonyOS adapter: AVScreenCapture, OH_Input, NAPI bridge (P4 skeleton)"
+description = "AeroDesk HarmonyOS NAPI shell (platform implementation moved to aerodesk-platform)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,7 +12,6 @@ rust-version.workspace = true
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-aerodesk-core = { path = "../aerodesk-core" }
-aerodesk-protocol.workspace = true
-str0m = { workspace = true, features = ["rust-crypto"] }
-tracing.workspace = true
+
+[target.'cfg(target_env = "ohos")'.dependencies]
+aerodesk-platform = { path = "../aerodesk-platform" }

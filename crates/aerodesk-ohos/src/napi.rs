@@ -14,8 +14,8 @@ use std::ffi::{CString, c_char, c_void};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{LazyLock, Mutex};
 
-use crate::publisher::PublisherSession;
-use crate::viewer::ViewerSession;
+use aerodesk_platform::ohos::publisher::PublisherSession;
+use aerodesk_platform::ohos::viewer::ViewerSession;
 
 // ---- Node-API C ABI 类型 ----
 
