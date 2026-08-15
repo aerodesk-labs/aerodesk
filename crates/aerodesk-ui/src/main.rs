@@ -763,8 +763,6 @@ fn main() -> Result<(), slint::PlatformError> {
                     file_label: String::new(),
                 });
             }
-            // 连接中的会话立即显示为标签：可看到“连接中”状态，也可直接断开取消。
-            session_refresh_ui(&ui);
             let weak2 = weak.clone();
             // 数据通道收发链（str0m/SCTP）调用栈深，放大线程栈防溢出（RULE 数据通道大块传输线程栈需放大默认2MB.md）。
             std::thread::Builder::new()
