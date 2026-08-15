@@ -1,0 +1,127 @@
+name: Platform cross-check
+
+# 仅手动触发：用于 aerodesk-platform 桌面三端 + iOS/Android 移动端
+# 的跨平台 `cargo check` 验证。不挂在 pull_request，避免与 ci.yml 的
+# workspace 矩阵/APK/Xcode build 重复消耗 runner。
+# OHOS 未接入：GitHub hosted runner 无 OHOS NDK；见 scripts/check-ohos-toolchain.sh。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: native check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+          - os: ubuntu-latest
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout str0m (netem dev-dep)
+        shell: bash
+        run: |
+          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
+            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: System deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libx11-dev libxcb1-dev libasound2-dev libx264-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev \
+            libswresample-dev libpostproc-dev libavdevice-dev libpipewire-0.3-dev libspa-0.2-dev
+
+      - name: System deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install x264 ffmpeg
+
+      - name: System deps (Windows FFmpeg dev libs)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-shared-8.1.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $dest = Join-Path $env:RUNNER_TEMP "ffmpeg"
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $root = (Get-ChildItem $dest -Directory | Select-Object -First 1).FullName
+          Add-Content $env:GITHUB_ENV "FFMPEG_DIR=$root"
+          Add-Content $env:GITHUB_PATH (Join-Path $root "bin")
+
+      - name: cargo check aerodesk-platform
+        run: cargo check -p aerodesk-platform
+
+  ios:
+    name: ios check
+    runs-on: macos-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout str0m (netem dev-dep)
+        shell: bash
+        run: |
+          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
+            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Add iOS targets
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+
+      - name: cargo check (device)
+        run: cargo check -p aerodesk-platform -p aerodesk-ios --target aarch64-apple-ios
+
+      - name: cargo check (simulator)
+        run: cargo check -p aerodesk-platform -p aerodesk-ios --target aarch64-apple-ios-sim
+
+  android:
+    name: android check
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout str0m (netem dev-dep)
+        shell: bash
+        run: |
+          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
+            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Android Rust target
+        run: rustup target add aarch64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Set Android SDK / NDK env
+        shell: bash
+        run: |
+          SDK="/usr/local/lib/android/sdk"
+          NDK="$(ls "$SDK/ndk" | sort -V | tail -1)"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$SDK/ndk/$NDK" >> "$GITHUB_ENV"
+          echo "Using Android SDK: $SDK, NDK: $NDK"
+
+      - name: cargo ndk check
+        run: cargo ndk -t arm64-v8a check -p aerodesk-platform -p aerodesk-android
