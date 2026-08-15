@@ -891,6 +891,52 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
         .expect("spawn viewer thread");
 }
 
+/// #446/#450 启动即自动连信令：后台常驻 presence，状态映射到主界面。
+fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: String) {
+    let ui_weak = ui.as_weak();
+    std::thread::Builder::new()
+        .name("signal-presence".into())
+        .spawn(move || {
+            if server.is_empty() || room.is_empty() || room == "—" {
+                return;
+            }
+            let mut config = aerodesk_core::signal_presence::PresenceConfig::new(
+                server,
+                room,
+                aerodesk_protocol::signal::Role::Publisher,
+            );
+            if !token.is_empty() {
+                config = config.with_auth_token(token);
+            }
+            let mut presence = aerodesk_core::signal_presence::SignalPresence::new(config)
+                .with_read_timeout(std::time::Duration::from_millis(500));
+            presence.start();
+            loop {
+                let st = presence.poll();
+                let (text, online) = match st {
+                    aerodesk_core::signal_presence::PresenceStatus::Stopped => {
+                        ("信令未连接".to_string(), false)
+                    }
+                    aerodesk_core::signal_presence::PresenceStatus::Connecting { .. } => {
+                        ("正在连接信令…".to_string(), false)
+                    }
+                    aerodesk_core::signal_presence::PresenceStatus::Online { room, .. } => {
+                        (format!("已在线，可被呼叫：{room}"), true)
+                    }
+                    aerodesk_core::signal_presence::PresenceStatus::Reconnecting { .. } => {
+                        ("信令重连中…".to_string(), false)
+                    }
+                };
+                crate::with_ui(&ui_weak, move |ui| {
+                    ui.set_signal_status(text.into());
+                    ui.set_signal_online(online);
+                });
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        })
+        .expect("spawn signal presence");
+}
+
 pub fn build_tabs_frames(
     sessions: &[SessionHandle],
 ) -> (Vec<slint::SharedString>, Vec<slint::Image>) {
@@ -1375,6 +1421,14 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_server_default(server_display.clone().into());
     ui.set_remember_token(settings.remember_token);
     ui.set_token_default(settings.token_default.clone().into());
+
+    // #450 启动即自动连信令（设备常在线可被呼叫）。
+    spawn_signal_presence(
+        &ui,
+        settings.server_default.clone(),
+        settings.device_id.clone(),
+        settings.token_default.clone(),
+    );
     if !settings.server_default.is_empty() {
         ui.set_server_input(server_display.into());
     }
