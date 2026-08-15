@@ -65,4 +65,7 @@ iOS/iPad、Android、HarmonyOS 的端侧 UI/UX 统一走 Slint；native 层只�
   feature 要求 `i-slint-backend-android-activity = "=1.17.1"`，crates.io
   尚未发布该后端 1.17.1（仅 1.10.0 等）。落地 Android Slint 前需先完成
   Slint 与 Android 后端版本选型（降级 slint 或等待后端发布）。- iOS 走 `backend-winit`：`i-slint-backend-winit 1.17.1` 已可用，但需 Xcode/
-  真机验证 winit iOS 后端与 Swift 生命周期接入。
+  真机验证 winit iOS 后端与 Swift 生命周期接入。- 更具体的阻塞：桌面 `aerodesk-desktop` 依赖 slint 1.17 的 `system-tray`
+  feature（1.10 无此 feature），而 Android 后端只有 1.10 可用；同一
+  workspace 内无法同时选择两个 1.x 版本。落地 Android Slint 需二选一：
+  桌面降级并去掉 system-tray，或等待官方发布 1.17 的 Android 后端。
