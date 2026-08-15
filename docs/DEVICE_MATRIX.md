@@ -1,6 +1,6 @@
 # 真机冒烟矩阵与硬件验收状态（#1/#2/#3/#4/#6/#8）
 
-> 软件侧（主控端 + 被控端）已全部合入 main 并经 CI 自测（截至 2026-08-12，main 全绿）；
+> 软件侧（主控端 + 被控端）已全部合入 main 并经 CI 自测（截至 2026-08-15，main 全绿）；
 > 平台抽象（core `platform` trait + 泛型发布/观看管线）已完成并合入（#277/#278/#279）。
 > 下表为**真机/干净环境验收**的当前状态。
 > 未打勾单元格 = 需要对应硬件，代码已就绪（或明确为后续实现）。
@@ -10,7 +10,7 @@
 | 被控端 \\ 观看端 | Web | macOS | iOS | Android | Windows | Linux | HarmonyOS |
 |---|---|---|---|---|---|---|---|
 | macOS | ✅（web-e2e：观看/发布/文件/重连） | ✅（smoke + UI e2e；默认 h265 硬编 + 真实系统音频 #274/#276） | ✅（iOS 模拟器 e2e：H.265 硬解观看 macOS 流 #275 + 摄像头第二轨 #328/#340） | ⬜ 待 Android | ⬜ 待 Win | ⬜ 待 Linux | ⬜ 待鸿蒙 |
-| Windows | ✅（Windows Edge e2e #409：观看+输入回传；DXGI 采集 + SendInput 注入 + 剪贴板 #281 + 远程光标 #406 + 显示器切换 #408 + BWE 码率反馈 #410 + 剪贴板注入 #411 + Windows 摄像头 #414；**远程 SFU 跨机联调 2026-08-15：合成源 viewer DECODED 187，Windows 被控端 RTP/光标/输入/剪贴板全通**，CI 编译/e2e 守护） | ⬜ | ⬜ | ⬜ | ✅（真机） | ⬜ | ⬜ |
+| Windows | ✅（Windows Edge e2e #409：观看+输入回传；DXGI 采集 + SendInput 注入 + 剪贴板 #281 + 远程光标 #406 + 显示器切换 #408 + BWE 码率反馈 #410 + 剪贴板注入 #411 + Windows 摄像头 #414 + **#417 Windows 发布完善（TLS wss 支持/被控授权/UI 关闭态提示/开机自启/窗口子系统）** + **#425/#426 状态机（被控端连信令=注册可被呼叫，观看端无媒体提示「对方不在线」）**；**远程 SFU 跨机联调 2026-08-15：合成源 viewer DECODED 187，Windows 被控端 RTP/光标/输入/剪贴板全通**，CI 编译/e2e 守护） | ⬜ | ⬜ | ⬜ | ✅（真机） | ⬜ | ⬜ |
 | Linux | ⬜（X11/Wayland(PipeWire) 采集 + XTest/uinput/portal 注入 + VAAPI 硬编/硬解 + PipeWire 系统音频 + V4L2 摄像头 + 真实光标 + 剪贴板（文本/图片/注入）+ FilePicker/Notifier/SystemWakeLock/CommandExecutor #282/#283/#284/#286/#307/#311/#313/#317/#320/#323/#375/#386/#392/#394，CI 编译/e2e 守护） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 | Android | ⬜（MediaProjection + MediaCodec + 无障碍注入代码就绪；**模拟器经 TURN relay 已出帧解码（#201/#203）**，真机验收待设备） | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 
@@ -20,7 +20,7 @@
 |---|---|---|
 | #1 iOS 壳层 | 壳 + **H.264/H.265 硬解 + 音视频分流 + PCMU 播放 + iPad 支持 + 设置持久化**（#275）；模拟器 e2e（含 h265 观看 macOS） | iPhone 真机（A12+）：观看 macOS 流 |
 | #2 Android 真机 | 观看端 MediaCodec 渲染 + 被控端 MediaProjection/硬编/无障碍注入 + Android 14 前台服务（#156/#165/#187）；APK CI 守护 | Android 真机（API 26+）：端到端画面 + 输入 |
-| #3 Windows | DXGI 采集/缩放 + MF(h264_mf/hevc_mf) 硬编 + DXVA2 硬解（#378/#383/#405）+ WASAPI 音频（#321）+ SendInput 注入 + 剪贴板文本/图片（#281/#383/#393）+ 远程光标（#406）+ 显示器切换（#408）+ BWE 码率反馈（#410）+ 剪贴板注入（#411）+ 开机自启（#402）+ Windows 摄像头（#414）+ VDD（#159/#188）；Windows UI e2e + Windows Edge e2e（#409）+ 显示器切换 e2e（#413）CI 守护；远程 SFU 跨机联调已通（2026-08-15） | Win10/11 真机：端到端 + 多显示器切换验收 |
+| #3 Windows | DXGI 采集/缩放 + MF(h264_mf/hevc_mf) 硬编 + DXVA2 硬解（#378/#383/#405）+ WASAPI 音频（#321）+ SendInput 注入 + 剪贴板文本/图片（#281/#383/#393）+ 远程光标（#406）+ 显示器切换（#408）+ BWE 码率反馈（#410）+ 剪贴板注入（#411）+ 开机自启（#402）+ Windows 摄像头（#414）+ **#417 发布完善（TLS wss/被控授权/UI 关闭态提示/开机自启/窗口子系统）** + **#425/#426 状态机** + VDD（#159/#188）；Windows UI e2e + Windows Edge e2e（#409）+ 显示器切换 e2e（#413）CI 守护；远程 SFU 跨机联调已通（2026-08-15，ws://129.226.150.174:14703） | Win10/11 真机：端到端 + 多显示器切换验收 |
 | #4 Linux | X11/Wayland(PipeWire) 采集 + XTest/uinput/portal 注入 + x264/OpenH264 回退 + **VAAPI 硬编/硬解优先（#282/#284）** + **Wayland/PipeWire 采集（#286）** + 剪贴板文本（#283）+ **CLI 被控端（#307/#311）** + **PipeWire 系统音频（#317）** + **portal 注入（#320）** + 图片剪贴板（#323）+ **SystemWakeLock/CommandExecutor（#375）** + **V4L2 摄像头（#386）** + **真实光标（#392）** + **FilePicker/Notifier/剪贴板注入（#394）** + linux-native-e2e（含 CURSOR 断言）CI 守护 | Linux 真机：X11/Wayland 端到端 + VAAPI/uinput 真机验收 |
 | #6 HarmonyOS | NAPI 规约 ✅（docs/HARMONYOS.md，tmp/ohos-check） | DevEco + OHOS NDK + 鸿蒙真机（ring 交叉编译） |
 | #75 鼠标控制 | 远程光标渲染 ✅（#86）、输入全事件 e2e ✅（#95）、高 DPI/多显示器坐标映射 ✅（#105）、远端光标叠加默认关（对齐 RustDesk/TeamViewer，#274） | 多显示器真机高 DPI 验证 + Windows/Linux/Android 注入真机验收 |
@@ -29,6 +29,7 @@
 | #330 平台抽象第五轮 | **CommandExecutor（bash/远程命令）trait 化**（#330）：core `platform` 新增 CommandExecutor（run_command/read_file/write_file/list_processes/kill_process），`cmd_exec` 收敛为策略层（危险拦截/白名单/审计）+ 原始执行委托；core 提供 DefaultCommandExecutor（unix sh -c / Windows cmd /C），macOS 适配器 `MacCommandExecutor` 实现 trait；Windows/Linux 适配器由各自 agent 补充 | — |
 | #334 平台抽象第六轮 | **SystemWakeLock（保持唤醒）trait 化**（#334）：core `platform` 新增 SystemWakeLock/WakeGuard + 默认 Noop；macOS `MacSystemWakeLock`（caffeinate -d/-i）替代 `capture::KeepAwake`，CLI 发布端接入；Windows SetThreadExecutionState / Linux systemd-inhibit 由各自 agent 补充 | — |
 | #8 压测 | 工具链/报告 ✅（#38）、netem ✅ | 干净环境 4K60 基线 + 真机矩阵 |
+| #425 观看/被控状态机 | **被控端连上信令=注册在线、可被呼叫；媒体流在观看端加入（呼叫）后才进入**（#426）：被控端启动显示「正在注册被控端…」→ ICE 连通「已在线，可被呼叫：{room} · 屏幕发布中」；观看端连接后 10s 无 RTP → 「对方不在线或未开启被控（房间 X），等待对方上线后自动出流」（会话保持不误杀），首帧后恢复「会话中 · 媒体流已接通」；超时文案补充 ws://地址:端口 / token / 网络排查 | — |
 | #58 工具栏媒体控制 | 画质选层 ✅、音频链路 ✅（PCMU/Opus → SFU → viewer + UI 静音）、**真实系统音频采集已接入**（SCK audio → Opus/PCMU，#276）、显示器切换 ✅（viewer `--display N` → SFU control 转发 → publisher 重建采集，`scripts/display-e2e.sh` 守护）；e2e 已接入 macOS CI | 多显示器真机切换验收 |
 
 ## 虚拟显示器冒烟（ADR-0001/0002/0003，#140）
@@ -41,10 +42,12 @@
 | macOS | BetterDisplay CLI | `scripts/macos-vdd-smoke.sh`（需 BetterDisplay 2.2.x+ 运行） | 设计 ✅ / 待 mac 真机/无头 |
 | Linux | VKMS + krfb-virtualmonitor | `scripts/linux-vdd-smoke.sh`（KDE Plasma 6 / Wayland） | 设计 ✅ / 待 Linux 真机 |
 
-## 自动验证现状（2026-08-15，main 全绿；#274-#284/#307-#323/#375-#394/#402-#414 已合入）
+## 自动验证现状（2026-08-15，main 全绿；#274-#284/#307-#323/#375-#394/#402-#417/#425-#426 已合入）
 - CI 三平台（macOS/Ubuntu/Windows）：cargo fmt/clippy/test 全绿 ✅
 - macOS e2e：web 观看/发布/文件上传/自动重连、SFU 准入配额、audio/simulcast/display、cursor、record、multipop/popreg、bridge-fallback ✅（#280 修复 SCTP abort 误判后稳定）
 - Windows/Linux UI e2e（viewer 真实媒体 + 输入；Linux 走 VAAPI 硬解优先 #284）✅；iOS 模拟器 e2e（viewer 解码，含 h265 #275；本地 PUBLISHER_CAMERA=1 验证摄像头第二轨 #340）✅；Android APK 构建 ✅
+- **#417 Windows 发布完善**（TLS wss 支持（rustls）/被控授权（显式开启被控语义）/UI 关闭态提示/开机自启（HKCU Run + 登录恢复发布，含评审重读开关修复）/窗口子系统）与 **#425/#426 状态机** 已合入 main ✅
+- **CI 减负（#429）**：`ci.yml` 仅 `pull_request` 触发（去掉 push 双 run），新增 `changes` 前置 job 检测 docs-only（全部 `*.md`/`docs/**`）跳过 6 个重型 job（test 矩阵 + iOS/Windows/Linux/Android），`lint(fmt)` 常跑；`release.yml` 仅 tag `v*` / pre-release / release 触发打包 ✅
 - **远程 SFU 跨机联调（129.226.150.174:14703/14778，2026-08-15）**：本机 Windows 客户端 → 远端 signal/SFU → 本地 viewer——合成源 h264_mf `RECEIVED 375 frames / 4 keyframes / DECODED 187` ✅；Windows 被控端（DXGI）RTP 跨机流动（112 frames/259KB）+ 真实光标回传 + 输入回传注入 + 剪贴板回传 ✅；远端 8/13 旧二进制（DTLS 超时）已升级到 main release（旧件备份保留）
 - 平台抽象 CI：#278/#279 全平台编译 + e2e 全绿（Windows/Linux 真机编译验证键盘映射/MediaSource/InputInjector）
 - 本机（共享开发机）：smoke/web-file/web-reconnect 多次全 PASS ✅
