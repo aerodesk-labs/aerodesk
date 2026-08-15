@@ -298,6 +298,8 @@ impl Endpoint {
         let _ = change.add_channel("cursor".into());
         // #109 远程命令：控制端 → 被控端（CmdRequest/CmdResponse，见 cmd.rs）。
         let _ = change.add_channel("cmd".into());
+        // #458 聊天：双向文本消息 data channel（见 aerodesk-protocol::chat）。
+        let _ = change.add_channel(aerodesk_protocol::chat::CHAT_CHANNEL.into());
         let (offer, pending) = change
             .apply()
             .ok_or(RtcError::Io(std::io::Error::other("no changes")))?;
