@@ -536,29 +536,112 @@ fn audit_opt(path: Option<&Path>, command: &str, cwd: Option<&str>, out: &CmdOut
     }
 }
 
-/// 写文件敏感路径（默认禁止，白名单前缀可放行）：系统目录/关键配置。
-/// 归一化写入路径：`~` 展开为 $HOME + 连续斜杠折叠为单斜杠。
+/// 用户主目录（策略与实际写入共用）。Windows 优先 `USERPROFILE`（`HOME` 不一定存在）。
+#[cfg(windows)]
+fn home_dir() -> Option<String> {
+    std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()
+}
+
+#[cfg(not(windows))]
+fn home_dir() -> Option<String> {
+    std::env::var("HOME").ok()
+}
+
+/// 展开用户主目录：仅 `~` 或 `~/...`（Windows 另接受 `~\...`）视为 home；
+/// `~user` 保持原样，避免错误拼成 `$HOMEuser`。无法确定 home 时保持原路径。
+fn expand_home(path: &str) -> String {
+    if path == "~" {
+        return home_dir().unwrap_or_else(|| "~".to_string());
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return home_dir()
+            .map(|h| format!("{}/{}", h.trim_end_matches(['/', '\\']), rest))
+            .unwrap_or_else(|| path.to_string());
+    }
+    #[cfg(windows)]
+    if let Some(rest) = path.strip_prefix("~\\") {
+        return home_dir()
+            .map(|h| format!("{}/{}", h.trim_end_matches(['/', '\\']), rest))
+            .unwrap_or_else(|| path.to_string());
+    }
+    path.to_string()
+}
+
+/// 写路径敏感路径（默认禁止，白名单前缀可放行）：系统目录/关键配置。
+/// 归一化策略路径：展开 `~`、Windows 反斜杠统一为 `/`、连续斜杠折叠为单斜杠。
 /// 单遍 `replace("//", "/")` 会把 `///etc/x` 归一成 `//etc/x`（POSIX 等价 `/etc/x`），
 /// 从而绕过前缀检查——必须循环折叠。
 fn normalize_write_path(path: &str) -> String {
-    let p = path.trim();
-    let abs = if p.starts_with('~') {
-        std::env::var("HOME")
-            .map(|h| format!("{}{}", h.trim_end_matches('/'), &p[1..]))
-            .unwrap_or_else(|_| p.to_string())
-    } else {
-        p.to_string()
-    };
-    let mut norm = abs.replace("//", "/");
+    let mut norm = expand_home(path.trim());
+    #[cfg(windows)]
+    {
+        norm = norm.replace('\\', "/");
+    }
     while norm.contains("//") {
         norm = norm.replace("//", "/");
+    }
+    #[cfg(windows)]
+    {
+        norm = norm.to_ascii_lowercase();
     }
     norm
 }
 
+/// 实际写入路径：仅展开 `~`，不做反斜杠/连续斜杠归一化，保留大小写与 UNC 语义。
+fn normalize_write_path_for_io(path: &str) -> String {
+    expand_home(path.trim())
+}
+
 /// 路径穿越（`/../`）：无论白名单如何都禁止（见 [`write_file`]）。
+/// 策略路径已统一为 `/`；Windows 的 `\..\` 也会先被 `normalize_write_path` 转为 `/../`。
 fn contains_traversal(norm: &str) -> bool {
     norm == "/" || norm.contains("/../") || norm.ends_with("/..")
+}
+
+#[cfg(windows)]
+fn is_forbidden_windows_prefix(norm: &str) -> bool {
+    let mut prefixes: Vec<String> = Vec::new();
+    for key in ["SystemRoot", "WINDIR", "ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(root) = std::env::var_os(key) {
+            let root = root.to_string_lossy().replace('\\', "/");
+            let root = root.trim_end_matches('/').to_ascii_lowercase();
+            prefixes.push(root);
+        }
+    }
+    if let Some(program_data) = std::env::var_os("ProgramData") {
+        let root = program_data.to_string_lossy().replace('\\', "/");
+        let root = root.trim_end_matches('/').to_ascii_lowercase();
+        prefixes.push(format!(
+            "{root}/microsoft/windows/start menu/programs/startup"
+        ));
+    }
+    if let Some(app_data) = std::env::var_os("APPDATA") {
+        let root = app_data.to_string_lossy().replace('\\', "/");
+        let root = root.trim_end_matches('/').to_ascii_lowercase();
+        prefixes.push(format!(
+            "{root}/microsoft/windows/start menu/programs/startup"
+        ));
+    }
+    if let Some(home) = home_dir() {
+        let home = home.trim_end_matches(['/', '\\']).to_ascii_lowercase();
+        prefixes.push(format!("{home}/.ssh"));
+    }
+    prefixes
+        .iter()
+        .any(|p| norm.starts_with(&format!("{p}/")) || norm == p)
+}
+
+/// 前缀比较：Windows 策略路径已小写，这里再做大小写不敏感比较；
+/// 其他平台保持大小写敏感，避免误伤 POSIX 路径。
+fn path_starts_with(norm: &str, prefix: &str) -> bool {
+    if cfg!(windows) {
+        norm.to_ascii_lowercase()
+            .starts_with(&prefix.to_ascii_lowercase())
+    } else {
+        norm.starts_with(prefix)
+    }
 }
 
 fn is_forbidden_write_prefix(norm: &str) -> bool {
@@ -580,17 +663,25 @@ fn is_forbidden_write_prefix(norm: &str) -> bool {
         "/System/Volumes/Data/etc/",
         "/System/Volumes/Data/usr/",
     ];
-    if FORBIDDEN_PREFIXES.iter().any(|f| norm.starts_with(f)) {
+    if FORBIDDEN_PREFIXES.iter().any(|f| path_starts_with(norm, f)) {
         return true;
     }
     // 用户级凭据/持久化目录（~/.ssh、~/Library/LaunchAgents）。
-    if let Ok(home) = std::env::var("HOME") {
-        let home = home.trim_end_matches('/');
+    if let Some(home) = home_dir() {
+        let mut home = home.trim_end_matches(['/', '\\']).replace('\\', "/");
+        #[cfg(windows)]
+        {
+            home = home.to_ascii_lowercase();
+        }
         for sub in ["/.ssh/", "/Library/LaunchAgents/"] {
-            if norm.starts_with(&format!("{home}{sub}")) {
+            if path_starts_with(norm, &format!("{home}{sub}")) {
                 return true;
             }
         }
+    }
+    #[cfg(windows)]
+    if is_forbidden_windows_prefix(norm) {
+        return true;
     }
     false
 }
@@ -619,7 +710,8 @@ pub fn write_file(path: &str, data_b64: &str, allowlist: &[String]) -> Result<()
         return Err(format!("blocked by policy: write {path}"));
     }
     let data = decode_b64(data_b64).ok_or_else(|| "invalid base64".to_string())?;
-    DefaultCommandExecutor.write_file(path, &data)
+    let write_path = normalize_write_path_for_io(path);
+    DefaultCommandExecutor.write_file(&write_path, &data)
 }
 
 /// 列出进程（unix：`ps -axo pid=,comm=`；Windows：tasklist）。委托 [`DefaultCommandExecutor`]。
@@ -853,6 +945,38 @@ mod tests {
         assert!(is_forbidden_write_path("/tmp/a/../b"));
         assert!(!is_forbidden_write_path("/tmp/aerodesk-test.txt"));
         assert!(!is_forbidden_write_path("relative/path.txt"));
+    }
+
+    #[test]
+    fn write_io_path_expands_only_user_home_tilde() {
+        let home = home_dir().unwrap_or_else(|| "~".to_string());
+        let expected = format!("{}/a/b", home.trim_end_matches(['/', '\\']));
+        assert_eq!(normalize_write_path_for_io("~/a/b"), expected);
+        assert_eq!(normalize_write_path_for_io("~user/a"), "~user/a");
+        assert_eq!(normalize_write_path_for_io("//tmp/a"), "//tmp/a");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_write_paths_block_system_and_traversal() {
+        let windir = std::env::var("WINDIR").unwrap();
+        assert!(is_forbidden_write_path(&format!("{windir}\\System32\\x")));
+        assert!(is_forbidden_write_path(&format!(
+            "{windir}\\System32\\..\\x"
+        )));
+
+        let userprofile = std::env::var("USERPROFILE").unwrap();
+        assert!(is_forbidden_write_path(&format!(
+            "{userprofile}\\.ssh\\authorized_keys"
+        )));
+        assert!(!is_forbidden_write_path(&format!(
+            "{userprofile}\\AeroDesk\\cmd-allowlist.txt"
+        )));
+
+        let appdata = std::env::var("APPDATA").unwrap();
+        assert!(is_forbidden_write_path(&format!(
+            "{appdata}\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\x"
+        )));
     }
 
     /// 回归：`///` 斜杠变体 / Data 卷 firmlink / 用户级敏感目录 / 白名单不可豁免穿越。

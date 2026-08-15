@@ -45,6 +45,34 @@ impl Drop for CmdThreadGuard {
     }
 }
 
+/// 并发满载时按请求动作返回同构错误结果，避免 ReadFile/WriteFile/Ps/Kill
+/// 被包装成 `Run` 后破坏控制端与 MCP 对响应类型的解析。
+fn busy_result(action: &CmdAction) -> CmdResult {
+    let busy = || format!("cmd busy: too many concurrent commands ({MAX_CMD_THREADS})");
+    match action {
+        CmdAction::Run { .. } => CmdResult::Run {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            truncated: false,
+            error: Some(busy()),
+        },
+        CmdAction::ReadFile { .. } | CmdAction::WriteFile { .. } => CmdResult::File {
+            data: None,
+            size: 0,
+            error: Some(busy()),
+        },
+        CmdAction::ListProcesses => CmdResult::ProcessList {
+            processes: Vec::new(),
+            error: Some(busy()),
+        },
+        CmdAction::KillProcess { pid } => CmdResult::Killed {
+            pid: *pid,
+            error: Some(busy()),
+        },
+    }
+}
+
 /// 控制端意图（viewer 命令行）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Intent {
@@ -103,15 +131,7 @@ pub fn handle_event(ev: &ClientEvent, endpoint: &mut Endpoint) {
         tracing::warn!("cmd busy: too many concurrent commands ({MAX_CMD_THREADS})");
         let resp = CmdResponse {
             id: req.id,
-            result: CmdResult::Run {
-                exit_code: None,
-                stdout: String::new(),
-                stderr: String::new(),
-                truncated: false,
-                error: Some(format!(
-                    "cmd busy: too many concurrent commands ({MAX_CMD_THREADS})"
-                )),
-            },
+            result: busy_result(&req.action),
         };
         if let Some(tx) = tx {
             let _ = tx.send(resp);
@@ -310,4 +330,73 @@ pub fn run_admin(args: &[String]) -> bool {
         }
     }
     true
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aerodesk_protocol::cmd::CmdAction;
+
+    /// 取各变体的 error 字段（busy 响应必带）。
+    fn busy_err(r: &CmdResult) -> &str {
+        match r {
+            CmdResult::Run { error, .. } => error.as_deref().unwrap_or(""),
+            CmdResult::File { error, .. } => error.as_deref().unwrap_or(""),
+            CmdResult::ProcessList { error, .. } => error.as_deref().unwrap_or(""),
+            CmdResult::Killed { error, .. } => error.as_deref().unwrap_or(""),
+        }
+    }
+
+    #[test]
+    fn busy_result_shapes_match_action() {
+        let run = busy_result(&CmdAction::Run {
+            command: "echo hi".into(),
+            cwd: None,
+            timeout_ms: None,
+        });
+        assert!(matches!(
+            run,
+            CmdResult::Run {
+                exit_code: None,
+                truncated: false,
+                ..
+            }
+        ));
+        assert!(busy_err(&run).contains("cmd busy"));
+
+        let rf = busy_result(&CmdAction::ReadFile {
+            path: "C:\\tmp\\a.txt".into(),
+            max_bytes: None,
+        });
+        assert!(matches!(
+            rf,
+            CmdResult::File {
+                data: None,
+                size: 0,
+                ..
+            }
+        ));
+        assert!(busy_err(&rf).contains("cmd busy"));
+
+        let wf = busy_result(&CmdAction::WriteFile {
+            path: "C:\\tmp\\b.txt".into(),
+            data: "".into(),
+        });
+        assert!(matches!(
+            wf,
+            CmdResult::File {
+                data: None,
+                size: 0,
+                ..
+            }
+        ));
+        assert!(busy_err(&wf).contains("cmd busy"));
+
+        let ps = busy_result(&CmdAction::ListProcesses);
+        assert!(matches!(ps, CmdResult::ProcessList { ref processes, .. } if processes.is_empty()));
+        assert!(busy_err(&ps).contains("cmd busy"));
+
+        let kill = busy_result(&CmdAction::KillProcess { pid: 42 });
+        assert!(matches!(kill, CmdResult::Killed { pid: 42, .. }));
+        assert!(busy_err(&kill).contains("cmd busy"));
+    }
 }
