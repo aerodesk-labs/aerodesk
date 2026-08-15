@@ -64,4 +64,5 @@ iOS/iPad、Android、HarmonyOS 的端侧 UI/UX 统一走 Slint；native 层只�
 - 当前 workspace 锁定 `slint 1.17.1`，但其 `backend-android-activity-06`
   feature 要求 `i-slint-backend-android-activity = "=1.17.1"`，crates.io
   尚未发布该后端 1.17.1（仅 1.10.0 等）。落地 Android Slint 前需先完成
-  Slint 与 Android 后端版本选型（降级 slint 或等待后端发布）。
+  Slint 与 Android 后端版本选型（降级 slint 或等待后端发布）。- iOS 走 `backend-winit`：`i-slint-backend-winit 1.17.1` 已可用，但需 Xcode/
+  真机验证 winit iOS 后端与 Swift 生命周期接入。
