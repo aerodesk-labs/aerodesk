@@ -6,7 +6,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::CapturedFrame;
+use crate::linux::CapturedFrame;
 
 /// X11 采集器（X11 桌面）。
 #[cfg(target_os = "linux")]

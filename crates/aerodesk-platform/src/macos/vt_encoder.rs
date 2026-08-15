@@ -310,8 +310,8 @@ mod tests {
     /// #74 HEVC 硬编回环：VT HEVC 编码 → VT HEVC 硬解 → RGBA。
     #[test]
     fn vt_hevc_encode_decode_roundtrip() {
-        use crate::decode::{HevcDecoder, to_rgba};
-        use crate::synthetic::SyntheticSource;
+        use crate::macos::decode::{HevcDecoder, to_rgba};
+        use crate::macos::synthetic::SyntheticSource;
 
         let (w, h) = (320u32, 180u32);
         let Ok(mut enc) = VtEncoder::new_with_codec(w, h, 30, 1_000_000, Codec::HEVC) else {

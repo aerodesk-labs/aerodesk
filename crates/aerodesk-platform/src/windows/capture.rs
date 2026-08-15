@@ -3,7 +3,7 @@
 //! D3D11 设备 → 输出复制 → 纹理读回 BGRA。Graphics Capture（Win10 1903+）
 //! 为后续可选升级路径（同接口，输出帧格式一致）。
 
-use crate::CapturedFrame;
+use crate::windows::CapturedFrame;
 
 /// DXGI Desktop Duplication 采集器（被控端，Windows）。
 #[cfg(windows)]

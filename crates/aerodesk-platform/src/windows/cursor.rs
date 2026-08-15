@@ -33,7 +33,7 @@ pub fn cursor_position_normalized(
             return None;
         }
     }
-    let virtual_rect = crate::inject::virtual_screen();
+    let virtual_rect = crate::windows::inject::virtual_screen();
     normalize(pt.x, pt.y, display_rect.unwrap_or(virtual_rect))
 }
 

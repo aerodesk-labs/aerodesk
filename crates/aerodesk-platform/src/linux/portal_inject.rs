@@ -4,7 +4,7 @@
 //! 无需 root/uinput。与视频采集（ScreenCast）共用同一 portal 会话类型；
 //! 本注入器自建会话（会弹一次「远程控制」授权，与采集授权分开）。
 //!
-//! 键码映射复用 [`crate::inject::keysym_for_code`]（X11 keysym，布局无关，
+//! 键码映射复用 [`crate::linux::inject::keysym_for_code`]（X11 keysym，布局无关，
 //! portal `NotifyKeyboardKeysym` 直接接受）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -87,7 +87,7 @@ async fn inject_one(
             state,
             modifiers,
         } => {
-            let keysym = crate::inject::keysym_for_code(code)
+            let keysym = crate::linux::inject::keysym_for_code(code)
                 .ok_or_else(|| format!("unsupported key code: {code}"))?;
             let down = *state == ButtonState::Pressed;
             let mods: [(i32, bool); 4] = [

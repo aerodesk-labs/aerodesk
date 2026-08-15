@@ -14,7 +14,7 @@ pub fn cursor_position_normalized() -> Option<(f64, f64)> {
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok()?;
     let ev = CGEvent::new(source).ok()?;
     let loc = ev.location();
-    let bounds = match crate::inject::active_display() {
+    let bounds = match crate::macos::inject::active_display() {
         Some(id) => CGDisplay::new(id).bounds(),
         None => CGDisplay::main().bounds(),
     };

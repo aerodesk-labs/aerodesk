@@ -1,6 +1,6 @@
 [package]
 name = "aerodesk-linux"
-description = "AeroDesk Linux adapter: PipeWire capture, VAAPI encode, XTest/uinput injection (P4 skeleton)"
+description = "AeroDesk Linux platform adapter compatibility shell (implementation moved to aerodesk-platform)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,28 +8,15 @@ rust-version.workspace = true
 
 [features]
 default = []
-# Wayland/PipeWire 采集（xdg-desktop-portal + PipeWire）。默认关闭：
-# lamco-portal→ashpd 会开启 zbus 的 tokio feature，而 aerodesk-ui 的
-# slint system-tray（ksni→zbus）在无 tokio runtime 的主线程会 panic
-# （"there is no reactor running"）。被控端宿主按需启用；ubuntu CI 用
-# `--features aerodesk-linux/pipewire` 覆盖构建/测试。
-pipewire = ["dep:lamco-portal", "dep:lamco-pipewire", "dep:tokio"]
+# 转发到 aerodesk-platform 的 PipeWire feature；消费方沿用
+# `--features aerodesk-linux/pipewire` 不受影响。
+pipewire = ["aerodesk-platform/pipewire"]
 
 [dependencies]
-aerodesk-core = { path = "../aerodesk-core" }
-aerodesk-softenc = { path = "../aerodesk-softenc" }
-aerodesk-protocol = { path = "../aerodesk-protocol" }
-tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.13", features = ["xtest"] }
-libc = "0.2"
-# VAAPI 硬编/硬解：FFmpeg AVHWDeviceContext（CI ubuntu 已装 libavcodec-dev 等）
-ffmpeg-next = "8"
-# V4L2 摄像头（v4l 纯 Rust 绑定，需 linux-libc-dev 提供 videodev2.h）
-v4l = "0.14"
-# Wayland 采集（feature `pipewire` 启用时编译；CI 需 libpipewire-0.3-dev/libspa-0.2-dev）
-lamco-portal = { version = "0.4", optional = true }
-# audio：PipeWire 系统音频捕获（stream.capture.sink，无需 portal）
-lamco-pipewire = { version = "0.4", default-features = false, features = ["audio"], optional = true }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"], optional = true }
+aerodesk-platform = { path = "../aerodesk-platform" }
+
+[dev-dependencies]
+aerodesk-core = { path = "../aerodesk-core" }
+aerodesk-protocol.workspace = true

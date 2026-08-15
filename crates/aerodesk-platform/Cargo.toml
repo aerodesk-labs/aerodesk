@@ -1,0 +1,85 @@
+[package]
+name = "aerodesk-platform"
+description = "AeroDesk platform adapters: macOS/Windows/Linux/iOS/Android/HarmonyOS implementations of aerodesk-core::platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+# iOS 需要 staticlib 供 Swift 链接；Android/HarmonyOS 需要 cdylib 供
+# JNI/NAPI 加载；桌面平台只需 rlib。统一声明多个产物类型，host 构建
+# 只编译当前 target 对应模块，不会引入其它平台的原生绑定。
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[features]
+default = []
+# Wayland/PipeWire 采集（xdg-desktop-portal + PipeWire）。默认关闭：
+# lamco-portal→ashpd 会开启 zbus 的 tokio feature，而桌面端侧 Slint
+# system-tray（ksni→zbus）在无 tokio runtime 的主线程会 panic。
+pipewire = ["dep:lamco-portal", "dep:lamco-pipewire", "dep:tokio"]
+
+[dependencies]
+aerodesk-core = { path = "../aerodesk-core" }
+aerodesk-protocol.workspace = true
+aerodesk-softenc = { path = "../aerodesk-softenc" }
+str0m = { workspace = true, features = ["rust-crypto"] }
+tracing.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+x264 = { path = "../x264" }
+core-graphics = { version = "0.25", features = ["highsierra"] }
+core-graphics-types = "0.2"
+core-foundation = "0.10"
+videotoolbox = "0.18"
+apple-cf = "0.9"
+screencapturekit = { version = "8", features = ["macos_14_0"] }
+objc = "0.2"
+objc2-av-foundation = "0.3.2"
+block2 = "0.6"
+objc2 = "0.6"
+dispatch2 = "0.3"
+objc2-core-media = "0.3"
+objc2-core-video = "0.3"
+objc2-foundation = "0.3"
+objc2-core-foundation = "0.3"
+cpal = "0.15"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+aerodesk-ffmpeg = { path = "../aerodesk-ffmpeg" }
+# ADR-0001：虚拟显示器（Parsec VDD）。其传递依赖 windows 0.62 与下方 0.58 并存，
+# 用 package 重命名 `windows062` 仅在本模块命名 HANDLE。
+parsec-vdd-rust = "0.0.1"
+windows062 = { package = "windows", version = "0.62", features = ["Win32_Foundation"] }
+windows = { version = "0.58", features = [
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Media_MediaFoundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Direct3D",
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_System_Com",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["xtest"] }
+libc = "0.2"
+ffmpeg-next = "8"
+v4l = "0.14"
+lamco-portal = { version = "0.4", optional = true }
+lamco-pipewire = { version = "0.4", default-features = false, features = ["audio"], optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"], optional = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+videotoolbox = { version = "0.18", features = ["decompression"] }
+apple-cf = "0.9"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+serde_json.workspace = true

@@ -147,17 +147,7 @@ dependencies = [
 name = "aerodesk-linux"
 version = "0.1.0"
 dependencies = [
- "aerodesk-core",
- "aerodesk-protocol",
- "aerodesk-softenc",
- "ffmpeg-next",
- "lamco-pipewire",
- "lamco-portal",
- "libc",
- "tokio",
- "tracing",
- "v4l",
- "x11rb",
+ "aerodesk-platform",
 ]
 
 [[package]]
@@ -166,26 +156,7 @@ version = "0.1.0"
 dependencies = [
  "aerodesk-core",
  "aerodesk-ffmpeg",
- "aerodesk-protocol",
- "aerodesk-softenc",
- "apple-cf",
- "block2 0.6.2",
- "core-foundation 0.10.1",
- "core-graphics 0.25.0",
- "core-graphics-types 0.2.0",
- "cpal",
- "dispatch2",
- "objc",
- "objc2 0.6.4",
- "objc2-av-foundation",
- "objc2-core-foundation",
- "objc2-core-media",
- "objc2-core-video",
- "objc2-foundation 0.3.2",
- "screencapturekit",
- "tracing",
- "videotoolbox",
- "x264",
+ "aerodesk-platform",
 ]
 
 [[package]]
@@ -206,6 +177,47 @@ dependencies = [
  "aerodesk-protocol",
  "str0m",
  "tracing",
+]
+
+[[package]]
+name = "aerodesk-platform"
+version = "0.1.0"
+dependencies = [
+ "aerodesk-core",
+ "aerodesk-ffmpeg",
+ "aerodesk-protocol",
+ "aerodesk-softenc",
+ "apple-cf",
+ "block2 0.6.2",
+ "core-foundation 0.10.1",
+ "core-graphics 0.25.0",
+ "core-graphics-types 0.2.0",
+ "cpal",
+ "dispatch2",
+ "ffmpeg-next",
+ "jni 0.21.1",
+ "lamco-pipewire",
+ "lamco-portal",
+ "libc",
+ "objc",
+ "objc2 0.6.4",
+ "objc2-av-foundation",
+ "objc2-core-foundation",
+ "objc2-core-media",
+ "objc2-core-video",
+ "objc2-foundation 0.3.2",
+ "parsec-vdd-rust",
+ "screencapturekit",
+ "serde_json",
+ "str0m",
+ "tokio",
+ "tracing",
+ "v4l",
+ "videotoolbox",
+ "windows 0.58.0",
+ "windows 0.62.2",
+ "x11rb",
+ "x264",
 ]
 
 [[package]]
@@ -296,14 +308,7 @@ dependencies = [
 name = "aerodesk-windows"
 version = "0.1.0"
 dependencies = [
- "aerodesk-core",
- "aerodesk-ffmpeg",
- "aerodesk-protocol",
- "aerodesk-softenc",
- "parsec-vdd-rust",
- "tracing",
- "windows 0.58.0",
- "windows 0.62.2",
+ "aerodesk-platform",
 ]
 
 [[package]]

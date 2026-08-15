@@ -392,7 +392,7 @@ impl HevcDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoder::X264Encoder;
+    use crate::macos::encoder::X264Encoder;
 
     #[test]
     fn parses_last_nal_without_truncation() {
@@ -446,7 +446,7 @@ mod tests {
     /// H.265 硬解回环：#74 FFmpeg(x265) 软编 → HevcDecoder(VT 硬解) → RGBA。
     #[test]
     fn hevc_vt_decodes_ffmpeg_annexb() {
-        use crate::synthetic::SyntheticSource;
+        use crate::macos::synthetic::SyntheticSource;
         use aerodesk_core::media_pipeline::Codec;
         use aerodesk_ffmpeg::encode::FfmpegEncoder;
 
@@ -481,8 +481,8 @@ mod tests {
     /// 编码→解码→RGBA 回环：验证 #29 macOS 真实解码渲染链。
     #[test]
     fn vt_encode_decode_roundtrip_to_rgba() {
-        use crate::synthetic::SyntheticSource;
-        use crate::vt_encoder::{VtEncoder, avcc_to_annexb};
+        use crate::macos::synthetic::SyntheticSource;
+        use crate::macos::vt_encoder::{VtEncoder, avcc_to_annexb};
 
         let (w, h) = (320u32, 180u32);
         let mut enc = VtEncoder::new(w, h, 30, 1_000_000).expect("vt encoder");

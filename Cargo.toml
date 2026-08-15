@@ -18,6 +18,7 @@ members = [
     "crates/aerodesk-bridge",
     "crates/aerodesk-mcp",
     "crates/aerodesk-admin",
+    "crates/aerodesk-platform",
 ]
 
 [workspace.package]

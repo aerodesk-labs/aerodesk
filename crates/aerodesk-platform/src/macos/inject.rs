@@ -344,6 +344,6 @@ impl aerodesk_core::platform::InputInjector for MacInjector {
     type Error = String;
 
     fn inject(&mut self, event: &aerodesk_protocol::input::InputEvent) -> Result<(), Self::Error> {
-        crate::inject::inject(event)
+        crate::macos::inject::inject(event)
     }
 }
