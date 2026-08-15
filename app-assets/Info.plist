@@ -12,14 +12,13 @@
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>NSHighResolutionCapable</key><true/>
-    <key>NSAppTransportSecurity</key>
-    <dict>
-        <key>NSAllowsArbitraryLoads</key><true/>
-    </dict>
     <!-- 屏幕录制/辅助功能（被控端/观看端需要；签名后由 TCC 弹窗授权） -->
     <key>NSScreenCaptureUsageDescription</key>
     <string>AeroDesk 需要屏幕录制权限以共享/观看远程桌面。</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>AeroDesk 需要辅助功能权限以注入远程键鼠。</string>
+    <!-- 相机（AVFoundation 摄像头采集；macOS 缺此 key 时访问相机会被系统终止） -->
+    <key>NSCameraUsageDescription</key>
+    <string>AeroDesk 需要相机权限以共享摄像头画面。</string>
 </dict>
 </plist>
