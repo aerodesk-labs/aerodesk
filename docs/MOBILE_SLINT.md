@@ -60,20 +60,16 @@ iOS/iPad、Android、HarmonyOS 的端侧 UI/UX 统一走 Slint；native 层只�
 
 ## 已知坑
 
-- 当前 workspace 锁定 `slint 1.17.1`，但其 `backend-android-activity-06`
-  feature 要求 `i-slint-backend-android-activity = "=1.17.1"`，crates.io
-  尚未发布该后端 1.17.1（仅 1.10.0 等）。落地 Android Slint 前需先完成
-  Slint 与 Android 后端版本选型（降级 slint 或等待后端发布）。- iOS 走 `backend-winit`：`i-slint-backend-winit 1.17.1` 已可用，但需 Xcode/
-  真机验证 winit iOS 后端与 Swift 生命周期接入。- 更具体的阻塞：桌面 `aerodesk-desktop` 依赖 slint 1.17 的 `system-tray`
-  feature（1.10 无此 feature），而 Android 后端只有 1.10 可用；同一
-  workspace 内无法同时选择两个 1.x 版本。落地 Android Slint 需二选一：
-  桌面降级并去掉 system-tray，或等待官方发布 1.17 的 Android 后端。- 降级路径也不可行：slint 1.10 缺少 `Weak::upgrade_in_event_loop`
-  （desktop 4 处使用）、`system-tray`、`raw-window-handle-06` 通道。
-  因此移动端 Slint 需等官方发布 slint 1.17 的 Android 后端，或接受
-  桌面端大改（换事件循环模型 + 去托盘 + 重做窗口聚焦）。- iOS Rust 侧 Slint 入口已就位：`aerodesk-ios/src/ui.rs` 导出
-  `ad_slint_run()`，使用 backend-winit 1.17。Swift 侧切换为 Slint 宿主
-  待 Xcode/真机接入。
-
+- Android 后端阻塞已解除：`i-slint-backend-android-activity 1.17.1` 已发布，
+  `aerodesk-android` 已启用 `backend-android-activity-06`，无需降级 slint。
+- Android Slint 后端的 `build.rs` 需要 `android.jar`；CI 与本地构建脚本已显式
+  提供 `ANDROID_PLATFORM` / `ANDROID_JAR`（见 `build-android-lib.sh`）。
+- iOS 走 `backend-winit`：`i-slint-backend-winit 1.17.1` 已可用，但需 Xcode/真机
+  验证 winit iOS 后端与 Swift 生命周期接入。
+- iOS Rust 侧 Slint 入口已就位：`aerodesk-ios/src/ui.rs` 导出 `ad_slint_run()`，
+  使用 backend-winit 1.17；Swift 侧目前保留 `-slint` 开关，默认仍 SwiftUI，
+  待真机验证后切默认 Slint。
+- 移动端 Slint 已完成编译级接入，真机生命周期/权限桥接仍需实机验证。
 ## 跨平台 CI 覆盖
 
 - 桌面三端（macOS/Linux/Windows）：`ci.yml` 的 `test` 矩阵 `cargo clippy --workspace` 编译 `aerodesk_platform::{macos,linux,windows}`。
