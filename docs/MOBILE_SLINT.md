@@ -74,3 +74,16 @@ iOS/iPad、Android、HarmonyOS 的端侧 UI/UX 统一走 Slint；native 层只�
   桌面端大改（换事件循环模型 + 去托盘 + 重做窗口聚焦）。- iOS Rust 侧 Slint 入口已就位：`aerodesk-ios/src/ui.rs` 导出
   `ad_slint_run()`，使用 backend-winit 1.17。Swift 侧切换为 Slint 宿主
   待 Xcode/真机接入。
+
+## 跨平台 CI 覆盖
+
+- 桌面三端（macOS/Linux/Windows）：`ci.yml` 的 `test` 矩阵 `cargo clippy --workspace` 编译 `aerodesk_platform::{macos,linux,windows}`。
+- iOS/iPad：`ios-app-build` 通过 `build-ios-lib.sh all` 编译真机 + 模拟器两个 slice，覆盖 `aerodesk_platform::ios`。
+- Android：`android-apk-build` 通过 `build-android-lib.sh` 编译 arm64 cdylib，覆盖 `aerodesk_platform::android`。
+- 手动快速检查：新增 `.github/workflows/platform-cross.yml`，`workflow_dispatch` 触发，仅做 `cargo check`（桌面三端 + iOS device/sim + Android arm64），用于发版前/跨平台改动时快速验证，不重复挂 PR。
+- OHOS 未接入 CI：GitHub hosted runner 无 OHOS NDK；需先 `scripts/check-ohos-toolchain.sh` 就绪，再 `cargo check -p aerodesk-ohos --target aarch64-unknown-linux-ohos`。阻塞点是 str0m→dimpl→aws-lc-sys 需要 OHOS C 工具链。
+
+## iOS Slint 宿主开关
+
+- `aerodesk-ios/src/ui.rs` 已导出 `ad_slint_run()`。
+- Swift 侧 `AeroDeskApp.swift` 默认仍走 SwiftUI 观看端；启动参数 `-slint` 时在主队列调用 `ad_slint_run()` 进入 Rust Slint UI（实验性，待真机/Xcode 验证 winit iOS 后端）。
