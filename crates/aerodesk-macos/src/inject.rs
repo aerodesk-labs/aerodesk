@@ -293,13 +293,14 @@ mod tests {
 
     #[test]
     fn active_display_set_get_roundtrip() {
-        // 纯状态读写，无需硬件。
+        // 纯状态读写，无需硬件。结尾恢复 None：该静态跨测试共享，
+        // 残留 Some(0) 会污染 cursor 测试的坐标系选择。
         set_active_display(Some(42));
         assert_eq!(active_display(), Some(42));
-        set_active_display(None);
-        assert_eq!(active_display(), None);
         set_active_display(Some(0));
         assert_eq!(active_display(), Some(0));
+        set_active_display(None);
+        assert_eq!(active_display(), None);
     }
 
     #[test]

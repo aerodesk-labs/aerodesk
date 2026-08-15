@@ -157,8 +157,8 @@ impl ScreenCapture {
     }
 
     /// 采集一帧，返回 IOSurface（零拷贝，可直接进 VideoToolbox）。
-    /// 采集一帧，返回 IOSurface（零拷贝，可直接进 VideoToolbox）。
-    /// 失败（如无权限）返回 None；SCK 挂起时连续超时自动重建会话（#274）。
+    /// 失败（如无权限）返回 None；SCK 挂起或持续报错时连续无有效帧
+    /// 达阈值自动重建会话（#274 自愈，对超时与错误路径同等生效）。
     /// 命名为 capture_frame 以区别于 core `MediaSource::next_frame`（#277）。
     pub fn capture_frame(&mut self, timeout: Duration) -> Option<IOSurface> {
         match self.rx.recv_timeout(timeout) {
@@ -167,24 +167,38 @@ impl ScreenCapture {
                 self.stale = 0;
                 Some(surface)
             }
-            Ok(Err(_)) => None,
-            Err(_) => {
-                // 超时：SCK 可能挂起。连续 ~3s（60×50ms）无帧则重建会话自愈。
+            // 错误与超时同样计入 stale：持续报错（无权限/设备移除）若不计数，
+            // 永远到不了重建阈值，错误还会被静默吞掉。
+            Ok(Err(_)) => {
                 self.stale += 1;
-                if self.stale >= 60 {
-                    self.stale = 0;
-                    eprintln!("SCK capture stalled, recreating session");
-                    if let Ok((f, c, id, w, h)) =
-                        build_capture(self.display_idx, self.fps, self.width, self.height)
-                    {
-                        self.display_id = id;
-                        self.width = w;
-                        self.height = h;
-                        self.rx = spawn_capture_thread(f, c);
-                    }
-                }
+                self.rebuild_if_stale();
                 None
             }
+            Err(_) => {
+                self.stale += 1;
+                self.rebuild_if_stale();
+                None
+            }
+        }
+    }
+
+    /// 连续无有效帧达到阈值（60 次调用，按调用方超时 33~50ms 约 2~3s）时
+    /// 重建采集会话（换新线程 + 新 filter/config）。重建失败记日志，
+    /// stale 已清零，下一轮窗口后自动重试。
+    fn rebuild_if_stale(&mut self) {
+        if self.stale < 60 {
+            return;
+        }
+        self.stale = 0;
+        tracing::warn!("SCK capture stalled, recreating session");
+        match build_capture(self.display_idx, self.fps, self.width, self.height) {
+            Ok((f, c, id, w, h)) => {
+                self.display_id = id;
+                self.width = w;
+                self.height = h;
+                self.rx = spawn_capture_thread(f, c);
+            }
+            Err(e) => tracing::error!("SCK capture session rebuild failed: {e}"),
         }
     }
 

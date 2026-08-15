@@ -156,6 +156,11 @@ pub struct H264Decoder {
     rx: mpsc::Receiver<DecodedFrame>,
     /// 解码是异步的：sample buffer 引用的内存必须活到回调后。
     pending: Option<(CMSampleBuffer, Vec<u8>)>,
+    /// 上次建会话用的参数集：编码端每个关键帧都前置 SPS/PPS，
+    /// 内容未变（分辨率/档位不变）时跳过重建——VT 会话创建开销大，
+    /// 无脑重建会变成 ~GOP 周期一次的规律性卡顿。
+    last_sps: Vec<u8>,
+    last_pps: Vec<u8>,
 }
 
 impl Default for H264Decoder {
@@ -166,14 +171,13 @@ impl Default for H264Decoder {
 
 impl H264Decoder {
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel();
-        // 占位 session：等第一个关键帧的 SPS/PPS 后重建
-        let _ = tx;
         Self {
             session: None,
             format: None,
-            rx,
+            rx: mpsc::channel().1,
             pending: None,
+            last_sps: Vec::new(),
+            last_pps: Vec::new(),
         }
     }
 
@@ -204,17 +208,22 @@ impl H264Decoder {
             }
         }
 
-        // 关键帧（含 SPS/PPS）：重建 format description + session
+        // 关键帧（含 SPS/PPS）：参数集变化（或首帧）才重建 format description + session。
         if let (Some(sps), Some(pps)) = (sps, pps) {
-            let fmt = build_format_description(sps, pps)?;
-            let (tx, rx) = mpsc::channel();
-            let session = DecompressionSession::new(&fmt, move |frame: DecodedFrame| {
-                let _ = tx.send(frame);
-            })
-            .map_err(|e| format!("decompress session: {e:?}"))?;
-            self.format = Some(fmt);
-            self.session = Some(session);
-            self.rx = rx;
+            let unchanged = self.session.is_some() && self.last_sps == sps && self.last_pps == pps;
+            if !unchanged {
+                let fmt = build_format_description(sps, pps)?;
+                let (tx, rx) = mpsc::channel();
+                let session = DecompressionSession::new(&fmt, move |frame: DecodedFrame| {
+                    let _ = tx.send(frame);
+                })
+                .map_err(|e| format!("decompress session: {e:?}"))?;
+                self.format = Some(fmt);
+                self.session = Some(session);
+                self.rx = rx;
+                self.last_sps = sps.to_vec();
+                self.last_pps = pps.to_vec();
+            }
         }
 
         // AVCC 化 VCL NAL（1..=5）。SPS/PPS 已在 format description 中；SEI/AUD 等
@@ -258,12 +267,16 @@ impl H264Decoder {
 /// H.265/HEVC 硬件解码器（VideoToolbox）。
 ///
 /// 输入 AnnexB HEVC（str0m MediaData.data），输出 CVPixelBuffer。
-/// 关键帧（含 VPS/SPS/PPS）时重建 CMVideoFormatDescription。
+/// 关键帧（含 VPS/SPS/PPS）且参数集**变化**时才重建 CMVideoFormatDescription
+///（同 H264：编码端每个关键帧都前置参数集，无脑重建有周期性卡顿）。
 pub struct HevcDecoder {
     session: Option<DecompressionSession>,
     format: Option<CMFormatDescription>,
     rx: mpsc::Receiver<DecodedFrame>,
     pending: Option<(CMSampleBuffer, Vec<u8>)>,
+    last_vps: Vec<u8>,
+    last_sps: Vec<u8>,
+    last_pps: Vec<u8>,
 }
 
 impl Default for HevcDecoder {
@@ -274,13 +287,14 @@ impl Default for HevcDecoder {
 
 impl HevcDecoder {
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel();
-        let _ = tx;
         Self {
             session: None,
             format: None,
-            rx,
+            rx: mpsc::channel().1,
             pending: None,
+            last_vps: Vec::new(),
+            last_sps: Vec::new(),
+            last_pps: Vec::new(),
         }
     }
 
@@ -316,17 +330,26 @@ impl HevcDecoder {
             }
         }
 
-        // 关键帧（VPS/SPS/PPS 齐）：重建 format description + session。
+        // 关键帧（VPS/SPS/PPS 齐）：参数集变化（或首帧）才重建 format description + session。
         if let (Some(vps), Some(sps), Some(pps)) = (vps, sps, pps) {
-            let fmt = build_hevc_format_description(vps, sps, pps)?;
-            let (tx, rx) = mpsc::channel();
-            let session = DecompressionSession::new(&fmt, move |frame: DecodedFrame| {
-                let _ = tx.send(frame);
-            })
-            .map_err(|e| format!("hevc decompress session: {e:?}"))?;
-            self.format = Some(fmt);
-            self.session = Some(session);
-            self.rx = rx;
+            let unchanged = self.session.is_some()
+                && self.last_vps == vps
+                && self.last_sps == sps
+                && self.last_pps == pps;
+            if !unchanged {
+                let fmt = build_hevc_format_description(vps, sps, pps)?;
+                let (tx, rx) = mpsc::channel();
+                let session = DecompressionSession::new(&fmt, move |frame: DecodedFrame| {
+                    let _ = tx.send(frame);
+                })
+                .map_err(|e| format!("hevc decompress session: {e:?}"))?;
+                self.format = Some(fmt);
+                self.session = Some(session);
+                self.rx = rx;
+                self.last_vps = vps.to_vec();
+                self.last_sps = sps.to_vec();
+                self.last_pps = pps.to_vec();
+            }
         }
 
         // AVCC 化 VCL NAL（0..=31）。VPS/SPS/PPS 已在 format description 中；

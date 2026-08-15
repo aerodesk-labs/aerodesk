@@ -428,8 +428,8 @@ impl aerodesk_core::platform::Encoder for VtEncoder {
             && (self.last_bitrate_bps == 0
                 || now.duration_since(self.last_bitrate_at) >= std::time::Duration::from_secs(1))
         {
-            self.last_bitrate_bps = bitrate_bps;
-            self.last_bitrate_at = now;
+            // 失败不更新 last_*：保留旧档位状态，后续同档反馈仍会重试
+            //（否则一次瞬时失败就把新码率「记账」，编码器被钉死在旧码率）。
             if let Err(e) = self.reconfigure(
                 self.codec,
                 self.width,
@@ -438,7 +438,10 @@ impl aerodesk_core::platform::Encoder for VtEncoder {
                 bitrate_bps as u32,
             ) {
                 tracing::warn!("vt set_bitrate reconfigure failed: {e}");
+                return;
             }
+            self.last_bitrate_bps = bitrate_bps;
+            self.last_bitrate_at = now;
         }
     }
 }
