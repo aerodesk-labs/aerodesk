@@ -152,6 +152,7 @@ dependencies = [
 name = "aerodesk-ios"
 version = "0.1.0"
 dependencies = [
+ "aerodesk-core",
  "aerodesk-platform",
  "slint",
 ]
