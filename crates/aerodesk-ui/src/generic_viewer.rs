@@ -38,6 +38,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     input_rx: std::sync::mpsc::Receiver<String>,
     file_cmd_rx: std::sync::mpsc::Receiver<crate::FileCmd>,
     stop: Arc<AtomicBool>,
+    view_only: Arc<AtomicBool>,
     decoder_label: &'static str,
     mut mk_decoder: DF,
     mut mk_renderer: RF,
@@ -147,9 +148,12 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     let mut no_media_notified = false;
     while !stale() {
         // 输入事件：UI 键鼠 → input data channel → SFU → 被控端。
-        while let Ok(json) = input_rx.try_recv() {
-            live.endpoint
-                .send_channel_data("input", false, json.as_bytes());
+        // #441 观看模式（仅观看）不发送键鼠输入。
+        if !view_only.load(Ordering::SeqCst) {
+            while let Ok(json) = input_rx.try_recv() {
+                live.endpoint
+                    .send_channel_data("input", false, json.as_bytes());
+            }
         }
         // #72/#271 文件/剪贴板命令（UI 工具栏）：发送文件/剪贴板文本/图片、取消。
         while let Ok(cmd) = file_cmd_rx.try_recv() {

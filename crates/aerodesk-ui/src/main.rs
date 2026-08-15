@@ -125,6 +125,8 @@ pub struct SessionHandle {
     pub stop: Arc<AtomicBool>,
     /// 画面源切换：false=屏幕 / true=摄像头（观看端本地渲染选择）。
     pub show_camera: Arc<AtomicBool>,
+    /// 观看模式：true=仅观看不发送键鼠输入。
+    pub view_only: Arc<AtomicBool>,
     /// 最近一帧（未收到帧时为 None，UI 显示空槽）。
     pub frame: Option<SessionFrame>,
     /// 远端光标最新位置（None = 尚未收到光标事件）。
@@ -210,6 +212,106 @@ pub fn session_joined_weak(ui_weak: &slint::Weak<AppWindow>, slot: usize) {
 
 /// 由 SESSIONS 顺序构建 (标签, 帧数组)。
 /// 帧存在各会话句柄里（按稳定 slot 归属）：断开中间会话后剩余会话仍显示自己的帧。
+#[derive(Copy, Clone)]
+enum ConnectMode {
+    Control,
+    View,
+    Camera,
+}
+
+impl ConnectMode {
+    fn view_only(self) -> bool {
+        matches!(self, ConnectMode::View)
+    }
+    fn prefer_camera(self) -> bool {
+        matches!(self, ConnectMode::Camera)
+    }
+}
+
+/// 发起观看/控制会话（#441 连接页功能按钮共用一个启动路径）。
+fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
+    let server = ui.get_server_default().to_string();
+    let room = ui.get_room_input().to_string();
+    let token = ui.get_token_default().to_string();
+    {
+        let sessions = SESSIONS.lock().unwrap();
+        if sessions.len() >= MAX_SESSIONS {
+            ui.set_status(format!("最多同时 {MAX_SESSIONS} 个会话（请先断开一个）").into());
+            return;
+        }
+    }
+    ui.set_connecting(true);
+    ui.set_conn_state(1);
+    ui.set_status(format!("连接 {} @ {} …", room, server).into());
+    let slot = SESSION_NEXT.fetch_add(1, Ordering::SeqCst);
+    let (control_tx, control_rx) = std::sync::mpsc::channel();
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    let (file_cmd_tx, file_cmd_rx) = std::sync::mpsc::channel();
+    let muted = Arc::new(AtomicBool::new(false));
+    let volume = Arc::new(AtomicU16::new(100));
+    let stop = Arc::new(AtomicBool::new(false));
+    let show_camera = Arc::new(AtomicBool::new(mode.prefer_camera()));
+    let view_only = Arc::new(AtomicBool::new(mode.view_only()));
+    {
+        let mut sessions = SESSIONS.lock().unwrap();
+        sessions.push(SessionHandle {
+            slot,
+            room: room.clone(),
+            server: server.clone(),
+            input_tx: input_tx.clone(),
+            control_tx: control_tx.clone(),
+            file_tx: file_cmd_tx.clone(),
+            muted: muted.clone(),
+            volume: volume.clone(),
+            stop: stop.clone(),
+            show_camera: show_camera.clone(),
+            view_only: view_only.clone(),
+            frame: None,
+            cursor: None,
+            file_progress: -1.0,
+            file_label: String::new(),
+        });
+    }
+    let weak2 = ui.as_weak();
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            #[cfg(target_os = "macos")]
+            {
+                crate::macos_media::run_viewer(
+                    server,
+                    room,
+                    Some(token),
+                    weak2.clone(),
+                    slot,
+                    control_rx,
+                    input_rx,
+                    file_cmd_rx,
+                    muted,
+                    volume,
+                    show_camera,
+                    stop,
+                );
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                crate::generic_media::run_generic_viewer(
+                    server,
+                    room,
+                    Some(token),
+                    weak2.clone(),
+                    slot,
+                    input_rx,
+                    file_cmd_rx,
+                    stop,
+                    view_only,
+                );
+            }
+            with_ui(&weak2, |ui| ui.set_connecting(false));
+        })
+        .expect("spawn viewer thread");
+}
+
 pub fn build_tabs_frames(
     sessions: &[SessionHandle],
 ) -> (Vec<slint::SharedString>, Vec<slint::Image>) {
@@ -719,91 +821,26 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     ui.on_connect({
-        let weak = ui.as_weak();
+        let ui = ui.as_weak();
         move || {
-            let ui = weak.unwrap();
-            let server = ui.get_server_input().to_string();
-            let room = ui.get_room_input().to_string();
-            let token = ui.get_token_input().to_string();
-            {
-                let sessions = SESSIONS.lock().unwrap();
-                if sessions.len() >= MAX_SESSIONS {
-                    ui.set_status(format!("最多同时 {MAX_SESSIONS} 个会话（请先断开一个）").into());
-                    return;
-                }
-            }
-            ui.set_connecting(true);
-            ui.set_conn_state(1);
-            ui.set_status(format!("连接 {} @ {} …", room, server).into());
-            // 每会话独立通道/状态（多会话互不干扰）：输入/控制/文件/静音/音量/stop。
-            let slot = SESSION_NEXT.fetch_add(1, Ordering::SeqCst);
-            let (control_tx, control_rx) = std::sync::mpsc::channel();
-            let (input_tx, input_rx) = std::sync::mpsc::channel();
-            let (file_cmd_tx, file_cmd_rx) = std::sync::mpsc::channel();
-            let muted = Arc::new(AtomicBool::new(false));
-            let volume = Arc::new(AtomicU16::new(100));
-            let stop = Arc::new(AtomicBool::new(false));
-            let show_camera = Arc::new(AtomicBool::new(false));
-            {
-                let mut sessions = SESSIONS.lock().unwrap();
-                sessions.push(SessionHandle {
-                    slot,
-                    room: room.clone(),
-                    server: server.clone(),
-                    input_tx: input_tx.clone(),
-                    control_tx: control_tx.clone(),
-                    file_tx: file_cmd_tx.clone(),
-                    muted: muted.clone(),
-                    volume: volume.clone(),
-                    stop: stop.clone(),
-                    show_camera: show_camera.clone(),
-                    frame: None,
-                    cursor: None,
-                    file_progress: -1.0,
-                    file_label: String::new(),
-                });
-            }
-            let weak2 = weak.clone();
-            // 数据通道收发链（str0m/SCTP）调用栈深，放大线程栈防溢出（RULE 数据通道大块传输线程栈需放大默认2MB.md）。
-            std::thread::Builder::new()
-                .stack_size(16 * 1024 * 1024)
-                .spawn(move || {
-                    #[cfg(target_os = "macos")]
-                    {
-                        // macOS：真实 H.264 解码渲染 + 音频/文件/多会话（每会话独立）。
-                        crate::macos_media::run_viewer(
-                            server,
-                            room,
-                            Some(token),
-                            weak2.clone(),
-                            slot,
-                            control_rx,
-                            input_rx,
-                            file_cmd_rx,
-                            muted,
-                            volume,
-                            show_camera,
-                            stop,
-                        );
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        // Windows/Linux 主控端：真实媒体观看（OpenH264 软解 + Slint 渲染）。
-                        crate::generic_media::run_generic_viewer(
-                            server,
-                            room,
-                            Some(token),
-                            weak2.clone(),
-                            slot,
-                            input_rx,
-                            file_cmd_rx,
-                            stop,
-                        );
-                    }
-                    // 跨线程 upgrade() 恒 None：经 with_ui 排队到 UI 线程复位连接中状态。
-                    with_ui(&weak2, |ui| ui.set_connecting(false));
-                })
-                .expect("spawn viewer thread");
+            let ui = ui.unwrap();
+            start_viewer_session(&ui, ConnectMode::Control);
+        }
+    });
+
+    ui.on_connect_view({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            start_viewer_session(&ui, ConnectMode::View);
+        }
+    });
+
+    ui.on_connect_camera({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            start_viewer_session(&ui, ConnectMode::Camera);
         }
     });
 
