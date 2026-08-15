@@ -268,6 +268,35 @@ JWT_SECRET=$JWT_SECRET cargo run -p aerodesk-cli -- --issue-token \
   --room demo --token {}
 ```
 
+## 6.1 公共测试服务器（2026-08-15 已部署，129.226.150.174）
+
+> 开发/跨机联调用公共节点（腾讯云轻量），signal + SFU（内嵌 TURN）单机部署；
+> **未配置 JWT**（`JWT_SECRET` 未设），用静态 token（`AUTH_TOKENS`）直连即可；
+> token 值向维护者索取（不写进公开仓库）。
+
+| 端口 | 协议 | 用途 |
+|---|---|---|
+| 14703 | TCP | signal 明文 WS（客户端连接口，最关键） |
+| 14778 | UDP + TCP | SFU 媒体（WebRTC RTP/RTCP，**UDP 必须放行**） |
+| 14779 | UDP + TCP | TURN 中继 |
+| 15449 | TCP | TURN TLS（可选） |
+| 14701 | TCP | signal WSS（可选） |
+
+连接示例（UI/CLI 信令地址会自动补协议与 `/ws` 路径）：
+
+```sh
+# 信令地址：ws://129.226.150.174:14703
+# token：从服务器 AUTH_TOKENS 获取
+
+cargo run -p aerodesk-cli -- --role publisher --signal ws://129.226.150.174:14703 \
+  --room accept --token <AUTH_TOKENS 值>
+```
+
+> 注意：14701（WSS）当前为开发 CA 证书，客户端默认信任链（rustls webpki-roots）会拒绝；
+> 正式使用需换成公网证书。跨机联调用明文 `ws://` 即可。
+> 2026-08-15 已用该节点完成 Windows 客户端跨机联调（合成源 viewer DECODED 187；
+> Windows 被控端 RTP/光标/输入/剪贴板全通），详见 [DEVICE_MATRIX.md](DEVICE_MATRIX.md)。
+
 ## 7. 验收清单（对应 Issue #5）
 
 - [x] 信令 JWT 认证（用户/设备/房间/角色）
