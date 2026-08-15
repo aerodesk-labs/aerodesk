@@ -1,20 +1,32 @@
 name: CI
 
+# #429 只在 PR 触发（去掉 push）：同一 commit 不再出现 push+PR 双 run；
+# main 变更走 PR + 分支保护，直推 main 不需要 CI。release 打包由 release.yml 负责。
 on:
-  push:
   pull_request:
 
-# 同一 commit 只保留一个 run（push 与 pull_request 事件共享分组，后到者取消先到者），
-# 新提交自动取消旧 run，防止陈旧 run 堆满 runner 队列（macOS 并发有限）。
 concurrency:
-  # PR 事件用 head.sha（分支 commit），push 事件用 github.sha——同一分支 commit
-  # 的 push/pr 双事件共享分组，后到者取消先到者，去重为单 run。
-  group: ci-${{ github.event.pull_request.head.sha || github.sha }}
+  # 同一 PR 新提交自动取消旧 run，防止陈旧 run 堆满 runner 队列（macOS 并发有限）。
+  group: ci-${{ github.event.pull_request.head.sha }}
   cancel-in-progress: true
 
 jobs:
+  # #429 轻量门禁：docs-only PR 也跑（fmt 无需系统库，秒级）；
+  # 代码 PR 的 fmt/clippy/test 仍由 test 矩阵覆盖。
+  lint:
+    name: lint (fmt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: fmt
+        run: cargo fmt --all -- --check
+
   test:
     name: test (${{ matrix.os }})
+    paths-ignore: ['*.md', 'docs/**']
     strategy:
       fail-fast: false
       matrix:
@@ -331,6 +343,7 @@ jobs:
   # 曾导致 Xcode 无法链接；此处每次 push/PR 都验证模拟器 + 真机 slice 可编译可链接。
   ios-app-build:
     name: iOS app build (sim + device)
+    paths-ignore: ['*.md', 'docs/**']
     runs-on: macos-latest
     env:
       CARGO_TERM_COLOR: always
@@ -379,6 +392,7 @@ jobs:
   # 内联回归）→ App 自动连接观看 → 解码帧 + HEVC 解码路径断言。
   ios-sim-e2e:
     name: iOS simulator e2e (viewer)
+    paths-ignore: ['*.md', 'docs/**']
     runs-on: macos-15
     env:
       CARGO_TERM_COLOR: always
@@ -414,6 +428,7 @@ jobs:
   # Windows 主控端运行态自测：#3 观看端建链（Git Bash + headless Edge 发布 + Windows UI ICE 断言）。
   windows-ui-e2e:
     name: Windows UI e2e (viewer)
+    paths-ignore: ['*.md', 'docs/**']
     runs-on: windows-latest
     env:
       CARGO_TERM_COLOR: always
@@ -452,6 +467,7 @@ jobs:
   # Linux 主控端运行态自测：#4 观看端真实媒体（Xvfb 无头跑 Slint UI → 本地 SFU → 解码帧断言）。
   linux-ui-e2e:
     name: Linux UI e2e (viewer)
+    paths-ignore: ['*.md', 'docs/**']
     runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
@@ -482,6 +498,7 @@ jobs:
   # 动态挑选最新 NDK，避免镜像版本漂移导致脚本 fallback 路径失效。
   android-apk-build:
     name: Android APK build (arm64-v8a)
+    paths-ignore: ['*.md', 'docs/**']
     runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
