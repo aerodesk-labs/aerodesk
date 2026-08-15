@@ -1428,6 +1428,9 @@ export component CameraWindow inherits Window {
     in-out property <float> frame-w: 0;
     in-out property <float> frame-h: 0;
     in-out property <string> status: "连接中…";
+    in-out property <bool> camera-active: true;
+
+    callback toggle-camera();
 
     title: "AeroDesk 摄像头";
     width: 1000px;
@@ -1445,7 +1448,7 @@ export component CameraWindow inherits Window {
                 image-fit: contain;
             }
             if root.video-frame.width == 0: Text {
-                text: "等待摄像头画面…";
+                text: "等待摄像头画面…（若对端未发布摄像头轨，则回退屏幕画面）";
                 color: #888888;
                 font-size: 14px;
                 vertical-alignment: center;
@@ -1453,12 +1456,32 @@ export component CameraWindow inherits Window {
                 width: 100%;
                 height: 100%;
             }
-            Text {
+            Rectangle {
                 x: 12px;
                 y: 12px;
-                text: root.status;
-                color: #34a853;
-                font-size: 14px;
+                height: 44px;
+                border-radius: 6px;
+                background: #ffffff;
+                border-width: 1px;
+                border-color: #d9d9de;
+                HorizontalLayout {
+                    cross-axis-alignment: center;
+                    padding-left: 4px;
+                    padding-right: 4px;
+                    spacing: 2px;
+                    RdButton {
+                        text: root.camera-active ? "切回屏幕" : "显示摄像头";
+                        width: 96px;
+                        clicked => { root.toggle-camera(); }
+                    }
+                    Rectangle { width: 6px; }
+                    Text {
+                        text: root.status;
+                        color: #34a853;
+                        font-size: 14px;
+                        vertical-alignment: center;
+                    }
+                }
             }
         }
         Rectangle {
@@ -1477,24 +1500,97 @@ export component CameraWindow inherits Window {
     }
 }
 
+
 export component FileTransferWindow inherits Window {
-    in-out property <string> status: "文件传输窗口建设中";
+    in-out property <string> status: "未选择文件";
+    in-out property <string> selected-file: "";
+    in-out property <float> progress: -1;
+    in-out property <string> progress-label: "";
+
+    callback choose-file();
+    callback send-file();
+    callback cancel-file();
+
     title: "AeroDesk 文件传输";
     width: 640px;
     height: 480px;
     Rectangle {
         background: #f5f5f7;
-        Text {
-            text: root.status;
-            color: #212121;
-            font-size: 16px;
-            vertical-alignment: center;
-            horizontal-alignment: center;
-            width: 100%;
-            height: 100%;
+        VerticalLayout {
+            padding-left: 24px;
+            padding-right: 24px;
+            padding-top: 20px;
+            padding-bottom: 20px;
+            spacing: 14px;
+
+            Text {
+                text: root.status;
+                color: #212121;
+                font-size: 14px;
+                vertical-stretch: 0;
+            }
+
+            Rectangle {
+                height: 48px;
+                border-radius: 8px;
+                background: #ffffff;
+                border-width: 1px;
+                border-color: #dedee2;
+                HorizontalLayout {
+                    cross-axis-alignment: center;
+                    padding-left: 14px;
+                    padding-right: 8px;
+                    spacing: 8px;
+                    Text {
+                        text: root.selected-file == "" ? "未选择文件" : root.selected-file;
+                        color: root.selected-file == "" ? #9a9aa0 : #212121;
+                        font-size: 14px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    RdButton {
+                        text: "选择文件";
+                        width: 96px;
+                        clicked => { root.choose-file(); }
+                    }
+                }
+            }
+
+            if root.progress >= 0: VerticalLayout {
+                spacing: 6px;
+                ProgressIndicator {
+                    progress: root.progress < 0 ? 0.0 : (root.progress > 1.0 ? 1.0 : root.progress);
+                }
+                Text {
+                    text: root.progress-label;
+                    color: #7d7d84;
+                    font-size: 13px;
+                    vertical-stretch: 0;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle { width: 0px; horizontal-stretch: 1; }
+                RdButton {
+                    text: "发送";
+                    primary: true;
+                    width: 88px;
+                    enabled: root.selected-file != "" && root.progress < 0;
+                    clicked => { root.send-file(); }
+                }
+                RdButton {
+                    text: "取消";
+                    width: 88px;
+                    enabled: root.progress >= 0;
+                    clicked => { root.cancel-file(); }
+                }
+            }
         }
     }
 }
+
 
 export component MessageWindow inherits Window {
     in-out property <string> status: "发消息窗口建设中";
@@ -1516,20 +1612,69 @@ export component MessageWindow inherits Window {
 }
 
 export component TerminalWindow inherits Window {
-    in-out property <string> status: "终端窗口建设中";
+    in-out property <string> status: "未连接会话";
+    in-out property <string> command: "";
+    in-out property <string> output: "";
+
+    callback send-command(string);
+    callback clear-output();
+
     title: "AeroDesk 终端";
     width: 720px;
     height: 520px;
     Rectangle {
         background: #1e1e1e;
-        Text {
-            text: root.status;
-            color: #e6e6e6;
-            font-size: 16px;
-            vertical-alignment: center;
-            horizontal-alignment: center;
-            width: 100%;
-            height: 100%;
+        VerticalLayout {
+            padding-left: 14px;
+            padding-right: 14px;
+            padding-top: 12px;
+            padding-bottom: 12px;
+            spacing: 8px;
+
+            Rectangle {
+                vertical-stretch: 1;
+                background: #111111;
+                border-radius: 8px;
+                ScrollView {
+                    vertical-stretch: 1;
+                    Text {
+                        text: root.output;
+                        color: #e6e6e6;
+                        font-size: 13px;
+                        horizontal-stretch: 1;
+                        vertical-stretch: 1;
+                    }
+                }
+            }
+
+            Text {
+                text: root.status;
+                color: #9a9aa0;
+                font-size: 13px;
+                vertical-stretch: 0;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                RdInput {
+                    text <=> root.command;
+                    placeholder: "输入命令后回车";
+                    font-size: 14px;
+                    horizontal-stretch: 1;
+                    accepted => { root.send-command(root.command); }
+                }
+                RdButton {
+                    text: "发送";
+                    primary: true;
+                    width: 72px;
+                    clicked => { root.send-command(root.command); }
+                }
+                RdButton {
+                    text: "清空";
+                    width: 72px;
+                    clicked => { root.clear-output(); }
+                }
+            }
         }
     }
 }
