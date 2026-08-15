@@ -1,13 +1,13 @@
 name: Build & Release
 
-# 打 tag v* 时自动构建 macOS（签名/公证）、Linux 与 Windows 桌面端，发 GitHub Release；
+# #433 仅 pre-release / 正式 release（release published）或手动触发时打包；
+# 去掉 push tags v* —— GitHub 创建 release 时会自动打 tag，push 与 release 双事件会
+# 导致每次发布跑两遍全平台打包（v0.1.0-pre1/pre2 均双 run），成本翻倍。
 # 也可手动触发（只出产物）；创建 pre-release 时同样触发全平台打包并回传产物。
 # 参考 ../abb 项目的 release 流水线（.github/workflows/release.yml）。
 # macOS：DMG（Developer ID + notarytool）；Linux：deb/tar.gz/rpm/AppImage（scripts/package-linux.sh）。
 # Windows：便携 ZIP + WiX MSI（scripts/package-windows.sh）。
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
   release:
     # published 覆盖 pre-release 与正式 release 的发布（prereleased 不触发草稿转发布的 pre-release）
