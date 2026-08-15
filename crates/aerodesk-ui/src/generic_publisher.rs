@@ -205,10 +205,7 @@ mod imp {
             None
         };
 
-        set_publisher_status(
-            &ui_weak,
-            format!("被控端已启动：{room} · {w}x{h}@30 · 屏幕发布中"),
-        );
+        set_publisher_status(&ui_weak, format!("正在注册被控端：{room} · {w}x{h}@30"));
 
         let mut connected = false;
         let mut next_frame = Instant::now();
@@ -237,7 +234,10 @@ mod imp {
                     ClientEvent::IceConnected => {
                         connected = true;
                         next_frame = Instant::now();
-                        set_publisher_status(&ui_weak, format!("被控端已连接：{room}"));
+                        set_publisher_status(
+                            &ui_weak,
+                            format!("已在线，可被呼叫：{room} · 屏幕发布中"),
+                        );
                     }
                     ClientEvent::Closed => {
                         set_publisher_status(&ui_weak, "被控端连接已关闭".into());

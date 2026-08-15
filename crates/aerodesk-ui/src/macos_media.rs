@@ -224,10 +224,14 @@ pub fn run_viewer(
             if !stale() {
                 with_ui(&ui_weak, |ui| {
                     ui.set_conn_state(3);
-                    ui.set_status("连接超时".into());
+                    ui.set_status("连接超时：请检查服务器 ws://地址:端口 / token / 网络；对方未在线时也会等待媒体流".into());
                 });
             }
-            crate::session_cleanup_weak(&ui_weak, session_idx, Some("连接超时".into()));
+            crate::session_cleanup_weak(
+                &ui_weak,
+                session_idx,
+                Some("连接超时：请检查服务器 ws://地址:端口 / token / 网络".into()),
+            );
             return;
         }
     };
