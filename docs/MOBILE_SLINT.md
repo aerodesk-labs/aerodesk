@@ -9,7 +9,7 @@ iOS/iPad、Android、HarmonyOS 的端侧 UI/UX 统一走 Slint；native 层只�
 ## 当前状态
 
 - `aerodesk-platform`：已包含移动端平台实现模块（ios/android/ohos）。
-- `aerodesk-ios`：C ABI 薄壳（`ffi.rs`），iOS 壳层仍为 SwiftUI。
+- `aerodesk-ios`：C ABI 薄壳（`ffi.rs`）+ Slint 宿主（`ui.rs`，支持 server/room 连接/断开）；iOS 壳层默认仍为 SwiftUI，`-slint` 可切到 Rust Slint UI。
 - `aerodesk-android`：JNI 薄壳（`jni.rs`）+ Slint 宿主（`ui.rs`），Kotlin 壳层已退化为系统垫片（服务 + NativeActivity）。
 - `aerodesk-ohos`：NAPI 薄壳（`napi.rs`），ArkTS 壳层待 DevEco。
 
@@ -33,7 +33,7 @@ iOS/iPad、Android、HarmonyOS 的端侧 UI/UX 统一走 Slint；native 层只�
 
 1. Rust 端侧：
    - `aerodesk-ios` 增加 Slint 依赖（winit iOS 后端）。
-   - 新增 `ui.rs` 启动 Slint `AppWindow`；保留 `ffi.rs` 供原生生命周期调用。
+   - 新增 `ui.rs` 启动 Slint `IosAppWindow`；当前已支持输入 server/room 并连接/断开 `ViewerSession`，保留 `ffi.rs` 供原生生命周期调用。
 2. Swift 壳层：
    - 替换 `ContentView.swift` 的 SwiftUI，改为承载 Slint 窗口。
    - 保留 App 生命周期、系统权限桥。
