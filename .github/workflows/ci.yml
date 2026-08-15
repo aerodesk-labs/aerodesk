@@ -24,9 +24,34 @@ jobs:
       - name: fmt
         run: cargo fmt --all -- --check
 
+  # #429 前置：检测 PR 是否仅改动文档（*.md / docs/**），供重型 job 跳过。
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.detect.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: detect
+        shell: bash
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          files=$(git diff --name-only "$base" "$head")
+          echo "changed files:"
+          echo "$files"
+          # 仅当所有变更文件都是 *.md 或 docs/** 时才算 docs-only。
+          if [ -z "$files" ] || echo "$files" | grep -qvE '^(README\.md|docs/|.*\.md)$'; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     name: test (${{ matrix.os }})
-    paths-ignore: ['*.md', 'docs/**']
+    needs: changes
+    if: needs.changes.outputs.docs_only == 'false'
     strategy:
       fail-fast: false
       matrix:
@@ -342,8 +367,9 @@ jobs:
   # iOS App 双 slice 构建回归：#14 类链接回归（XCFramework/扁平静态库路径错位）
   # 曾导致 Xcode 无法链接；此处每次 push/PR 都验证模拟器 + 真机 slice 可编译可链接。
   ios-app-build:
+    needs: changes
+    if: needs.changes.outputs.docs_only == 'false'
     name: iOS app build (sim + device)
-    paths-ignore: ['*.md', 'docs/**']
     runs-on: macos-latest
     env:
       CARGO_TERM_COLOR: always
@@ -391,8 +417,9 @@ jobs:
   # 构建 App → 启动模拟器 → 本地 SFU 发布端（默认 h265 合成源，#328 HEVC 参数集
   # 内联回归）→ App 自动连接观看 → 解码帧 + HEVC 解码路径断言。
   ios-sim-e2e:
+    needs: changes
+    if: needs.changes.outputs.docs_only == 'false'
     name: iOS simulator e2e (viewer)
-    paths-ignore: ['*.md', 'docs/**']
     runs-on: macos-15
     env:
       CARGO_TERM_COLOR: always
@@ -427,8 +454,9 @@ jobs:
 
   # Windows 主控端运行态自测：#3 观看端建链（Git Bash + headless Edge 发布 + Windows UI ICE 断言）。
   windows-ui-e2e:
+    needs: changes
+    if: needs.changes.outputs.docs_only == 'false'
     name: Windows UI e2e (viewer)
-    paths-ignore: ['*.md', 'docs/**']
     runs-on: windows-latest
     env:
       CARGO_TERM_COLOR: always
@@ -466,8 +494,9 @@ jobs:
 
   # Linux 主控端运行态自测：#4 观看端真实媒体（Xvfb 无头跑 Slint UI → 本地 SFU → 解码帧断言）。
   linux-ui-e2e:
+    needs: changes
+    if: needs.changes.outputs.docs_only == 'false'
     name: Linux UI e2e (viewer)
-    paths-ignore: ['*.md', 'docs/**']
     runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
@@ -497,8 +526,9 @@ jobs:
   # ubuntu-latest 镜像预装 Android SDK（platform 34 / build-tools / NDK r2x），
   # 动态挑选最新 NDK，避免镜像版本漂移导致脚本 fallback 路径失效。
   android-apk-build:
+    needs: changes
+    if: needs.changes.outputs.docs_only == 'false'
     name: Android APK build (arm64-v8a)
-    paths-ignore: ['*.md', 'docs/**']
     runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
