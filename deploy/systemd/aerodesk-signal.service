@@ -15,7 +15,8 @@ ExecStart=/opt/aerodesk/aerodesk-signal
 Restart=on-failure
 RestartSec=2
 Environment=SIGNAL_PORT=3001
-# 明文 WS 仅限开发（生产只暴露 WSS:3001；如需关闭请用防火墙限制 3003）
+# 明文 WS 仅限开发（生产只暴露 WSS:3001；如需关闭设 SIGNAL_PLAIN_PORT=off，
+# 或用防火墙限制 3003）
 # Environment=SIGNAL_PLAIN_PORT=3003
 # 认证（生产必设：JWT_SECRET 或 AUTH_TOKENS 至少一个）
 Environment=JWT_SECRET=CHANGE_ME_JWT_SECRET
