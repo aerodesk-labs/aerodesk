@@ -3,3 +3,4 @@
 #![cfg(target_os = "ios")]
 
 pub mod ffi;
+pub mod ui;
