@@ -18,6 +18,8 @@
 
 ```
 aerodesk/
+aerodesk/
+aerodesk/
 ├── crates/
 │   ├── aerodesk-sfu/        # SFU 服务端：8 shard × SO_REUSEPORT + UnifiedSocket(UDP/TCP/SSL-TCP 3478)
 │   │                        #   + BitrateController/simulcast 选层 + /healthz + /metrics[/prometheus] ✅
@@ -27,19 +29,19 @@ aerodesk/
 │   │                        #   platform trait：MediaSource/Encoder/Decoder/Renderer/InputInjector/
 │   │                        #   AudioSink/AudioCapturer/Clipboard/CursorSource/Permissions/CameraSource/
 │   │                        #   FilePicker/AppShell/VirtualDisplay/Notifier/CommandExecutor（#330）/SystemWakeLock（#334）
+│   ├── aerodesk-platform/   # 平台实现收敛层：macos/windows/linux/ios/android/ohos 各平台 trait 实现 ✅
+│   ├── aerodesk-desktop/    # 桌面端侧 UI/UX（Slint，Win/macOS/Linux）✅
 │   ├── aerodesk-cli/        # CLI：publisher（pcap/x264/VT/screen 四种源）+ viewer ✅
-│   ├── aerodesk-macos/      # macOS 适配器：ScreenCaptureKit 采集 + VT 硬编 + x264 软编 + CGEvent 注入 ✅
-│   ├── aerodesk-ios/        # iOS 适配器：VideoToolbox H.264 硬解（AnnexB→CVPixelBuffer）✅
-│   ├── aerodesk-android/    # Android 适配器骨架：MediaCodec/MediaProjection/Accessibility 🔨 P3
-│   ├── aerodesk-linux/      # Linux 适配器：X11/Wayland(PipeWire) 采集 + VAAPI 硬编硬解 + XTest/uinput/portal 注入 + V4L2 摄像头 + PipeWire 系统音频 + 剪贴板/光标/FilePicker/Notifier/唤醒锁 ✅
-│   ├── aerodesk-windows/    # Windows 适配器：DXGI 采集+缩放 / MF 硬编+DXVA2 硬解 / WASAPI 音频 / SendInput / 远程光标 / 显示器切换 / VDD ✅
-│   ├── aerodesk-ohos/       # HarmonyOS 适配器骨架：AVScreenCapture/OH_VideoDecoder/NAPI 🔨 P4
+│   ├── aerodesk-macos/      # macOS 平台实现兼容壳（实现已迁 aerodesk-platform）✅
+│   ├── aerodesk-windows/    # Windows 平台实现兼容壳（实现已迁 aerodesk-platform）✅
+│   ├── aerodesk-linux/      # Linux 平台实现兼容壳（实现已迁 aerodesk-platform）✅
+│   ├── aerodesk-ios/        # iOS/iPad FFI 薄壳（平台实现已迁 aerodesk-platform）✅
+│   ├── aerodesk-android/    # Android JNI 薄壳（平台实现已迁 aerodesk-platform）🔨 P3
+│   ├── aerodesk-ohos/       # HarmonyOS NAPI 薄壳（平台实现已迁 aerodesk-platform）🔨 P4
 │   └── x264/                # vendored x264 crate（+sliced_threads/threads 控制）
 ├── web/index.html           # 浏览器观看端（publisher=屏幕采集受限 / viewer=观看+输入）
 ├── certs/                   # str0m.test 自签证书（开发用）
 └── docs/                    # 规划与调研
-```
-
 ## 运行
 
 ```sh
