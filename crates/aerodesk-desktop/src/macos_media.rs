@@ -440,7 +440,7 @@ pub fn run_viewer(
             }
             // #109/#452 终端命令响应 → 终端独立窗口回显。
             if let ClientEvent::ChannelData(cid, _, data) = &ev
-                && live.endpoint.channel_label(cid).as_deref() == Some("cmd")
+                && live.endpoint.channel_label(*cid).as_deref() == Some("cmd")
                 && let Ok(response) =
                     serde_json::from_slice::<aerodesk_protocol::cmd::CmdResponse>(data)
             {
@@ -451,7 +451,7 @@ pub fn run_viewer(
             }
             // #458 聊天消息：被控端经 chat 通道回传 → 聊天窗口消息列表。
             if let ClientEvent::ChannelData(cid, _, data) = &ev
-                && live.endpoint.channel_label(cid).as_deref() == Some("chat")
+                && live.endpoint.channel_label(*cid).as_deref() == Some("chat")
                 && let Some((sender, text)) = crate::decode_chat_text(data)
             {
                 crate::append_chat_message(session_idx, sender, text, false);
