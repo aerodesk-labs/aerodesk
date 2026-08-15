@@ -55,4 +55,7 @@ int ad_viewer_camera_available(void *viewer);
 }
 #endif
 
+/// 启动 Slint UI（阻塞运行事件循环；由 Swift 生命周期宿主在主线程调用）。
+void ad_slint_run(void);
+
 #endif /* AD_AERODESK_H */
