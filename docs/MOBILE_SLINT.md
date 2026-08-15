@@ -71,4 +71,6 @@ iOS/iPad、Android、HarmonyOS 的端侧 UI/UX 统一走 Slint；native 层只�
   桌面降级并去掉 system-tray，或等待官方发布 1.17 的 Android 后端。- 降级路径也不可行：slint 1.10 缺少 `Weak::upgrade_in_event_loop`
   （desktop 4 处使用）、`system-tray`、`raw-window-handle-06` 通道。
   因此移动端 Slint 需等官方发布 slint 1.17 的 Android 后端，或接受
-  桌面端大改（换事件循环模型 + 去托盘 + 重做窗口聚焦）。
+  桌面端大改（换事件循环模型 + 去托盘 + 重做窗口聚焦）。- iOS Rust 侧 Slint 入口已就位：`aerodesk-ios/src/ui.rs` 导出
+  `ad_slint_run()`，使用 backend-winit 1.17。Swift 侧切换为 Slint 宿主
+  待 Xcode/真机接入。
