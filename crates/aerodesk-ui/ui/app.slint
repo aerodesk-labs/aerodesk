@@ -475,6 +475,9 @@ export component AppWindow inherits Window {
     in-out property <bool> camera-available: false;
     in-out property <bool> camera-active: false;
     in-out property <bool> inc-view-only: false;
+    // #444 信令连接状态（主界面常显）
+    in-out property <string> signal-status: "信令未连接";
+    in-out property <bool> signal-online: false;
     // 设置页密码编辑
     in-out property <string> pw-edit: "";
 
@@ -732,6 +735,30 @@ export component AppWindow inherits Window {
                         width: 18px;
                         height: 26px;
                         MIcon { icon: "\u{e8fd}"; size: 16px; color: #9a9aa0; }   // help_outline
+                    }
+                }
+
+                // #444 信令连接状态（明显常显）
+                Rectangle {
+                    height: 32px;
+                    border-radius: 8px;
+                    background: root.signal-online ? #e6f4ea : #fef7e0;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 8px;
+                        Rectangle {
+                            width: 10px;
+                            height: 10px;
+                            border-radius: 5px;
+                            background: root.signal-online ? #34a853 : #f9ab00;
+                        }
+                        Text {
+                            text: "信令：" + root.signal-status;
+                            color: root.signal-online ? #188038 : #b06000;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                        }
                     }
                 }
 
