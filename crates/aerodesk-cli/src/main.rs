@@ -607,7 +607,9 @@ fn issue_token(args: &[String]) {
 fn arg(args: &[String], key: &str) -> Option<String> {
     args.iter()
         .position(|a| a == key)
-        .map(|i| args[i + 1].clone())
+        // flag 是最后一个参数时无值可取：返回 None（调用方均有默认值/错误处理），
+        // 不得越界 panic。
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 fn init_log() {
@@ -1733,6 +1735,9 @@ fn viewer(
     // #340：摄像头轨按 NAL 分片到达，需组装为完整访问单元再解码
     //（屏幕轨单 NAL/帧直接可解；摄像头 hevc_videotoolbox 多 NAL/帧）。
     let mut camera_assembler = AccessUnitAssembler::new();
+    // 屏幕轨同样经 assembler 组装：借用 &[u8]，避免每帧 data.data.to_vec()
+    // 全量拷贝（str0m 媒体数据为 Arc<[u8]>，无法移动进 EncodedUnit）。
+    let mut screen_assembler = AccessUnitAssembler::new();
     let mut audio_frames = 0u64;
     let mut audio_bytes = 0u64;
     let mut last_report = Instant::now();
@@ -1763,9 +1768,9 @@ fn viewer(
     let mut file_request_started: Option<Instant> = None;
     let mut input_exit_at: Option<Instant> = None;
     // #109 远程命令/文件/进程（控制端一次执行）：请求每 1s 重传直到响应（首包可能被
-    // SFU 在通道未就绪时丢弃；被控端按 id 去重，重复执行安全）。
+    // SFU 在通道未就绪时丢弃；被控端按 id 去重，重复执行安全）。响应一旦解析成功
+    // 即 process::exit，无需单独的重传停止标志。
     let cmd_pending = cmd_intent.is_some();
-    let mut cmd_done = false;
     let mut last_cmd_send = Instant::now() - Duration::from_secs(1);
     // #74 解码端验证：FFmpeg 软解全部 codec（H264/H265/VP9/AV1），codec-e2e 断言。
     let mut video_decoder: Option<cli_video_decoder::CliVideoDecoder> = None;
@@ -1974,10 +1979,16 @@ fn viewer(
                                     video_decoder =
                                         cli_video_decoder::CliVideoDecoder::new(cc).ok();
                                 }
-                                if let Some(dec) = &mut video_decoder {
+                                if let Some(dec) = &mut video_decoder
+                                    && let Some(au) = screen_assembler.push(
+                                        data.data.as_ref(),
+                                        data.time.as_micros(),
+                                        data.is_keyframe(),
+                                    )
+                                {
                                     let unit = aerodesk_core::media_pipeline::EncodedUnit {
-                                        data: data.data.as_ref().to_vec(),
-                                        keyframe: data.is_keyframe(),
+                                        data: au.data,
+                                        keyframe: au.keyframe,
                                         pts_ms: 0,
                                         rtp_timestamp: 0,
                                     };
@@ -2058,20 +2069,21 @@ fn viewer(
                 ClientEvent::ChannelData(cid, _, data)
                     if endpoint.channel_label(cid).as_deref() == Some("cmd") =>
                 {
-                    if !cmd_done {
-                        cmd_done = true;
-                        if let Some(resp) = cmd_exec::handle_response(&data) {
-                            if cmd_json {
-                                // MCP 桥接：stdout 输出纯 JSON。
-                                println!(
-                                    "{}",
-                                    serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into())
-                                );
-                            } else {
-                                print_cmd_result(&resp);
-                            }
-                            std::process::exit(if resp.result.ok() { 0 } else { 1 });
+                    // 仅在响应真正解析成功时处理并退出：坏包（解析失败）不影响
+                    // 后续重传（旧实现先置 cmd_done 再解析，一次坏包即终止重传、
+                    // 控制端永远等不到响应、无法退出；成功路径必然 process::exit，
+                    // 标志位本身不再需要）。
+                    if let Some(resp) = cmd_exec::handle_response(&data) {
+                        if cmd_json {
+                            // MCP 桥接：stdout 输出纯 JSON。
+                            println!(
+                                "{}",
+                                serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into())
+                            );
+                        } else {
+                            print_cmd_result(&resp);
                         }
+                        std::process::exit(if resp.result.ok() { 0 } else { 1 });
                     }
                 }
                 // #75 远程光标：被控端广播位置，观看端日志（节流）。
@@ -2108,8 +2120,9 @@ fn viewer(
 
         // #72 文件传输：推进发送 + 剪贴板轮询/落地。
         file_transfer::tick(&mut endpoint);
-        // #109 远程命令：未收到响应前每 1s 重传请求（首包丢失自愈）。
-        if cmd_pending && !cmd_done && last_cmd_send.elapsed() >= Duration::from_secs(1) {
+        // #109 远程命令：未收到响应前每 1s 重传请求（首包丢失自愈；响应到达
+        // 即退出进程，无需停止标志）。
+        if cmd_pending && last_cmd_send.elapsed() >= Duration::from_secs(1) {
             if let Some(intent) = cmd_intent {
                 let sent = cmd_exec::send_intent(&mut endpoint, intent);
                 info!("cmd request sent (retry={sent}): {intent:?}");
@@ -2321,7 +2334,13 @@ fn publisher_x264(
     const H: u32 = 360;
 
     let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
-        connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio).expect("connect");
+        match connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("connect failed: {e}");
+                return;
+            }
+        };
 
     let make_source = |w: u32, h: u32| {
         if noisy {
@@ -2332,24 +2351,26 @@ fn publisher_x264(
     };
 
     // (rid, encoder, source)：单层 rid=None；simulcast 为 q/h/f 三层。
-    let mut layers: Vec<(Option<Rid>, X264Encoder, SyntheticSource)> = if simulcast {
+    // 编码器构建失败报错退出（旧 expect 一错即 panic）。
+    let layer_specs: Vec<(Option<&str>, u32, u32, u32)> = if simulcast {
         SIMULCAST_LAYERS_X264
             .iter()
-            .map(|(rid, w, h, kbps)| {
-                (
-                    Some(Rid::from(*rid)),
-                    X264Encoder::new(*w, *h, FPS, *kbps).expect("x264 encoder"),
-                    make_source(*w, *h),
-                )
-            })
+            .map(|(rid, w, h, kbps)| (Some(*rid), *w, *h, *kbps))
             .collect()
     } else {
-        vec![(
-            None,
-            X264Encoder::new(W, H, FPS, 800).expect("x264 encoder"),
-            make_source(W, H),
-        )]
+        vec![(None, W, H, 800)]
     };
+    let mut layers: Vec<(Option<Rid>, X264Encoder, SyntheticSource)> = Vec::new();
+    for (rid, w, h, kbps) in layer_specs {
+        let encoder = match X264Encoder::new(w, h, FPS, kbps) {
+            Ok(e) => e,
+            Err(e) => {
+                error!("x264 encoder init failed ({w}x{h}@{FPS}): {e}");
+                return;
+            }
+        };
+        layers.push((rid.map(|r| Rid::from(r)), encoder, make_source(w, h)));
+    }
 
     let mut connected = false;
     let mut audio_ticker = AudioTicker::new(audio_opus);
@@ -2357,6 +2378,11 @@ fn publisher_x264(
     let mut pts = 0i64;
 
     loop {
+        // 会话失效（ICE 断开/对端离开）时干净退出循环，不再空转采集/编码。
+        if !endpoint.is_alive() {
+            warn!("endpoint dead, exiting publisher loop");
+            break;
+        }
         // #211：排空式读取（软编/高负载下保证 SCTP ACK 及时消费，input 送达率不塌陷）。
         let wait = Duration::from_millis(5);
         socket.set_read_timeout(Some(wait)).ok();
@@ -2425,11 +2451,16 @@ fn publisher_x264(
             let mut frames = Vec::with_capacity(layers.len());
             for (rid, encoder, source) in &mut layers {
                 let rgb = source.next_frame();
-                if let Some(frame) = encoder.encode(rgb).expect("encode") {
-                    if frame.keyframe {
-                        info!("sent keyframe rid={rid:?} #{pts}");
+                // 运行期编码错误降级为丢帧 + 告警（与 VT 路径同口径，不 panic 会话）。
+                match encoder.encode(rgb) {
+                    Ok(Some(frame)) => {
+                        if frame.keyframe {
+                            info!("sent keyframe rid={rid:?} #{pts}");
+                        }
+                        frames.push((*rid, frame.data));
                     }
-                    frames.push((*rid, frame.data));
+                    Ok(None) => {}
+                    Err(e) => warn!("encode failed（丢帧继续）: {e}"),
                 }
             }
             send_frame_layers(&mut endpoint, video_mid, rtp_time, &frames);
@@ -2468,7 +2499,13 @@ fn publisher_vt(
     use str0m::media::Rid;
 
     let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
-        connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio).expect("connect");
+        match connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("connect failed: {e}");
+                return;
+            }
+        };
 
     let make_source = |w: u32, h: u32| {
         if noisy {
@@ -2478,25 +2515,27 @@ fn publisher_vt(
         }
     };
 
-    // (rid, encoder, source)
-    let mut layers: Vec<(Option<Rid>, VtEncoder, SyntheticSource)> = if simulcast {
+    // (rid, encoder, source)：单层 rid=None；simulcast 为 q/h/f 三层。
+    // 编码器构建失败报错退出（旧 expect 一错即 panic）。
+    let layer_specs: Vec<(Option<&str>, u32, u32, u32)> = if simulcast {
         SIMULCAST_LAYERS_VT
             .iter()
-            .map(|(rid, w, h, bps)| {
-                (
-                    Some(Rid::from(*rid)),
-                    VtEncoder::new(*w, *h, fps, *bps).expect("vt encoder"),
-                    make_source(*w, *h),
-                )
-            })
+            .map(|(rid, w, h, bps)| (Some(*rid), *w, *h, *bps))
             .collect()
     } else {
-        vec![(
-            None,
-            VtEncoder::new(width, height, fps, bitrate).expect("vt encoder"),
-            make_source(width, height),
-        )]
+        vec![(None, width, height, bitrate)]
     };
+    let mut layers: Vec<(Option<Rid>, VtEncoder, SyntheticSource)> = Vec::new();
+    for (rid, w, h, bps) in layer_specs {
+        let encoder = match VtEncoder::new(w, h, fps, bps) {
+            Ok(e) => e,
+            Err(e) => {
+                error!("vt encoder init failed ({w}x{h}@{fps}): {e}");
+                return;
+            }
+        };
+        layers.push((rid.map(|r| Rid::from(r)), encoder, make_source(w, h)));
+    }
     info!(
         "VT publisher: {} layer(s), top {width}x{height}@{fps} {bitrate}bps",
         layers.len()
@@ -2511,6 +2550,11 @@ fn publisher_vt(
     let mut last_cursor = Instant::now();
 
     loop {
+        // 会话失效（ICE 断开/对端离开）时干净退出循环，不再空转采集/编码。
+        if !endpoint.is_alive() {
+            warn!("endpoint dead, exiting publisher loop");
+            break;
+        }
         // #211：排空式读取（软编/高负载下保证 SCTP ACK 及时消费，input 送达率不塌陷）。
         let wait = Duration::from_millis(5);
         socket.set_read_timeout(Some(wait)).ok();
@@ -2626,11 +2670,16 @@ fn publisher_generic<
     mut cursor: Option<CS>,
 ) {
     let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) =
-        if camera_cap.is_some() {
+        match if camera_cap.is_some() {
             connect_camera(signal_url, room, Role::Publisher, auth, audio, Some(codec))
-                .expect("connect")
         } else {
-            connect_codec(signal_url, room, Role::Publisher, auth, audio, codec).expect("connect")
+            connect_codec(signal_url, room, Role::Publisher, auth, audio, codec)
+        } {
+            Ok(v) => v,
+            Err(e) => {
+                error!("connect failed: {e}");
+                return;
+            }
         };
     let mut connected = false;
     // #316：有真实系统音频采集则优先（RealAudioSender），否则合成音 AudioTicker。
@@ -2650,6 +2699,11 @@ fn publisher_generic<
     let mut last_cursor = Instant::now();
 
     loop {
+        // 会话失效（ICE 断开/对端离开）时干净退出循环，不再空转采集/编码。
+        if !endpoint.is_alive() {
+            warn!("endpoint dead, exiting publisher loop");
+            break;
+        }
         // #211：排空式读取（软编/高负载下保证 SCTP ACK 及时消费，input 送达率不塌陷）。
         let wait = Duration::from_millis(5);
         socket.set_read_timeout(Some(wait)).ok();
@@ -2751,33 +2805,32 @@ fn publisher_generic<
 
         if connected && Instant::now() >= next_frame {
             next_frame += frame_interval(fps);
-            let frame = match source.next_frame() {
-                Ok(Some(f)) => f,
-                Ok(None) => continue,
-                Err(e) => {
-                    warn!("source next_frame: {e}");
-                    continue;
-                }
-            };
+            // 屏幕源无帧（DXGI 静态画面返回 None）或瞬时错误：只跳过本帧屏幕
+            // 编码/发送，摄像头轨与循环节拍照常（旧 continue 会一并跳过，
+            // 屏幕静止时摄像头轨冻结、sleep 节拍失效）。
             // 运行期编码错误降级为丢帧 + 告警：硬件编码器可能瞬时失败（模式切换/
             // 设备丢失），不应 panic 整个发布端（旧实现 expect 一错即崩）。
-            match encoder.encode(&frame) {
-                Ok(Some(unit)) => {
-                    let rtp_time = str0m::media::MediaTime::new(
-                        pts as u64 * 3000,
-                        str0m::media::Frequency::NINETY_KHZ,
-                    );
-                    if let Err(e) = endpoint.send_video_frame(video_mid, unit.data, rtp_time) {
-                        warn!("send frame failed: {e:?}");
+            match source.next_frame() {
+                Ok(Some(frame)) => match encoder.encode(&frame) {
+                    Ok(Some(unit)) => {
+                        let rtp_time = str0m::media::MediaTime::new(
+                            pts as u64 * 3000,
+                            str0m::media::Frequency::NINETY_KHZ,
+                        );
+                        if let Err(e) = endpoint.send_video_frame(video_mid, unit.data, rtp_time) {
+                            warn!("send frame failed: {e:?}");
+                        }
+                        if unit.keyframe {
+                            debug!("sent keyframe #{pts}");
+                        }
+                        pts += 1;
                     }
-                    if unit.keyframe {
-                        debug!("sent keyframe #{pts}");
-                    }
-                }
+                    Ok(None) => {}
+                    Err(e) => warn!("encode failed（丢帧继续）: {e}"),
+                },
                 Ok(None) => {}
-                Err(e) => warn!("encode failed（丢帧继续）: {e}"),
+                Err(e) => warn!("source next_frame: {e}"),
             }
-            pts += 1;
         }
 
         // #385 摄像头第二路视频轨：30fps 节拍，BGRA → FfmpegEncoder → camera_mid。
@@ -2856,7 +2909,13 @@ fn publisher_ffmpeg(
 ) {
     use aerodesk_core::synthetic::SyntheticSource;
 
-    let encoder = FfmpegEncoder::new(w, h, fps, bitrate as u64, codec).expect("ffmpeg encoder");
+    let encoder = match FfmpegEncoder::new(w, h, fps, bitrate as u64, codec) {
+        Ok(e) => e,
+        Err(e) => {
+            error!("ffmpeg encoder init failed ({w}x{h}@{fps} {codec:?}): {e}");
+            return;
+        }
+    };
     // #8：--noisy 高熵合成源（码率贴近目标档位，压测/高码率回归用）。
     let source = if noisy {
         SyntheticSource::new_noisy(w, h)
@@ -3266,12 +3325,20 @@ fn publisher_capture_ffmpeg(
     use aerodesk_ffmpeg::encode::FfmpegEncoder;
     use aerodesk_macos::capture::ScreenCapture;
 
-    const W: u32 = 1920;
-    const H: u32 = 1080;
+    // 采集分辨率：0,0 = 按显示器原生宽高比等比缩放（与 VT 路径 publisher_capture
+    // 一致）。固定 1920x1080 会拉伸非 16:9 显示器并使输入坐标错位。
+    const W: u32 = 0;
+    const H: u32 = 0;
     const FPS: u32 = 30;
 
     let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
-        connect_codec(signal_url, room, Role::Publisher, auth, audio, codec).expect("connect");
+        match connect_codec(signal_url, room, Role::Publisher, auth, audio, codec) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("connect failed: {e}");
+                return;
+            }
+        };
     let mut capture = match ScreenCapture::start(initial_display, FPS, W, H) {
         Ok(c) => c,
         Err(e) => {
@@ -3287,7 +3354,19 @@ fn publisher_capture_ffmpeg(
         .ok();
     // #75：输入注入坐标按被控显示器（不总是主屏）换算。
     aerodesk_macos::inject::set_active_display(Some(capture.display_id()));
-    let mut encoder = FfmpegEncoder::new(W, H, FPS, 8_000_000, codec).expect("ffmpeg encoder");
+    // 编码分辨率 = 采集实际尺寸（保持显示器宽高比；旧固定 1920x1080 拉伸非 16:9）。
+    let (w, h) = (capture.width(), capture.height());
+    info!(
+        "screen capture started at {w}x{h} (display {})",
+        capture.display_id()
+    );
+    let mut encoder = match FfmpegEncoder::new(w, h, FPS, 8_000_000, codec) {
+        Ok(e) => e,
+        Err(e) => {
+            error!("ffmpeg encoder init failed ({w}x{h}): {e}");
+            return;
+        }
+    };
     let mut connected = false;
     let mut audio_ticker = AudioTicker::new(audio_opus);
     let mut pts = 0i64;
@@ -3295,6 +3374,11 @@ fn publisher_capture_ffmpeg(
     let mut last_cursor = Instant::now();
 
     loop {
+        // 会话失效（ICE 断开/对端离开）时干净退出循环，不再空转采集/编码。
+        if !endpoint.is_alive() {
+            warn!("endpoint dead, exiting publisher loop");
+            break;
+        }
         // #211：排空式读取（软编/高负载下保证 SCTP ACK 及时消费，input 送达率不塌陷）。
         let wait = Duration::from_millis(5);
         socket.set_read_timeout(Some(wait)).ok();
@@ -3348,20 +3432,28 @@ fn publisher_capture_ffmpeg(
 
         if connected && let Some(surface) = capture.capture_frame(Duration::from_millis(50)) {
             // IOSurface（BGRA）→ 行复制到 CPU 缓冲 → FFmpeg 编码。
-            let bgra = match aerodesk_macos::capture::surface_to_bgra(&surface, W, H) {
+            let bgra = match aerodesk_macos::capture::surface_to_bgra(&surface, w, h) {
                 Ok(b) => b,
                 Err(e) => {
                     warn!("surface read failed: {e}");
                     continue;
                 }
             };
-            if let Some(unit) = encoder.encode_bgra(&bgra).expect("encode_bgra") {
-                let rtp_time = str0m::media::MediaTime::new(
-                    pts as u64 * 3000,
-                    str0m::media::Frequency::NINETY_KHZ,
-                );
-                if let Err(e) = endpoint.send_video_frame(video_mid, unit.data, rtp_time) {
-                    warn!("send frame failed: {e:?}");
+            // 运行期编码错误降级为丢帧 + 告警（旧 expect 一错即崩整个发布端）。
+            match encoder.encode_bgra(&bgra) {
+                Ok(Some(unit)) => {
+                    let rtp_time = str0m::media::MediaTime::new(
+                        pts as u64 * 3000,
+                        str0m::media::Frequency::NINETY_KHZ,
+                    );
+                    if let Err(e) = endpoint.send_video_frame(video_mid, unit.data, rtp_time) {
+                        warn!("send frame failed: {e:?}");
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!("encode_bgra failed（丢帧继续）: {e}");
+                    continue;
                 }
             }
             pts += 1;
@@ -3402,17 +3494,23 @@ fn publisher_capture(
         _ => VtCodec::H264,
     };
 
-    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) = connect_inner(
-        signal_url,
-        room,
-        Role::Publisher,
-        Some(codec),
-        simulcast,
-        audio,
-        auth,
-        camera,
-    )
-    .expect("connect");
+    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) =
+        match connect_inner(
+            signal_url,
+            room,
+            Role::Publisher,
+            Some(codec),
+            simulcast,
+            audio,
+            auth,
+            camera,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("connect failed: {e}");
+                return;
+            }
+        };
 
     // #75 远程光标：真实光标位置（30Hz）。
     let mut last_cursor = Instant::now();
@@ -3425,18 +3523,31 @@ fn publisher_capture(
             .iter()
             .map(|(rid, _enc, cap)| (*rid, cap.width(), cap.height()))
             .collect();
-        layers.clear();
+        // 先在临时 Vec 中完整重建：任一层失败即返回 Err、旧层原样保留
+        //（旧实现先 clear 再逐层重建 + expect，远端一条切换消息即可让
+        // 发布端 panic，或把 layers 留成半重建状态）。
+        let mut new_layers: Vec<(Option<Rid>, VtEncoder, ScreenCapture)> =
+            Vec::with_capacity(specs.len());
         for (rid, w, h) in specs {
             let capture = ScreenCapture::start(idx, FPS, w, h)
                 .map_err(|e| format!("display {idx} init failed: {e}"))?;
-            // 重建：编码器按分辨率新建（与 display 无关，但保持同样参数）。
-            let bps = if w >= 1280 { 8_000_000 } else { 4_000_000 };
-            layers.push((
-                rid,
-                VtEncoder::new_with_codec(w, h, FPS, bps, vt_codec).expect("vt encoder"),
-                capture,
-            ));
+            // 重建：编码器按分辨率新建；码率沿用原 simulcast 档位（按 rid 查
+            // SIMULCAST_LAYERS_VT），单层/未命中回退分辨率启发式（旧实现直接
+            // 丢弃档位信息）。
+            let bps = rid
+                .and_then(|r| {
+                    SIMULCAST_LAYERS_VT
+                        .iter()
+                        .find(|(lr, _, _, _)| *lr == &*r)
+                        .map(|(_, _, _, bps)| *bps)
+                })
+                .unwrap_or(if w >= 1280 { 8_000_000 } else { 4_000_000 });
+            let encoder = VtEncoder::new_with_codec(w, h, FPS, bps, vt_codec)
+                .map_err(|e| format!("display {idx} encoder init failed: {e}"))?;
+            new_layers.push((rid, encoder, capture));
         }
+        // 全部层重建成功后原子替换。
+        *layers = new_layers;
         // #75：切换显示器后输入注入坐标基准同步。
         if let Some((_, _, cap)) = layers.first() {
             aerodesk_macos::inject::set_active_display(Some(cap.display_id()));
@@ -3463,11 +3574,14 @@ fn publisher_capture(
                     return;
                 }
             };
-            layers.push((
-                Some(Rid::from(*rid)),
-                VtEncoder::new_with_codec(*w, *h, FPS, *bps, vt_codec).expect("vt encoder"),
-                capture,
-            ));
+            let encoder = match VtEncoder::new_with_codec(*w, *h, FPS, *bps, vt_codec) {
+                Ok(e) => e,
+                Err(e) => {
+                    error!("vt encoder init failed ({w}x{h}): {e}");
+                    return;
+                }
+            };
+            layers.push((Some(Rid::from(*rid)), encoder, capture));
         }
         if let Some((_, _, cap)) = layers.first() {
             aerodesk_macos::inject::set_active_display(Some(cap.display_id()));
@@ -3487,11 +3601,14 @@ fn publisher_capture(
             "screen capture started at {cw}x{ch} (display {}), codec={codec:?}",
             capture.display_id()
         );
-        layers.push((
-            None,
-            VtEncoder::new_with_codec(cw, ch, FPS, 8_000_000, vt_codec).expect("vt encoder"),
-            capture,
-        ));
+        let encoder = match VtEncoder::new_with_codec(cw, ch, FPS, 8_000_000, vt_codec) {
+            Ok(e) => e,
+            Err(e) => {
+                error!("vt encoder init failed ({cw}x{ch}): {e}");
+                return;
+            }
+        };
+        layers.push((None, encoder, capture));
         aerodesk_macos::inject::set_active_display(Some(layers[0].2.display_id()));
     }
     // #315：采集会话期间保持显示器唤醒（防闲置休眠后 SCK 无显示器）。
@@ -3548,6 +3665,11 @@ fn publisher_capture(
     }
 
     loop {
+        // 会话失效（ICE 断开/对端离开）时干净退出循环，不再空转采集/编码。
+        if !endpoint.is_alive() {
+            warn!("endpoint dead, exiting publisher loop");
+            break;
+        }
         // #211：排空式读取（软编/高负载下保证 SCTP ACK 及时消费，input 送达率不塌陷）。
         let wait = Duration::from_millis(5);
         socket.set_read_timeout(Some(wait)).ok();

@@ -253,6 +253,9 @@ component RdInput {
     in property <length> font-size: 16px;
     in-out property <string> text: "";
     callback edited;
+    // 回车确认（TextInput.accepted，Enter 触发一次）：供“输入完成才提交”场景，
+    // 避免用 edited（每次按键都触发）导致输入被 Rust 侧清空、无法输入多字符前缀。
+    callback accepted;
     height: 48px;
     Rectangle {
         width: 100%;
@@ -272,6 +275,7 @@ component RdInput {
             vertical-alignment: center;
             single-line: true;
             edited => { root.edited(); }
+            accepted => { root.accepted(); }
         }
         // 手动 placeholder（TextInput 内建不支持 placeholder-text）
         Text {
@@ -487,9 +491,10 @@ export component AppWindow inherits Window {
     // #73 观看端音量滑块（0..1）。
     callback change-volume(float);
     // #75：会话视图指针输入 → Rust 侧转发为 InputFrame（0=Move 1=Down 2=Up）。
+    // 第二个 int 为按键（0=左 1=中 2=右，F4）：右键/中键也要转发被控端。
     // 传原始鼠标坐标 + 视频区尺寸 + 远端帧尺寸；Rust 侧按 image-fit: contain
     // 扣除 letterbox 后归一化，保证主控/被控宽高比不同时坐标不错位。
-    callback send-input(int, float, float, float, float, float, float);
+    callback send-input(int, int, float, float, float, float, float, float);
     // #75：键盘/滚轮输入 → Rust 侧转发为 InputFrame（send-key: 0=按下 1=抬起）。
     callback send-key(int, string, bool, bool, bool, bool) -> bool;
     // #75：滚轮 → send-wheel（原始坐标 + 尺寸 + 像素增量；Rust 侧 letterbox 扣减后归一化）。
@@ -1139,7 +1144,7 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         cross-axis-alignment: center;
                         spacing: 8px;
-                        RdInput { text <=> root.cmd-allowlist-input; placeholder: "命令前缀，如 /tmp/safe"; font-size: 14px; edited => { root.cmd-allowlist-add(); } }
+                        RdInput { text <=> root.cmd-allowlist-input; placeholder: "命令前缀，如 /tmp/safe"; font-size: 14px; accepted => { root.cmd-allowlist-add(); } }
                         RdButton { text: "添加"; width: 72px; clicked => { root.cmd-allowlist-add(); } }
                         RdButton { text: "刷新"; width: 72px; clicked => { root.cmd-allowlist-refresh(); } }
                     }
@@ -1271,8 +1276,10 @@ export component AppWindow inherits Window {
                         enabled: root.in-session && root.session-frames[root.active-session].width > 0;
                         pointer-event(event) => {
                             if event.kind == PointerEventKind.down { fs.focus(); }
+                            // F4：转发实际按键（0=左 1=中 2=右；other 归左键）。
                             root.send-input(
                                 event.kind == PointerEventKind.down ? 1 : (event.kind == PointerEventKind.up ? 2 : 0),
+                                event.button == PointerEventButton.middle ? 1 : (event.button == PointerEventButton.right ? 2 : 0),
                                 self.mouse-x / 1px,
                                 self.mouse-y / 1px,
                                 self.width / 1px,
