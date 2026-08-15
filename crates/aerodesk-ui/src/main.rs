@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 #[cfg(not(target_os = "macos"))]
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_RECENTS: usize = 10;
 const DEMO_W: u32 = 320;
@@ -40,6 +41,13 @@ pub enum FileCmd {
     SendClipboardImage(Vec<u8>),
     /// 取消当前发送。
     Cancel,
+}
+
+/// #458 UI → 会话聊天命令（经 mpsc 传到 run_viewer 线程）。
+#[derive(Debug, PartialEq, Eq)]
+pub enum ChatCmd {
+    /// 发送一条文本消息。
+    Send(String),
 }
 
 /// #72 拖放发送纯路由（可单测）：把文件交给会话 file 通道，返回状态文案。
@@ -69,6 +77,39 @@ pub fn dispatch_dropped_files(
             files.len() - 1
         )
     }
+}
+
+/// 当前墙钟（unix 毫秒），用于聊天消息 timestamp_ms。
+pub(crate) fn system_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 解析 `chat` data channel 收到的 JSON 文本。
+///
+/// #458 只依赖 JSON 形状（`sender` 可选、`text` 必填），不依赖协议侧可能尚未
+/// 合入的具体 Rust 类型，避免 UI 分支与并行 protocol 改动耦合。
+pub(crate) fn decode_chat_text(data: &[u8]) -> Option<(String, String)> {
+    let value: serde_json::Value = serde_json::from_slice(data).ok()?;
+    let text = value
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        return None;
+    }
+    let sender = value
+        .get("sender")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("对方")
+        .to_string();
+    Some((sender, text))
 }
 
 /// 主控端视频区像素坐标 → 远端归一化坐标（0..1）。
@@ -251,6 +292,7 @@ pub struct SessionHandle {
     pub control_tx: std::sync::mpsc::Sender<String>,
     pub cmd_tx: std::sync::mpsc::Sender<CmdRequest>,
     pub file_tx: std::sync::mpsc::Sender<FileCmd>,
+    pub chat_tx: std::sync::mpsc::Sender<ChatCmd>,
     pub muted: Arc<AtomicBool>,
     pub volume: Arc<AtomicU16>,
     pub stop: Arc<AtomicBool>,
@@ -292,6 +334,21 @@ static TERMINAL_WINDOW_STATE: std::sync::Mutex<Option<(usize, slint::Weak<Termin
 static CMD_NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// 终端窗口输出上限：避免无限回显撑爆 UI 字符串。
 const MAX_TERMINAL_OUTPUT_CHARS: usize = 64 * 1024;
+/// #458 聊天窗口状态：(关联会话 slot, 窗口弱引用)。
+static MESSAGE_WINDOW_STATE: std::sync::Mutex<Option<(usize, slint::Weak<MessageWindow>)>> =
+    std::sync::Mutex::new(None);
+/// #458 聊天历史上限（按会话保存，窗口关闭后重开仍可回显）。
+const MAX_CHAT_MESSAGES: usize = 500;
+/// #458 会话内聊天历史项（非 Slint 类型，便于跨线程存放与截断）。
+#[derive(Clone, Debug)]
+struct ChatHistoryEntry {
+    sender: String,
+    text: String,
+    own: bool,
+}
+/// #458 会话聊天历史：slot → 历史消息。会话清理时删除。
+static CHAT_HISTORY: std::sync::Mutex<Vec<(usize, Vec<ChatHistoryEntry>)>> =
+    std::sync::Mutex::new(Vec::new());
 /// 键鼠捕获开关镜像（on_toggle_input 写，输入转发回调读）：
 /// 工具栏「输入」按钮控制——未捕获时鼠标/键盘/滚轮不转发被控端（F3）。
 pub static INPUT_CAPTURING: std::sync::atomic::AtomicBool =
@@ -374,6 +431,82 @@ fn unregister_terminal_window(slot: usize) {
     }
 }
 
+/// #458 聊天窗口状态读取/写入。与文件/终端窗口一致：主界面同时只允许一个窗口。
+fn message_window_weak_for_slot(slot: usize) -> Option<slint::Weak<MessageWindow>> {
+    let state = MESSAGE_WINDOW_STATE.lock().unwrap();
+    match state.as_ref() {
+        Some((s, weak)) if *s == slot => Some(weak.clone()),
+        _ => None,
+    }
+}
+
+fn register_message_window(slot: usize, weak: slint::Weak<MessageWindow>) {
+    *MESSAGE_WINDOW_STATE.lock().unwrap() = Some((slot, weak));
+}
+
+fn unregister_message_window(slot: usize) {
+    let mut state = MESSAGE_WINDOW_STATE.lock().unwrap();
+    if state.as_ref().is_some_and(|(s, _)| *s == slot) {
+        *state = None;
+    }
+}
+
+/// 把内部聊天历史转换为 Slint 模型（仅可在 UI 线程调用）。
+fn chat_entries_model(entries: &[ChatHistoryEntry]) -> slint::ModelRc<ChatEntry> {
+    let rows: Vec<ChatEntry> = entries
+        .iter()
+        .map(|m| ChatEntry {
+            sender: m.sender.clone().into(),
+            text: m.text.clone().into(),
+            own: m.own,
+        })
+        .collect();
+    slint::ModelRc::new(slint::VecModel::from(rows))
+}
+
+/// 追加一条聊天历史并截断到上限；返回截断后的完整列表。
+fn push_chat_history(slot: usize, entry: ChatHistoryEntry) -> Vec<ChatHistoryEntry> {
+    let mut history = CHAT_HISTORY.lock().unwrap();
+    let list = match history.iter_mut().find(|(s, _)| *s == slot) {
+        Some((_, list)) => list,
+        None => {
+            history.push((slot, Vec::new()));
+            &mut history.last_mut().expect("just pushed").1
+        }
+    };
+    list.push(entry);
+    if list.len() > MAX_CHAT_MESSAGES {
+        let drop = list.len() - MAX_CHAT_MESSAGES;
+        list.drain(..drop);
+    }
+    list.clone()
+}
+
+/// 会话线程/UI 线程追加一条聊天消息，并回显到已打开的聊天窗口。
+pub fn append_chat_message(slot: usize, sender: String, text: String, own: bool) {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return;
+    }
+    let entries = push_chat_history(slot, ChatHistoryEntry { sender, text, own });
+    let Some(weak) = message_window_weak_for_slot(slot) else {
+        return;
+    };
+    let _ = weak.upgrade_in_event_loop(move |win| {
+        win.set_messages(chat_entries_model(&entries));
+    });
+}
+
+/// 会话线程更新聊天窗口状态（无窗口时 no-op）。
+pub fn set_message_window_status(slot: usize, status: String) {
+    let Some(weak) = message_window_weak_for_slot(slot) else {
+        return;
+    };
+    let _ = weak.upgrade_in_event_loop(move |win| {
+        win.set_status(status.into());
+    });
+}
+
 /// 会话线程更新文件传输独立窗口的进度/文案（无窗口时 no-op）。
 pub fn update_file_window_progress(slot: usize, progress: f32, label: String, status: String) {
     let Some(weak) = file_window_weak_for_slot(slot) else {
@@ -438,6 +571,15 @@ fn close_feature_windows_for_slot(ui: &AppWindow, slot: usize) {
         unregister_terminal_window(slot);
         ui.set_terminal_open(false);
     }
+    if let Some(weak) = message_window_weak_for_slot(slot) {
+        if let Some(win) = weak.upgrade() {
+            let _ = win.hide();
+        }
+        unregister_message_window(slot);
+        ui.set_message_open(false);
+    }
+    // 会话已结束：聊天历史不再需要，避免 slot 复用后串消息。
+    CHAT_HISTORY.lock().unwrap().retain(|(s, _)| *s != slot);
 }
 
 /// 会话状态同步到独立窗口，同时兼容保留 AppWindow.session_status。
@@ -1001,8 +1143,45 @@ fn open_file_transfer_window(ui: &AppWindow) {
     }
 }
 
-/// #447 打开发消息骨架窗口。
+/// #458 把聊天文本发送到窗口关联会话的 chat 通道，并在本地消息列表中回显。
+fn send_message_from_window(win_weak: slint::Weak<MessageWindow>, slot: usize, text: String) {
+    let _ = win_weak.upgrade_in_event_loop(move |win| {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            win.set_status("请输入消息".into());
+            return;
+        }
+        let sent = {
+            let sessions = SESSIONS.lock().unwrap();
+            match sessions.iter().find(|s| s.slot == slot) {
+                Some(s) => s.chat_tx.send(ChatCmd::Send(text.clone())).is_ok(),
+                None => false,
+            }
+        };
+        if !sent {
+            win.set_status("发消息：会话已结束".into());
+            return;
+        }
+        let entries = push_chat_history(
+            slot,
+            ChatHistoryEntry {
+                sender: "我".to_string(),
+                text,
+                own: true,
+            },
+        );
+        win.set_messages(chat_entries_model(&entries));
+        win.set_draft("".into());
+        win.set_status("消息已发送".into());
+    });
+}
+
+/// #458 打开发消息独立窗口并绑定到当前活动会话。
 fn open_message_window(ui: &AppWindow) {
+    let Some(slot) = active_session_slot(ui) else {
+        ui.set_status("发消息：未连接会话".into());
+        return;
+    };
     let win = match MessageWindow::new() {
         Ok(win) => win,
         Err(e) => {
@@ -1010,16 +1189,45 @@ fn open_message_window(ui: &AppWindow) {
             return;
         }
     };
-    win.set_status("发消息窗口建设中".into());
+    win.set_status("已连接到当前会话，输入消息后回车发送".into());
+    win.set_draft("".into());
+    {
+        let history = CHAT_HISTORY.lock().unwrap();
+        let entries = history
+            .iter()
+            .find(|(s, _)| *s == slot)
+            .map(|(_, entries)| entries.clone())
+            .unwrap_or_default();
+        win.set_messages(chat_entries_model(&entries));
+    }
+    register_message_window(slot, win.as_weak());
     ui.set_message_open(true);
-    let ui_weak = ui.as_weak();
-    win.window().on_close_requested(move || {
-        if let Some(ui) = ui_weak.upgrade() {
-            ui.set_message_open(false);
+
+    let win_weak = win.as_weak();
+    win.on_send_message({
+        let win_weak = win_weak.clone();
+        move |text: slint::SharedString| {
+            send_message_from_window(win_weak.clone(), slot, text.to_string());
         }
-        slint::CloseRequestResponse::HideWindow
+    });
+
+    let ui_weak = ui.as_weak();
+    win.window().on_close_requested({
+        let win_weak = win_weak.clone();
+        move || {
+            // 聊天窗口关闭只清理窗口状态；远程会话继续保持。
+            unregister_message_window(slot);
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_message_open(false);
+            }
+            if let Some(win) = win_weak.upgrade() {
+                let _ = win.hide();
+            }
+            slint::CloseRequestResponse::HideWindow
+        }
     });
     if let Err(e) = win.show() {
+        unregister_message_window(slot);
         ui.set_message_open(false);
         ui.set_status(format!("打开发消息窗口失败：{e}").into());
     }
@@ -1158,6 +1366,7 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
     let (input_tx, input_rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<CmdRequest>();
     let (file_cmd_tx, file_cmd_rx) = std::sync::mpsc::channel();
+    let (chat_cmd_tx, chat_cmd_rx) = std::sync::mpsc::channel::<ChatCmd>();
     let muted = Arc::new(AtomicBool::new(false));
     let volume = Arc::new(AtomicU16::new(100));
     let stop = Arc::new(AtomicBool::new(false));
@@ -1173,6 +1382,7 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
             control_tx: control_tx.clone(),
             cmd_tx: cmd_tx.clone(),
             file_tx: file_cmd_tx.clone(),
+            chat_tx: chat_cmd_tx.clone(),
             muted: muted.clone(),
             volume: volume.clone(),
             stop: stop.clone(),
@@ -1201,6 +1411,7 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
                     input_rx,
                     cmd_rx,
                     file_cmd_rx,
+                    chat_cmd_rx,
                     muted,
                     volume,
                     show_camera,
@@ -1218,6 +1429,7 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
                     input_rx,
                     cmd_rx,
                     file_cmd_rx,
+                    chat_cmd_rx,
                     stop,
                     view_only,
                 );
@@ -3194,6 +3406,21 @@ mod tests {
     }
 
     #[test]
+    fn decode_chat_text_accepts_protocol_json_shape() {
+        let json = r#"{"sender":"alice","text":"hello 你好","timestamp_ms":1723766400123}"#;
+        let (sender, text) = decode_chat_text(json.as_bytes()).unwrap();
+        assert_eq!(sender, "alice");
+        assert_eq!(text, "hello 你好");
+
+        // sender 缺失时使用默认显示名，非法 JSON / 空文本不 panic。
+        let (sender, text) = decode_chat_text(br#"{"text":"hi"}"#).unwrap();
+        assert_eq!(sender, "对方");
+        assert_eq!(text, "hi");
+        assert!(decode_chat_text(b"not-json").is_none());
+        assert!(decode_chat_text(br#"{"text":"   "}"#).is_none());
+    }
+
+    #[test]
     fn device_groups_grouped_and_sorted() {
         let items: Vec<slint::SharedString> = vec![
             "NAS2 · demo · 10.0.0.2:3003 · 家庭".into(),
@@ -3244,6 +3471,7 @@ mod tests {
         let (control_tx, _) = std::sync::mpsc::channel();
         let (cmd_tx, _) = std::sync::mpsc::channel::<CmdRequest>();
         let (file_tx, _) = std::sync::mpsc::channel();
+        let (chat_tx, _) = std::sync::mpsc::channel::<ChatCmd>();
         SessionHandle {
             slot,
             room: room.into(),
@@ -3252,6 +3480,7 @@ mod tests {
             control_tx,
             cmd_tx,
             file_tx,
+            chat_tx,
             muted: Arc::new(AtomicBool::new(false)),
             volume: Arc::new(AtomicU16::new(100)),
             stop: Arc::new(AtomicBool::new(false)),
@@ -3895,6 +4124,7 @@ mod multi_session_e2e {
                 control_tx: std::sync::mpsc::channel().0,
                 cmd_tx: std::sync::mpsc::channel::<CmdRequest>().0,
                 file_tx: std::sync::mpsc::channel().0,
+                chat_tx: std::sync::mpsc::channel::<ChatCmd>().0,
                 muted: Arc::new(AtomicBool::new(false)),
                 volume: Arc::new(AtomicU16::new(100)),
                 stop: stop.clone(),
