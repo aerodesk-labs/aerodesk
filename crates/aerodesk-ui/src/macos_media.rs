@@ -258,12 +258,9 @@ pub fn run_viewer(
         );
         crate::add_recent(ui, &room2, &server2);
         ui.set_conn_state(2);
-        ui.set_in_session(true);
-        ui.set_session_status("会话中 · 真实解码（H.264/H.265/VP9/AV1）".into());
     });
 
-    // #29 多会话：登记会话标签并切到当前会话（SESSIONS 为唯一事实源）。
-    crate::session_joined_weak(&ui_weak, session_idx);
+    // #438：连上信令不进入观察页，收到首个渲染帧后才登记会话/切页。
 
     let mut assembler = AccessUnitAssembler::new();
     let mut decoder: Option<UiDecoder> = None;
@@ -629,6 +626,13 @@ pub fn run_viewer(
             let audio_active = last_audio.elapsed() < Duration::from_millis(500);
             let due = !audio_active || avsync.audio_time_secs() + 0.05 >= vtime;
             if due {
+                if frames == 0 {
+                    crate::session_joined_weak(&ui_weak, session_idx);
+                    with_ui(&ui_weak, |ui| {
+                        ui.set_in_session(true);
+                        ui.set_session_status("会话中 · 真实解码（H.264/H.265/VP9/AV1）".into());
+                    });
+                }
                 present_frame(
                     &ui_weak,
                     &rgba,

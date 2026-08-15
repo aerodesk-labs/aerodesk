@@ -805,7 +805,7 @@ export component AppWindow inherits Window {
                                 RdButton {
                                     text: "断开";
                                     width: 76px;
-                                    enabled: connecting || root.in-session;
+                                    enabled: connecting || root.in-session || root.conn-state == 2;
                                     clicked => { root.disconnect(); }
                                 }
                                 Text {

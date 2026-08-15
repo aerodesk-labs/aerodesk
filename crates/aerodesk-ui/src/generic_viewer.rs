@@ -112,11 +112,9 @@ pub fn run_viewer_generic<D, R, DF, RF>(
         );
         crate::add_recent(ui, &room2, &server2);
         ui.set_conn_state(2);
-        ui.set_in_session(true);
-        ui.set_session_status(format!("会话中 · {decoder_label}").into());
     });
-    // #29 多会话：登记标签并切到当前会话。
-    crate::session_joined_weak(&ui_weak, session_idx);
+    // #438：连上信令只表示设备已连接/可被找到，不进入观察页；
+    // 收到首个渲染帧后才 session_joined_weak 进入会话视图。
 
     let mut assembler = AccessUnitAssembler::new();
     // #72/#271 文件/剪贴板状态机：观看端不落盘接收，但剪贴板文本/图片接收生效。
@@ -143,6 +141,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     let mut last_kf_request: Option<std::time::Instant> = None;
     let mut last_kf_rid: Option<str0m::media::Rid> = None;
     let mut seen_video = false;
+    let mut session_ui_joined = false;
     // #425：连接建立后 10s 内无任何 RTP → 提示"对方不在线/未开启被控"（保持等待）。
     let no_media_deadline = Instant::now() + Duration::from_secs(10);
     let mut no_media_notified = false;
@@ -346,13 +345,18 @@ pub fn run_viewer_generic<D, R, DF, RF>(
         if !no_media_notified && media_evts == 0 && Instant::now() >= no_media_deadline {
             no_media_notified = true;
             let room_msg = format!("对方不在线或未开启被控（设备 {room}），等待对方上线后自动出流");
-            with_ui(&ui_weak, move |ui| ui.set_session_status(room_msg.into()));
+            with_ui(&ui_weak, move |ui| ui.set_status(room_msg.into()));
+        }
+        if frames > 0 && !session_ui_joined {
+            session_ui_joined = true;
+            crate::session_joined_weak(&ui_weak, session_idx);
+            with_ui(&ui_weak, move |ui| {
+                ui.set_in_session(true);
+                ui.set_session_status("会话中 · 媒体流已接通".into());
+            });
         }
         if frames > 0 && no_media_notified {
             no_media_notified = false;
-            with_ui(&ui_weak, move |ui| {
-                ui.set_session_status("会话中 · 媒体流已接通".into())
-            });
         }
         // #72 文件传输推进 + 剪贴板接收落地（文本/图片写入系统剪贴板）。
         file_transfer.tick(&mut live.endpoint);
