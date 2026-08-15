@@ -1,6 +1,6 @@
 [package]
 name = "aerodesk-android"
-description = "AeroDesk Android JNI shell (platform implementation moved to aerodesk-platform)"
+description = "AeroDesk Android JNI + Slint host (platform implementation moved to aerodesk-platform)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
