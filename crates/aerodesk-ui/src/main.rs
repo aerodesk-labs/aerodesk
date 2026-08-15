@@ -1812,7 +1812,7 @@ fn display_server(input: &str) -> String {
     s.strip_suffix("/ws").unwrap_or(s).to_string()
 }
 
-/// 最近会话格式：`房间 · 服务器`（解析用分隔符）。
+/// 最近会话格式：`设备 · 服务器`（解析用分隔符）。
 fn parse_recent(entry: &str) -> (String, String) {
     match entry.split_once(" · ") {
         Some((r, s)) => (r.to_string(), s.to_string()),
@@ -1876,7 +1876,7 @@ fn save_addressbook(items: &[slint::SharedString]) {
     }
 }
 
-/// 解析地址簿条目 `别名 · 房间 · 服务器 · 组`。
+/// 解析地址簿条目 `别名 · 设备 · 服务器 · 组`。
 fn parse_addressbook(entry: &str) -> (String, String, String, String) {
     let parts: Vec<&str> = entry.splitn(4, " · ").collect();
     let name = parts.first().map(|s| s.to_string()).unwrap_or_default();

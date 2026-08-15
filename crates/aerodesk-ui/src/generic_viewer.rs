@@ -101,7 +101,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
         ui.set_status(format!("已连接：peer={peer} ice={ice}").into());
         ui.set_log(
             format!(
-                "房间: {room2}\n服务器: {server2}\nSDP 交换: OK\nICE: {}\n\n{decoder_label}渲染。",
+                "设备: {room2}\n服务器: {server2}\nSDP 交换: OK\nICE: {}\n\n{decoder_label}渲染。",
                 if ice {
                     "connected"
                 } else {
@@ -345,7 +345,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
         // 收到首个视频帧后恢复"会话中"。
         if !no_media_notified && media_evts == 0 && Instant::now() >= no_media_deadline {
             no_media_notified = true;
-            let room_msg = format!("对方不在线或未开启被控（房间 {room}），等待对方上线后自动出流");
+            let room_msg = format!("对方不在线或未开启被控（设备 {room}），等待对方上线后自动出流");
             with_ui(&ui_weak, move |ui| ui.set_session_status(room_msg.into()));
         }
         if frames > 0 && no_media_notified {

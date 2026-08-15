@@ -251,7 +251,7 @@ pub fn run_viewer(
         ui.set_status(format!("已连接：peer={peer} ice={ice}").into());
         ui.set_log(
             format!(
-                "房间: {room2}\n服务器: {server2}\nSDP 交换: OK\nICE: {}\n\n真实解码渲染（H.264/H.265 硬解优先，VP9/AV1 FFmpeg）。",
+                "设备: {room2}\n服务器: {server2}\nSDP 交换: OK\nICE: {}\n\n真实解码渲染（H.264/H.265 硬解优先，VP9/AV1 FFmpeg）。",
                 if ice { "connected" } else { "pending(5s 超时)" }
             )
             .into(),
