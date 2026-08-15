@@ -8,9 +8,11 @@ use crate::CapturedFrame;
 /// DXGI Desktop Duplication 采集器（被控端，Windows）。
 #[cfg(windows)]
 pub struct DxgiCapturer {
-    context: windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
-    duplication: windows::Win32::Graphics::Dxgi::IDXGIOutputDuplication,
-    staging: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+    // Option 以便运行中切换显示器时先释放旧输出复制（同一 output 同时只允许一个
+    // duplication，否则 DuplicateOutput 返回 E_INVALIDARG，#58）。
+    context: Option<windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext>,
+    duplication: Option<windows::Win32::Graphics::Dxgi::IDXGIOutputDuplication>,
+    staging: Option<windows::Win32::Graphics::Direct3D11::ID3D11Texture2D>,
     /// 原生桌面宽高。
     width: u32,
     height: u32,
@@ -19,6 +21,11 @@ pub struct DxgiCapturer {
     out_height: u32,
     /// 被控显示器在虚拟屏幕中的区域（像素；多显示器坐标映射用，#75）。
     display_rect: (i32, i32, u32, u32),
+    /// 当前采集的显示器索引（#58 运行中切换用）。
+    display: u32,
+    /// 缩放目标宽高（0 = 原生；切换显示器后保持同一输出分辨率，编码器无需重建）。
+    target_w: u32,
+    target_h: u32,
 }
 
 #[cfg(windows)]
@@ -128,14 +135,17 @@ impl DxgiCapturer {
                 (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top).max(0) as u32,
             );
             Ok(Self {
-                context,
-                duplication,
-                staging,
+                context: Some(context),
+                duplication: Some(duplication),
+                staging: Some(staging),
                 width,
                 height,
                 out_width,
                 out_height,
                 display_rect,
+                display,
+                target_w,
+                target_h,
             })
         }
     }
@@ -149,6 +159,32 @@ impl DxgiCapturer {
         self.display_rect
     }
 
+    /// 运行中切换采集显示器（#58）：按新索引重建输出复制/暂存纹理，
+    /// 保持目标输出分辨率（编码器无需重建）。失败时保持原采集不变。
+    pub fn switch_display(&mut self, display: u32) -> Result<(), String> {
+        let old_display = self.display;
+        let target_w = self.target_w;
+        let target_h = self.target_h;
+        // 同一 output 同时只允许一个 duplication，且旧 D3D11 device 存活也会让
+        // DuplicateOutput 返回 E_INVALIDARG：先彻底释放旧资源再重建。
+        self.context = None;
+        self.duplication = None;
+        self.staging = None;
+        match Self::new_with_display(display, target_w, target_h) {
+            Ok(next) => {
+                *self = next;
+                Ok(())
+            }
+            Err(e) => {
+                // 回退重建原显示器，尽量恢复会话（旧资源已释放，原显示器可重建）。
+                if let Ok(prev) = Self::new_with_display(old_display, target_w, target_h) {
+                    *self = prev;
+                }
+                Err(e)
+            }
+        }
+    }
+
     /// 取下一帧（阻塞最多 16ms）。无新帧/错误返回 None。
     pub fn capture_frame(&mut self) -> Option<CapturedFrame> {
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -157,36 +193,43 @@ impl DxgiCapturer {
         use windows::core::Interface;
 
         unsafe {
+            let Some(duplication) = &self.duplication else {
+                return None;
+            };
+            let Some(staging) = &self.staging else {
+                return None;
+            };
+            let Some(context) = &self.context else {
+                return None;
+            };
             let mut info = windows::Win32::Graphics::Dxgi::DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource: Option<IDXGIResource> = None;
-            if self
-                .duplication
+            if duplication
                 .AcquireNextFrame(16, &mut info, &mut resource)
                 .is_err()
             {
                 return None;
             }
             let Some(res) = resource else {
-                let _ = self.duplication.ReleaseFrame();
+                let _ = duplication.ReleaseFrame();
                 return None;
             };
             let tex: ID3D11Texture2D = match res.cast() {
                 Ok(t) => t,
                 Err(_) => {
-                    let _ = self.duplication.ReleaseFrame();
+                    let _ = duplication.ReleaseFrame();
                     return None;
                 }
             };
-            self.context.CopyResource(&self.staging, &tex);
+            context.CopyResource(staging, &tex);
 
             let mut mapped =
                 windows::Win32::Graphics::Direct3D11::D3D11_MAPPED_SUBRESOURCE::default();
-            if self
-                .context
-                .Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            if context
+                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
                 .is_err()
             {
-                let _ = self.duplication.ReleaseFrame();
+                let _ = duplication.ReleaseFrame();
                 return None;
             }
             let row_pitch = mapped.RowPitch as usize;
@@ -199,8 +242,8 @@ impl DxgiCapturer {
                 let row = &src[y * row_pitch..y * row_pitch + self.width as usize * 4];
                 bgra.extend_from_slice(row);
             }
-            self.context.Unmap(&self.staging, 0);
-            let _ = self.duplication.ReleaseFrame();
+            context.Unmap(staging, 0);
+            let _ = duplication.ReleaseFrame();
 
             let pts_us = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -231,7 +274,9 @@ impl DxgiCapturer {
 impl Drop for DxgiCapturer {
     fn drop(&mut self) {
         unsafe {
-            let _ = self.duplication.ReleaseFrame();
+            if let Some(d) = &self.duplication {
+                let _ = d.ReleaseFrame();
+            }
         }
     }
 }
@@ -258,6 +303,18 @@ impl aerodesk_core::platform::MediaSource for DxgiCapturer {
     }
 
     fn stop(&mut self) {}
+
+    fn display_id(&self) -> Option<u32> {
+        Some(self.display)
+    }
+
+    fn switch_display(&mut self, display: u32) -> Result<(), String> {
+        self.switch_display(display)
+    }
+
+    fn display_rect(&self) -> Option<(i32, i32, u32, u32)> {
+        Some(self.display_rect)
+    }
 }
 
 /// 非 Windows 主机上的编译期骨架（保证 workspace 全平台可编译）。

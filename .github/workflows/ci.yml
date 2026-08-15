@@ -307,6 +307,19 @@ jobs:
         # --examples：编译验证 vdd_smoke（#140，真机验收示例）。
         # -p aerodesk-ui：#3 主控端真实媒体（PR #159）Windows 编译验证。
         run: cargo check -p aerodesk-windows -p aerodesk-ui --examples
+      # #3 Windows→Web 验收：本机 Edge 观看端全链路回归
+      # （signaling→ICE/DTLS/SCTP→视频轨→输入回传）。合成源发布端不受静态桌面
+      # 影响；Edge 由 windows-latest runner 预装；playwright-core 由脚本 npm i。
+      - name: e2e web viewer (Windows Edge)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/web-edge-e2e-win.ps1
+      # #58/#408 显示器切换 CLI 接线回归：viewer --display N → control → publisher 重建。
+      # DXGI 不可用的 runner 自动 SKIP（与 windows_runtime 容错一致）。
+      - name: e2e display switch (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/display-switch-e2e-win.ps1
       - name: linux adapter
         if: runner.os == 'Linux'
         run: cargo check -p aerodesk-linux -p aerodesk-ui

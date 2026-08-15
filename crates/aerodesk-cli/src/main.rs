@@ -233,9 +233,15 @@ fn run() {
                 println!("{c}");
             }
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
         {
-            eprintln!("--list-cameras 仅 macOS/Linux 支持");
+            for (id, name) in aerodesk_windows::camera::list_cameras() {
+                println!("{id}\t{name}");
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            eprintln!("--list-cameras 仅 macOS/Linux/Windows 支持");
             std::process::exit(1);
         }
         return;
@@ -388,6 +394,8 @@ fn run() {
                         scale_h,
                         _display as u32,
                         bitrate,
+                        camera,
+                        camera_device.clone(),
                     );
                 }
                 #[cfg(target_os = "linux")]
@@ -2675,6 +2683,43 @@ fn publisher_generic<
                 ClientEvent::KeyframeRequest(_) => {
                     encoder.request_keyframe();
                 }
+                // #58 显示器切换：viewer 经 control 通道请求 → 运行中切换采集源
+                // （Windows DxgiCapturer 重建；其余源默认不支持则告警保持现状）。
+                ClientEvent::ChannelData(cid, _, data)
+                    if endpoint.channel_label(cid).as_deref() == Some("control") =>
+                {
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&data) {
+                        if let Some(n) = v.get("display").and_then(|d| d.as_u64()) {
+                            match source.switch_display(n as u32) {
+                                Ok(()) => {
+                                    info!("display switch -> display {n}");
+                                    // #75：切换后同步注入坐标与光标基准到新显示器区域。
+                                    #[cfg(target_os = "windows")]
+                                    {
+                                        if let Some(rect) = source.display_rect() {
+                                            if let Ok(mut guard) = ACTIVE_DISPLAY_RECT.lock() {
+                                                *guard = Some(rect);
+                                            }
+                                            if let Some(c) = &mut cursor {
+                                                aerodesk_core::platform::CursorSource::
+                                                    set_active_display(c, Some(rect));
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("display switch failed（保持当前显示器）: {e}");
+                                }
+                            }
+                        }
+                        if let Some(bps) = v.get("bitrate").and_then(|b| b.as_u64()) {
+                            // #267 码率反馈：真实屏幕发布端（Windows/Linux）应用 BWE
+                            // 降/升档（对齐 macOS publisher_screen；FFmpeg 编码器按需重建）。
+                            encoder.set_bitrate(bps, fps);
+                            info!("control: bitrate feedback applied -> {bps} bps");
+                        }
+                    }
+                }
                 ev => handle_publisher_input(&mut endpoint, ev),
             }
         }
@@ -2839,6 +2884,8 @@ fn publisher_capture_windows(
     target_h: u32,
     display: u32,
     bitrate: u32,
+    camera: bool,
+    camera_device: Option<String>,
 ) {
     use aerodesk_core::platform::MediaSource;
     use aerodesk_windows::capture::DxgiCapturer;
@@ -2862,6 +2909,8 @@ fn publisher_capture_windows(
         error!("DXGI capture: 无可用显示器输出");
         return;
     }
+    // #75 远程光标：真实光标按被控显示器区域归一化（在 capture 移入 publisher 前取值）。
+    let display_rect = capture.display_rect();
     info!("Windows screen capture started at {w}x{h}");
     // #334：采集会话期间保持系统/显示器唤醒（防闲置休眠后 DXGI 无输出）。
     let _keep_awake = aerodesk_windows::wake_lock::WindowsSystemWakeLock
@@ -2895,6 +2944,28 @@ fn publisher_capture_windows(
     } else {
         None
     };
+    // #385 摄像头（MF SourceReader）：--camera 时启动本地摄像头第二路视频轨，
+    // 失败仅告警（屏幕视频轨照常）；SourceReader 输出 RGB32/BGRA。
+    let camera_cap: Option<aerodesk_windows::camera::MfCamera> = if camera {
+        match aerodesk_windows::camera::MfCamera::new(camera_device.as_deref()) {
+            Ok(mut cam) => match cam.start(1280, 720, FPS) {
+                Ok(()) => {
+                    info!("Windows camera capture started (device={camera_device:?})");
+                    Some(cam)
+                }
+                Err(e) => {
+                    warn!("camera capture disabled: {e}");
+                    None
+                }
+            },
+            Err(e) => {
+                warn!("camera capture disabled: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     publisher_generic(
         signal_url,
         room,
@@ -2906,8 +2977,11 @@ fn publisher_capture_windows(
         capture,
         encoder,
         audio_cap,
-        None::<NoCameraCapture>,
-        None::<NoCursor>,
+        camera_cap,
+        // #75 远程光标：Windows 被控端真实光标位置（GetCursorPos，活动显示器归一化）。
+        Some(aerodesk_windows::cursor::WindowsCursor::new(Some(
+            display_rect,
+        ))),
     );
 }
 

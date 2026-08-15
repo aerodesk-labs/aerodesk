@@ -1,7 +1,8 @@
-//! Android 发布会话（被控端）：连接信令 + 逐帧发送 H.264 → SFU。
+//! HarmonyOS 发布会话（被控端骨架）：连接信令 + 逐帧发送 H.264 → SFU。
 //!
-//! 采集/编码由 Kotlin 侧 MediaProjection + MediaCodec 完成，
-//! 编码输出（AnnexB）通过 JNI `publisherFeedAnnexB` 交给本模块发送。
+//! 真机路径：AVScreenCapture 输出 → OH_VideoEncoder 编码 → 本模块发送；
+//! 编码输出（AnnexB）由 ArkTS 侧通过 `publisherFeedAnnexB` 交给 Rust。
+//! 输入注入仍需系统权限，当前保留通道与占位实现。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -11,7 +12,7 @@ use aerodesk_core::connect::LiveSession;
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_protocol::signal::Role;
 
-/// 发布会话（FFI 句柄 = *mut PublisherSession）。
+/// 发布会话（NAPI `startPublish` 返回的 session id 即指向本结构）。
 pub struct PublisherSession {
     live: Mutex<LiveSession>,
     /// 输入事件（观看端 → 本被控端），JSON InputFrame。
@@ -22,8 +23,12 @@ pub struct PublisherSession {
 
 impl PublisherSession {
     /// 连接信令（publisher 角色）+ SDP 交换 + ICE 泵。
-    pub fn connect(server: &str, room: &str) -> Result<PublisherSession, String> {
-        let live = aerodesk_core::connect::connect_live_role(server, room, Role::Publisher, None)?;
+    pub fn connect(
+        server: &str,
+        room: &str,
+        token: Option<&str>,
+    ) -> Result<PublisherSession, String> {
+        let live = aerodesk_core::connect::connect_live_role(server, room, Role::Publisher, token)?;
         let (input_tx, input_rx) = mpsc::channel();
         Ok(PublisherSession {
             live: Mutex::new(live),
@@ -62,10 +67,10 @@ impl PublisherSession {
         }
         while let Some(ev) = live.endpoint.poll_event() {
             if let ClientEvent::ChannelData(cid, _, data) = ev {
-                if live.endpoint.channel_label(cid).as_deref() == Some("input")
-                    && let Ok(s) = String::from_utf8(data)
-                {
-                    let _ = self.input_tx.send(s);
+                if live.endpoint.channel_label(cid).as_deref() == Some("input") {
+                    if let Ok(s) = String::from_utf8(data) {
+                        let _ = self.input_tx.send(s);
+                    }
                 }
             }
         }

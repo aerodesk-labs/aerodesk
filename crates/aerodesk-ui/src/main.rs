@@ -2235,6 +2235,35 @@ mod tests {
     }
 
     #[test]
+    fn viewer_norm_multi_resolution_switch() {
+        // #75 多分辨率切换：同一个视频区，远端分辨率变化时，归一化中心/四角
+        // 映射必须始终正确（比例不同走 letterbox 分支）。
+        let area = (1000.0_f32, 680.0_f32);
+        for (fw, fh) in [
+            (1920.0_f32, 1080.0_f32), // 16:9（横屏）
+            (2560.0_f32, 1440.0_f32), // 16:9 更高分辨率
+            (1280.0_f32, 720.0_f32),  // 16:9 低分辨率
+            (1080.0_f32, 1920.0_f32), // 竖屏（触发左右黑边）
+        ] {
+            let (x, y) = viewer_to_remote_norm(500.0, 340.0, area.0, area.1, fw, fh);
+            assert!(
+                (x - 0.5).abs() <= 1e-3 && (y - 0.5).abs() <= 1e-3,
+                "center mismatch for {fw}x{fh}: ({x},{y})"
+            );
+            let (x0, y0) = viewer_to_remote_norm(0.0, 0.0, area.0, area.1, fw, fh);
+            assert!(
+                x0 <= 1e-6 && y0 <= 1e-6,
+                "top-left clamp mismatch for {fw}x{fh}: ({x0},{y0})"
+            );
+            let (x1, y1) = viewer_to_remote_norm(1000.0, 680.0, area.0, area.1, fw, fh);
+            assert!(
+                (x1 - 1.0).abs() <= 1e-3 && (y1 - 1.0).abs() <= 1e-3,
+                "bottom-right clamp mismatch for {fw}x{fh}: ({x1},{y1})"
+            );
+        }
+    }
+
+    #[test]
     fn parse_recent_formats() {
         let (r, s) = parse_recent("demo · 127.0.0.1:3003");
         assert_eq!(r, "demo");

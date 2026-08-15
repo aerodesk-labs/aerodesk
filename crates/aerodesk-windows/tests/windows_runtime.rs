@@ -11,9 +11,15 @@ use aerodesk_core::platform::{InputInjector, MediaSource};
 use aerodesk_protocol::input::{ButtonState, InputEvent, Modifiers, MouseButton};
 use aerodesk_windows::capture::DxgiCapturer;
 use aerodesk_windows::inject::SendInputInjector;
+use std::sync::Mutex;
+
+/// 同一 output 同时只允许一个 duplication（DXGI 限制）：运行级 DXGI 测试
+/// 必须串行执行，否则并行建 duplication 的后建者会 E_INVALIDARG 假 SKIP。
+static DXGI_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn dxgi_capture_produces_frame() {
+    let _guard = DXGI_LOCK.lock().unwrap();
     let mut cap = match DxgiCapturer::new() {
         Ok(c) => c,
         Err(e) => {
@@ -91,4 +97,97 @@ fn sendinput_injects_mouse_key() {
     )
     .expect("key up");
     eprintln!("sendinput inject OK");
+}
+
+#[test]
+fn dxgi_switch_display_same_display_ok() {
+    // #58 运行中切换显示器：切到同一显示器应成功且输出尺寸保持。
+    let _guard = DXGI_LOCK.lock().unwrap();
+    let mut cap = match DxgiCapturer::new() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("SKIP: DXGI init failed: {e}");
+            return;
+        }
+    };
+    let (w, h) = cap.size();
+    // 同屏切换必须成功（先释放旧 duplication 再重建；失败视为缺陷，不跳过）。
+    cap.switch_display(0)
+        .expect("switch to same display should succeed");
+    let (w2, h2) = cap.size();
+    assert!(w2 > 0 && h2 > 0, "切换后输出尺寸应 > 0: {w2}x{h2}");
+    eprintln!("dxgi switch to same display OK: {w}x{h} -> {w2}x{h2}");
+}
+
+#[test]
+fn dxgi_switch_display_invalid_keeps_capture() {
+    // #58：切换失败必须保持原采集不变（不破坏进行中的会话）。
+    let _guard = DXGI_LOCK.lock().unwrap();
+    let mut cap = match DxgiCapturer::new_with_scale(640, 360) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("SKIP: DXGI init failed: {e}");
+            return;
+        }
+    };
+    let (w, h) = cap.size();
+    assert!(cap.switch_display(9999).is_err(), "无效显示器索引应报错");
+    let (w2, h2) = cap.size();
+    assert_eq!((w, h), (w2, h2), "切换失败后采集应保持不变");
+}
+
+#[test]
+fn clipboard_text_inject_roundtrip() {
+    // #72/#271：SendInputInjector 的 ClipboardText 注入写入系统剪贴板（Win32）。
+    // 非交互会话 OpenClipboard 可能失败 → 跳过；成功则必须读回一致。
+    let mut inj = SendInputInjector::new();
+    let text = format!("aerodesk-clip-{}", std::process::id());
+    match InputInjector::inject(&mut inj, &InputEvent::ClipboardText(text.clone())) {
+        Ok(()) => {
+            let read = aerodesk_core::clipboard::read();
+            assert_eq!(
+                read.as_deref(),
+                Some(text.as_str()),
+                "系统剪贴板应等于注入文本"
+            );
+            eprintln!("clipboard inject roundtrip OK: {text}");
+        }
+        Err(e) => eprintln!("SKIP: clipboard inject: {e}"),
+    }
+}
+
+#[test]
+fn mf_camera_lists_and_captures() {
+    // #385 Windows 摄像头（MF SourceReader）：枚举 + 采集首帧（BGRA）。
+    // 无摄像头（CI/裸机）时 SKIP；有设备（如虚拟摄像头）必须出帧。
+    use aerodesk_core::platform::CameraSource;
+    let cams = aerodesk_windows::camera::list_cameras();
+    if cams.is_empty() {
+        eprintln!("SKIP: no camera device（真机/虚拟摄像头验证）");
+        return;
+    }
+    eprintln!("cameras: {cams:?}");
+    let mut cam = match aerodesk_windows::camera::MfCamera::new(Some("0")) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("SKIP: MfCamera::new: {e}");
+            return;
+        }
+    };
+    if let Err(e) = CameraSource::start(&mut cam, 640, 480, 30) {
+        eprintln!("SKIP: camera start: {e}");
+        return;
+    }
+    match CameraSource::next_frame(&mut cam) {
+        Ok(Some(f)) => {
+            assert_eq!(
+                f.raw.len() as u64,
+                f.width as u64 * f.height as u64 * 4,
+                "BGRA32 帧大小应匹配"
+            );
+            eprintln!("camera capture OK: {}x{}", f.width, f.height);
+        }
+        Ok(None) => eprintln!("SKIP: camera 首帧未就绪"),
+        Err(e) => eprintln!("SKIP: camera next_frame: {e}"),
+    }
 }

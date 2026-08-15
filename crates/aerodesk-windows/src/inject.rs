@@ -165,8 +165,13 @@ impl aerodesk_core::platform::InputInjector for SendInputInjector {
                 InputEvent::Touch { .. } => {
                     return Err("windows: touch injection not implemented".into());
                 }
-                InputEvent::ClipboardText(_) => {
-                    return Err("windows: clipboard inject not implemented".into());
+                InputEvent::ClipboardText(text) => {
+                    // 远程剪贴板粘贴：写入被控端本地剪贴板（Win32 CF_UNICODETEXT，
+                    // #72/#271；与 Linux inject 同语义，CLI 上层也走同一 core 写入）。
+                    if !aerodesk_core::clipboard::write(text) {
+                        return Err("windows: clipboard write failed".into());
+                    }
+                    return Ok(());
                 }
             };
             let sent = SendInput(
@@ -222,7 +227,7 @@ impl SendInputInjector {
 
 /// 虚拟屏幕（所有显示器并集）像素矩形。
 #[cfg(windows)]
-fn virtual_screen() -> (i32, i32, u32, u32) {
+pub(crate) fn virtual_screen() -> (i32, i32, u32, u32) {
     use windows::Win32::UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
         SM_YVIRTUALSCREEN,

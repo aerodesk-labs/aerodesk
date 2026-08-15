@@ -33,7 +33,8 @@ winit = "0.30"
 aerodesk-linux = { path = "../aerodesk-linux" }
 
 # Windows 被控端（屏幕发布）：DXGI 采集 + OpenH264 软编 + SendInput 注入。
-[target.'cfg(windows)'.dependencies]
+# #3 观看端 DXVA2 硬解（Windows；无 GPU/驱动时回退 OpenH264 软解）。
+[target.'cfg(target_os = "windows")'.dependencies]
 aerodesk-windows = { path = "../aerodesk-windows" }
 
 [build-dependencies]

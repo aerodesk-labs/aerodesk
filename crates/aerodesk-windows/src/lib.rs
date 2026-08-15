@@ -13,7 +13,10 @@
 pub mod audio_capture;
 #[cfg(windows)]
 pub mod autostart;
+pub mod camera;
 pub mod capture;
+pub mod cursor;
+pub mod decode;
 pub mod encode;
 pub mod inject;
 pub mod vdd;

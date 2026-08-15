@@ -31,8 +31,8 @@ aerodesk/
 │   ├── aerodesk-macos/      # macOS 适配器：ScreenCaptureKit 采集 + VT 硬编 + x264 软编 + CGEvent 注入 ✅
 │   ├── aerodesk-ios/        # iOS 适配器：VideoToolbox H.264 硬解（AnnexB→CVPixelBuffer）✅
 │   ├── aerodesk-android/    # Android 适配器骨架：MediaCodec/MediaProjection/Accessibility 🔨 P3
-│   ├── aerodesk-linux/      # Linux 适配器骨架：PipeWire/VAAPI/XTest 🔨 P4
-│   ├── aerodesk-windows/    # Windows 适配器：DXGI 采集+缩放 / MF 硬编 / WASAPI 音频 / SendInput / VDD ✅
+│   ├── aerodesk-linux/      # Linux 适配器：X11/Wayland(PipeWire) 采集 + VAAPI 硬编硬解 + XTest/uinput/portal 注入 + V4L2 摄像头 + PipeWire 系统音频 + 剪贴板/光标/FilePicker/Notifier/唤醒锁 ✅
+│   ├── aerodesk-windows/    # Windows 适配器：DXGI 采集+缩放 / MF 硬编+DXVA2 硬解 / WASAPI 音频 / SendInput / 远程光标 / 显示器切换 / VDD ✅
 │   ├── aerodesk-ohos/       # HarmonyOS 适配器骨架：AVScreenCapture/OH_VideoDecoder/NAPI 🔨 P4
 │   └── x264/                # vendored x264 crate（+sliced_threads/threads 控制）
 ├── web/index.html           # 浏览器观看端（publisher=屏幕采集受限 / viewer=观看+输入）
@@ -124,7 +124,7 @@ CLI viewer 端到端收流、iOS 解码器（x264 关键帧 + P 帧全序列 8/8
 | Web | ❌ | ✅ | P0 完成 |
 | macOS | ✅ | ✅ | P2 完成（采集/编码/注入） |
 | Windows | ✅ | ✅ | 被控端+观看端完整：DXGI 采集/缩放、MF(h264_mf/hevc_mf)+OpenH264 编码、WASAPI 音频、SendInput/VDD、唤醒锁、开机自启（HKCU Run）、原生 Win32 剪贴板（文本/图片）、D3D11VA/DXVA2 硬解（UI+CLI）、Opus/PCMU 播放、远程光标；本机端到端（4K30 硬编→硬解）验证；便携 ZIP + MSI 安装器 |
-| Linux | 🔨 | 🔨 | P4 骨架 |
+| Linux | ✅ | ✅ | 被控端+观看端完整：X11/Wayland(PipeWire) 采集、VAAPI 硬编/硬解 + x264/OpenH264 回退、XTest/uinput/portal 注入、PipeWire 系统音频、V4L2 摄像头（--camera/--list-cameras）、真实光标（X11 QueryPointer）、剪贴板（文本/图片 + 注入）、FilePicker（zenity/kdialog）、Notifier（notify-send）、SystemWakeLock（systemd-inhibit）、CommandExecutor（sh -c）；linux-native-e2e（含 CURSOR 断言）CI 守护；打包 deb/tar.gz/rpm/AppImage |
 | Android | 🔨 | 🔨 | P3 骨架 |
 | iOS | ❌ | ✅ | P3 解码器完成（App 壳层待真机） |
 | HarmonyOS | ⚠️ 权限评估 | ✅ | P4 骨架 |

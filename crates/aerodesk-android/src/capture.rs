@@ -3,8 +3,6 @@
 //! 真机路径：`MediaProjectionManager.createScreenCaptureIntent` → 用户授权 →
 //! `VirtualDisplay` + `ImageReader` → RGBA 帧 → 编码器（MediaCodec H.264/AV1）。
 
-use crate::CapturedFrame;
-
 /// TODO(P3): MediaProjection + ImageReader 实现。
 pub struct MediaProjectionCapturer;
 

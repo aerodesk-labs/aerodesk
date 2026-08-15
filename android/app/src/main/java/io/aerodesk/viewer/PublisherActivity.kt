@@ -18,8 +18,6 @@ class PublisherActivity : AppCompatActivity() {
         private const val REQ_PROJECTION = 1001
     }
 
-    private var capture: PublisherCapture? = null
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_publisher)
@@ -40,8 +38,8 @@ class PublisherActivity : AppCompatActivity() {
             status.text = "等待录屏授权…"
         }
         stopBtn.setOnClickListener {
-            capture?.stop()
-            capture = null
+            // 采集/编码实际运行在 ProjectionService；Activity 只负责拉起与停止前台服务。
+            stopService(Intent(this, ProjectionService::class.java))
             status.text = "已停止"
         }
     }
@@ -64,15 +62,10 @@ class PublisherActivity : AppCompatActivity() {
             putExtra("room", room)
         }
         startForegroundService(svc)
-        // 输入注入：绑定发布会话指针并启动无障碍服务（需在系统设置开启）。
+        // 输入注入：无障碍服务由系统绑定（用户开启后 onServiceConnected），
+        // 不要用 startService 启动；发布线程拿到 Rust 会话指针后再交给服务轮询。
+        InputInjectionService.instance?.stop()
         InputInjectionService.pendingPtr = 0L
-        startService(Intent(this, InputInjectionService::class.java))
         status.text = "被控端采集编码中…（1280x720 H.264；请到系统设置开启 AeroDesk 无障碍服务）"
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        capture?.stop()
-        capture = null
     }
 }

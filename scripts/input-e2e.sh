@@ -34,7 +34,13 @@ PUB_PID=$!
 ./target/debug/aerodesk-cli --role viewer --input-script \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/input-view.log 2>&1 &
 VIEW_PID=$!
-sleep 6
+# 等待输入链路完成首轮事件轮换（Key 出现即 Move/Button/Wheel 均已发出，
+# 上限 ~8s）；进程异常退出时立即收尾。固定 sleep 在 CI 偶发偏短，改为就绪轮询更稳。
+for _ in $(seq 1 40); do
+    if grep -qE "inject: seq=.*Key" /tmp/input-pub.log 2>/dev/null; then break; fi
+    if ! kill -0 "$PUB_PID" 2>/dev/null || ! kill -0 "$VIEW_PID" 2>/dev/null; then break; fi
+    sleep 0.2
+done
 kill "$PUB_PID" "$VIEW_PID" "$SFU_PID" "$SIG_PID" 2>/dev/null || true
 wait 2>/dev/null || true
 
@@ -47,6 +53,23 @@ for evt in MouseMove MouseButton Wheel Key; do
         echo "PASS input event type reached inject: $evt"
     else
         echo "FAIL input event type missing: $evt"; grep "inject" /tmp/input-pub.log | tail -3; fail=1
+    fi
+done
+
+# #75 坐标值断言：归一化坐标必须原样穿越 SFU + 注入计算（CGEvent 可能因无
+# 辅助功能权限静默，但注入前的归一化坐标/增量可验证，且不依赖真实显示器）。
+# --input-script 固定发送 MouseMove(0.3,0.4)、Button/Wheel(0.5,0.5)、delta_y=-3。
+coords=(
+    "MouseMove { x: 0.3, y: 0.4 }"
+    "MouseButton { button: Left, state: Pressed, x: 0.5, y: 0.5 }"
+    "MouseButton { button: Left, state: Released, x: 0.5, y: 0.5 }"
+    "Wheel { x: 0.5, y: 0.5, delta_x: 0.0, delta_y: -3.0 }"
+)
+for coord in "${coords[@]}"; do
+    if grep -qF "$coord" /tmp/input-pub.log; then
+        echo "PASS input coord carried: $coord"
+    else
+        echo "FAIL input coord missing: $coord"; grep "inject" /tmp/input-pub.log | tail -3; fail=1
     fi
 done
 if ! grep -qE "inject: seq=.*Key.*ctrl: true" /tmp/input-pub.log; then
