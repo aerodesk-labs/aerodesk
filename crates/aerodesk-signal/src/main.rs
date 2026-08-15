@@ -16,11 +16,19 @@
 //!   SFU_URLS      SFU 池（逗号分隔，可选）：设置后按房间无状态哈希选路到其中一个 SFU；
 //!                 未设置回退单值 SFU_URL（向后兼容）
 //!   SFU_TOKEN     SFU 内部接口 token（可选）
+//!   SFU_STICKY_TTL_SECS 房间→SFU 粘性映射空闲淘汰阈值（秒，默认 21600=6h；仅池>1）
 //!
 //! 多 PoP（#146）：
 //! 连接配额（#163）：
 //!   MAX_ROOM_CLIENTS  每房间人数上限（0=不限）；超限 Join 返回 Error("room full")
 //!   MAX_TOTAL_CLIENTS 单实例全局连接上限（0=不限）；超限返回 Error("server full")
+//!   SIGNAL_MAX_PREJOIN_CLIENTS 并发「未 Join」连接上限（默认 256，0=不限）：
+//!                 认证/Join 前的连接同样占线程与 fd 且不受 MAX_TOTAL_CLIENTS
+//!                 约束，超限直接断开（防预认证连接堆积）
+//!   SIGNAL_ALLOWED_ORIGINS /ws Origin 白名单（逗号分隔；未设置不校验，`*` 放行
+//!                 全部）。浏览器必带 Origin；CLI/native 无 Origin 头始终放行
+//!   SIGNAL_PLAIN_PORT 明文 WS 端口（默认 3003）；设为 off/disabled/none 关闭
+//!                 明文服务器（生产建议关闭或用防火墙限制）
 //!
 //!   POP_ID        本 PoP 标识（默认 local）
 //!   ROOM_POP_MAP  房间前缀=PoP，逗号分隔（如 eu-=pop-eu,us-=pop-us）；最长前缀优先
@@ -83,6 +91,14 @@ struct Config {
     sfu_poll_interval_secs: u64,
     /// SFU 探测失败后的冷却期（秒；期间不参与新房间分配）。
     sfu_fail_cooldown_secs: u64,
+    /// 房间粘性映射空闲淘汰阈值（秒；仅池 >1 时生效）。
+    sfu_sticky_ttl_secs: u64,
+    /// 并发「未 Join」连接上限（0=不限）：Join/认证之前连接同样占线程与 fd，
+    /// 防止绕过 max_total_clients 的连接堆积（#163 只在 Join 后计数）。
+    max_prejoin_clients: usize,
+    /// /ws Origin 白名单（None=不校验，兼容现状；`*` 放行全部）。
+    /// 非浏览器客户端（CLI/native）无 Origin 头，始终放行。
+    allowed_origins: Option<Vec<String>>,
     /// 跨 PoP 桥接编排（#216 M3）：BRIDGE_CMD 设置时启用；桥失败回退 Redirect。
     bridge: Option<Arc<BridgeManager>>,
     /// 桥空闲回收阈值（#246）：房间内无真实客户端超过该时长 → 停止桥。
@@ -120,8 +136,9 @@ struct SfuPool {
     loads: Vec<AtomicU64>,
     /// 各 SFU 的不可用截止时间戳（Unix 秒；0=可用）。
     down_until: Vec<AtomicU64>,
-    /// 房间 → SFU 下标（粘性：新房间分配一次后固定；SFU 剔除时重选）。
-    room_sfu: Mutex<HashMap<String, usize>>,
+    /// 房间 → (SFU 下标, 最近使用 Unix 秒)（粘性：新房间分配一次后固定，
+    /// SFU 剔除时重选；空闲超过 TTL 由 poller 淘汰，防长期运行无界增长）。
+    room_sfu: Mutex<HashMap<String, (usize, u64)>>,
 }
 
 static SFU_POOL: OnceLock<Arc<SfuPool>> = OnceLock::new();
@@ -153,10 +170,11 @@ impl SfuPool {
     /// 全部下线回退哈希。锁贯穿「查/选/写」消除同房间并发首连的竞态。
     fn select(&self, room: &str) -> usize {
         let mut reg = self.room_sfu.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(i) = reg.get(room).copied() {
-            return i;
-        }
         let now = unix_secs();
+        if let Some((i, last_used)) = reg.get_mut(room) {
+            *last_used = now;
+            return *i;
+        }
         let chosen = (0..self.urls.len())
             .filter(|&i| self.is_up(i, now))
             .min_by(|&a, &b| {
@@ -170,8 +188,26 @@ impl SfuPool {
                     })
             })
             .unwrap_or_else(|| sfu_for_room(&self.urls, room));
-        reg.insert(room.to_string(), chosen);
+        reg.insert(room.to_string(), (chosen, now));
         chosen
+    }
+
+    /// 淘汰「无活跃 peer 且超过 `ttl_secs` 未使用」的粘性映射（poller 周期调用），
+    /// 返回淘汰数。`alive` 为 rooms 表中有 peer 的房间集合：这些房间的映射一律
+    /// 保留——活跃房间**永不重映射**（粘性保证）；仅当房间已空（peer 清零、
+    /// session_loop 已将其移出 rooms 表）且映射空闲超过 TTL 才淘汰，防无界增长。
+    /// 注意 select 只在 Description/kick 路径被调用，Join 不刷新时间戳，因此
+    /// 不能用「最近 select 时间」判断房间死活，必须看 rooms 表。
+    fn evict_stale(
+        &self,
+        alive: &std::collections::HashSet<String>,
+        ttl_secs: u64,
+        now: u64,
+    ) -> usize {
+        let mut reg = self.room_sfu.lock().unwrap_or_else(|e| e.into_inner());
+        let before = reg.len();
+        reg.retain(|room, (_, t)| alive.contains(room) || now.saturating_sub(*t) < ttl_secs);
+        before - reg.len()
     }
 }
 
@@ -188,31 +224,98 @@ fn parse_max_shard_load(body: &str) -> u64 {
     ((max * 10_000.0).round() as u64).min(10_000)
 }
 
-/// 后台轮询各 SFU 的负载；失败按冷却期标记下线。
-fn poll_sfu_pool(pool: Arc<SfuPool>, interval_secs: u64, cooldown_secs: u64) {
+/// 单个 SFU 负载探测的失败分类（区分配置错误与网络故障）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PollErr {
+    /// 401/403：`SFU_TOKEN` 与 SFU `INTERNAL_TOKEN` 不匹配（配置错误，非 SFU 故障）。
+    Unauthorized,
+    /// 其它非 2xx 状态码。
+    Http(u16),
+    /// 连接失败/超时。
+    Unreachable,
+    /// 响应体读取失败。
+    Body,
+}
+
+/// 探测单个 SFU 的 `shard_load` 最大值（×10000）。
+/// 必须携带 `X-Internal-Token`：SFU 内部端口在设置 `INTERNAL_TOKEN` 后对所有
+/// 请求（含 /metrics/prometheus）鉴权，缺头会 403 导致整个池被误判下线。
+fn poll_sfu_load(url: &str, token: Option<&str>) -> Result<u64, PollErr> {
+    let mut req = ureq::get(url).timeout(Duration::from_secs(3));
+    if let Some(token) = token {
+        req = req.set("X-Internal-Token", token);
+    }
+    match req.call() {
+        Ok(resp) => match resp.into_string() {
+            Ok(body) => Ok(parse_max_shard_load(&body)),
+            Err(_) => Err(PollErr::Body),
+        },
+        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
+            Err(PollErr::Unauthorized)
+        }
+        Err(ureq::Error::Status(code, _)) => Err(PollErr::Http(code)),
+        Err(_) => Err(PollErr::Unreachable),
+    }
+}
+
+/// 后台轮询各 SFU 的负载；网络/HTTP 失败按冷却期标记下线，
+/// 401/403 属配置错误（SFU 本身健康），保留上次负载不标记下线（error 日志
+/// 按每 SFU 每 300s 节流，防刷屏）。
+/// 同时淘汰「无活跃 peer 且空闲超时」的房间粘性映射（防 room_sfu 无界增长）。
+fn poll_sfu_pool(
+    pool: Arc<SfuPool>,
+    rooms: Rooms,
+    interval_secs: u64,
+    cooldown_secs: u64,
+    token: Option<String>,
+    sticky_ttl_secs: u64,
+) {
+    let mut last_unauth_log = vec![0u64; pool.urls.len()];
     loop {
-        for i in 0..pool.urls.len() {
+        // enumerate 而非 0..len：循环体并行索引 urls/loads/down_until/
+        // last_unauth_log 四个集合，range 写法触发 needless_range_loop。
+        for (i, _url) in pool.urls.iter().enumerate() {
             let url = format!("{}/metrics/prometheus", pool.urls[i]);
-            match ureq::get(&url).timeout(Duration::from_secs(3)).call() {
-                Ok(resp) if resp.status() < 400 => match resp.into_string() {
-                    Ok(body) => {
-                        pool.loads[i].store(parse_max_shard_load(&body), Ordering::Relaxed);
-                        pool.down_until[i].store(0, Ordering::Relaxed);
+            match poll_sfu_load(&url, token.as_deref()) {
+                Ok(load) => {
+                    pool.loads[i].store(load, Ordering::Relaxed);
+                    pool.down_until[i].store(0, Ordering::Relaxed);
+                }
+                Err(PollErr::Unauthorized) => {
+                    let now = unix_secs();
+                    if now.saturating_sub(last_unauth_log[i]) >= 300 {
+                        error!(
+                            "sfu pool: {url} metrics 401/403: SFU_TOKEN 与 SFU INTERNAL_TOKEN \
+                             不匹配（配置错误）；保留上次负载，不标记下线"
+                        );
+                        last_unauth_log[i] = now;
+                    } else {
+                        debug!("sfu pool: {url} metrics 401/403 (log throttled)");
                     }
-                    Err(e) => {
-                        warn!("sfu pool: {url} read body failed ({e}); mark down");
-                        pool.down_until[i].store(unix_secs() + cooldown_secs, Ordering::Relaxed);
-                    }
-                },
-                Ok(resp) => {
-                    warn!("sfu pool: {url} http {}", resp.status());
+                }
+                Err(PollErr::Http(code)) => {
+                    warn!("sfu pool: {url} http {code}; mark down");
                     pool.down_until[i].store(unix_secs() + cooldown_secs, Ordering::Relaxed);
                 }
-                Err(e) => {
-                    warn!("sfu pool: {url} unreachable ({e}); mark down");
+                Err(PollErr::Unreachable) => {
+                    warn!("sfu pool: {url} unreachable; mark down");
+                    pool.down_until[i].store(unix_secs() + cooldown_secs, Ordering::Relaxed);
+                }
+                Err(PollErr::Body) => {
+                    warn!("sfu pool: {url} read body failed; mark down");
                     pool.down_until[i].store(unix_secs() + cooldown_secs, Ordering::Relaxed);
                 }
             }
+        }
+        let alive: std::collections::HashSet<String> = {
+            let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
+            rooms.keys().cloned().collect()
+        };
+        let evicted = pool.evict_stale(&alive, sticky_ttl_secs, unix_secs());
+        if evicted > 0 {
+            debug!(
+                "sfu pool: evicted {evicted} idle sticky room mappings (ttl {sticky_ttl_secs}s)"
+            );
         }
         std::thread::sleep(Duration::from_secs(interval_secs));
     }
@@ -259,6 +362,57 @@ fn quota_ok(
         return Err("server full");
     }
     Ok(())
+}
+
+/// SIGNAL_PLAIN_PORT 解析：未设置 → 默认 3003；off/disabled/none（不区分大小写）
+/// → None（完全关闭明文服务器）；非法值告警并回退 3003（配置笔误不静默改行为）。
+fn parse_plain_port(raw: Option<&str>) -> Option<u16> {
+    const DEFAULT: u16 = 3003;
+    match raw {
+        None => Some(DEFAULT),
+        Some(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "off" | "disabled" | "none" => None,
+            other => match other.parse::<u16>() {
+                Ok(port) => Some(port),
+                Err(_) => {
+                    warn!("invalid SIGNAL_PLAIN_PORT={v:?}; fallback to {DEFAULT}");
+                    Some(DEFAULT)
+                }
+            },
+        },
+    }
+}
+
+/// 预 Join（未认证/未加入）连接计数：MAX_TOTAL_CLIENTS 只在 Join 后计数，
+/// 认证前的连接同样占用线程与 fd，单独设限防连接堆积 DoS。
+static PREJOIN_CLIENTS: AtomicUsize = AtomicUsize::new(0);
+
+/// 预占一个 pre-join 槽位：`None`=超上限拒绝；`Some(counted)`=放行，
+/// `counted` 指示是否实际计数（cap=0 不限时释放须传回原值，防止多减）。
+fn reserve_prejoin(counter: &AtomicUsize, cap: usize) -> Option<bool> {
+    if cap == 0 {
+        return Some(false);
+    }
+    if counter.fetch_add(1, Ordering::Relaxed) >= cap {
+        counter.fetch_sub(1, Ordering::Relaxed);
+        return None;
+    }
+    Some(true)
+}
+
+/// 释放 pre-join 槽位（仅在 `reserve_prejoin` 实际计数时递减）。
+fn release_prejoin(counter: &AtomicUsize, counted: bool) {
+    if counted {
+        counter.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// SFU_STICKY_TTL_SECS 解析：0/非法 → 默认 6h（TTL=0 会让每轮轮询清空
+/// 全部粘性映射，摧毁房间粘性）。
+fn parse_sticky_ttl(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(6 * 3600)
 }
 
 #[cfg(unix)]
@@ -458,9 +612,12 @@ fn main() {
         let _ = SFU_POOL.set(pool.clone());
         let interval = config.sfu_poll_interval_secs.max(1);
         let cooldown = config.sfu_fail_cooldown_secs;
+        let token = config.sfu_token.clone();
+        let sticky_ttl = config.sfu_sticky_ttl_secs;
+        let poll_rooms = rooms.clone();
         std::thread::Builder::new()
             .name("sfu-poller".into())
-            .spawn(move || poll_sfu_pool(pool, interval, cooldown))
+            .spawn(move || poll_sfu_pool(pool, poll_rooms, interval, cooldown, token, sticky_ttl))
             .ok();
     }
 
@@ -585,19 +742,19 @@ fn main() {
             .expect("spawn bridge monitor");
     }
 
-    // 明文 WS（开发用；生产只开 WSS 端口）
-    let plain_port: u16 = std::env::var("SIGNAL_PLAIN_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(3003);
-    let plain_config = config.clone();
-    let plain_rooms = rooms.clone();
-    let plain = rouille::Server::new(format!("0.0.0.0:{plain_port}"), move |request| {
-        handle(request, plain_config.clone(), plain_rooms.clone())
-    })
-    .expect("start plain signaling server");
-    std::thread::spawn(move || plain.run());
-    info!("Signaling (WS plain) listening on :{plain_port}");
+    // 明文 WS（开发用；生产只开 WSS 端口，SIGNAL_PLAIN_PORT=off 可完全关闭）。
+    if let Some(plain_port) = parse_plain_port(std::env::var("SIGNAL_PLAIN_PORT").ok().as_deref()) {
+        let plain_config = config.clone();
+        let plain_rooms = rooms.clone();
+        let plain = rouille::Server::new(format!("0.0.0.0:{plain_port}"), move |request| {
+            handle(request, plain_config.clone(), plain_rooms.clone())
+        })
+        .expect("start plain signaling server");
+        std::thread::spawn(move || plain.run());
+        info!("Signaling (WS plain) listening on :{plain_port}");
+    } else {
+        info!("Signaling (WS plain) disabled by SIGNAL_PLAIN_PORT=off");
+    }
 
     #[cfg(unix)]
     install_signal_handlers();
@@ -781,6 +938,21 @@ fn load_config() -> Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(30),
+        sfu_sticky_ttl_secs: parse_sticky_ttl(std::env::var("SFU_STICKY_TTL_SECS").ok().as_deref()),
+        max_prejoin_clients: std::env::var("SIGNAL_MAX_PREJOIN_CLIENTS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(256),
+        allowed_origins: std::env::var("SIGNAL_ALLOWED_ORIGINS")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty()),
         bridge,
         bridge_idle_secs: std::env::var("BRIDGE_IDLE_SECS")
             .ok()
@@ -868,6 +1040,17 @@ fn auth_result(config: &Config, token: Option<&str>, room: &str, role: Role) -> 
 
 fn handle(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
     if request.method() == "GET" && request.url() == "/ws" {
+        // Origin 白名单（可选）：浏览器 WebSocket 必带 Origin（CSWSH 防护）；
+        // 非浏览器客户端（CLI/native）无 Origin 头，始终放行。
+        if let Some(allowed) = &config.allowed_origins
+            && let Some(origin) = request.header("Origin")
+            && !allowed
+                .iter()
+                .any(|a| a == "*" || a.eq_ignore_ascii_case(origin))
+        {
+            warn!("ws rejected: origin {origin} not in allowlist");
+            return Response::text("origin not allowed").with_status_code(403);
+        }
         return match websocket::start(request, None::<&str>) {
             Ok((response, rx)) => {
                 std::thread::spawn(move || session_loop(rx, config, rooms));
@@ -924,7 +1107,23 @@ fn total_clients() -> usize {
 }
 
 fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, rooms: Rooms) {
-    let ws = Arc::new(Mutex::new(rx.recv().expect("websocket accepted")));
+    // 预 Join 连接上限（H2 缓解）：未认证/未加入的连接同样占线程与 fd，
+    // 且不受 MAX_TOTAL_CLIENTS 约束（其只在 Join 后计数）；超限直接断开。
+    let Some(mut prejoin_counted) = reserve_prejoin(&PREJOIN_CLIENTS, config.max_prejoin_clients)
+    else {
+        warn!(
+            "reject connection: too many pre-join connections (SIGNAL_MAX_PREJOIN_CLIENTS={})",
+            config.max_prejoin_clients
+        );
+        return;
+    };
+    // 兜底：rouille 升级线程理论上总会在 recv 前 build 出 Websocket；若异常
+    // 未交付，必须释放 pre-join 槽位再退出（避免 panic 留下永久泄漏）。
+    let Ok(ws_owned) = rx.recv() else {
+        release_prejoin(&PREJOIN_CLIENTS, prejoin_counted);
+        return;
+    };
+    let ws = Arc::new(Mutex::new(ws_owned));
     info!("session open");
     // 本连接加入时的 peer_id：用于校验 Description.from 属于本连接（防冒用）。
     let mut own_peer_id: Option<String> = None;
@@ -936,7 +1135,10 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
             None => break,
         };
 
-        // 消息体上限：防恶意超大帧导致无界分配（信令消息远小于 1MiB）。
+        // 消息体上限（信令消息远小于 1MiB）。注意：rouille 的 next() 在返回前
+        // 已把整条消息缓冲进内存，此检查只能阻止后续解析/转发——因此超限直接
+        // 断开连接（而非仅回错误），终止该连接上的重复分配。真正的分配前上限
+        // 需更换 WS 层实现（如 tungstenite 的 max_message_size）。
         if msg.len() > 1 << 20 {
             send(
                 ws.clone(),
@@ -944,7 +1146,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                     message: "message too large".into(),
                 },
             );
-            continue;
+            break;
         }
 
         let parsed: Result<SignalMessage, _> = serde_json::from_str(&msg);
@@ -1014,33 +1216,15 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                             // 客户端触发进程 spawn），再尝试桥接——viewer 在本 PoP
                             // 经桥收流（不 Redirect）；桥失败/超时/冷却回退 v1 Redirect。
                             if config.bridge.is_some() {
-                                // 认证先行（纯校验，不占配额；下方正式流程会再验一次）。
-                                let claims_pre =
-                                    auth_result(&config, auth_token.as_deref(), &room, role);
-                                let auth_ok_pre = if config.jwt_secret.is_some()
-                                    || !config.auth_tokens.is_empty()
-                                {
-                                    claims_pre.is_some()
-                                } else {
-                                    true
-                                };
-                                if !auth_ok_pre {
-                                    send(
-                                        ws.clone(),
-                                        SignalMessage::Error {
-                                            message: "auth failed".into(),
-                                        },
-                                    );
-                                    break;
-                                }
-                                // 配额先行（纯检查）：桥自身 publisher 腿豁免。
+                                // 配额先行（纯检查，spawn 之前拦截）：桥自身 publisher 腿豁免。
+                                // 认证无需重查——Join 入口已先验（同输入的确定性校验）。
                                 let bridge_leg_pre = config.bridge.as_ref().is_some_and(|b| {
                                     role == Role::Publisher && b.is_running(&room)
                                 });
                                 if !bridge_leg_pre {
                                     let room_len = rooms
                                         .lock()
-                                        .unwrap()
+                                        .unwrap_or_else(|e| e.into_inner())
                                         .get(&room)
                                         .map(|peers| peers.len())
                                         .unwrap_or(0);
@@ -1182,7 +1366,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                             .get()
                             .expect("user conns initialized")
                             .lock()
-                            .unwrap();
+                            .unwrap_or_else(|e| e.into_inner());
                         if let Err(reason) = user_quota_take(&mut uc, sub, max_conns) {
                             TOTAL_CLIENTS
                                 .get()
@@ -1216,7 +1400,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                                 .get()
                                 .expect("user conns initialized")
                                 .lock()
-                                .unwrap();
+                                .unwrap_or_else(|e| e.into_inner());
                             user_quota_release(&mut uc, sub.as_str());
                         }
                         info!("reject join room={room} role={role:?}: room full");
@@ -1251,6 +1435,9 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 };
                 info!("peer {peer_id} joined room {room} as {role:?}");
                 own_peer_id = Some(peer_id.clone());
+                // 已正式计入 TOTAL_CLIENTS，释放 pre-join 槽位。
+                release_prejoin(&PREJOIN_CLIENTS, prejoin_counted);
+                prejoin_counted = false;
                 send(
                     ws.clone(),
                     SignalMessage::Joined {
@@ -1288,7 +1475,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 // #12：把 peer 角色传给 SFU，SFU 据此拒绝 viewer 发布媒体。
                 let role = rooms
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|e| e.into_inner())
                     .get(&room)
                     .and_then(|peers| peers.iter().find(|p| p.id == from))
                     .map(|p| p.role)
@@ -1319,6 +1506,9 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
             | SignalMessage::Redirect { .. } => {}
         }
     }
+
+    // 未 Join 即断开：释放 pre-join 槽位。
+    release_prejoin(&PREJOIN_CLIENTS, prejoin_counted);
 
     // 断开：移除并广播 PeerLeft
     let found = {
@@ -1351,7 +1541,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
             .get()
             .expect("user conns initialized")
             .lock()
-            .unwrap();
+            .unwrap_or_else(|e| e.into_inner());
         user_quota_release(&mut uc, sub);
     }
     info!("peer {peer_id} left room {room}");
@@ -1461,6 +1651,9 @@ mod tests {
             sfu_token: None,
             sfu_poll_interval_secs: 5,
             sfu_fail_cooldown_secs: 30,
+            sfu_sticky_ttl_secs: 6 * 3600,
+            max_prejoin_clients: 0,
+            allowed_origins: None,
             bridge: None,
             bridge_idle_secs: Duration::from_secs(300),
             bridge_monitor_interval: Duration::from_secs(15),
@@ -1656,8 +1849,6 @@ mod tests {
         );
     }
 
-    use super::*;
-
     /// 回归：peer_id 必须在快速连续 Join 下保持唯一（粗时钟下纳秒时间戳会碰撞，
     /// 碰撞会让 Description 按 id 查角色时命中错误条目，导致 SFU #12 误拒）。
     #[test]
@@ -1705,5 +1896,158 @@ mod tests {
             let dup = !seen.insert(id.clone());
             assert!(!dup, "duplicate peer_id: {id}");
         }
+    }
+
+    /// 极简 HTTP 假服务器：接受一个连接，读取请求头，回固定响应。
+    fn fake_http_server(
+        status_line: &'static str,
+        body: &'static str,
+    ) -> (std::net::SocketAddr, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut req = String::new();
+            let mut buf = [0u8; 4096];
+            // GET 无 body，读到请求头结束即可。
+            while !req.contains("\r\n\r\n") {
+                let n = match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
+                req.push_str(&String::from_utf8_lossy(&buf[..n]));
+            }
+            let _ = tx.send(req);
+            let resp = format!(
+                "{status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        });
+        (addr, rx)
+    }
+
+    /// 回归（H1）：metrics 探测必须携带 X-Internal-Token——SFU 内部端口设置
+    /// INTERNAL_TOKEN 后对所有请求鉴权，缺头会 403 导致整个池被误判下线。
+    #[test]
+    fn poll_sfu_load_sends_token_and_parses() {
+        let body = "aerodesk_sfu_shard_load{shard=\"0\"} 0.9000\n";
+        let (addr, rx) = fake_http_server("HTTP/1.1 200 OK", body);
+        let url = format!("http://{addr}/metrics/prometheus");
+        assert_eq!(poll_sfu_load(&url, Some("tok123")), Ok(9000));
+        let req = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("fake server got request");
+        assert!(
+            req.to_ascii_lowercase()
+                .contains("x-internal-token: tok123"),
+            "metrics 探测必须带内部 token：{req}"
+        );
+    }
+
+    /// 403 必须归类为 Unauthorized（配置错误），而非网络故障。
+    #[test]
+    fn poll_sfu_load_classifies_unauthorized() {
+        let (addr, _rx) = fake_http_server("HTTP/1.1 403 Forbidden", "");
+        let url = format!("http://{addr}/metrics/prometheus");
+        assert_eq!(poll_sfu_load(&url, None), Err(PollErr::Unauthorized));
+    }
+
+    #[test]
+    fn reserve_prejoin_caps_and_releases() {
+        let counter = AtomicUsize::new(0);
+        assert_eq!(
+            reserve_prejoin(&counter, 0),
+            Some(false),
+            "cap=0 不限且不计数"
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+        assert_eq!(reserve_prejoin(&counter, 2), Some(true));
+        assert_eq!(reserve_prejoin(&counter, 2), Some(true));
+        assert_eq!(reserve_prejoin(&counter, 2), None, "超过上限拒绝");
+        assert_eq!(counter.load(Ordering::Relaxed), 2, "被拒的不得占位");
+        release_prejoin(&counter, true);
+        assert_eq!(reserve_prejoin(&counter, 2), Some(true), "释放后可再进");
+        release_prejoin(&counter, false);
+        release_prejoin(&counter, true);
+        release_prejoin(&counter, true);
+        assert_eq!(counter.load(Ordering::Relaxed), 0, "未计数的释放不得多减");
+    }
+
+    #[test]
+    fn parse_plain_port_variants() {
+        assert_eq!(parse_plain_port(None), Some(3003));
+        assert_eq!(parse_plain_port(Some("3005")), Some(3005));
+        assert_eq!(parse_plain_port(Some("off")), None);
+        assert_eq!(parse_plain_port(Some("DISABLED")), None);
+        assert_eq!(parse_plain_port(Some("none")), None);
+        assert_eq!(parse_plain_port(Some("bad")), Some(3003), "非法值回退默认");
+    }
+
+    #[test]
+    fn origin_whitelist_blocks_and_allows() {
+        let mut config = cfg("s", None);
+        config.allowed_origins = Some(vec!["https://good.example".into()]);
+        let config = Arc::new(config);
+        let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
+
+        // 非白名单 Origin → 403。
+        let req = Request::fake_http(
+            "GET",
+            "/ws",
+            vec![("Origin".into(), "https://evil.example".into())],
+            Vec::new(),
+        );
+        assert_eq!(handle(&req, config.clone(), rooms.clone()).status_code, 403);
+
+        // 白名单 Origin / 无 Origin（CLI/native）→ 通过 Origin 检查，
+        // 进入 websocket 升级（fake 请求缺升级头 → 400）。
+        let req = Request::fake_http(
+            "GET",
+            "/ws",
+            vec![("Origin".into(), "https://good.example".into())],
+            Vec::new(),
+        );
+        assert_eq!(handle(&req, config.clone(), rooms.clone()).status_code, 400);
+        let req = Request::fake_http("GET", "/ws", vec![], Vec::new());
+        assert_eq!(handle(&req, config, rooms).status_code, 400);
+    }
+
+    /// 粘性映射淘汰（M3）：有活跃 peer 的房间**永不淘汰**（即使映射空闲超过
+    /// TTL——审查反馈：Join 不调用 select，静默信令的活跃房间不能用时间戳判死）；
+    /// 无 peer 且空闲超过 TTL 的房间才被淘汰。
+    #[test]
+    fn sticky_map_evicts_idle_rooms() {
+        let pool = SfuPool::new(vec!["http://s1".into(), "http://s2".into()]);
+        let _ = pool.select("live-quiet");
+        let _ = pool.select("stale");
+        {
+            let mut reg = pool.room_sfu.lock().unwrap_or_else(|e| e.into_inner());
+            reg.get_mut("live-quiet").unwrap().1 = unix_secs() - 7 * 3600;
+            reg.get_mut("stale").unwrap().1 = unix_secs() - 7 * 3600;
+        }
+        let mut alive = std::collections::HashSet::new();
+        alive.insert("live-quiet".to_string());
+        let evicted = pool.evict_stale(&alive, 6 * 3600, unix_secs());
+        assert_eq!(evicted, 1, "只淘汰无 peer 且空闲超过 TTL 的房间");
+        let reg = pool.room_sfu.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            reg.contains_key("live-quiet"),
+            "有活跃 peer 的房间即使映射空闲超时也不得淘汰"
+        );
+        assert!(!reg.contains_key("stale"));
+    }
+
+    /// SFU_STICKY_TTL_SECS 解析：0/非法 → 默认 6h（TTL=0 会让每轮轮询清空
+    /// 全部粘性映射，摧毁房间粘性）。
+    #[test]
+    fn parse_sticky_ttl_defaults_and_rejects_zero() {
+        assert_eq!(parse_sticky_ttl(None), 6 * 3600);
+        assert_eq!(parse_sticky_ttl(Some("0")), 6 * 3600);
+        assert_eq!(parse_sticky_ttl(Some("bad")), 6 * 3600);
+        assert_eq!(parse_sticky_ttl(Some("3600")), 3600);
     }
 }

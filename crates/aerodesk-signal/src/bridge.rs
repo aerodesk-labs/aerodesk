@@ -106,7 +106,7 @@ impl BridgeManager {
         self.reap_dead();
         self.running
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .map(|(r, rb)| (r.clone(), rb.epoch))
             .collect()
