@@ -111,6 +111,7 @@ pub fn run_generic_viewer(
     input_rx: std::sync::mpsc::Receiver<String>,
     file_cmd_rx: std::sync::mpsc::Receiver<crate::FileCmd>,
     stop: Arc<AtomicBool>,
+    view_only: Arc<AtomicBool>,
 ) {
     let ui2 = ui_weak.clone();
     crate::generic_viewer::run_viewer_generic(
@@ -122,6 +123,7 @@ pub fn run_generic_viewer(
         input_rx,
         file_cmd_rx,
         stop,
+        view_only,
         decoder_label(),
         mk_viewer_decoder,
         move || crate::SlintRenderer::new(ui2.clone(), session_idx),

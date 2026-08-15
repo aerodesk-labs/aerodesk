@@ -479,6 +479,8 @@ export component AppWindow inherits Window {
     in-out property <string> pw-edit: "";
 
     callback connect();
+    callback connect-view();
+    callback connect-camera();
     callback disconnect();
     callback set-tab(int);
     callback connect-recent(string);
@@ -758,62 +760,58 @@ export component AppWindow inherits Window {
                                 placeholder: "输入对端 ID";
                                 font-size: 22px;
                             }
-                            HorizontalLayout {
-                                cross-axis-alignment: center;
-                                spacing: 4px;
-                                Text { text: "访问凭证 / JWT（可选）"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
-                                Rectangle {
-                                    width: 16px;
-                                    height: 18px;
-                                    MIcon { icon: "\u{e8fd}"; size: 13px; color: #9a9aa0; }   // help_outline
-                                    Tooltip {
-                                        Rectangle {
-                                            background: #3c4043;
-                                            border-radius: 4px;
-                                            padding-left: 8px;
-                                            padding-right: 8px;
-                                            padding-top: 4px;
-                                            padding-bottom: 4px;
-                                            Text { text: "服务器管理员分发的连接授权凭证（JWT/静态 token）；未配置认证时留空"; font-size: 12px; color: #ffffff; }
-                                        }
+                            VerticalLayout {
+                                spacing: 8px;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    RdButton {
+                                        text: connecting ? "连接中…" : "远程控制";
+                                        enabled: !connecting && !root.in-session;
+                                        primary: true;
+                                        clicked => { root.connect(); }
+                                    }
+                                    RdButton {
+                                        text: "观看";
+                                        enabled: !connecting && !root.in-session;
+                                        clicked => { root.connect-view(); }
+                                    }
+                                    RdButton {
+                                        text: "摄像头";
+                                        enabled: !connecting && !root.in-session;
+                                        clicked => { root.connect-camera(); }
                                     }
                                 }
-                            }
-                            RdInput {
-                                text <=> root.token-input;
-                                placeholder: "留空或填管理员给的凭证";
-                                font-size: 15px;
-                            }
-                            Text { text: "信令服务器"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
-                            RdInput {
-                                text <=> root.server-input;
-                                placeholder: "signal.aerodesk.io 或 127.0.0.1:3003";
-                                font-size: 14px;
-                                edited => { root.server-default = root.server-input; root.auto-save(); }
-                            }
-                            HorizontalLayout {
-                                cross-axis-alignment: center;
-                                spacing: 8px;
-                                Rectangle { width: 0px; }
-                                RdButton {
-                                    text: connecting ? "连接中…" : (root.conn-state == 3 ? "重连" : "连接");
-                                    enabled: !connecting && !root.in-session;
-                                    primary: true;
-                                    width: 120px;
-                                    clicked => { root.connect(); }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    RdButton {
+                                        text: "文件传输";
+                                        enabled: false;
+                                        clicked => { root.status = "文件传输建设中"; }
+                                    }
+                                    RdButton {
+                                        text: "发消息";
+                                        enabled: false;
+                                        clicked => { root.status = "发消息建设中"; }
+                                    }
+                                    RdButton {
+                                        text: "终端";
+                                        enabled: false;
+                                        clicked => { root.status = "终端建设中"; }
+                                    }
+                                    RdButton {
+                                        text: "断开";
+                                        enabled: connecting || root.in-session || root.conn-state == 2;
+                                        clicked => { root.disconnect(); }
+                                    }
                                 }
-                                RdButton {
-                                    text: "断开";
-                                    width: 76px;
-                                    enabled: connecting || root.in-session || root.conn-state == 2;
-                                    clicked => { root.disconnect(); }
-                                }
-                                Text {
-                                    text: root.status;
-                                    color: root.conn-state == 2 ? #34a853 : (root.conn-state == 3 ? #d93025 : #9a9aa0);
-                                    font-size: 14px;
-                                    vertical-alignment: center;
-                                    vertical-stretch: 0;
+                                HorizontalLayout {
+                                    Text {
+                                        text: root.status;
+                                        color: root.conn-state == 2 ? #34a853 : (root.conn-state == 3 ? #d93025 : #9a9aa0);
+                                        font-size: 14px;
+                                        vertical-alignment: center;
+                                        vertical-stretch: 0;
+                                    }
                                 }
                             }
                         }
