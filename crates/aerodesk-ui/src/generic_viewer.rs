@@ -104,6 +104,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     input_rx: std::sync::mpsc::Receiver<String>,
     cmd_rx: std::sync::mpsc::Receiver<aerodesk_protocol::cmd::CmdRequest>,
     file_cmd_rx: std::sync::mpsc::Receiver<crate::FileCmd>,
+    chat_cmd_rx: std::sync::mpsc::Receiver<crate::ChatCmd>,
     stop: Arc<AtomicBool>,
     view_only: Arc<AtomicBool>,
     decoder_label: &'static str,
@@ -280,6 +281,33 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                 }
             }
         }
+        // #458 聊天消息：UI 聊天窗口 → chat data channel → SFU → 被控端。
+        while let Ok(cmd) = chat_cmd_rx.try_recv() {
+            match cmd {
+                crate::ChatCmd::Send(text) => {
+                    let text = text.trim().to_string();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let payload = serde_json::json!({
+                        "sender": "我",
+                        "text": text,
+                        "timestamp_ms": crate::system_time_millis(),
+                    });
+                    if let Ok(json) = serde_json::to_string(&payload) {
+                        let sent = live
+                            .endpoint
+                            .send_channel_data("chat", false, json.as_bytes());
+                        if !sent {
+                            crate::set_message_window_status(
+                                session_idx,
+                                "发送失败：chat 通道未就绪".to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
         live.socket
             .set_read_timeout(Some(Duration::from_millis(10)))
             .ok();
@@ -330,6 +358,13 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                 crate::with_session_ui_state(&ui_weak, session_idx, move |s| {
                     s.cursor = Some((cx, cy));
                 });
+            }
+            // #458 聊天消息：被控端经 chat 通道回传 → 聊天窗口消息列表。
+            if let ClientEvent::ChannelData(cid, _, data) = &ev
+                && live.endpoint.channel_label(*cid).as_deref() == Some("chat")
+                && let Some((sender, text)) = crate::decode_chat_text(data)
+            {
+                crate::append_chat_message(session_idx, sender, text, false);
             }
             if let ClientEvent::Media(data) = ev {
                 media_evts += 1;

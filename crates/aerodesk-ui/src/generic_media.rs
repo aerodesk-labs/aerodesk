@@ -111,6 +111,7 @@ pub fn run_generic_viewer(
     input_rx: std::sync::mpsc::Receiver<String>,
     cmd_rx: std::sync::mpsc::Receiver<aerodesk_protocol::cmd::CmdRequest>,
     file_cmd_rx: std::sync::mpsc::Receiver<crate::FileCmd>,
+    chat_cmd_rx: std::sync::mpsc::Receiver<crate::ChatCmd>,
     stop: Arc<AtomicBool>,
     view_only: Arc<AtomicBool>,
 ) {
@@ -124,6 +125,7 @@ pub fn run_generic_viewer(
         input_rx,
         cmd_rx,
         file_cmd_rx,
+        chat_cmd_rx,
         stop,
         view_only,
         decoder_label(),
