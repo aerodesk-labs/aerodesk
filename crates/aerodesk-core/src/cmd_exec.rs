@@ -856,7 +856,10 @@ mod tests {
     }
 
     /// 回归：`///` 斜杠变体 / Data 卷 firmlink / 用户级敏感目录 / 白名单不可豁免穿越。
+    /// Unix 专属：断言路径（/etc、firmlink、~/.ssh、LaunchAgents）与 HOME 展开
+    /// 均为 POSIX 语义，Windows 无对应概念（且 HOME 未设置会 panic）。
     #[test]
+    #[cfg(unix)]
     fn forbidden_write_paths_block_bypass_variants() {
         // 多余斜杠（POSIX 等价 /etc/x）：单遍归一化会漏，循环折叠后命中。
         assert!(is_forbidden_write_path("///etc/x"));
