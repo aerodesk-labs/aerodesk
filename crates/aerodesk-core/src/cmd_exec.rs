@@ -30,14 +30,22 @@ pub const MAX_READ_BYTES: usize = 700 * 1024;
 pub const DEFAULT_READ_MAX_BYTES: usize = MAX_READ_BYTES;
 
 /// 危险/交互式命令模式（默认禁止）。命中即拦截，除非命令以白名单前缀开头。
+/// 匹配前先把空白折叠为单空格（防 "rm  -rf" 双空格绕过）；单词模式按整 token
+/// 相等匹配（防 "anymore" 命中 "more"、"docker stop" 命中 "top" 这类子串误伤），
+/// 多词模式在归一化串上 contains。
 pub fn is_dangerous(command: &str) -> bool {
-    let c = command.trim().to_ascii_lowercase();
+    let c: String = command
+        .trim()
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     const PATTERNS: &[&str] = &[
         // 破坏性
         "rm -rf",
         "rm -fr",
         "rm -r -f",
-        "dd ",
+        "dd",
         "mkfs",
         "fdisk",
         "diskutil erase",
@@ -57,6 +65,8 @@ pub fn is_dangerous(command: &str) -> bool {
         "reg delete",
         "chmod -r 777 /",
         "chown -r /",
+        // 源为根目录的搬移/拷贝（"mv / 文件"）——尾随空格保留，
+        // 避免误伤 "mv /Users/foo /tmp" 这类正常命令。
         "mv / ",
         "cp -r / ",
         // 交互式（AI 无法应答）
@@ -65,10 +75,10 @@ pub fn is_dangerous(command: &str) -> bool {
         "emacs",
         "less",
         "more",
-        "man ",
-        "ssh ",
-        "telnet ",
-        "ftp ",
+        "man",
+        "ssh",
+        "telnet",
+        "ftp",
         "top",
         "htop",
         "crontab -e",
@@ -85,7 +95,13 @@ pub fn is_dangerous(command: &str) -> bool {
         "echo > /etc/",
         "mkpasswd",
     ];
-    PATTERNS.iter().any(|p| c.contains(p))
+    PATTERNS.iter().any(|p| {
+        if p.contains(' ') {
+            c.contains(p)
+        } else {
+            c.split(' ').any(|t| t == *p)
+        }
+    })
 }
 
 /// 白名单文件路径：`$AERODESK_CMD_ALLOWLIST` 或 `$HOME/AeroDesk/cmd-allowlist.txt`。
@@ -521,16 +537,31 @@ fn audit_opt(path: Option<&Path>, command: &str, cwd: Option<&str>, out: &CmdOut
 }
 
 /// 写文件敏感路径（默认禁止，白名单前缀可放行）：系统目录/关键配置。
-pub fn is_forbidden_write_path(path: &str) -> bool {
+/// 归一化写入路径：`~` 展开为 $HOME + 连续斜杠折叠为单斜杠。
+/// 单遍 `replace("//", "/")` 会把 `///etc/x` 归一成 `//etc/x`（POSIX 等价 `/etc/x`），
+/// 从而绕过前缀检查——必须循环折叠。
+fn normalize_write_path(path: &str) -> String {
     let p = path.trim();
     let abs = if p.starts_with('~') {
         std::env::var("HOME")
-            .map(|h| format!("{h}{}", &p[1..]))
+            .map(|h| format!("{}{}", h.trim_end_matches('/'), &p[1..]))
             .unwrap_or_else(|_| p.to_string())
     } else {
         p.to_string()
     };
-    let norm = abs.replace("//", "/");
+    let mut norm = abs.replace("//", "/");
+    while norm.contains("//") {
+        norm = norm.replace("//", "/");
+    }
+    norm
+}
+
+/// 路径穿越（`/../`）：无论白名单如何都禁止（见 [`write_file`]）。
+fn contains_traversal(norm: &str) -> bool {
+    norm == "/" || norm.contains("/../") || norm.ends_with("/..")
+}
+
+fn is_forbidden_write_prefix(norm: &str) -> bool {
     const FORBIDDEN_PREFIXES: &[&str] = &[
         "/etc/",
         "/System/",
@@ -542,8 +573,32 @@ pub fn is_forbidden_write_path(path: &str) -> bool {
         "/private/etc/",
         "/private/var/db/",
         "/cores/",
+        // 持久化/提权目录（LaunchAgent/LaunchDaemon 守护项安装）
+        "/Library/LaunchAgents/",
+        "/Library/LaunchDaemons/",
+        // Data 卷 firmlink 可绕过上面的 /etc、/usr 前缀
+        "/System/Volumes/Data/etc/",
+        "/System/Volumes/Data/usr/",
     ];
-    FORBIDDEN_PREFIXES.iter().any(|f| norm.starts_with(f)) || norm.contains("/../") || norm == "/"
+    if FORBIDDEN_PREFIXES.iter().any(|f| norm.starts_with(f)) {
+        return true;
+    }
+    // 用户级凭据/持久化目录（~/.ssh、~/Library/LaunchAgents）。
+    if let Ok(home) = std::env::var("HOME") {
+        let home = home.trim_end_matches('/');
+        for sub in ["/.ssh/", "/Library/LaunchAgents/"] {
+            if norm.starts_with(&format!("{home}{sub}")) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 写路径是否默认禁止（敏感前缀或路径穿越）。
+pub fn is_forbidden_write_path(path: &str) -> bool {
+    let norm = normalize_write_path(path);
+    is_forbidden_write_prefix(&norm) || contains_traversal(&norm)
 }
 
 /// 读文件（上限 max_bytes，默认 4MB，硬上限 16MB）。委托 [`DefaultCommandExecutor`]。
@@ -553,11 +608,14 @@ pub fn read_file(path: &str, max_bytes: Option<usize>) -> Result<Vec<u8>, String
 
 /// 写文件（敏感路径默认禁止，白名单前缀放行；data 为 base64）。
 /// 策略检查后委托 [`DefaultCommandExecutor`] 原始写入。
+/// 白名单按归一化路径匹配前缀（防 `//` 变体绕过）；
+/// 路径穿越（`/../`）**不可**被白名单豁免。
 pub fn write_file(path: &str, data_b64: &str, allowlist: &[String]) -> Result<(), String> {
+    let norm = normalize_write_path(path);
     let allowed = allowlist
         .iter()
-        .any(|p| !p.is_empty() && path.starts_with(p.as_str()));
-    if is_forbidden_write_path(path) && !allowed {
+        .any(|p| !p.is_empty() && norm.starts_with(&normalize_write_path(p)));
+    if contains_traversal(&norm) || (is_forbidden_write_prefix(&norm) && !allowed) {
         return Err(format!("blocked by policy: write {path}"));
     }
     let data = decode_b64(data_b64).ok_or_else(|| "invalid base64".to_string())?;
@@ -795,6 +853,70 @@ mod tests {
         assert!(is_forbidden_write_path("/tmp/a/../b"));
         assert!(!is_forbidden_write_path("/tmp/aerodesk-test.txt"));
         assert!(!is_forbidden_write_path("relative/path.txt"));
+    }
+
+    /// 回归：`///` 斜杠变体 / Data 卷 firmlink / 用户级敏感目录 / 白名单不可豁免穿越。
+    #[test]
+    fn forbidden_write_paths_block_bypass_variants() {
+        // 多余斜杠（POSIX 等价 /etc/x）：单遍归一化会漏，循环折叠后命中。
+        assert!(is_forbidden_write_path("///etc/x"));
+        assert!(is_forbidden_write_path("//etc//x"));
+        // Data 卷 firmlink 绕过 /etc 前缀。
+        assert!(is_forbidden_write_path("/System/Volumes/Data/etc/x"));
+        // 用户级凭据/持久化目录。
+        assert!(is_forbidden_write_path("~/.ssh/authorized_keys"));
+        let home = std::env::var("HOME").unwrap();
+        assert!(is_forbidden_write_path(&format!(
+            "{home}/Library/LaunchAgents/com.evil.plist"
+        )));
+        assert!(is_forbidden_write_path(
+            "/Library/LaunchDaemons/com.evil.plist"
+        ));
+        // 穿越不可被白名单前缀豁免（前缀匹配整体短路 /../ 检测的旧缺陷）。
+        let err = write_file(
+            "/tmp/../../etc/aerodesk-test.txt",
+            &encode_b64(b"x"),
+            &["/tmp".to_string()],
+        )
+        .unwrap_err();
+        assert!(err.contains("blocked by policy"), "{err}");
+        // 对照：白名单仍按原语义放行普通敏感前缀（不含穿越）。
+        match write_file(
+            "/etc/aerodesk-test2.txt",
+            &encode_b64(b"x"),
+            &["/etc/".to_string()],
+        ) {
+            Ok(()) => {}
+            Err(e) => assert!(!e.contains("blocked by policy"), "{e}"),
+        }
+        // 白名单前缀也按归一化路径匹配（//tmp 仍命中 /tmp 前缀，不误拦）。
+        match write_file(
+            "//tmp/aerodesk-bypass.txt",
+            &encode_b64(b"x"),
+            &["/tmp".to_string()],
+        ) {
+            Ok(()) => {}
+            Err(e) => assert!(!e.contains("blocked by policy"), "{e}"),
+        }
+        let _ = std::fs::remove_file("/tmp/aerodesk-bypass.txt");
+    }
+
+    /// 回归：空白折叠 + 整 token 匹配（双空格绕过修复 + 子串误伤消除）。
+    #[test]
+    fn dangerous_matching_normalizes_whitespace_and_tokens() {
+        // 双空格/Tab 折叠后仍拦截（旧 contains 可被 "rm  -rf" 绕过）。
+        assert!(is_dangerous("rm  -rf /tmp/x"));
+        assert!(is_dangerous("dd\tif=/dev/zero of=/dev/disk0"));
+        // 整 token 匹配：子串不再误伤。
+        assert!(!is_dangerous("echo anymore"));
+        assert!(!is_dangerous("docker stop web"));
+        assert!(!is_dangerous("cat ~/notes-vim-tips.md"));
+        assert!(!is_dangerous("unzip -l archive.zip"));
+        assert!(!is_dangerous("mv /Users/foo /tmp/bar"));
+        // 真危险/交互式命令仍拦截（含大小写归一）。
+        assert!(is_dangerous("man ls"));
+        assert!(is_dangerous("VIM /etc/hosts"));
+        assert!(is_dangerous("python3 -c 'print(1)'"));
     }
 
     /// #330：trait 原始执行与自由函数（策略层）行为等价。
