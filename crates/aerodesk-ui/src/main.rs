@@ -1605,7 +1605,11 @@ fn main() -> Result<(), slint::PlatformError> {
         let weak = ui.as_weak();
         slint::Timer::single_shot(std::time::Duration::from_millis(800), move || {
             if let Some(ui) = weak.upgrade() {
-                crate::generic_publisher::start_publisher(&ui);
+                // #404 评审：触发前重读开关——用户在前 800ms 内关闭时不得再启动被控端，
+                // 否则界面上开关为关而采集/连接/「已启动」提示照常，需再开关一次才能停。
+                if ui.get_inc_enabled() {
+                    crate::generic_publisher::start_publisher(&ui);
+                }
             }
         });
     }
