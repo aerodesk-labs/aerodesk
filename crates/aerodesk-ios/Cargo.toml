@@ -13,4 +13,5 @@ crate-type = ["rlib", "staticlib"]
 
 [target.'cfg(target_os = "ios")'.dependencies]
 aerodesk-platform = { path = "../aerodesk-platform" }
+aerodesk-core = { path = "../aerodesk-core" }
 slint = { version = "1", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2"] }
