@@ -22,7 +22,7 @@ slint::slint! {
         in-out property <string> server: "ws://127.0.0.1:3003";
         in-out property <string> room: "demo";
         in-out property <string> status: "未连接";
-        callback connect(string server, string room);
+        callback connect(string, string);
         callback disconnect();
 
         VerticalLayout {
