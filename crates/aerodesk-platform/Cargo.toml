@@ -22,7 +22,6 @@ pipewire = ["dep:lamco-portal", "dep:lamco-pipewire", "dep:tokio"]
 [dependencies]
 aerodesk-core = { path = "../aerodesk-core" }
 aerodesk-protocol.workspace = true
-aerodesk-softenc = { path = "../aerodesk-softenc" }
 str0m = { workspace = true, features = ["rust-crypto"] }
 tracing.workspace = true
 
@@ -44,8 +43,10 @@ objc2-core-video = "0.3"
 objc2-foundation = "0.3"
 objc2-core-foundation = "0.3"
 cpal = "0.15"
+aerodesk-softenc = { path = "../aerodesk-softenc" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+aerodesk-softenc = { path = "../aerodesk-softenc" }
 aerodesk-ffmpeg = { path = "../aerodesk-ffmpeg" }
 # ADR-0001：虚拟显示器（Parsec VDD）。其传递依赖 windows 0.62 与下方 0.58 并存，
 # 用 package 重命名 `windows062` 仅在本模块命名 HANDLE。
@@ -68,6 +69,7 @@ windows = { version = "0.58", features = [
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+aerodesk-softenc = { path = "../aerodesk-softenc" }
 x11rb = { version = "0.13", features = ["xtest"] }
 libc = "0.2"
 ffmpeg-next = "8"
