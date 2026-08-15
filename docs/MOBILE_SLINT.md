@@ -10,7 +10,7 @@ iOS/iPad、Android、HarmonyOS 的端侧 UI/UX 统一走 Slint；native 层只�
 
 - `aerodesk-platform`：已包含移动端平台实现模块（ios/android/ohos）。
 - `aerodesk-ios`：C ABI 薄壳（`ffi.rs`），iOS 壳层仍为 SwiftUI。
-- `aerodesk-android`：JNI 薄壳（`jni.rs`），Android 壳层仍为 Kotlin Activity/XML。
+- `aerodesk-android`：JNI 薄壳（`jni.rs`）+ Slint 宿主（`ui.rs`），Kotlin 壳层已退化为系统垫片（服务 + NativeActivity）。
 - `aerodesk-ohos`：NAPI 薄壳（`napi.rs`），ArkTS 壳层待 DevEco。
 
 ## 落地路径
@@ -18,14 +18,13 @@ iOS/iPad、Android、HarmonyOS 的端侧 UI/UX 统一走 Slint；native 层只�
 ### Android（优先，CI 有 APK build 可验证编译）
 
 1. Rust 端侧：
-   - `aerodesk-android` 增加 Slint 依赖（`backend-android-activity-06`）。
-   - 新增 `ui.rs`：`android_main(app: slint::android::AndroidApp)`，
-     调用 `slint::android::init(app)`，创建 Slint `AppWindow` 并运行。
-   - 复用 `aerodesk-desktop/ui/app.slint` 的连接/房间/会话 UI（抽成共享 Slint 组件）。
+   - `aerodesk-android` 已增加 Slint 依赖（`backend-android-activity-06` + `renderer-software`）。
+   - 已新增 `ui.rs`：`android_main(app: slint::android::AndroidApp)`，调用 `slint::android::init(app)` 并运行 Slint `AndroidAppWindow`。
+   - 后续复用 `aerodesk-desktop/ui/app.slint` 的连接/房间/会话 UI（抽成共享 Slint 组件）。
 2. Kotlin 壳层：
-   - `MainActivity` 改为 `NativeActivity` 派生类，调用 `RustAndroidApp.run()`。
-   - 保留 `ProjectionService`、`InputInjectionService` 作为系统垫片。
-   - 移除 XML 布局中的 UI 部分；保留服务声明。
+   - 已新增 `SlintActivity : NativeActivity`，通过 `android.app.lib_name=aerodesk_android` 加载 Rust Slint 入口。
+   - 保留 `ProjectionService`、`InputInjectionService`、`PublisherActivity` 作为系统垫片。
+   - `MainActivity`（MediaCodec 观看端调试壳）保留但不再作为 launcher。
 3. 构建：
    - `build-android-lib.sh` 继续 `cargo ndk build -p aerodesk-android`。
    - CI `android-apk-build` 覆盖 Rust .so + Gradle APK 编译验证。
