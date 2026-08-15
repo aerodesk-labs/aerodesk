@@ -12,8 +12,15 @@ pub struct WindowsPermissions;
 
 /// 是否有活动显示器（交互桌面会话；服务/无桌面会话 GetSystemMetrics 返回 0）。
 fn has_active_display() -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CMONITORS};
-    unsafe { GetSystemMetrics(SM_CMONITORS) > 0 }
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CMONITORS};
+        unsafe { GetSystemMetrics(SM_CMONITORS) > 0 }
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 impl Permissions for WindowsPermissions {
