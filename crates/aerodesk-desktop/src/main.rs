@@ -1337,9 +1337,9 @@ fn open_terminal_window(ui: &AppWindow) {
 
 /// 发起观看/控制会话（#441 连接页功能按钮共用一个启动路径）。
 fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
-    let server = ui.get_server_default().to_string();
+    let server = ui.get_server_input().to_string();
     let room = ui.get_room_input().to_string();
-    let token = ui.get_token_default().to_string();
+    let token = ui.get_token_input().to_string();
     {
         let sessions = SESSIONS.lock().unwrap();
         if sessions.len() >= MAX_SESSIONS {
