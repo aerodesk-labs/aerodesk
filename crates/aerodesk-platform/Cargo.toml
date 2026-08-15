@@ -7,10 +7,11 @@ license.workspace = true
 rust-version.workspace = true
 
 [lib]
-# iOS 需要 staticlib 供 Swift 链接；Android/HarmonyOS 需要 cdylib 供
-# JNI/NAPI 加载；桌面平台只需 rlib。统一声明多个产物类型，host 构建
-# 只编译当前 target 对应模块，不会引入其它平台的原生绑定。
-crate-type = ["rlib", "staticlib", "cdylib"]
+# aerodesk-platform 是平台实现层，只作为 rlib 被端侧薄壳
+# （aerodesk-ios/staticlib、aerodesk-android/ohos/cdylib）链接。
+# 不声明 staticlib/cdylib，避免 iOS target 构建本 crate 时触发
+# 动态库链接（ApplicationServices 等 macOS 框架在 iOS 不存在）。
+crate-type = ["rlib"]
 
 [features]
 default = []
