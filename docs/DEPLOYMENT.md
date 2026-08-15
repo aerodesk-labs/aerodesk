@@ -40,7 +40,8 @@
 | sfu | `SFU_BIND_ADDRESS` | 媒体 socket 绑定地址（未设时：显式 `SFU_HOST_ADDRESS` 则默认 `0.0.0.0`，否则跟随通告地址，#216） |
 | sfu | `SFU_SHARD_COUNT` | 媒体分片数（默认 CPU 核数，上限 8；1..=64 可覆盖）。大规格机器可上调利用更多核，小容器可下调到 1 |
 | signal | `SFU_URLS` / `SFU_URL` / `SFU_TOKEN` | SFU 池（逗号分隔，可选）+ 单值回退 + 内部 token。设 `SFU_URLS` 时按房间名无状态哈希选路到池中某个 SFU（同房间恒同 SFU）；未设回退 `SFU_URL`（单 SFU，向后兼容） |
-| signal | `SFU_POLL_INTERVAL_SECS` / `SFU_FAIL_COOLDOWN_SECS` | SFU 池负载轮询间隔（默认 5s）与探测失败冷却期（默认 30s，期间不参与新房间分配）。仅 `SFU_URLS` 池 >1 时生效；新房间选最闲 SFU 并避开下线节点；同房间粘性（已分配房间不重映射，SFU 下线由客户端 --reconnect 恢复） |
+| signal | `SFU_POLL_INTERVAL_SECS` / `SFU_FAIL_COOLDOWN_SECS` | SFU 池负载轮询间隔（默认 5s）与探测失败冷却期（默认 30s，期间不参与新房间分配）。仅 `SFU_URLS` 池 >1 时生效；新房间选最闲 SFU 并避开下线节点；同房间粘性（已分配房间不重映射，SFU 下线由客户端 --reconnect 恢复）。轮询携带 `SFU_TOKEN`（SFU 设 `INTERNAL_TOKEN` 时必须配置）；401/403 视为配置错误告警，不标记节点下线 |
+| signal | `SFU_STICKY_TTL_SECS` | 房间→SFU 粘性映射空闲淘汰阈值（秒，默认 21600=6h，0 值无效按默认；仅池 >1 时生效）：**有活跃 peer 的房间永不淘汰**（粘性保证）；房间已空且映射空闲超过 TTL 才淘汰，防无界增长 |
 | sfu | `RECORD_DIR` | 录制/审计目录（可选） |
 | sfu | `RECORD_ON_DEMAND` | `1` 时只录显式 start() 的房间（配合内部 API 按需录制，#160） |
 | sfu | `MAX_ROOM_CLIENTS` / `MAX_TOTAL_CLIENTS` | `/start` 准入配额（0=不限，#180，信令层 #163/#171 之外 SFU 侧纵深防御）；超限 503 `room full`/`server full` |
@@ -50,6 +51,9 @@
 | signal | `POP_REGISTRY_TTL_SECS` | 注册条目 TTL（默认 3600，过期后可被重新登记） |
 | signal | `MAX_ROOM_CLIENTS` | 每房间人数上限（0=不限，#163）；超限 Join 返回 `Error("room full")` |
 | signal | `MAX_TOTAL_CLIENTS` | 单实例全局连接上限（0=不限，#163）；超限返回 `Error("server full")` |
+| signal | `SIGNAL_MAX_PREJOIN_CLIENTS` | 并发「未 Join」连接上限（默认 256，0=不限）：认证/Join 之前的连接同样占线程与 fd 且不受 `MAX_TOTAL_CLIENTS` 约束，超限直接断开（防预认证连接堆积） |
+| signal | `SIGNAL_ALLOWED_ORIGINS` | /ws Origin 白名单（逗号分隔；未设置不校验，`*` 放行全部）。浏览器 WebSocket 必带 Origin；CLI/native 客户端无 Origin 头始终放行 |
+| signal | `SIGNAL_PLAIN_PORT` | 明文 WS 端口（默认 3003，开发用）；设为 `off`/`disabled`/`none` 完全关闭明文服务器（生产建议关闭或用防火墙限制） |
 | signal | `BRIDGE_CMD` | 跨 PoP 桥接编排（#216 M3，可选）：房间桥命令模板（含 `{room}`）。设置后跨 PoP viewer 先经桥在本 PoP 接入，失败/超时回退 v1 Redirect（详见 docs/BRIDGE.md） |
 | signal | `BRIDGE_READY_TIMEOUT_SECS` | 桥就绪等待上限（默认 15） |
 | signal | `BRIDGE_FAIL_COOLDOWN_SECS` | 桥失败冷却（默认 30；期间直接 Redirect 不反复 spawn） |
