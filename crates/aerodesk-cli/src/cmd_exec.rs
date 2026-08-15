@@ -5,6 +5,7 @@
 //! 控制端（viewer）：cmd 通道打开后发意图请求（每 1s 重传直到响应），打印结果并退出。
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use aerodesk_core::cmd_exec::{
     allowlist, kill_process, list_processes, read_file, run_command, write_file,
@@ -17,6 +18,32 @@ static CMD_RX: Mutex<Option<std::sync::mpsc::Receiver<CmdResponse>>> = Mutex::ne
 /// 最近处理过的请求 (id, 时间)：控制端重传（首包丢失）按 id 去重防重复执行；
 /// 新会话复用相同 id 超过窗口后重新放行。
 static LAST_CMD: Mutex<Option<(u64, std::time::Instant)>> = Mutex::new(None);
+
+/// 后台执行线程并发上限：每请求一线程，远端连发可无限增长，超过上限直接
+/// 回 busy 响应（控制端可见清晰错误），不再无界 spawn。
+const MAX_CMD_THREADS: usize = 8;
+static ACTIVE_CMD_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+/// RAII 并发计数守护：线程闭包退出（含 panic 路径）时自动递减。
+struct CmdThreadGuard;
+
+impl CmdThreadGuard {
+    /// 满载返回 None（不占用名额）。
+    fn acquire() -> Option<Self> {
+        if ACTIVE_CMD_THREADS.fetch_add(1, Ordering::SeqCst) >= MAX_CMD_THREADS {
+            ACTIVE_CMD_THREADS.fetch_sub(1, Ordering::SeqCst);
+            None
+        } else {
+            Some(Self)
+        }
+    }
+}
+
+impl Drop for CmdThreadGuard {
+    fn drop(&mut self) {
+        ACTIVE_CMD_THREADS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// 控制端意图（viewer 命令行）。
 #[derive(Debug, Clone, PartialEq)]
@@ -70,7 +97,29 @@ pub fn handle_event(ev: &ClientEvent, endpoint: &mut Endpoint) {
     }
     tracing::info!("cmd request #{}: {:?}", req.id, req.action);
     let tx = CMD_TX.lock().unwrap().clone();
+    // 并发上限：满载时不 spawn，直接回带 error 的响应（控制端立即得到
+    // 清晰错误而非无限等待）。
+    let Some(guard) = CmdThreadGuard::acquire() else {
+        tracing::warn!("cmd busy: too many concurrent commands ({MAX_CMD_THREADS})");
+        let resp = CmdResponse {
+            id: req.id,
+            result: CmdResult::Run {
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                truncated: false,
+                error: Some(format!(
+                    "cmd busy: too many concurrent commands ({MAX_CMD_THREADS})"
+                )),
+            },
+        };
+        if let Some(tx) = tx {
+            let _ = tx.send(resp);
+        }
+        return;
+    };
     std::thread::spawn(move || {
+        let _guard = guard; // 持有到闭包结束，退出时递减并发计数。
         let result = execute(&req.action);
         let resp = CmdResponse { id: req.id, result };
         if let Some(tx) = tx {
@@ -164,9 +213,14 @@ pub fn tick(endpoint: &mut Endpoint) {
     }
 }
 
-/// 控制端：发送一个意图请求（id 按进程唯一：pid<<16|1）。
+/// 控制端意图 id 序列（进程内自增，从 1 开始）。
+static CMD_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// 控制端：发送一个意图请求（id = pid<<32 | 进程内自增序列，每次意图唯一：
+/// 旧的 pid<<16|1 每进程恒定，被控端 60s 去重会吞掉同进程后续命令，
+/// 且重连后新进程可能撞出相同 id）。
 pub fn send_intent(endpoint: &mut Endpoint, intent: &Intent) -> bool {
-    let id = ((std::process::id() as u64) << 16) | 1;
+    let id = ((std::process::id() as u64) << 32) | CMD_SEQ.fetch_add(1, Ordering::Relaxed);
     let action = match intent {
         Intent::Run(cmd) => CmdAction::Run {
             command: cmd.clone(),
