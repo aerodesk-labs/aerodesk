@@ -260,7 +260,10 @@ mod tests {
         }
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("fresh-room"));
-        assert!(!text.contains("stale-room"), "文件中的过期条目应被清扫：{text}");
+        assert!(
+            !text.contains("stale-room"),
+            "文件中的过期条目应被清扫：{text}"
+        );
         let leftovers: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())

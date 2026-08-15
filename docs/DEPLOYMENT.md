@@ -41,7 +41,7 @@
 | sfu | `SFU_SHARD_COUNT` | 媒体分片数（默认 CPU 核数，上限 8；1..=64 可覆盖）。大规格机器可上调利用更多核，小容器可下调到 1 |
 | signal | `SFU_URLS` / `SFU_URL` / `SFU_TOKEN` | SFU 池（逗号分隔，可选）+ 单值回退 + 内部 token。设 `SFU_URLS` 时按房间名无状态哈希选路到池中某个 SFU（同房间恒同 SFU）；未设回退 `SFU_URL`（单 SFU，向后兼容） |
 | signal | `SFU_POLL_INTERVAL_SECS` / `SFU_FAIL_COOLDOWN_SECS` | SFU 池负载轮询间隔（默认 5s）与探测失败冷却期（默认 30s，期间不参与新房间分配）。仅 `SFU_URLS` 池 >1 时生效；新房间选最闲 SFU 并避开下线节点；同房间粘性（已分配房间不重映射，SFU 下线由客户端 --reconnect 恢复）。轮询携带 `SFU_TOKEN`（SFU 设 `INTERNAL_TOKEN` 时必须配置）；401/403 视为配置错误告警，不标记节点下线 |
-| signal | `SFU_STICKY_TTL_SECS` | 房间→SFU 粘性映射空闲淘汰阈值（秒，默认 21600=6h，0 值无效按默认；仅池 >1 时生效）：长期无 Join/Description 的死房间映射被周期淘汰，防无界增长 |
+| signal | `SFU_STICKY_TTL_SECS` | 房间→SFU 粘性映射空闲淘汰阈值（秒，默认 21600=6h，0 值无效按默认；仅池 >1 时生效）：**有活跃 peer 的房间永不淘汰**（粘性保证）；房间已空且映射空闲超过 TTL 才淘汰，防无界增长 |
 | sfu | `RECORD_DIR` | 录制/审计目录（可选） |
 | sfu | `RECORD_ON_DEMAND` | `1` 时只录显式 start() 的房间（配合内部 API 按需录制，#160） |
 | sfu | `MAX_ROOM_CLIENTS` / `MAX_TOTAL_CLIENTS` | `/start` 准入配额（0=不限，#180，信令层 #163/#171 之外 SFU 侧纵深防御）；超限 503 `room full`/`server full` |

@@ -192,12 +192,21 @@ impl SfuPool {
         chosen
     }
 
-    /// 淘汰超过 `ttl_secs` 未使用的粘性映射（poller 周期调用），返回淘汰数。
-    /// 房间活跃期间每次 Join/Description 都会刷新时间戳，正常房间不会被误汰。
-    fn evict_stale(&self, ttl_secs: u64, now: u64) -> usize {
+    /// 淘汰「无活跃 peer 且超过 `ttl_secs` 未使用」的粘性映射（poller 周期调用），
+    /// 返回淘汰数。`alive` 为 rooms 表中有 peer 的房间集合：这些房间的映射一律
+    /// 保留——活跃房间**永不重映射**（粘性保证）；仅当房间已空（peer 清零、
+    /// session_loop 已将其移出 rooms 表）且映射空闲超过 TTL 才淘汰，防无界增长。
+    /// 注意 select 只在 Description/kick 路径被调用，Join 不刷新时间戳，因此
+    /// 不能用「最近 select 时间」判断房间死活，必须看 rooms 表。
+    fn evict_stale(
+        &self,
+        alive: &std::collections::HashSet<String>,
+        ttl_secs: u64,
+        now: u64,
+    ) -> usize {
         let mut reg = self.room_sfu.lock().unwrap_or_else(|e| e.into_inner());
         let before = reg.len();
-        reg.retain(|_, (_, t)| now.saturating_sub(*t) < ttl_secs);
+        reg.retain(|room, (_, t)| alive.contains(room) || now.saturating_sub(*t) < ttl_secs);
         before - reg.len()
     }
 }
@@ -250,27 +259,40 @@ fn poll_sfu_load(url: &str, token: Option<&str>) -> Result<u64, PollErr> {
 }
 
 /// 后台轮询各 SFU 的负载；网络/HTTP 失败按冷却期标记下线，
-/// 401/403 属配置错误（SFU 本身健康），保留上次负载不标记下线。
-/// 同时按 `sticky_ttl_secs` 淘汰长期空闲的房间粘性映射（防 room_sfu 无界增长）。
+/// 401/403 属配置错误（SFU 本身健康），保留上次负载不标记下线（error 日志
+/// 按每 SFU 每 300s 节流，防刷屏）。
+/// 同时淘汰「无活跃 peer 且空闲超时」的房间粘性映射（防 room_sfu 无界增长）。
 fn poll_sfu_pool(
     pool: Arc<SfuPool>,
+    rooms: Rooms,
     interval_secs: u64,
     cooldown_secs: u64,
     token: Option<String>,
     sticky_ttl_secs: u64,
 ) {
+    let mut last_unauth_log = vec![0u64; pool.urls.len()];
     loop {
-        for i in 0..pool.urls.len() {
+        // enumerate 而非 0..len：循环体并行索引 urls/loads/down_until/
+        // last_unauth_log 四个集合，range 写法触发 needless_range_loop。
+        for (i, _url) in pool.urls.iter().enumerate() {
             let url = format!("{}/metrics/prometheus", pool.urls[i]);
             match poll_sfu_load(&url, token.as_deref()) {
                 Ok(load) => {
                     pool.loads[i].store(load, Ordering::Relaxed);
                     pool.down_until[i].store(0, Ordering::Relaxed);
                 }
-                Err(PollErr::Unauthorized) => error!(
-                    "sfu pool: {url} metrics 401/403: SFU_TOKEN 与 SFU INTERNAL_TOKEN \
-                     不匹配（配置错误）；保留上次负载，不标记下线"
-                ),
+                Err(PollErr::Unauthorized) => {
+                    let now = unix_secs();
+                    if now.saturating_sub(last_unauth_log[i]) >= 300 {
+                        error!(
+                            "sfu pool: {url} metrics 401/403: SFU_TOKEN 与 SFU INTERNAL_TOKEN \
+                             不匹配（配置错误）；保留上次负载，不标记下线"
+                        );
+                        last_unauth_log[i] = now;
+                    } else {
+                        debug!("sfu pool: {url} metrics 401/403 (log throttled)");
+                    }
+                }
                 Err(PollErr::Http(code)) => {
                     warn!("sfu pool: {url} http {code}; mark down");
                     pool.down_until[i].store(unix_secs() + cooldown_secs, Ordering::Relaxed);
@@ -285,9 +307,15 @@ fn poll_sfu_pool(
                 }
             }
         }
-        let evicted = pool.evict_stale(sticky_ttl_secs, unix_secs());
+        let alive: std::collections::HashSet<String> = {
+            let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
+            rooms.keys().cloned().collect()
+        };
+        let evicted = pool.evict_stale(&alive, sticky_ttl_secs, unix_secs());
         if evicted > 0 {
-            debug!("sfu pool: evicted {evicted} idle sticky room mappings (ttl {sticky_ttl_secs}s)");
+            debug!(
+                "sfu pool: evicted {evicted} idle sticky room mappings (ttl {sticky_ttl_secs}s)"
+            );
         }
         std::thread::sleep(Duration::from_secs(interval_secs));
     }
@@ -377,6 +405,14 @@ fn release_prejoin(counter: &AtomicUsize, counted: bool) {
     if counted {
         counter.fetch_sub(1, Ordering::Relaxed);
     }
+}
+
+/// SFU_STICKY_TTL_SECS 解析：0/非法 → 默认 6h（TTL=0 会让每轮轮询清空
+/// 全部粘性映射，摧毁房间粘性）。
+fn parse_sticky_ttl(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(6 * 3600)
 }
 
 #[cfg(unix)]
@@ -578,9 +614,10 @@ fn main() {
         let cooldown = config.sfu_fail_cooldown_secs;
         let token = config.sfu_token.clone();
         let sticky_ttl = config.sfu_sticky_ttl_secs;
+        let poll_rooms = rooms.clone();
         std::thread::Builder::new()
             .name("sfu-poller".into())
-            .spawn(move || poll_sfu_pool(pool, interval, cooldown, token, sticky_ttl))
+            .spawn(move || poll_sfu_pool(pool, poll_rooms, interval, cooldown, token, sticky_ttl))
             .ok();
     }
 
@@ -901,12 +938,7 @@ fn load_config() -> Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(30),
-        sfu_sticky_ttl_secs: std::env::var("SFU_STICKY_TTL_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            // 0/非法值按默认：TTL=0 会让每轮轮询清空全部粘性映射。
-            .filter(|v| *v > 0)
-            .unwrap_or(6 * 3600),
+        sfu_sticky_ttl_secs: parse_sticky_ttl(std::env::var("SFU_STICKY_TTL_SECS").ok().as_deref()),
         max_prejoin_clients: std::env::var("SIGNAL_MAX_PREJOIN_CLIENTS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -1085,7 +1117,13 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
         );
         return;
     };
-    let ws = Arc::new(Mutex::new(rx.recv().expect("websocket accepted")));
+    // 兜底：rouille 升级线程理论上总会在 recv 前 build 出 Websocket；若异常
+    // 未交付，必须释放 pre-join 槽位再退出（避免 panic 留下永久泄漏）。
+    let Ok(ws_owned) = rx.recv() else {
+        release_prejoin(&PREJOIN_CLIENTS, prejoin_counted);
+        return;
+    };
+    let ws = Arc::new(Mutex::new(ws_owned));
     info!("session open");
     // 本连接加入时的 peer_id：用于校验 Description.from 属于本连接（防冒用）。
     let mut own_peer_id: Option<String> = None;
@@ -1904,7 +1942,8 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("fake server got request");
         assert!(
-            req.to_ascii_lowercase().contains("x-internal-token: tok123"),
+            req.to_ascii_lowercase()
+                .contains("x-internal-token: tok123"),
             "metrics 探测必须带内部 token：{req}"
         );
     }
@@ -1920,7 +1959,11 @@ mod tests {
     #[test]
     fn reserve_prejoin_caps_and_releases() {
         let counter = AtomicUsize::new(0);
-        assert_eq!(reserve_prejoin(&counter, 0), Some(false), "cap=0 不限且不计数");
+        assert_eq!(
+            reserve_prejoin(&counter, 0),
+            Some(false),
+            "cap=0 不限且不计数"
+        );
         assert_eq!(counter.load(Ordering::Relaxed), 0);
         assert_eq!(reserve_prejoin(&counter, 2), Some(true));
         assert_eq!(reserve_prejoin(&counter, 2), Some(true));
@@ -1973,20 +2016,38 @@ mod tests {
         assert_eq!(handle(&req, config, rooms).status_code, 400);
     }
 
-    /// 粘性映射空闲淘汰（M3）：只淘汰超过 TTL 未使用的房间，活跃房间保留。
+    /// 粘性映射淘汰（M3）：有活跃 peer 的房间**永不淘汰**（即使映射空闲超过
+    /// TTL——审查反馈：Join 不调用 select，静默信令的活跃房间不能用时间戳判死）；
+    /// 无 peer 且空闲超过 TTL 的房间才被淘汰。
     #[test]
     fn sticky_map_evicts_idle_rooms() {
         let pool = SfuPool::new(vec!["http://s1".into(), "http://s2".into()]);
-        let _ = pool.select("active");
+        let _ = pool.select("live-quiet");
         let _ = pool.select("stale");
         {
             let mut reg = pool.room_sfu.lock().unwrap_or_else(|e| e.into_inner());
+            reg.get_mut("live-quiet").unwrap().1 = unix_secs() - 7 * 3600;
             reg.get_mut("stale").unwrap().1 = unix_secs() - 7 * 3600;
         }
-        let evicted = pool.evict_stale(6 * 3600, unix_secs());
-        assert_eq!(evicted, 1, "只淘汰空闲超过 TTL 的房间");
+        let mut alive = std::collections::HashSet::new();
+        alive.insert("live-quiet".to_string());
+        let evicted = pool.evict_stale(&alive, 6 * 3600, unix_secs());
+        assert_eq!(evicted, 1, "只淘汰无 peer 且空闲超过 TTL 的房间");
         let reg = pool.room_sfu.lock().unwrap_or_else(|e| e.into_inner());
-        assert!(reg.contains_key("active"));
+        assert!(
+            reg.contains_key("live-quiet"),
+            "有活跃 peer 的房间即使映射空闲超时也不得淘汰"
+        );
         assert!(!reg.contains_key("stale"));
+    }
+
+    /// SFU_STICKY_TTL_SECS 解析：0/非法 → 默认 6h（TTL=0 会让每轮轮询清空
+    /// 全部粘性映射，摧毁房间粘性）。
+    #[test]
+    fn parse_sticky_ttl_defaults_and_rejects_zero() {
+        assert_eq!(parse_sticky_ttl(None), 6 * 3600);
+        assert_eq!(parse_sticky_ttl(Some("0")), 6 * 3600);
+        assert_eq!(parse_sticky_ttl(Some("bad")), 6 * 3600);
+        assert_eq!(parse_sticky_ttl(Some("3600")), 3600);
     }
 }
