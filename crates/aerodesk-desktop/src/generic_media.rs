@@ -15,11 +15,11 @@ use std::sync::atomic::AtomicBool;
 enum ViewerDecoder {
     Soft(aerodesk_softenc::decode::SoftDecoder),
     #[cfg(target_os = "linux")]
-    Vaapi(aerodesk_linux::vaapi::VaapiDecoder),
+    Vaapi(aerodesk_platform::linux::vaapi::VaapiDecoder),
     // #3 Windows 观看端硬解（DXVA2）；设备创建失败时回退 OpenH264 软解
     //（见 mk_viewer_decoder）。
     #[cfg(target_os = "windows")]
-    Dxva2(aerodesk_windows::decode::Dxva2Decoder),
+    Dxva2(aerodesk_platform::windows::decode::Dxva2Decoder),
 }
 
 impl aerodesk_core::platform::Decoder for ViewerDecoder {
@@ -58,7 +58,7 @@ fn mk_viewer_decoder() -> Result<ViewerDecoder, String> {
     #[cfg(target_os = "linux")]
     {
         use aerodesk_core::media_pipeline::Codec;
-        match aerodesk_linux::vaapi::VaapiDecoder::new(Codec::H264) {
+        match aerodesk_platform::linux::vaapi::VaapiDecoder::new(Codec::H264) {
             Ok(d) => {
                 tracing::info!("linux viewer: VAAPI 硬解启用");
                 return Ok(ViewerDecoder::Vaapi(d));
@@ -70,7 +70,7 @@ fn mk_viewer_decoder() -> Result<ViewerDecoder, String> {
     }
     #[cfg(target_os = "windows")]
     {
-        match aerodesk_windows::decode::Dxva2Decoder::new() {
+        match aerodesk_platform::windows::decode::Dxva2Decoder::new() {
             Ok(d) => {
                 tracing::info!("windows viewer: DXVA2 硬解启用");
                 return Ok(ViewerDecoder::Dxva2(d));

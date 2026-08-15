@@ -75,7 +75,7 @@ RECORD_DIR=/tmp/aerodesk-acceptance ./target/debug/aerodesk-sfu   # 分片服务
 ./target/debug/aerodesk-cli --role publisher --encoder screen --signal ws://127.0.0.1:3003 --room accept
 ./target/debug/aerodesk-cli --role viewer    --signal ws://127.0.0.1:3003 --room accept
 ```
-或桌面 UI：`cargo run -p aerodesk-ui`（连接页填 `127.0.0.1:3003`）。
+或桌面 UI：`cargo run -p aerodesk-desktop`（连接页填 `127.0.0.1:3003`）。
 
 ### 2. iOS 真机（#1，iPhone A12+）
 1. 构建：`bash scripts/build-ios-lib.sh all` → `cd ios && xcodegen generate`（双 slice 已由 CI 守护）

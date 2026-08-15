@@ -17,18 +17,18 @@ if ! command -v cargo-deb >/dev/null 2>&1; then
 fi
 
 echo "== [2/3] 构建 .deb（depends=\$auto 自动探测）"
-cargo deb -p aerodesk-ui
+cargo deb -p aerodesk-desktop
 cp target/debian/aerodesk_*.deb dist/
 
 echo "== [3/5] 便携 tar.gz（二进制 + 图标 + desktop）"
 STAGE="dist/aerodesk-$VERSION-linux-x86_64"
 mkdir -p "$STAGE"
-cp target/release/aerodesk-ui "$STAGE/"
+cp target/release/aerodesk-desktop "$STAGE/"
 cp app-assets/icon-1024.png "$STAGE/aerodesk.png"
 cp app-assets/aerodesk.desktop "$STAGE/aerodesk.desktop"
 cat > "$STAGE/README.txt" <<'EOF'
 AeroDesk Linux 便携包
-- 直接运行：./aerodesk-ui
+- 直接运行：./aerodesk-desktop
 - 可选安装 desktop/icon：
     mkdir -p ~/.local/share/applications ~/.local/share/icons/hicolor/512x512/apps
     cp aerodesk.desktop ~/.local/share/applications/
@@ -57,11 +57,11 @@ Requires: libavcodec >= 60, libx264 >= 155, fontconfig, xkbcommon, libX11
 AeroDesk remote desktop client (viewer/controller): connect/room/settings across platforms.
 %install
 mkdir -p %{buildroot}/usr/bin %{buildroot}/usr/share/applications %{buildroot}/usr/share/icons/hicolor/512x512/apps
-install -m755 $ROOT/target/release/aerodesk-ui %{buildroot}/usr/bin/aerodesk-ui
+install -m755 $ROOT/target/release/aerodesk-desktop %{buildroot}/usr/bin/aerodesk-desktop
 install -m644 $ROOT/app-assets/aerodesk.desktop %{buildroot}/usr/share/applications/aerodesk.desktop
 install -m644 $ROOT/app-assets/icon-1024.png %{buildroot}/usr/share/icons/hicolor/512x512/apps/aerodesk.png
 %files
-/usr/bin/aerodesk-ui
+/usr/bin/aerodesk-desktop
 /usr/share/applications/aerodesk.desktop
 /usr/share/icons/hicolor/512x512/apps/aerodesk.png
 EOF
@@ -83,7 +83,7 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 APPDIR="$ROOT/target/aerodesk-appdir"
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/512x512/apps"
-cp target/release/aerodesk-ui "$APPDIR/usr/bin/"
+cp target/release/aerodesk-desktop "$APPDIR/usr/bin/"
 cp app-assets/aerodesk.desktop "$APPDIR/usr/share/applications/"
 cp app-assets/icon-1024.png "$APPDIR/usr/share/icons/hicolor/512x512/apps/aerodesk.png"
 "$LINUXDEPLOY" --appdir "$APPDIR" --output appimage >/tmp/aerodesk-linuxdeploy.log 2>&1 \

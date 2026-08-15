@@ -173,7 +173,7 @@ pub fn focus_window_to_front(window: &slint::Window) {
         && let raw_window_handle::RawWindowHandle::AppKit(appkit) = raw
     {
         // #277 平台抽象：窗口聚焦走 core `AppShell` trait。
-        aerodesk_macos::dock::MacAppShell
+        aerodesk_platform::macos::dock::MacAppShell
             .focus_view(appkit.ns_view.as_ptr() as *mut std::ffi::c_void);
     }
 }
@@ -534,11 +534,11 @@ impl i_slint_backend_winit::CustomApplicationHandler for FileDropHandler {
 fn pick_file() -> Result<Option<String>, String> {
     #[cfg(target_os = "macos")]
     {
-        return aerodesk_macos::file_picker::MacFilePicker.pick_file();
+        return aerodesk_platform::macos::file_picker::MacFilePicker.pick_file();
     }
     #[cfg(target_os = "linux")]
     {
-        return aerodesk_linux::file_picker::LinuxFilePicker.pick_file();
+        return aerodesk_platform::linux::file_picker::LinuxFilePicker.pick_file();
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -614,7 +614,7 @@ fn main() -> Result<(), slint::PlatformError> {
     {
         *MAIN_WINDOW.lock().unwrap() = Some(ui.as_weak());
         // #277 平台抽象：Dock 重开回调走 core `AppShell` trait。
-        aerodesk_macos::dock::MacAppShell.set_reopen_callback(Box::new(|| {
+        aerodesk_platform::macos::dock::MacAppShell.set_reopen_callback(Box::new(|| {
             let weak = MAIN_WINDOW.lock().unwrap().clone();
             if let Some(weak) = weak {
                 let _ = weak.upgrade_in_event_loop(|ui| {
@@ -655,7 +655,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_inc_enabled(settings.inc_enabled);
     // #417 开机自启状态回填（Windows HKCU Run；登录后自动启动并恢复被控）。
     #[cfg(target_os = "windows")]
-    if let Ok(Some(_)) = aerodesk_windows::autostart::installed() {
+    if let Ok(Some(_)) = aerodesk_platform::windows::autostart::installed() {
         ui.set_auto_start(true);
     }
     ui.set_inc_audio(settings.inc_audio);
@@ -1578,9 +1578,9 @@ fn main() -> Result<(), slint::PlatformError> {
                     .map(|p| p.display().to_string())
                     .unwrap_or_default();
                 let res = if on {
-                    aerodesk_windows::autostart::install(&format!("\"{exe}\""))
+                    aerodesk_platform::windows::autostart::install(&format!("\"{exe}\""))
                 } else {
-                    aerodesk_windows::autostart::remove().map(|_| ())
+                    aerodesk_platform::windows::autostart::remove().map(|_| ())
                 };
                 match res {
                     Ok(()) => ui.set_settings_status(if on {
@@ -1618,7 +1618,7 @@ fn main() -> Result<(), slint::PlatformError> {
             #[cfg(target_os = "macos")]
             {
                 // #277 平台抽象：权限查询走 core `Permissions` trait。
-                let p = aerodesk_macos::permissions::MacPermissions;
+                let p = aerodesk_platform::macos::permissions::MacPermissions;
                 let (sc, ax) = (p.screen_capture_authorized(), p.accessibility_authorized());
                 ui.set_perm_screen(if sc {
                     "已授权".into()
@@ -1635,7 +1635,7 @@ fn main() -> Result<(), slint::PlatformError> {
             {
                 // #417 Windows 被控授权：无 TCC 弹窗，交互会话即已授权；
                 // 授权语义 = 用户显式开启「开启被控」开关。
-                let p = aerodesk_windows::permissions::WindowsPermissions;
+                let p = aerodesk_platform::windows::permissions::WindowsPermissions;
                 let (sc, ax) = (p.screen_capture_authorized(), p.accessibility_authorized());
                 ui.set_perm_screen(if sc {
                     "已授权".into()
@@ -1664,11 +1664,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 // 登记进「屏幕录制」授权列表（不在列表时打开设置窗口），
                 // 后台线程避免阻塞 UI；随后再打开系统设置对应面板。
                 // #277 平台抽象：权限请求/引导走 core `Permissions` trait。
-                let p = aerodesk_macos::permissions::MacPermissions;
+                let p = aerodesk_platform::macos::permissions::MacPermissions;
                 std::thread::spawn(move || {
                     let _ = p.request_screen_capture();
                 });
-                let p2 = aerodesk_macos::permissions::MacPermissions;
+                let p2 = aerodesk_platform::macos::permissions::MacPermissions;
                 p2.open_screen_capture_settings();
             }
             #[cfg(target_os = "windows")]
@@ -1685,7 +1685,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui = ui.as_weak();
         move || {
             #[cfg(target_os = "macos")]
-            aerodesk_macos::permissions::MacPermissions.open_accessibility_settings();
+            aerodesk_platform::macos::permissions::MacPermissions.open_accessibility_settings();
             #[cfg(target_os = "windows")]
             if let Some(ui) = ui.upgrade() {
                 ui.set_settings_status("Windows 无系统权限弹窗：开启「开启被控」即授权".into());
@@ -1702,7 +1702,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // 放后台线程避免 SCShareableContent 首调阻塞首屏。
     #[cfg(target_os = "macos")]
     std::thread::spawn(|| {
-        aerodesk_macos::permissions::MacPermissions.trigger_screen_capture_registration();
+        aerodesk_platform::macos::permissions::MacPermissions.trigger_screen_capture_registration();
     });
     // 启动时刷一次权限状态
     ui.invoke_refresh_perms();
@@ -1725,7 +1725,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // macOS：点击 Dock 图标恢复隐藏窗口（配合托盘隐藏）。
     #[cfg(target_os = "macos")]
     // #277 平台抽象：Dock 重开处理器走 core `AppShell` trait。
-    aerodesk_macos::dock::MacAppShell.install_reopen_handler();
+    aerodesk_platform::macos::dock::MacAppShell.install_reopen_handler();
 
     // 系统托盘（Slint 1.17 SystemTrayIcon）：仅 macOS 创建；Linux/Windows 下
     // Slint 托盘创建失败会 abort（Xvfb/CI 无 StatusNotifier），故非 macOS 不创建。
@@ -2396,7 +2396,7 @@ mod tests {
     #[test]
     fn dropped_files_route_to_file_cmd() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let path = std::env::temp_dir().join("aerodesk-ui-drop-test.txt");
+        let path = std::env::temp_dir().join("aerodesk-desktop-drop-test.txt");
         std::fs::write(&path, b"hello").unwrap();
         let status = dispatch_dropped_files(Some(&tx), &[path.clone()]);
         assert!(status.contains("发送文件"), "status={status}");
@@ -2409,7 +2409,7 @@ mod tests {
     #[test]
     fn dropped_directory_is_not_sent() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let dir = std::env::temp_dir().join("aerodesk-ui-drop-dir-test");
+        let dir = std::env::temp_dir().join("aerodesk-desktop-drop-dir-test");
         std::fs::create_dir_all(&dir).unwrap();
         let status = dispatch_dropped_files(Some(&tx), &[dir.clone()]);
         assert!(status.contains("不是文件"), "status={status}");
@@ -2422,8 +2422,8 @@ mod tests {
         // 一次一个：多文件拖放只发第一个，状态文案提示其余逐个发送。
         let (tx, rx) = std::sync::mpsc::channel();
         let dir = std::env::temp_dir();
-        let p1 = dir.join("aerodesk-ui-drop-batch-1.txt");
-        let p2 = dir.join("aerodesk-ui-drop-batch-2.txt");
+        let p1 = dir.join("aerodesk-desktop-drop-batch-1.txt");
+        let p2 = dir.join("aerodesk-desktop-drop-batch-2.txt");
         std::fs::write(&p1, b"1").unwrap();
         std::fs::write(&p2, b"2").unwrap();
         let status = dispatch_dropped_files(Some(&tx), &[p1.clone(), p2.clone()]);

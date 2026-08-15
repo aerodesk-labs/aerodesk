@@ -80,7 +80,7 @@ fn probe_audio() {
     #[cfg(target_os = "macos")]
     {
         use std::time::Instant;
-        match aerodesk_macos::audio_capture::SystemAudioCapture::start() {
+        match aerodesk_platform::macos::audio_capture::SystemAudioCapture::start() {
             Ok(cap) => {
                 info!("probe-audio: SCStream audio started");
                 let start = Instant::now();
@@ -134,8 +134,8 @@ fn run() {
                 .unwrap_or_else(|_| "aerodesk-cli.exe".into());
             let signal = arg(&args, "--signal").unwrap_or_else(|| "ws://127.0.0.1:3003/ws".into());
             let room = arg(&args, "--room").unwrap_or_else(|| "default".into());
-            let cmd = aerodesk_windows::autostart::autostart_command(&exe, &signal, &room);
-            match aerodesk_windows::autostart::install(&cmd) {
+            let cmd = aerodesk_platform::windows::autostart::autostart_command(&exe, &signal, &room);
+            match aerodesk_platform::windows::autostart::install(&cmd) {
                 Ok(()) => println!("autostart installed (HKCU Run): {cmd}"),
                 Err(e) => {
                     eprintln!("autostart install failed: {e}");
@@ -153,7 +153,7 @@ fn run() {
     if args.iter().any(|a| a == "--remove-autostart") {
         #[cfg(windows)]
         {
-            match aerodesk_windows::autostart::remove() {
+            match aerodesk_platform::windows::autostart::remove() {
                 Ok(true) => println!("autostart removed"),
                 Ok(false) => println!("autostart not installed"),
                 Err(e) => {
@@ -172,7 +172,7 @@ fn run() {
     if args.iter().any(|a| a == "--autostart-status") {
         #[cfg(windows)]
         {
-            match aerodesk_windows::autostart::installed() {
+            match aerodesk_platform::windows::autostart::installed() {
                 Ok(Some(cmd)) => println!("installed: {cmd}"),
                 Ok(None) => println!("not installed"),
                 Err(e) => {
@@ -223,19 +223,19 @@ fn run() {
     if args.iter().any(|a| a == "--list-cameras") {
         #[cfg(target_os = "macos")]
         {
-            for c in aerodesk_macos::camera::list_cameras() {
+            for c in aerodesk_platform::macos::camera::list_cameras() {
                 println!("{}\t{}", c.id, c.name);
             }
         }
         #[cfg(target_os = "linux")]
         {
-            for c in aerodesk_linux::camera::list_cameras() {
+            for c in aerodesk_platform::linux::camera::list_cameras() {
                 println!("{c}");
             }
         }
         #[cfg(target_os = "windows")]
         {
-            for (id, name) in aerodesk_windows::camera::list_cameras() {
+            for (id, name) in aerodesk_platform::windows::camera::list_cameras() {
                 println!("{id}\t{name}");
             }
         }
@@ -305,7 +305,7 @@ fn run() {
         None => {
             #[cfg(target_os = "macos")]
             {
-                if aerodesk_macos::vt_encoder::VtEncoder::hevc_encoder_available() {
+                if aerodesk_platform::macos::vt_encoder::VtEncoder::hevc_encoder_available() {
                     Codec::Hevc
                 } else {
                     Codec::H264
@@ -336,7 +336,7 @@ fn run() {
             {
                 let vt_capable = video_codec == Codec::H264
                     || (video_codec == Codec::Hevc
-                        && aerodesk_macos::vt_encoder::VtEncoder::hevc_encoder_available());
+                        && aerodesk_platform::macos::vt_encoder::VtEncoder::hevc_encoder_available());
                 if vt_capable {
                     // #74 硬编优先：H264/H265 走 VideoToolbox 硬编（HEVC 无硬编
                     // 时探针失败回退 FFmpeg）。
@@ -1439,16 +1439,16 @@ fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
 /// portal RemoteDesktop（compositor 级，无需 root），失败回退 uinput。
 #[cfg(target_os = "linux")]
 enum LinuxInjector {
-    XTest(aerodesk_linux::inject::XTestInjector),
-    Uinput(aerodesk_linux::inject::UinputInjector),
-    Portal(aerodesk_linux::portal_inject::PortalInjector),
+    XTest(aerodesk_platform::linux::inject::XTestInjector),
+    Uinput(aerodesk_platform::linux::inject::UinputInjector),
+    Portal(aerodesk_platform::linux::portal_inject::PortalInjector),
 }
 
 #[cfg(target_os = "linux")]
 impl LinuxInjector {
     fn new() -> Option<Self> {
         if std::env::var("DISPLAY").is_ok() {
-            match aerodesk_linux::inject::XTestInjector::new() {
+            match aerodesk_platform::linux::inject::XTestInjector::new() {
                 Ok(i) => Some(Self::XTest(i)),
                 Err(e) => {
                     warn!("XTest injector init failed: {e}");
@@ -1458,7 +1458,7 @@ impl LinuxInjector {
         } else {
             // Wayland：portal RemoteDesktop 优先（#319；aerodesk-linux 依赖固定启用 pipewire）。
             {
-                match aerodesk_linux::portal_inject::PortalInjector::new() {
+                match aerodesk_platform::linux::portal_inject::PortalInjector::new() {
                     Ok(i) => {
                         info!("Linux input injector: portal RemoteDesktop");
                         return Some(Self::Portal(i));
@@ -1466,7 +1466,7 @@ impl LinuxInjector {
                     Err(e) => warn!("portal injector init failed, fallback uinput: {e}"),
                 }
             }
-            match aerodesk_linux::inject::UinputInjector::new() {
+            match aerodesk_platform::linux::inject::UinputInjector::new() {
                 Ok(i) => Some(Self::Uinput(i)),
                 Err(e) => {
                     warn!("uinput injector init failed: {e}");
@@ -1499,14 +1499,14 @@ static ACTIVE_DISPLAY_RECT: std::sync::Mutex<Option<(i32, i32, u32, u32)>> =
 fn inject_input(seq: u64, event: &InputEvent) {
     #[cfg(target_os = "macos")]
     {
-        match aerodesk_macos::inject::inject(event) {
+        match aerodesk_platform::macos::inject::inject(event) {
             Ok(()) => info!("inject: seq={seq} {event:?}"),
             Err(e) => info!("inject failed: seq={seq} {event:?}: {e}"),
         }
     }
     #[cfg(target_os = "windows")]
     {
-        let mut inj = aerodesk_windows::inject::SendInputInjector::new();
+        let mut inj = aerodesk_platform::windows::inject::SendInputInjector::new();
         if let Ok(guard) = ACTIVE_DISPLAY_RECT.lock() {
             inj.set_active_display(*guard);
         }
@@ -2495,7 +2495,7 @@ fn publisher_vt(
         bitrate,
     } = params;
     use aerodesk_core::synthetic::SyntheticSource;
-    use aerodesk_macos::vt_encoder::VtEncoder;
+    use aerodesk_platform::macos::vt_encoder::VtEncoder;
     use str0m::media::Rid;
 
     let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
@@ -2964,7 +2964,7 @@ fn publisher_capture_windows(
     camera_device: Option<String>,
 ) {
     use aerodesk_core::platform::MediaSource;
-    use aerodesk_windows::capture::DxgiCapturer;
+    use aerodesk_platform::windows::capture::DxgiCapturer;
 
     const FPS: u32 = 30;
 
@@ -2989,7 +2989,7 @@ fn publisher_capture_windows(
     let display_rect = capture.display_rect();
     info!("Windows screen capture started at {w}x{h}");
     // #334：采集会话期间保持系统/显示器唤醒（防闲置休眠后 DXGI 无输出）。
-    let _keep_awake = aerodesk_windows::wake_lock::WindowsSystemWakeLock
+    let _keep_awake = aerodesk_platform::windows::wake_lock::WindowsSystemWakeLock
         .acquire(true)
         .map_err(|e| warn!("保持显示器唤醒失败: {e}"))
         .ok();
@@ -3006,8 +3006,8 @@ fn publisher_capture_windows(
             }
         };
     // #3 Windows 系统音频：WASAPI loopback 采集系统播放的声音；失败回退合成音。
-    let audio_cap: Option<aerodesk_windows::audio_capture::WasapiLoopbackCapture> = if audio {
-        match aerodesk_windows::audio_capture::WasapiLoopbackCapture::start() {
+    let audio_cap: Option<aerodesk_platform::windows::audio_capture::WasapiLoopbackCapture> = if audio {
+        match aerodesk_platform::windows::audio_capture::WasapiLoopbackCapture::start() {
             Ok(cap) => {
                 info!("Windows system audio capture started (WASAPI loopback)");
                 Some(cap)
@@ -3022,8 +3022,8 @@ fn publisher_capture_windows(
     };
     // #385 摄像头（MF SourceReader）：--camera 时启动本地摄像头第二路视频轨，
     // 失败仅告警（屏幕视频轨照常）；SourceReader 输出 RGB32/BGRA。
-    let camera_cap: Option<aerodesk_windows::camera::MfCamera> = if camera {
-        match aerodesk_windows::camera::MfCamera::new(camera_device.as_deref()) {
+    let camera_cap: Option<aerodesk_platform::windows::camera::MfCamera> = if camera {
+        match aerodesk_platform::windows::camera::MfCamera::new(camera_device.as_deref()) {
             Ok(mut cam) => match cam.start(1280, 720, FPS) {
                 Ok(()) => {
                     info!("Windows camera capture started (device={camera_device:?})");
@@ -3055,7 +3055,7 @@ fn publisher_capture_windows(
         audio_cap,
         camera_cap,
         // #75 远程光标：Windows 被控端真实光标位置（GetCursorPos，活动显示器归一化）。
-        Some(aerodesk_windows::cursor::WindowsCursor::new(Some(
+        Some(aerodesk_platform::windows::cursor::WindowsCursor::new(Some(
             display_rect,
         ))),
     );
@@ -3077,14 +3077,14 @@ fn publisher_capture_linux(
     camera_device: Option<String>,
 ) {
     use aerodesk_core::platform::MediaSource;
-    use aerodesk_linux::capture::{WaylandPortalCapturer, X11Capturer};
+    use aerodesk_platform::linux::capture::{WaylandPortalCapturer, X11Capturer};
 
     const FPS: u32 = 30;
 
     // #385 摄像头（V4L2）：--camera 时启动本地摄像头，失败仅告警（视频轨照常）。
-    let camera_cap: Option<aerodesk_linux::camera::V4l2Camera> = if camera {
+    let camera_cap: Option<aerodesk_platform::linux::camera::V4l2Camera> = if camera {
         let dev = camera_device.unwrap_or_else(|| "/dev/video0".to_string());
-        match aerodesk_linux::camera::V4l2Camera::new(&dev) {
+        match aerodesk_platform::linux::camera::V4l2Camera::new(&dev) {
             Ok(mut cam) => {
                 use aerodesk_core::platform::CameraSource;
                 match CameraSource::start(&mut cam, 1280, 720, 30) {
@@ -3143,14 +3143,14 @@ fn publisher_capture_linux(
     let encoder = match codec {
         Codec::H264 => {
             // VAAPI 硬编优先，失败回退 x264 软编。
-            match aerodesk_linux::vaapi::VaapiEncoder::new(w, h, FPS, 8_000_000, Codec::H264) {
+            match aerodesk_platform::linux::vaapi::VaapiEncoder::new(w, h, FPS, 8_000_000, Codec::H264) {
                 Ok(e) => {
                     info!("Linux screen encoder: VAAPI (h264_vaapi)");
                     LinuxScreenEncoder::Vaapi(e)
                 }
                 Err(e) => {
                     warn!("VAAPI encoder unavailable ({e})，回退 x264 软编");
-                    match aerodesk_linux::encode::SoftEncoder::new(w, h, FPS, 8_000) {
+                    match aerodesk_platform::linux::encode::SoftEncoder::new(w, h, FPS, 8_000) {
                         Ok(e) => LinuxScreenEncoder::Soft(e),
                         Err(e) => {
                             error!("x264 encoder init failed: {e}");
@@ -3173,12 +3173,12 @@ fn publisher_capture_linux(
     };
     // #334：采集会话期间保持显示器唤醒（防系统/显示器休眠导致采集失效）。
     let _keep_awake =
-        SystemWakeLock::acquire(&aerodesk_linux::wake_lock::LinuxSystemWakeLock, true)
+        SystemWakeLock::acquire(&aerodesk_platform::linux::wake_lock::LinuxSystemWakeLock, true)
             .map_err(|e| warn!("保持显示器唤醒失败: {e}"))
             .ok();
     // #316 Linux 系统音频（PipeWire sink 捕获）：可用则真实音频，失败回退合成音。
-    let audio_cap: Option<aerodesk_linux::audio::SystemAudioCapture> = if audio {
-        match aerodesk_linux::audio::SystemAudioCapture::new() {
+    let audio_cap: Option<aerodesk_platform::linux::audio::SystemAudioCapture> = if audio {
+        match aerodesk_platform::linux::audio::SystemAudioCapture::new() {
             Ok(cap) => {
                 info!("Linux system audio capture started (PipeWire)");
                 Some(cap)
@@ -3203,7 +3203,7 @@ fn publisher_capture_linux(
         encoder,
         audio_cap,
         camera_cap,
-        Some(aerodesk_linux::cursor::LinuxCursor::new()),
+        Some(aerodesk_platform::linux::cursor::LinuxCursor::new()),
     );
 }
 
@@ -3211,8 +3211,8 @@ fn publisher_capture_linux(
 #[cfg(target_os = "linux")]
 #[allow(clippy::large_enum_variant)]
 enum LinuxScreenSource {
-    X11(aerodesk_linux::capture::X11Capturer),
-    Wayland(aerodesk_linux::capture::WaylandPortalCapturer),
+    X11(aerodesk_platform::linux::capture::X11Capturer),
+    Wayland(aerodesk_platform::linux::capture::WaylandPortalCapturer),
 }
 
 #[cfg(target_os = "linux")]
@@ -3255,8 +3255,8 @@ impl aerodesk_core::platform::MediaSource for LinuxScreenSource {
 #[cfg(target_os = "linux")]
 #[allow(clippy::large_enum_variant)]
 enum LinuxScreenEncoder {
-    Vaapi(aerodesk_linux::vaapi::VaapiEncoder),
-    Soft(aerodesk_linux::encode::SoftEncoder),
+    Vaapi(aerodesk_platform::linux::vaapi::VaapiEncoder),
+    Soft(aerodesk_platform::linux::encode::SoftEncoder),
     Ffmpeg(aerodesk_ffmpeg::encode::FfmpegEncoder),
 }
 
@@ -3323,7 +3323,7 @@ fn publisher_capture_ffmpeg(
     initial_display: usize,
 ) {
     use aerodesk_ffmpeg::encode::FfmpegEncoder;
-    use aerodesk_macos::capture::ScreenCapture;
+    use aerodesk_platform::macos::capture::ScreenCapture;
 
     // 采集分辨率：0,0 = 按显示器原生宽高比等比缩放（与 VT 路径 publisher_capture
     // 一致）。固定 1920x1080 会拉伸非 16:9 显示器并使输入坐标错位。
@@ -3348,12 +3348,12 @@ fn publisher_capture_ffmpeg(
         }
     };
     // #315：采集会话期间保持显示器唤醒（防闲置休眠后 SCK 无显示器）。
-    let _keep_awake = aerodesk_macos::wake_lock::MacSystemWakeLock
+    let _keep_awake = aerodesk_platform::macos::wake_lock::MacSystemWakeLock
         .acquire(true)
         .map_err(|e| warn!("保持显示器唤醒失败: {e}"))
         .ok();
     // #75：输入注入坐标按被控显示器（不总是主屏）换算。
-    aerodesk_macos::inject::set_active_display(Some(capture.display_id()));
+    aerodesk_platform::macos::inject::set_active_display(Some(capture.display_id()));
     // 编码分辨率 = 采集实际尺寸（保持显示器宽高比；旧固定 1920x1080 拉伸非 16:9）。
     let (w, h) = (capture.width(), capture.height());
     info!(
@@ -3425,14 +3425,14 @@ fn publisher_capture_ffmpeg(
         if last_cursor.elapsed() >= Duration::from_millis(33) {
             last_cursor = Instant::now();
             #[cfg(target_os = "macos")]
-            if let Some((x, y)) = aerodesk_macos::cursor::cursor_position_normalized() {
+            if let Some((x, y)) = aerodesk_platform::macos::cursor::cursor_position_normalized() {
                 send_cursor(&mut endpoint, x, y);
             }
         }
 
         if connected && let Some(surface) = capture.capture_frame(Duration::from_millis(50)) {
             // IOSurface（BGRA）→ 行复制到 CPU 缓冲 → FFmpeg 编码。
-            let bgra = match aerodesk_macos::capture::surface_to_bgra(&surface, w, h) {
+            let bgra = match aerodesk_platform::macos::capture::surface_to_bgra(&surface, w, h) {
                 Ok(b) => b,
                 Err(e) => {
                     warn!("surface read failed: {e}");
@@ -3478,8 +3478,8 @@ fn publisher_capture(
     camera_device: Option<String>,
 ) {
     use aerodesk_core::platform::CameraSource;
-    use aerodesk_macos::capture::ScreenCapture;
-    use aerodesk_macos::vt_encoder::VtEncoder;
+    use aerodesk_platform::macos::capture::ScreenCapture;
+    use aerodesk_platform::macos::vt_encoder::VtEncoder;
     use str0m::media::Rid;
 
     const FPS: u32 = 30;
@@ -3559,7 +3559,7 @@ fn publisher_capture(
         *layers = new_layers;
         // #75：切换显示器后输入注入坐标基准同步。
         if let Some((_, _, cap)) = layers.first() {
-            aerodesk_macos::inject::set_active_display(Some(cap.display_id()));
+            aerodesk_platform::macos::inject::set_active_display(Some(cap.display_id()));
         }
         info!("screen capture switched to display {idx}");
         Ok(())
@@ -3593,7 +3593,7 @@ fn publisher_capture(
             layers.push((Some(Rid::from(*rid)), encoder, capture));
         }
         if let Some((_, _, cap)) = layers.first() {
-            aerodesk_macos::inject::set_active_display(Some(cap.display_id()));
+            aerodesk_platform::macos::inject::set_active_display(Some(cap.display_id()));
         }
     } else {
         let capture = match init_capture(initial_display, W, H) {
@@ -3618,10 +3618,10 @@ fn publisher_capture(
             }
         };
         layers.push((None, encoder, capture));
-        aerodesk_macos::inject::set_active_display(Some(layers[0].2.display_id()));
+        aerodesk_platform::macos::inject::set_active_display(Some(layers[0].2.display_id()));
     }
     // #315：采集会话期间保持显示器唤醒（防闲置休眠后 SCK 无显示器）。
-    let _keep_awake = aerodesk_macos::wake_lock::MacSystemWakeLock
+    let _keep_awake = aerodesk_platform::macos::wake_lock::MacSystemWakeLock
         .acquire(true)
         .map_err(|e| warn!("保持显示器唤醒失败: {e}"))
         .ok();
@@ -3629,10 +3629,10 @@ fn publisher_capture(
     let mut connected = false;
     // #73 真实系统音频：SCK audio-only SCStream 采集本机正在播放的声音；
     // 采集失败/未开 --audio 时回退合成音 AudioTicker。
-    let mut real_audio: Option<RealAudioSender<aerodesk_macos::audio_capture::SystemAudioCapture>> =
+    let mut real_audio: Option<RealAudioSender<aerodesk_platform::macos::audio_capture::SystemAudioCapture>> =
         None;
     if audio {
-        match aerodesk_macos::audio_capture::SystemAudioCapture::start() {
+        match aerodesk_platform::macos::audio_capture::SystemAudioCapture::start() {
             Ok(cap) => {
                 info!("system audio capture started (SCK audio)");
                 real_audio = Some(RealAudioSender::new(cap, audio_opus));
@@ -3645,22 +3645,22 @@ fn publisher_capture(
     let pts_inc = 90_000 / FPS as i64;
 
     // 摄像头第二路视频轨（--camera）：AVFoundation 采集 + FFmpeg 软编（BGRA）。
-    let mut camera_cap: Option<aerodesk_macos::camera::MacCamera> = None;
+    let mut camera_cap: Option<aerodesk_platform::macos::camera::MacCamera> = None;
     let mut camera_enc: Option<aerodesk_ffmpeg::encode::FfmpegEncoder> = None;
     let mut camera_pts = 0i64;
     let camera_pts_inc = 90_000 / 30;
     let mut camera_frames = 0u64;
     if camera {
         // 未授权时先弹系统授权框（TCC「相机」），授权后才真正启动采集。
-        if !aerodesk_macos::camera::camera_authorized() {
+        if !aerodesk_platform::macos::camera::camera_authorized() {
             info!("camera permission not granted, requesting…");
-            if aerodesk_macos::camera::request_camera_access() {
+            if aerodesk_platform::macos::camera::request_camera_access() {
                 info!("camera permission granted");
             } else {
                 warn!("camera permission denied (System Settings > Privacy & Security > Camera)");
             }
         }
-        let mut cam = aerodesk_macos::camera::MacCamera::new();
+        let mut cam = aerodesk_platform::macos::camera::MacCamera::new();
         if let Some(id) = &camera_device {
             cam = cam.with_device(id.clone());
         }
@@ -3778,7 +3778,7 @@ fn publisher_capture(
         if last_cursor.elapsed() >= Duration::from_millis(33) {
             last_cursor = Instant::now();
             #[cfg(target_os = "macos")]
-            if let Some((x, y)) = aerodesk_macos::cursor::cursor_position_normalized() {
+            if let Some((x, y)) = aerodesk_platform::macos::cursor::cursor_position_normalized() {
                 send_cursor(&mut endpoint, x, y);
             }
         }

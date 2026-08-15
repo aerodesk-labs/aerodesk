@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Windows 主控端（aerodesk-ui）运行态端到端：构建 → 本地 SFU → Web 被控端发布
+# Windows 主控端（aerodesk-desktop）运行态端到端：构建 → 本地 SFU → Web 被控端发布
 # （headless Edge 屏幕共享）→ Windows UI 自动连接观看 → 断言 ICE Completed。
 # 依赖：cargo、node/playwright-core、Edge（windows runner 预装）、UI 编译通过（#177）。
 # 用法: scripts/windows-ui-e2e.sh [room]  （Git Bash）
@@ -9,7 +9,7 @@ cd "$ROOT"
 ROOM="${1:-winui-$(date +%s)}"
 
 echo "== [1/6] 构建（Windows）"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-ui
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-desktop
 
 E2E_DIR="${WEB_E2E_DIR:-/tmp/win-ui-e2e}"
 mkdir -p "$E2E_DIR"
@@ -69,7 +69,7 @@ PUB=$!
 sleep 3
 
 echo "== [4/6] 启动 Windows UI（自动连接观看）"
-RUST_LOG=debug "$ROOT/target/debug/aerodesk-ui.exe" \
+RUST_LOG=debug "$ROOT/target/debug/aerodesk-desktop.exe" \
   -server 127.0.0.1:3003 -room "$ROOM" -autoconnect >/tmp/winui-ui.log 2>&1 &
 UI_PID=$!
 sleep 8

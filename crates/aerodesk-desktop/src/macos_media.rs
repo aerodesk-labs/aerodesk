@@ -12,7 +12,7 @@ use aerodesk_core::access_unit::AccessUnitAssembler;
 use aerodesk_core::connect::connect_live_role_with_camera;
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media_pipeline::Codec;
-use aerodesk_macos::decode::{H264Decoder, HevcDecoder, to_rgba};
+use aerodesk_platform::macos::decode::{H264Decoder, HevcDecoder, to_rgba};
 use aerodesk_protocol::signal::Role;
 use str0m::net::Protocol;
 
@@ -148,7 +148,7 @@ fn notify_user(title: &str, body: &str) {
     #[cfg(target_os = "macos")]
     {
         use aerodesk_core::platform::Notifier;
-        aerodesk_macos::notifier::MacNotifier.notify(title, body);
+        aerodesk_platform::macos::notifier::MacNotifier.notify(title, body);
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -288,7 +288,7 @@ pub fn run_viewer(
     // sink 按首个音频帧的 codec 采样率惰性创建；无输出设备时降级为仅统计。
     let mut avsync = aerodesk_core::avsync::AvSync::new();
     let mut jitter = aerodesk_core::avsync::AudioJitterBuffer::new(0.08);
-    let mut audio_sink: Option<aerodesk_macos::audio::AudioSink> = None;
+    let mut audio_sink: Option<aerodesk_platform::macos::audio::AudioSink> = None;
     /// 当前 AudioSink 采样率（codec 切换时重建，防 8k↔48k 重采样变速）。
     let mut sink_rate: u32 = 0;
     // #73 Opus 音频：libopus 解码（惰性创建）。
@@ -412,7 +412,8 @@ pub fn run_viewer(
                             let pcm = aerodesk_core::pcmu::pcmu_decode(&data.data);
                             if audio_sink.is_none() || sink_rate != 8000 {
                                 audio_sink =
-                                    aerodesk_macos::audio::AudioSink::new_with_rate(8000).ok();
+                                    aerodesk_platform::macos::audio::AudioSink::new_with_rate(8000)
+                                        .ok();
                                 sink_rate = 8000;
                             }
                             avsync.on_audio(data.time.numer(), data.time.denom());
@@ -441,10 +442,11 @@ pub fn run_viewer(
                             if audio_sink.is_none()
                                 || sink_rate != aerodesk_ffmpeg::audio::OPUS_SAMPLE_RATE
                             {
-                                audio_sink = aerodesk_macos::audio::AudioSink::new_with_rate(
-                                    aerodesk_ffmpeg::audio::OPUS_SAMPLE_RATE,
-                                )
-                                .ok();
+                                audio_sink =
+                                    aerodesk_platform::macos::audio::AudioSink::new_with_rate(
+                                        aerodesk_ffmpeg::audio::OPUS_SAMPLE_RATE,
+                                    )
+                                    .ok();
                                 sink_rate = aerodesk_ffmpeg::audio::OPUS_SAMPLE_RATE;
                             }
                             avsync.on_audio(data.time.numer(), data.time.denom());
@@ -763,8 +765,8 @@ fn present_frame(
 mod tests {
     use super::*;
     use aerodesk_core::synthetic::SyntheticSource;
-    use aerodesk_macos::decode::to_rgba;
-    use aerodesk_macos::vt_encoder::VtEncoder;
+    use aerodesk_platform::macos::decode::to_rgba;
+    use aerodesk_platform::macos::vt_encoder::VtEncoder;
 
     /// 按 AnnexB 起始码拆分 NAL（保留起始码，模拟 str0m 的 `Output::Media` AnnexB 输出）。
     fn split_annexb_nalus(annexb: &[u8]) -> Vec<&[u8]> {

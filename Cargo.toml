@@ -13,7 +13,7 @@ members = [
     "crates/aerodesk-linux",
     "crates/aerodesk-windows",
     "crates/aerodesk-ohos",
-    "crates/aerodesk-ui",
+    "crates/aerodesk-desktop",
     "crates/aerodesk-ffmpeg",
     "crates/aerodesk-bridge",
     "crates/aerodesk-mcp",

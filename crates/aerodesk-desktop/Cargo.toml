@@ -1,6 +1,6 @@
 [package]
-name = "aerodesk-ui"
-description = "AeroDesk cross-platform UI shell (Slint): connect/room/settings, 7 platforms one codebase"
+name = "aerodesk-desktop"
+description = "AeroDesk desktop UI/UX shell (Slint): connect/device/settings for Windows/macOS/Linux"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,6 +14,8 @@ tracing-subscriber.workspace = true
 str0m = { workspace = true, features = ["rust-crypto"] }
 aerodesk-core = { path = "../aerodesk-core" }
 aerodesk-protocol = { path = "../aerodesk-protocol" }
+# 桌面端侧只依赖平台实现层，不再直接引用分散的 aerodesk-{macos,windows,linux}。
+aerodesk-platform = { path = "../aerodesk-platform" }
 # 非 macOS 主控端真实媒体：OpenH264 软解（全平台）；macOS 用 VideoToolbox 不依赖。
 aerodesk-softenc = { path = "../aerodesk-softenc" }
 # #73 观看端 Opus 解码（generic_viewer 非 macOS 音频播放；macOS 由 macos_media 使用）。
@@ -24,18 +26,8 @@ getrandom = "0.2"
 raw-window-handle = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-aerodesk-macos = { path = "../aerodesk-macos" }
 i-slint-backend-winit = "1.17"
 winit = "0.30"
-
-# #4 观看端 VAAPI 硬解（Linux；无 /dev/dri 时回退 OpenH264 软解）。
-[target.'cfg(target_os = "linux")'.dependencies]
-aerodesk-linux = { path = "../aerodesk-linux" }
-
-# Windows 被控端（屏幕发布）：DXGI 采集 + OpenH264 软编 + SendInput 注入。
-# #3 观看端 DXVA2 硬解（Windows；无 GPU/驱动时回退 OpenH264 软解）。
-[target.'cfg(target_os = "windows")'.dependencies]
-aerodesk-windows = { path = "../aerodesk-windows" }
 
 [build-dependencies]
 slint-build = "1"
@@ -47,7 +39,6 @@ embed-resource = "2"
 [dev-dependencies]
 # 无头 Slint 测试后端：UI 链路 e2e（session_refresh_ui/present_frame/session_cleanup）。
 i-slint-backend-testing = "1.17"
-
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
@@ -66,7 +57,7 @@ priority = "optional"
 # target/release/ 是 cargo-deb 的魔法前缀（自动指向真实 target 目录）；
 # app-assets 在 crate 外，用相对 CARGO_MANIFEST_DIR 的 ../../ 路径（cargo-deb #68）。
 assets = [
-  ["target/release/aerodesk-ui", "usr/bin/", "755"],
+  ["target/release/aerodesk-desktop", "usr/bin/", "755"],
   ["../../app-assets/icon-1024.png", "usr/share/icons/hicolor/512x512/apps/aerodesk.png", "644"],
   ["../../app-assets/aerodesk.desktop", "usr/share/applications/aerodesk.desktop", "644"],
 ]

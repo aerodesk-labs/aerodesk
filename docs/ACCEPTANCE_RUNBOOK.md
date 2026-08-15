@@ -12,7 +12,7 @@
 | 观看端 | Windows/macOS/Linux 任意（CLI 或 UI）；推荐与服务器异地网络 |
 | 服务器 | SFU + signal 已部署（含 TURN），端口/认证见部署实例 |
 | 网络 | 本机关闭代理/TUN（Clash 等）或加 DIRECT 规则；安全组放行 signal/媒体端口 |
-| 构建 | `cargo build --release -p aerodesk-cli -p aerodesk-ui`（依赖见 CI System deps），或用 pre-release 包 |
+| 构建 | `cargo build --release -p aerodesk-cli -p aerodesk-desktop`（依赖见 CI System deps），或用 pre-release 包 |
 
 常用连接参数（实测示例，按部署替换）：
 

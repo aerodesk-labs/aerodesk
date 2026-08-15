@@ -17,7 +17,7 @@ VALUE "ProductName", "AeroDesk"
 VALUE "FileVersion", "@@VERSION@@"
 VALUE "FileDescription", "AeroDesk remote desktop client (viewer/controller)"
 VALUE "LegalCopyright", "AeroDesk Labs"
-VALUE "OriginalFilename", "aerodesk-ui.exe"
+VALUE "OriginalFilename", "aerodesk-desktop.exe"
 }
 }
 BLOCK "VarFileInfo"

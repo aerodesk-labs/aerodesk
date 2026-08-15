@@ -152,7 +152,7 @@ mod imp {
         let audio_mid = live.audio_mid;
 
         // DXGI Desktop Duplication 采集（4K 软编性能不足，默认缩放到 1080p）。
-        use aerodesk_windows::capture::DxgiCapturer;
+        use aerodesk_platform::windows::capture::DxgiCapturer;
         let mut capture = match DxgiCapturer::new_with_scale(DEFAULT_TARGET_W, DEFAULT_TARGET_H) {
             Ok(c) => c,
             Err(e) => {
@@ -173,28 +173,34 @@ mod imp {
             return;
         }
 
-        let mut injector = aerodesk_windows::inject::SendInputInjector::new();
+        let mut injector = aerodesk_platform::windows::inject::SendInputInjector::new();
         injector.set_active_display(Some(display_rect));
 
         // OpenH264 软编：Windows 无系统 x264 时的全平台回退，输入统一 BGRA。
-        let mut encoder =
-            match aerodesk_windows::encode::SoftEncoder::new(w, h, FPS, DEFAULT_BITRATE_KBPS) {
-                Ok(e) => e,
-                Err(e) => {
-                    set_publisher_status(&ui_weak, format!("OpenH264 编码器初始化失败：{e}"));
-                    return;
-                }
-            };
+        let mut encoder = match aerodesk_platform::windows::encode::SoftEncoder::new(
+            w,
+            h,
+            FPS,
+            DEFAULT_BITRATE_KBPS,
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                set_publisher_status(&ui_weak, format!("OpenH264 编码器初始化失败：{e}"));
+                return;
+            }
+        };
 
         // #334：采集期间保持显示器唤醒（防闲置休眠后 DXGI 无输出）。
-        let _keep_awake =
-            SystemWakeLock::acquire(&aerodesk_windows::wake_lock::WindowsSystemWakeLock, true)
-                .map_err(|e| tracing::warn!("保持显示器唤醒失败: {e}"))
-                .ok();
+        let _keep_awake = SystemWakeLock::acquire(
+            &aerodesk_platform::windows::wake_lock::WindowsSystemWakeLock,
+            true,
+        )
+        .map_err(|e| tracing::warn!("保持显示器唤醒失败: {e}"))
+        .ok();
 
         // 真实系统音频（WASAPI loopback → PCMU）；失败仅告警，视频照常发布。
         let mut audio_sender = if audio {
-            match aerodesk_windows::audio_capture::WasapiLoopbackCapture::start() {
+            match aerodesk_platform::windows::audio_capture::WasapiLoopbackCapture::start() {
                 Ok(cap) => Some(PcmuAudioSender::new(cap)),
                 Err(e) => {
                     tracing::warn!("WASAPI 回环采集失败，被控端仅发布视频: {e}");
@@ -317,7 +323,7 @@ mod imp {
     /// 被控端输入通道：远端键鼠 → SendInput 注入；剪贴板文本 → 系统剪贴板。
     fn handle_input(
         endpoint: &mut Endpoint,
-        injector: &mut aerodesk_windows::inject::SendInputInjector,
+        injector: &mut aerodesk_platform::windows::inject::SendInputInjector,
         view_only: bool,
         mouse: bool,
         ev: ClientEvent,
@@ -367,7 +373,7 @@ mod imp {
 
     /// WASAPI 48kHz f32 样本 → PCMU 8kHz 20ms 帧（6:1 降采样），一次补一帧。
     struct PcmuAudioSender {
-        cap: aerodesk_windows::audio_capture::WasapiLoopbackCapture,
+        cap: aerodesk_platform::windows::audio_capture::WasapiLoopbackCapture,
         buf48: Vec<i16>,
         buf8: Vec<i16>,
         pts: u64,
@@ -375,7 +381,7 @@ mod imp {
     }
 
     impl PcmuAudioSender {
-        fn new(cap: aerodesk_windows::audio_capture::WasapiLoopbackCapture) -> Self {
+        fn new(cap: aerodesk_platform::windows::audio_capture::WasapiLoopbackCapture) -> Self {
             Self {
                 cap,
                 buf48: Vec::new(),

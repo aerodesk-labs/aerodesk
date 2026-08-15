@@ -2,7 +2,7 @@
 //!
 //! Slint 普通按键的 `text` 是实际字符（如 `a`/`A`/`1`/`!`），特殊键是私有
 //! Unicode 码位（见 `i-slint-common::key_codes`，`Key.Escape` 等命名空间常量）。
-//! 输出与 `aerodesk-macos::inject::keycode_for_code` 对齐；无法映射返回 `None`，
+//! 输出与 `aerodesk_platform::macos::inject::keycode_for_code` 对齐；无法映射返回 `None`，
 //! 调用方应 `reject` 让本地 UI 继续处理（例如 F13+、输入法组合键）。
 
 /// 把 Slint `KeyEvent.text` 映射为平台无关键码（`"KeyA"`/`"Digit1"`/`"Enter"`/`"F5"`…）。
