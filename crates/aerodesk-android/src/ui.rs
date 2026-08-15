@@ -15,7 +15,7 @@ use slint::ComponentHandle;
 static ACTIVE_VIEWER: Mutex<Option<ViewerSession>> = Mutex::new(None);
 
 slint::slint! {
-    import { Button, TextInput } from "std-widgets.slint";
+    import { Button } from "std-widgets.slint";
 
     export component AndroidAppWindow inherits Window {
         title: "AeroDesk";
