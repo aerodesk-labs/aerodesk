@@ -738,8 +738,9 @@ pub fn run_viewer(
                 last_file_status = Instant::now();
                 let st = file_transfer.status();
                 if let Some(msg) = st.message {
+                    let msg_for_ui = msg.clone();
                     with_ui(&ui_weak, move |ui| {
-                        ui.set_session_status(msg.clone().into())
+                        ui.set_session_status(msg_for_ui.clone().into())
                     });
                     crate::with_session_ui_state(&ui_weak, session_idx, |s| {
                         s.file_progress = -1.0;
@@ -751,8 +752,9 @@ pub fn run_viewer(
                     let status = format!("发送文件：{name} {done}/{total} ({pct:.0}%)");
                     let label = format!("发送 {name} {pct:.0}%");
                     let window_status = format!("正在发送：{name}");
+                    let status_for_ui = status.clone();
                     with_ui(&ui_weak, move |ui| {
-                        ui.set_session_status(status.clone().into())
+                        ui.set_session_status(status_for_ui.clone().into())
                     });
                     crate::with_session_ui_state(&ui_weak, session_idx, move |s| {
                         s.file_progress = (pct / 100.0) as f32;
@@ -769,12 +771,13 @@ pub fn run_viewer(
                     let status = format!("接收文件：{name} {done}/{total} ({pct:.0}%)");
                     let label = format!("接收 {name} {pct:.0}%");
                     let window_status = format!("正在接收：{name}");
+                    let status_for_ui = status.clone();
                     if done >= total && last_notified_file.as_deref() != Some(name.as_str()) {
                         notify_user("AeroDesk", &format!("收到文件：{name}"));
                         last_notified_file = Some(name.clone());
                     }
                     with_ui(&ui_weak, move |ui| {
-                        ui.set_session_status(status.clone().into())
+                        ui.set_session_status(status_for_ui.clone().into())
                     });
                     crate::with_session_ui_state(&ui_weak, session_idx, move |s| {
                         s.file_progress = (pct / 100.0) as f32;
