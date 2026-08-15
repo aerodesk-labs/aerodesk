@@ -68,4 +68,7 @@ iOS/iPad、Android、HarmonyOS 的端侧 UI/UX 统一走 Slint；native 层只�
   真机验证 winit iOS 后端与 Swift 生命周期接入。- 更具体的阻塞：桌面 `aerodesk-desktop` 依赖 slint 1.17 的 `system-tray`
   feature（1.10 无此 feature），而 Android 后端只有 1.10 可用；同一
   workspace 内无法同时选择两个 1.x 版本。落地 Android Slint 需二选一：
-  桌面降级并去掉 system-tray，或等待官方发布 1.17 的 Android 后端。
+  桌面降级并去掉 system-tray，或等待官方发布 1.17 的 Android 后端。- 降级路径也不可行：slint 1.10 缺少 `Weak::upgrade_in_event_loop`
+  （desktop 4 处使用）、`system-tray`、`raw-window-handle-06` 通道。
+  因此移动端 Slint 需等官方发布 slint 1.17 的 Android 后端，或接受
+  桌面端大改（换事件循环模型 + 去托盘 + 重做窗口聚焦）。
