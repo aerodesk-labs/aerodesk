@@ -78,10 +78,14 @@ pub fn run_viewer_generic<D, R, DF, RF>(
             if !stale() {
                 with_ui(&ui_weak, |ui| {
                     ui.set_conn_state(3);
-                    ui.set_status("连接超时".into());
+                    ui.set_status("连接超时：请检查服务器 ws://地址:端口 / token / 网络；对方未在线时也会等待媒体流".into());
                 });
             }
-            crate::session_cleanup_weak(&ui_weak, session_idx, Some("连接超时".into()));
+            crate::session_cleanup_weak(
+                &ui_weak,
+                session_idx,
+                Some("连接超时：请检查服务器 ws://地址:端口 / token / 网络".into()),
+            );
             return;
         }
     };
@@ -139,6 +143,9 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     let mut last_kf_request: Option<std::time::Instant> = None;
     let mut last_kf_rid: Option<str0m::media::Rid> = None;
     let mut seen_video = false;
+    // #425：连接建立后 10s 内无任何 RTP → 提示"对方不在线/未开启被控"（保持等待）。
+    let no_media_deadline = Instant::now() + Duration::from_secs(10);
+    let mut no_media_notified = false;
     while !stale() {
         // 输入事件：UI 键鼠 → input data channel → SFU → 被控端。
         while let Ok(json) = input_rx.try_recv() {
@@ -333,6 +340,19 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                     }
                 }
             }
+        }
+        // #425：连接建立后无媒体流 → 明确提示，而非一直"等待媒体流"；
+        // 收到首个视频帧后恢复"会话中"。
+        if !no_media_notified && media_evts == 0 && Instant::now() >= no_media_deadline {
+            no_media_notified = true;
+            let room_msg = format!("对方不在线或未开启被控（房间 {room}），等待对方上线后自动出流");
+            with_ui(&ui_weak, move |ui| ui.set_session_status(room_msg.into()));
+        }
+        if frames > 0 && no_media_notified {
+            no_media_notified = false;
+            with_ui(&ui_weak, move |ui| {
+                ui.set_session_status("会话中 · 媒体流已接通".into())
+            });
         }
         // #72 文件传输推进 + 剪贴板接收落地（文本/图片写入系统剪贴板）。
         file_transfer.tick(&mut live.endpoint);
