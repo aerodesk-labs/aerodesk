@@ -119,9 +119,12 @@ jobs:
         run: |
           SDK="/usr/local/lib/android/sdk"
           NDK="$(ls "$SDK/ndk" | sort -V | tail -1)"
+          PLATFORM="$(ls "$SDK/platforms" | sort -V | tail -1)"
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$SDK/ndk/$NDK" >> "$GITHUB_ENV"
-          echo "Using Android SDK: $SDK, NDK: $NDK"
-
+          echo "ANDROID_PLATFORM=$PLATFORM" >> "$GITHUB_ENV"
+          echo "ANDROID_JAR=$SDK/platforms/$PLATFORM/android.jar" >> "$GITHUB_ENV"
+          echo "Using Android SDK: $SDK, NDK: $NDK, platform: $PLATFORM"
       - name: cargo ndk check
         run: cargo ndk -t arm64-v8a check -p aerodesk-platform -p aerodesk-android
