@@ -83,3 +83,8 @@ apple-cf = "0.9"
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 serde_json.workspace = true
+
+[dev-dependencies]
+aerodesk-core = { path = "../aerodesk-core" }
+aerodesk-ffmpeg = { path = "../aerodesk-ffmpeg" }
+aerodesk-softenc = { path = "../aerodesk-softenc" }
