@@ -2,6 +2,9 @@
 //!
 //! 5 个原生平台（Win/macOS/Linux/Android/iOS）一套 UI；Web 走浏览器原生 WebRTC。
 
+// #417 Windows：release 为窗口程序（非控制台应用）；debug 保留控制台便于看日志。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 slint::include_modules!();
 #[cfg(not(target_os = "macos"))]
 mod generic_media;
@@ -647,6 +650,11 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_device_pw(pw_display.into());
     ui.set_pw_edit(settings.device_pw.clone().into());
     ui.set_inc_enabled(settings.inc_enabled);
+    // #417 开机自启状态回填（Windows HKCU Run；登录后自动启动并恢复被控）。
+    #[cfg(target_os = "windows")]
+    if let Ok(Some(_)) = aerodesk_windows::autostart::installed() {
+        ui.set_auto_start(true);
+    }
     ui.set_inc_audio(settings.inc_audio);
     ui.set_inc_mouse(settings.inc_mouse);
     ui.set_inc_view_only(settings.inc_view_only);
@@ -1517,6 +1525,39 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // #417 开机自启开关（Windows HKCU Run）：登录后自动启动 UI 并恢复被控。
+    ui.on_toggle_auto_start({
+        let ui = ui.as_weak();
+        move || {
+            #[cfg(target_os = "windows")]
+            if let Some(ui) = ui.upgrade() {
+                let on = ui.get_auto_start();
+                let exe = std::env::current_exe()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                let res = if on {
+                    aerodesk_windows::autostart::install(&format!("\"{exe}\""))
+                } else {
+                    aerodesk_windows::autostart::remove().map(|_| ())
+                };
+                match res {
+                    Ok(()) => ui.set_settings_status(if on {
+                        "已开启开机自启：登录后自动接受被控".into()
+                    } else {
+                        "已关闭开机自启".into()
+                    }),
+                    Err(e) => {
+                        ui.set_auto_start(!on);
+                        ui.set_settings_status(format!("开机自启设置失败：{e}").into());
+                    }
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            if let Some(ui) = ui.upgrade() {
+                ui.set_settings_status("开机自启仅 Windows 实现".into());
+            }
+        }
+    });
     // 「开启被控」开关：接入非 macOS（Windows）发布端；macOS 回调为 no-op。
     ui.on_toggle_inc({
         let ui = ui.as_weak();
@@ -1548,7 +1589,24 @@ fn main() -> Result<(), slint::PlatformError> {
                     "未授权".into()
                 });
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
+            {
+                // #417 Windows 被控授权：无 TCC 弹窗，交互会话即已授权；
+                // 授权语义 = 用户显式开启「开启被控」开关。
+                let p = aerodesk_windows::permissions::WindowsPermissions;
+                let (sc, ax) = (p.screen_capture_authorized(), p.accessibility_authorized());
+                ui.set_perm_screen(if sc {
+                    "已授权".into()
+                } else {
+                    "未授权".into()
+                });
+                ui.set_perm_a11y(if ax {
+                    "已授权".into()
+                } else {
+                    "未授权".into()
+                });
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             {
                 ui.set_perm_screen("平台未实现".into());
                 ui.set_perm_a11y("平台未实现".into());
@@ -1571,9 +1629,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 let p2 = aerodesk_macos::permissions::MacPermissions;
                 p2.open_screen_capture_settings();
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
             if let Some(ui) = ui.upgrade() {
-                ui.set_settings_status("被控端权限引导仅 macOS 实现".into());
+                ui.set_settings_status("Windows 无系统权限弹窗：开启「开启被控」即授权".into());
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            if let Some(ui) = ui.upgrade() {
+                ui.set_settings_status("被控端权限引导仅 macOS/Windows 实现".into());
             }
         }
     });
@@ -1582,9 +1644,13 @@ fn main() -> Result<(), slint::PlatformError> {
         move || {
             #[cfg(target_os = "macos")]
             aerodesk_macos::permissions::MacPermissions.open_accessibility_settings();
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
             if let Some(ui) = ui.upgrade() {
-                ui.set_settings_status("被控端权限引导仅 macOS 实现".into());
+                ui.set_settings_status("Windows 无系统权限弹窗：开启「开启被控」即授权".into());
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            if let Some(ui) = ui.upgrade() {
+                ui.set_settings_status("被控端权限引导仅 macOS/Windows 实现".into());
             }
         }
     });

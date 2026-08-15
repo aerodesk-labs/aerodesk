@@ -460,6 +460,7 @@ export component AppWindow inherits Window {
     in-out property <string> perm-a11y: "未知";
     // 被控端设置
     in-out property <bool> inc-enabled: false;
+    in-out property <bool> auto-start: false;   // #417 开机自启（Windows HKCU Run）
     in-out property <bool> inc-audio: true;
     in-out property <bool> inc-mouse: true;
     // #72 文件传输总开关：关闭后禁用发文件/剪贴板/拖放，并暂停接收落盘。
@@ -519,6 +520,7 @@ export component AppWindow inherits Window {
     callback add-discovered(string);
     callback auto-save();
     callback toggle-inc();
+    callback toggle-auto-start();   // #417 开机自启开关
     callback refresh-perms();
     callback open-screen-perms();
     callback open-a11y-perms();
@@ -596,6 +598,19 @@ export component AppWindow inherits Window {
                         text: "使用下面的 ID 和密码，可以远程访问这台设备。";
                         font-size: 14px;
                         color: #6d6d73;
+                        wrap: word-wrap;
+                        height: 34px;
+                        vertical-stretch: 0;
+                    }
+                }
+                // #417 被控未开启提示：引导到被控端页面（tab=2 接入设置）开启开关。
+                if !root.inc-enabled: HorizontalLayout {
+                    padding-left: 20px;
+                    padding-right: 16px;
+                    Text {
+                        text: "当前设备还不接受被控，需要到被控端页面去开启「开启被控」开关。";
+                        font-size: 13px;
+                        color: #d97706;
                         wrap: word-wrap;
                         height: 34px;
                         vertical-stretch: 0;
@@ -1186,6 +1201,7 @@ export component AppWindow inherits Window {
                         spacing: 10px;
                         Text { text: "接入设置"; font-size: 15px; font-weight: 600; color: #212121; height: 20px; vertical-stretch: 0; }
                         Switch { text: "开启被控（允许被远程接入）"; checked <=> root.inc-enabled; toggled => { root.auto-save(); root.toggle-inc(); } }
+                        Switch { text: "开机自启（登录后自动接受被控）"; checked <=> root.auto-start; toggled => { root.toggle-auto-start(); } }
                         Switch { text: "允许声音（被控端采集系统音频）"; enabled: root.inc-enabled; checked <=> root.inc-audio; toggled => { root.auto-save(); } }
                         Switch { text: "仅观看（只读，禁止鼠标/键盘控制）"; enabled: root.inc-enabled; checked <=> root.inc-view-only; toggled => { root.auto-save(); } }
                         Text { text: "设置修改后自动保存；开关即时反映状态"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }

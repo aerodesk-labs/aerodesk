@@ -19,6 +19,7 @@ pub mod cursor;
 pub mod decode;
 pub mod encode;
 pub mod inject;
+pub mod permissions;
 pub mod vdd;
 #[cfg(windows)]
 pub mod wake_lock;
