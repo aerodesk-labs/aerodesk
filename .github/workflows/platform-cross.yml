@@ -6,11 +6,6 @@ name: Platform cross-check
 # OHOS 未接入：GitHub hosted runner 无 OHOS NDK；见 scripts/check-ohos-toolchain.sh。
 on:
   workflow_dispatch:
-  # 临时：当前 PR 的 pull_request 事件未触达 Actions，push 事件作为验证通道；
-  # 仅针对本重构分支，合并/删除分支后不影响其他分支。
-  push:
-    branches:
-      - 'refactor/aerodesk-platform'
 
 permissions:
   contents: read
@@ -130,42 +125,3 @@ jobs:
 
       - name: cargo ndk check
         run: cargo ndk -t arm64-v8a check -p aerodesk-platform -p aerodesk-android
-
-  ios-app-build:
-    name: ios app build (sim + device)
-    runs-on: macos-latest
-    env:
-      CARGO_TERM_COLOR: always
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Checkout str0m (netem dev-dep)
-        shell: bash
-        run: |
-          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
-            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
-          fi
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Add iOS Rust targets
-        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
-
-      - name: Install xcodegen
-        run: brew install xcodegen
-
-      - name: Build Rust static libs (sim + device) -> XCFramework
-        run: bash scripts/build-ios-lib.sh all
-
-      - name: Generate Xcode project
-        run: cd ios && xcodegen generate
-
-      - name: Build app (simulator slice)
-        run: |
-          cd ios
-          xcodebuild -project AeroDesk.xcodeproj -scheme AeroDesk             -destination 'generic/platform=iOS Simulator' -configuration Debug             ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build CODE_SIGNING_ALLOWED=NO
-
-      - name: Build app (device slice, unsigned)
-        run: |
-          cd ios
-          xcodebuild -project AeroDesk.xcodeproj -scheme AeroDesk             -destination 'generic/platform=iOS' -configuration Debug             ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build CODE_SIGNING_ALLOWED=NO
