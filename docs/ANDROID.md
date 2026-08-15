@@ -4,7 +4,7 @@
 
 ## 现状（里程碑 1）
 
-- `crates/aerodesk-android`：Rust 核心 + JNI 桥（`jni.rs`）+ Slint 宿主（`ui.rs`）
+- `crates/aerodesk-android`：Rust 核心 + JNI 桥（`jni.rs`）+ Slint 宿主（`ui.rs`，支持 server/room 连接/断开）
   - `version()`：SDK 版本
   - `connect(server, room)`：观看端连接（WSS 信令 + SDP 交换 + ICE 泵，阻塞调用）
 - `android/`：Gradle 工程（AGP 8.7.3 / Kotlin 2.0.21 / compileSdk 34 / minSdk 26）

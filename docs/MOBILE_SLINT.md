@@ -19,8 +19,8 @@ iOS/iPad、Android、HarmonyOS 的端侧 UI/UX 统一走 Slint；native 层只�
 
 1. Rust 端侧：
    - `aerodesk-android` 已增加 Slint 依赖（`backend-android-activity-06` + `renderer-software`）。
-   - 已新增 `ui.rs`：`android_main(app: slint::android::AndroidApp)`，调用 `slint::android::init(app)` 并运行 Slint `AndroidAppWindow`。
-   - 后续复用 `aerodesk-desktop/ui/app.slint` 的连接/房间/会话 UI（抽成共享 Slint 组件）。
+   - 已新增 `ui.rs`：`android_main(app: slint::android::AndroidApp)`，调用 `slint::android::init(app)` 并运行 Slint `AndroidAppWindow`；当前已支持输入 server/room 并连接/断开 `ViewerSession`。
+   - 后续复用 `aerodesk-desktop/ui/app.slint` 的连接/房间/会话 UI（抽成共享 Slint 组件），并把解码帧渲染接入 Slint。
 2. Kotlin 壳层：
    - 已新增 `SlintActivity : NativeActivity`，通过 `android.app.lib_name=aerodesk_android` 加载 Rust Slint 入口。
    - 保留 `ProjectionService`、`InputInjectionService`、`PublisherActivity` 作为系统垫片。
