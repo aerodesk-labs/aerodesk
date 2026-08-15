@@ -1240,15 +1240,18 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                 server,
                 room,
                 aerodesk_protocol::signal::Role::Publisher,
-            );
+            )
+            .with_auto_accept(false); // #456 由 UI 根据「开启被控」授权决定是否接听
             if !token.is_empty() {
                 config = config.with_auth_token(token);
             }
-            let mut presence = aerodesk_core::signal_presence::SignalPresence::new(config)
-                .with_read_timeout(std::time::Duration::from_millis(500));
-            presence.start();
+            let presence = std::sync::Arc::new(std::sync::Mutex::new(
+                aerodesk_core::signal_presence::SignalPresence::new(config)
+                    .with_read_timeout(std::time::Duration::from_millis(500)),
+            ));
+            presence.lock().unwrap().start();
             loop {
-                let st = presence.poll();
+                let st = presence.lock().unwrap().poll();
                 let (text, online) = match st {
                     aerodesk_core::signal_presence::PresenceStatus::Stopped => {
                         ("信令未连接".to_string(), false)
@@ -1267,6 +1270,37 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                     ui.set_signal_status(text.into());
                     ui.set_signal_online(online);
                 });
+
+                // #456 被呼叫时再出流：接听→启动 publisher；挂断/超时→停止 publisher。
+                let events = presence.lock().unwrap().take_events();
+                for ev in events {
+                    match ev {
+                        aerodesk_core::signal_presence::PresenceEvent::IncomingCall {
+                            from,
+                            ..
+                        } => {
+                            let p = presence.clone();
+                            let uiw = ui_weak.clone();
+                            crate::with_ui(&uiw, move |ui| {
+                                if ui.get_inc_enabled() {
+                                    let _ = p.lock().unwrap().accept_call();
+                                    crate::generic_publisher::start_publisher(ui);
+                                    ui.set_status(format!("接听来自 {from} 的呼叫").into());
+                                } else {
+                                    let _ = p.lock().unwrap().reject_call(Some("未开启被控"));
+                                    ui.set_status("已拒绝呼叫：未开启被控".into());
+                                }
+                            });
+                        }
+                        aerodesk_core::signal_presence::PresenceEvent::Hangup { .. }
+                        | aerodesk_core::signal_presence::PresenceEvent::CallTimeout { .. } => {
+                            let uiw = ui_weak.clone();
+                            crate::with_ui(&uiw, |ui| {
+                                crate::generic_publisher::stop_publisher(ui);
+                            });
+                        }
+                    }
+                }
                 std::thread::sleep(std::time::Duration::from_millis(300));
             }
         })
