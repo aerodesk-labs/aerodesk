@@ -205,7 +205,8 @@ impl SendInputInjector {
     /// 映射到 `display_rect` 指定的活动显示器区域（多显示器，#75）。
     fn mouse_move(&self, x: f32, y: f32) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
         use windows::Win32::UI::Input::KeyboardAndMouse::{
-            INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE, MOUSEINPUT,
+            INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE,
+            MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
         };
         let virtual_rect = virtual_screen();
         let (dx, dy) = map_to_virtual(x, y, self.display_rect, virtual_rect);
@@ -216,7 +217,10 @@ impl SendInputInjector {
                     dx,
                     dy,
                     mouseData: 0,
-                    dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
+                    // dx/dy 已按整个虚拟屏幕归一化（可含负坐标区/多显示器），
+                    // 必须带 VIRTUALDESK；否则 0..65535 被解释为主显示器坐标，
+                    // 多显示器下点击/移动落点错误。
+                    dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
                     time: 0,
                     dwExtraInfo: 0,
                 },
@@ -303,13 +307,22 @@ fn wheel(dy: f32) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
             mi: MOUSEINPUT {
                 dx: 0,
                 dy: 0,
-                mouseData: (dy.clamp(-100.0, 100.0) * 120.0) as u32,
+                mouseData: wheel_mouse_data(dy),
                 dwFlags: MOUSEEVENTF_WHEEL,
                 time: 0,
                 dwExtraInfo: 0,
             },
         },
     }
+}
+
+/// 滚轮增量（正=向上，1.0 = 一格）→ `MOUSEINPUT.mouseData`（DWORD 位型，120/格）。
+///
+/// 负增量必须先转 `i32` 再按位重解释为 `u32`：Rust 的 float→无符号 `as` 是
+/// 饱和转换，负值直接变 0（曾致向下滚动完全失效）。
+#[cfg(any(windows, test))]
+fn wheel_mouse_data(dy: f32) -> u32 {
+    ((dy.clamp(-100.0, 100.0) * 120.0) as i32) as u32
 }
 
 #[cfg(windows)]
@@ -379,5 +392,21 @@ mod tests {
         let virtual_rect = (0, 0, 1920, 1080);
         let (sx, sy) = map_to_virtual(-1.0, 2.0, None, virtual_rect);
         assert_eq!((sx, sy), (0, 65535));
+    }
+
+    /// 滚轮负增量回归：向下滚动（delta_y < 0）不得因 float→u32 饱和转换变 0。
+    /// 按位重解释后 API 读到的有符号值必须为负。
+    #[test]
+    fn wheel_mouse_data_keeps_negative_direction() {
+        assert_eq!(wheel_mouse_data(3.0) as i32, 360, "向上 3 格 = +360");
+        assert_eq!(
+            wheel_mouse_data(-3.0) as i32,
+            -360,
+            "向下 3 格应为 -360（饱和转换 bug 回归）"
+        );
+        assert_eq!(wheel_mouse_data(0.0) as i32, 0);
+        // 超界增量 clamp 到 ±100 格（±12000），不溢出 i32。
+        assert_eq!(wheel_mouse_data(1_000_000.0) as i32, 12_000);
+        assert_eq!(wheel_mouse_data(-1_000_000.0) as i32, -12_000);
     }
 }

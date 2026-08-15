@@ -194,15 +194,24 @@ fn windows_read() -> Option<String> {
             return None;
         }
         let size = GlobalSize(h);
-        let mut len = 0usize;
-        while len + 1 < size && *((ptr as *const u16).add(len)) != 0 {
-            len += 1;
-        }
-        let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr as *const u16, len));
+        // SAFETY: GlobalLock 成功后 [ptr, ptr+size) 可读；按 u16 元素切（size 为字节
+        // 数，除 2 丢弃奇数尾巴字节），NUL 截断由 utf16_len_until_nul 在元素范围内完成，
+        // 畸形无 NUL 数据不会越界（旧实现的循环上限误用字节数，可越界至约 2 倍分配）。
+        let units = std::slice::from_raw_parts(ptr as *const u16, size / 2);
+        let text = String::from_utf16_lossy(&units[..utf16_len_until_nul(units)]);
         GlobalUnlock(h);
         CloseClipboard();
         Some(text)
     }
+}
+
+/// UTF-16 元素序列到首个 NUL 的长度（无 NUL 时取全部元素数）。
+///
+/// 剪贴板 CF_UNICODETEXT 按约定 NUL 结尾，但畸形/第三方写入的数据可能没有；
+/// 截断长度必须以元素数计，不得拿字节数当元素上限。
+#[cfg(any(target_os = "windows", test))]
+fn utf16_len_until_nul(units: &[u16]) -> usize {
+    units.iter().position(|&u| u == 0).unwrap_or(units.len())
 }
 
 /// Windows 写剪贴板（原生 Win32 CF_UNICODETEXT，#271 修复）。
@@ -581,6 +590,23 @@ mod tests {
     fn cache_roundtrip() {
         set_cache("hello 你好".to_string());
         assert_eq!(cached().as_deref(), Some("hello 你好"));
+    }
+
+    /// Windows 剪贴板 NUL 扫描量纲回归：截断长度必须收敛在元素数内。
+    /// （旧实现的循环条件把 GlobalSize 字节数当元素上限，无 NUL 的畸形数据
+    /// 可越界读取至约 2 倍分配之外。）
+    #[test]
+    fn utf16_len_until_nul_bounds() {
+        // 有 NUL：到 NUL 为止（不含），NUL 后的脏数据被截断。
+        let mut with_nul: Vec<u16> = "AeroDesk".encode_utf16().collect();
+        with_nul.push(0);
+        with_nul.extend_from_slice(&[0x41, 0x42]);
+        assert_eq!(utf16_len_until_nul(&with_nul), "AeroDesk".len());
+        // 畸形：无 NUL 时恰好取全部元素数（不得超出切片）。
+        let no_nul: Vec<u16> = (1..=100u16).collect();
+        assert_eq!(utf16_len_until_nul(&no_nul), 100);
+        // 空缓冲。
+        assert_eq!(utf16_len_until_nul(&[]), 0);
     }
 
     /// Linux 真机剪贴板往返（CI ubuntu runner 交互会话；无显示环境时 SKIP）。

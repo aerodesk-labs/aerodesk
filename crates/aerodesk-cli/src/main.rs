@@ -2639,6 +2639,8 @@ fn publisher_generic<
     // #385：摄像头第二路视频轨（--camera，BGRA → FFmpeg 软编 → camera_mid）。
     let mut camera_cap = camera_cap;
     let mut camera_enc: Option<aerodesk_ffmpeg::encode::FfmpegEncoder> = None;
+    // 摄像头编码器初始化失败（如奇数分辨率）时停用摄像头轨，避免逐帧重试刷告警。
+    let mut camera_dead = false;
     let mut camera_pts = 0i64;
     let mut next_camera = Instant::now();
     let mut next_frame = Instant::now();
@@ -2757,21 +2759,23 @@ fn publisher_generic<
                     continue;
                 }
             };
-            if let Some(unit) = encoder
-                .encode(&frame)
-                .map_err(|e| e.to_string())
-                .expect("encode")
-            {
-                let rtp_time = str0m::media::MediaTime::new(
-                    pts as u64 * 3000,
-                    str0m::media::Frequency::NINETY_KHZ,
-                );
-                if let Err(e) = endpoint.send_video_frame(video_mid, unit.data, rtp_time) {
-                    warn!("send frame failed: {e:?}");
+            // 运行期编码错误降级为丢帧 + 告警：硬件编码器可能瞬时失败（模式切换/
+            // 设备丢失），不应 panic 整个发布端（旧实现 expect 一错即崩）。
+            match encoder.encode(&frame) {
+                Ok(Some(unit)) => {
+                    let rtp_time = str0m::media::MediaTime::new(
+                        pts as u64 * 3000,
+                        str0m::media::Frequency::NINETY_KHZ,
+                    );
+                    if let Err(e) = endpoint.send_video_frame(video_mid, unit.data, rtp_time) {
+                        warn!("send frame failed: {e:?}");
+                    }
+                    if unit.keyframe {
+                        debug!("sent keyframe #{pts}");
+                    }
                 }
-                if unit.keyframe {
-                    debug!("sent keyframe #{pts}");
-                }
+                Ok(None) => {}
+                Err(e) => warn!("encode failed（丢帧继续）: {e}"),
             }
             pts += 1;
         }
@@ -2779,6 +2783,7 @@ fn publisher_generic<
         // #385 摄像头第二路视频轨：30fps 节拍，BGRA → FfmpegEncoder → camera_mid。
         // ICE 未连通（connected=false）时不轮询摄像头，避免空转与 send 失败刷屏。
         if connected
+            && !camera_dead
             && let Some(cmid) = camera_mid
             && let Some(cap) = &mut camera_cap
             && Instant::now() >= next_camera
@@ -2787,28 +2792,40 @@ fn publisher_generic<
             match aerodesk_core::platform::CameraSource::next_frame(cap) {
                 Ok(Some(frame)) => {
                     if camera_enc.is_none() {
-                        camera_enc = Some(
-                            aerodesk_ffmpeg::encode::FfmpegEncoder::new(
-                                frame.width,
-                                frame.height,
-                                30,
-                                8_000_000,
-                                codec,
-                            )
-                            .expect("camera encoder"),
-                        );
+                        // 编码器初始化失败降级停用摄像头轨（仅告警一次，不 panic；
+                        // 旧实现 expect 在奇数分辨率等场景一错即崩）。
+                        camera_enc = match aerodesk_ffmpeg::encode::FfmpegEncoder::new(
+                            frame.width,
+                            frame.height,
+                            30,
+                            8_000_000,
+                            codec,
+                        ) {
+                            Ok(enc) => Some(enc),
+                            Err(e) => {
+                                warn!("camera encoder init failed（停用摄像头轨）: {e}");
+                                camera_dead = true;
+                                None
+                            }
+                        };
                     }
-                    if let Some(enc) = &mut camera_enc
-                        && let Ok(Some(unit)) = enc.encode_bgra(&frame.raw)
-                    {
-                        let rtp_time = str0m::media::MediaTime::new(
-                            camera_pts as u64 * 3000,
-                            str0m::media::Frequency::NINETY_KHZ,
-                        );
-                        if let Err(e) = endpoint.send_video_frame(cmid, unit.data, rtp_time) {
-                            warn!("send camera frame failed: {e:?}");
+                    if let Some(enc) = &mut camera_enc {
+                        match enc.encode_bgra(&frame.raw) {
+                            Ok(Some(unit)) => {
+                                let rtp_time = str0m::media::MediaTime::new(
+                                    camera_pts as u64 * 3000,
+                                    str0m::media::Frequency::NINETY_KHZ,
+                                );
+                                if let Err(e) = endpoint.send_video_frame(cmid, unit.data, rtp_time)
+                                {
+                                    warn!("send camera frame failed: {e:?}");
+                                }
+                                camera_pts += 1;
+                            }
+                            // 编码错误与屏幕轨同口径告警，不再静默丢帧。
+                            Ok(None) => {}
+                            Err(e) => warn!("camera encode failed（丢帧继续）: {e}"),
                         }
-                        camera_pts += 1;
                     }
                 }
                 Ok(None) => {}
