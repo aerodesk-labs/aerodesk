@@ -6,6 +6,11 @@ name: Platform cross-check
 # OHOS 未接入：GitHub hosted runner 无 OHOS NDK；见 scripts/check-ohos-toolchain.sh。
 on:
   workflow_dispatch:
+  # 临时：当前 PR 的 pull_request 事件未触达 Actions，push 事件作为验证通道；
+  # 仅针对本重构分支，合并/删除分支后不影响其他分支。
+  push:
+    branches:
+      - 'refactor/aerodesk-platform'
 
 permissions:
   contents: read
