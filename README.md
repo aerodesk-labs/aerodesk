@@ -36,7 +36,7 @@ aerodesk/
 │   ├── aerodesk-windows/    # Windows 平台实现兼容壳（实现已迁 aerodesk-platform）✅
 │   ├── aerodesk-linux/      # Linux 平台实现兼容壳（实现已迁 aerodesk-platform）✅
 │   ├── aerodesk-ios/        # iOS/iPad FFI 薄壳（平台实现已迁 aerodesk-platform）✅
-│   ├── aerodesk-android/    # Android JNI 薄壳（平台实现已迁 aerodesk-platform）🔨 P3
+│   ├── aerodesk-android/    # Android JNI 薄壳 + Slint 宿主（平台实现已迁 aerodesk-platform）🔨 P3
 │   ├── aerodesk-ohos/       # HarmonyOS NAPI 薄壳（平台实现已迁 aerodesk-platform）🔨 P4
 │   └── x264/                # vendored x264 crate（+sliced_threads/threads 控制）
 ├── web/index.html           # 浏览器观看端（publisher=屏幕采集受限 / viewer=观看+输入）
