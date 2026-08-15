@@ -3521,7 +3521,16 @@ fn publisher_capture(
      -> Result<(), String> {
         let specs: Vec<(Option<Rid>, u32, u32)> = layers
             .iter()
-            .map(|(rid, _enc, cap)| (*rid, cap.width(), cap.height()))
+            .map(|(rid, _enc, cap)| {
+                // simulcast 固定层尺寸沿用原档位；单层传 0,0 让新显示器按原生
+                // 宽高比重新缩放，避免切到不同宽高比屏幕后继续沿用旧尺寸拉伸。
+                let (w, h) = if rid.is_some() {
+                    (cap.width(), cap.height())
+                } else {
+                    (0, 0)
+                };
+                (*rid, w, h)
+            })
             .collect();
         // 先在临时 Vec 中完整重建：任一层失败即返回 Err、旧层原样保留
         //（旧实现先 clear 再逐层重建 + expect，远端一条切换消息即可让
@@ -3531,18 +3540,18 @@ fn publisher_capture(
         for (rid, w, h) in specs {
             let capture = ScreenCapture::start(idx, FPS, w, h)
                 .map_err(|e| format!("display {idx} init failed: {e}"))?;
+            let (cw, ch) = (capture.width(), capture.height());
             // 重建：编码器按分辨率新建；码率沿用原 simulcast 档位（按 rid 查
-            // SIMULCAST_LAYERS_VT），单层/未命中回退分辨率启发式（旧实现直接
-            // 丢弃档位信息）。
-            let bps = rid
-                .and_then(|r| {
-                    SIMULCAST_LAYERS_VT
-                        .iter()
-                        .find(|(lr, _, _, _)| *lr == &*r)
-                        .map(|(_, _, _, bps)| *bps)
-                })
-                .unwrap_or(if w >= 1280 { 8_000_000 } else { 4_000_000 });
-            let encoder = VtEncoder::new_with_codec(w, h, FPS, bps, vt_codec)
+            // SIMULCAST_LAYERS_VT），单层沿用初始路径的 8Mbps。
+            let bps = match rid {
+                Some(r) => SIMULCAST_LAYERS_VT
+                    .iter()
+                    .find(|(lr, _, _, _)| *lr == &*r)
+                    .map(|(_, _, _, bps)| *bps)
+                    .unwrap_or(if cw >= 1280 { 8_000_000 } else { 4_000_000 }),
+                None => 8_000_000,
+            };
+            let encoder = VtEncoder::new_with_codec(cw, ch, FPS, bps, vt_codec)
                 .map_err(|e| format!("display {idx} encoder init failed: {e}"))?;
             new_layers.push((rid, encoder, capture));
         }
