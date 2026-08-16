@@ -2,8 +2,11 @@ name: CI
 
 # #429 只在 PR 触发（去掉 push）：同一 commit 不再出现 push+PR 双 run；
 # main 变更走 PR + 分支保护，直推 main 不需要 CI。release 打包由 release.yml 负责。
+# workflow_dispatch：PR 事件投递异常时（实测 2026-08-16 pull_request 触发哑火）
+# 可手动跑同一套矩阵，也便于复跑。
 on:
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   # 同一 PR 新提交自动取消旧 run，防止陈旧 run 堆满 runner 队列（macOS 并发有限）。
@@ -36,6 +39,8 @@ jobs:
 
   # #429 前置：检测 PR 是否仅改动文档（*.md / docs/**），供重型 job 跳过。
   changes:
+    # workflow_dispatch 无 pull_request base/head 可 diff,跳过(下游以事件名放行)
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
@@ -61,7 +66,7 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false')
     strategy:
       fail-fast: false
       matrix:
@@ -136,6 +141,40 @@ jobs:
 
       - name: test
         run: cargo test --workspace ${{ matrix.skip_crates }} ${{ matrix.features }}
+
+      # #470 Windows 服务生命周期冒烟（runner 具管理员权限）：安装→启动→
+      # 查询→移除→终态。服务体在无配置下安全空转（presence 不启动，仅日志），
+      # 登录界面/让位切换仍需 VM 人工联调（docs/PRELOGIN_WINDOWS_SERVICE.md §9）。
+      - name: service lifecycle smoke (Windows only)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -e
+          # cargo test 只产测试容器(deps/<bin>-<hash>.exe),不落 target/debug/<bin>.exe——
+          # 显式链出可执行文件(全量已编译,仅链接,秒级)。
+          cargo build -p aerodesk-cli
+          # SYSTEM 服务进程不吃 job shell 的 PATH(GITHUB_PATH 只对当前进程生效),
+          # FFmpeg DLL 须与 exe 同目录(与便携包约定一致,LESSON: exe 与 DLL 同目录)。
+          mkdir -p svc-smoke
+          cp target/debug/aerodesk-cli.exe svc-smoke/
+          cp "$FFMPEG_DIR"/bin/*.dll svc-smoke/
+          BIN="$(pwd)/svc-smoke/aerodesk-cli.exe"
+          test -f "$BIN"
+          out=$("$BIN" --service-status); echo "$out"; [ "$out" = "not installed" ]
+          # install 失败时 dump SCM 视角(服务配置/状态/事件日志)定位进程早退原因(1053 教训)。
+          if ! "$BIN" --install-service; then
+            echo "== 诊断:sc query/qc =="
+            sc query AeroDeskService || true
+            sc qc AeroDeskService || true
+            echo "== 诊断:SCM 事件日志(最近 5 条) =="
+            wevtutil qe System "/q:*[System[Provider[@Name='Service Control Manager']]]" /c:5 /rd:true /f:text || true
+            echo "== 诊断:服务日志文件 =="
+            tail -30 "$PROGRAMDATA/AeroDesk/logs/service.log" 2>/dev/null || echo "(无 service.log——进程死在 init_service_log 之前)"
+            exit 1
+          fi
+          out=$("$BIN" --service-status); echo "$out"; echo "$out" | grep -q "运行中"
+          "$BIN" --remove-service
+          out=$("$BIN" --service-status); echo "$out"; [ "$out" = "not installed" ]
 
       # 端到端冒烟依赖 macOS 专属编码器（aerodesk-cli ← aerodesk-platform::macos），
       # 跨平台编译/单测已由三平台矩阵覆盖。
@@ -378,7 +417,7 @@ jobs:
   # 曾导致 Xcode 无法链接；此处每次 push/PR 都验证模拟器 + 真机 slice 可编译可链接。
   ios-app-build:
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false')
     name: iOS app build (sim + device)
     runs-on: macos-latest
     env:
@@ -428,7 +467,7 @@ jobs:
   # 内联回归）→ App 自动连接观看 → 解码帧 + HEVC 解码路径断言。
   ios-sim-e2e:
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false')
     name: iOS simulator e2e (viewer)
     runs-on: macos-15
     env:
@@ -465,7 +504,7 @@ jobs:
   # Windows 主控端运行态自测：#3 观看端建链（Git Bash + headless Edge 发布 + Windows UI ICE 断言）。
   windows-ui-e2e:
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false')
     name: Windows UI e2e (viewer)
     runs-on: windows-latest
     env:
@@ -505,7 +544,7 @@ jobs:
   # Linux 主控端运行态自测：#4 观看端真实媒体（Xvfb 无头跑 Slint UI → 本地 SFU → 解码帧断言）。
   linux-ui-e2e:
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false')
     name: Linux UI e2e (viewer)
     runs-on: ubuntu-latest
     env:
@@ -537,7 +576,7 @@ jobs:
   # 动态挑选最新 NDK，避免镜像版本漂移导致脚本 fallback 路径失效。
   android-apk-build:
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false')
     name: Android APK build (arm64-v8a)
     runs-on: ubuntu-latest
     env:
