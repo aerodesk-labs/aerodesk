@@ -150,7 +150,9 @@ function nextSignalTypes(types, timeoutMs = 20000) {
 async function joinWithRedirect(token, maxHops = 3) {
     for (let hop = 0; hop <= maxHops; hop++) {
         await connectSignal();
-        sendSignal({ type: 'join', room: $('room').value || 'demo', role: ROLE, auth_token: token });
+        // dc_ready（#467）：声明会在 offer/answer 通道 DCEP 完成后发 signal_ready，
+        // SFU 据此门控重协商时机（与 CLI/bridge 的 Rust 客户端对齐）。
+        sendSignal({ type: 'join', room: $('room').value || 'demo', role: ROLE, auth_token: token, dc_ready: true });
         const msg = await nextSignalTypes(['joined', 'redirect']);
         if (msg.type === 'redirect') {
             log(`多 PoP 重定向（hop ${hop}/${maxHops}）→ ${msg.url}（${msg.pop}）`);
@@ -296,6 +298,9 @@ function setupRtc(iceServers) {
         }
     };
     signalChannel.onopen = () => {
+        // #467：onopen 即 DCEP 完成（双向就绪），第一时间向 SFU 声明 signal_ready，
+        // 之后 SFU 才会发重协商 offer——避免 offer 落在未就绪通道上被丢弃。
+        try { signalChannel.send(JSON.stringify({ type: 'signal_ready' })); } catch (_) {}
         inputChannel = rtc.createDataChannel('input');
         inputChannel.onopen = () => log('input channel open');
         inputChannel.onmessage = (e) => log('input event: ' + e.data);
