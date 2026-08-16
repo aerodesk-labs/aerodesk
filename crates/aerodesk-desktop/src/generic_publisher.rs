@@ -48,7 +48,7 @@ pub fn stop_publisher(ui: &crate::AppWindow) {
     ui.set_settings_status("被控端发布当前仅 Windows 实现".into());
 }
 
-/// Windows 被控端实现。独立 cfg 模块避免在 Linux/macOS 引用 `aerodesk-windows`。
+/// Windows 被控端实现。独立 cfg 模块避免在 Linux/macOS 引用 `aerodesk-platform`。
 #[cfg(windows)]
 mod imp {
     use super::valid_publisher_room;

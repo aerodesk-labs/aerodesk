@@ -291,7 +291,7 @@ pub fn run_command_with(
 /// 平台无关默认命令执行器：unix `sh -c`，Windows `cmd /C`。
 ///
 /// 实现 [`CommandExecutor`]（#330）；策略层（危险拦截/白名单/审计）不在本实现。
-/// 各平台适配器可自行实现 trait（macOS 见 `aerodesk-macos::cmd`），本默认实现
+/// 各平台适配器可自行实现 trait（macOS 见 `aerodesk-platform::cmd`），本默认实现
 /// 保证未接适配器的平台（Windows/Linux 等）行为与旧版完全一致。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultCommandExecutor;

@@ -159,24 +159,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aerodesk-linux"
-version = "0.1.0"
-dependencies = [
- "aerodesk-core",
- "aerodesk-platform",
- "aerodesk-protocol",
-]
-
-[[package]]
-name = "aerodesk-macos"
-version = "0.1.0"
-dependencies = [
- "aerodesk-core",
- "aerodesk-ffmpeg",
- "aerodesk-platform",
-]
-
-[[package]]
 name = "aerodesk-mcp"
 version = "0.1.0"
 dependencies = [
@@ -290,15 +272,6 @@ dependencies = [
  "aerodesk-core",
  "openh264",
  "x264",
-]
-
-[[package]]
-name = "aerodesk-windows"
-version = "0.1.0"
-dependencies = [
- "aerodesk-core",
- "aerodesk-platform",
- "aerodesk-protocol",
 ]
 
 [[package]]

@@ -4,10 +4,10 @@
 //!
 //! 依赖真实 Wayland 桌面 + xdg-desktop-portal + PipeWire，且会弹授权对话框；
 //! CI（无头/无 portal）与日常测试一律跳过，仅当 `AERODESK_TEST_WAYLAND=1`
-//! 显式启用（真机验收时执行：`AERODESK_TEST_WAYLAND=1 cargo test -p aerodesk-linux --test wayland_runtime`）。
+//! 显式启用（真机验收时执行：`AERODESK_TEST_WAYLAND=1 cargo test -p aerodesk-platform --test wayland_runtime`）。
 
 use aerodesk_core::platform::MediaSource;
-use aerodesk_linux::capture::WaylandPortalCapturer;
+use aerodesk_platform::linux::capture::WaylandPortalCapturer;
 
 #[test]
 fn wayland_portal_capture_produces_frame() {
