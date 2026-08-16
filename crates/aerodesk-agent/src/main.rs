@@ -118,6 +118,24 @@ fn probe_audio() {
 
 fn run() {
     let args: Vec<String> = std::env::args().collect();
+    // #471 M2 前台调试入口:绕过 SCM dispatcher 直跑服务体(foreground_ctx
+    // 永不停止),本地/CI e2e 无需管理员/SCM 即可驱动信令常驻+接听逻辑。
+    // Ctrl+C 终止(服务体是死循环,调试场景够用)。
+    if args.iter().any(|a| a == "--service-fg") {
+        #[cfg(windows)]
+        {
+            init_log();
+            info!("aerodesk-service 前台模式(--service-fg,#471 M2 调试/e2e)");
+            let ctx = aerodesk_platform::windows::service::foreground_ctx();
+            service_run::service_body(ctx);
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--service-fg 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
     // #470 服务态必须最先分流：init_log() 会占用全局 tracing subscriber，
     // 服务分支的 init_service_log() 二次 init 会 panic（双订阅）→ 服务进程
     // 秒死 → SCM 报 1053（CI 实测教训，本地直跑 --service 前记得也无 stderr 消费者）。

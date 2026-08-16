@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use aerodesk_core::protocol::signal::Role;
-use aerodesk_core::signal_presence::{PresenceConfig, SignalPresence};
+use aerodesk_core::signal_presence::{PresenceConfig, PresenceEvent, SignalPresence};
 use aerodesk_platform::windows::service::{ServiceCtx, ServiceEvent, SessionChangeReason};
 use aerodesk_platform::windows::session;
 use serde::{Deserialize, Serialize};
@@ -259,7 +259,8 @@ impl Supervisor {
         }
     }
 
-    /// 驱动 presence：状态变化与事件记日志（P0 不接听呼叫）。
+    /// 驱动 presence：状态变化与事件记日志；#471 M2 起 NoSession 态接听呼叫
+    /// (媒体链路随帧源接入;P0 的"不接听"解除)。
     fn poll(&mut self) {
         let Some(presence) = self.presence.as_mut() else {
             return;
@@ -270,9 +271,15 @@ impl Supervisor {
             self.last_status = st.as_str().to_string();
         }
         for ev in presence.take_events() {
-            // P0：登录前阶段收到呼叫不接听（无媒体能力），等呼叫超时自动挂断；
-            // #471 接入登录界面画面后转接。
-            info!("presence 事件（P0 不接听）：{ev:?}");
+            match ev {
+                PresenceEvent::IncomingCall { call_id, from, .. } => {
+                    info!("incoming call {call_id} from {from}——NoSession 态接听(登录界面媒体)");
+                    if let Err(e) = presence.accept_call() {
+                        warn!("接听失败：{e}");
+                    }
+                }
+                other => info!("presence 事件：{other:?}"),
+            }
         }
     }
 

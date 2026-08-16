@@ -57,6 +57,17 @@ impl ServiceCtx {
     }
 }
 
+/// 前台调试上下文(#471 M2 可测性地基):永不停止、无 SCM 事件——
+/// `--service-fg` 直跑服务体(本地/CI e2e 无需 SCM/管理员)。
+pub fn foreground_ctx() -> ServiceCtx {
+    let (tx, rx) = mpsc::channel::<ServiceEvent>();
+    drop(tx); // 断链:wait_event 恒 None,仅作节拍 sleep
+    ServiceCtx {
+        stop: Arc::new(AtomicBool::new(false)),
+        events: rx,
+    }
+}
+
 /// 服务体签名：接收运行上下文，循环自查直至 SCM Stop/Shutdown。
 type ServiceBody = Box<dyn FnOnce(ServiceCtx) + Send>;
 static SERVICE_BODY: Mutex<Option<ServiceBody>> = Mutex::new(None);
