@@ -1223,6 +1223,9 @@ fn print_cmd_result(resp: &aerodesk_protocol::cmd::CmdResponse) {
                 error.is_none()
             );
         }
+        CmdResult::Chat { sender, text } => {
+            info!("CHAT: {sender}: {text}");
+        }
     }
 }
 

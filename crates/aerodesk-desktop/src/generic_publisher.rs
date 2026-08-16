@@ -62,6 +62,7 @@ mod imp {
     use aerodesk_core::media_pipeline::Codec;
     use aerodesk_core::media_socket::MediaSocket;
     use aerodesk_core::platform::{Encoder, InputInjector, MediaSource, SystemWakeLock};
+    use aerodesk_protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult};
     use aerodesk_protocol::input::{InputEvent, InputFrame};
     use aerodesk_protocol::signal::Role;
     use slint::ComponentHandle;
@@ -340,6 +341,21 @@ mod imp {
                 tracing::info!("被控端 input channel open");
             }
             ClientEvent::ChannelData(cid, _, data) => {
+                if endpoint.channel_label(cid).as_deref() == Some("cmd") {
+                    // #458 发消息：被控端收到 Chat 后回 CmdResponse::Chat 给观看端。
+                    if let Ok(req) = serde_json::from_slice::<CmdRequest>(&data)
+                        && let CmdAction::Chat { text, sender, .. } = req.action
+                    {
+                        let resp = CmdResponse {
+                            id: req.id,
+                            result: CmdResult::Chat { sender, text },
+                        };
+                        if let Ok(json) = serde_json::to_string(&resp) {
+                            let _ = endpoint.send_channel_data("cmd", false, json.as_bytes());
+                        }
+                    }
+                    return;
+                }
                 if endpoint.channel_label(cid).as_deref() != Some("input") {
                     return;
                 }

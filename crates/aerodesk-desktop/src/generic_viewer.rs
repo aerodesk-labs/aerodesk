@@ -13,7 +13,7 @@ use aerodesk_core::access_unit::AccessUnitAssembler;
 use aerodesk_core::connect::connect_live_role;
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::platform::{Decoder, Renderer};
-use aerodesk_protocol::cmd::{CmdResponse, CmdResult};
+use aerodesk_protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult};
 use aerodesk_protocol::signal::Role;
 use str0m::net::Protocol;
 
@@ -86,6 +86,7 @@ pub(crate) fn format_cmd_response(response: &CmdResponse) -> String {
                 format!("[已结束进程 {pid}]")
             }
         }
+        CmdResult::Chat { text, .. } => format!("[消息] {text}"),
     }
 }
 
@@ -281,7 +282,8 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                 }
             }
         }
-        // #458 聊天消息：UI 聊天窗口 → chat data channel → SFU → 被控端。
+        // #458 聊天消息：复用 cmd 通道（CmdAction::Chat），避免新增 data channel
+        // 破坏 str0m 媒体协商（新增第 7 个 channel 会导致 RTP 0 帧）。
         while let Ok(cmd) = chat_cmd_rx.try_recv() {
             match cmd {
                 crate::ChatCmd::Send(text) => {
@@ -289,19 +291,22 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                     if text.is_empty() {
                         continue;
                     }
-                    let payload = serde_json::json!({
-                        "sender": "我",
-                        "text": text,
-                        "timestamp_ms": crate::system_time_millis(),
-                    });
-                    if let Ok(json) = serde_json::to_string(&payload) {
+                    let req = CmdRequest::new(
+                        crate::system_time_millis(),
+                        CmdAction::Chat {
+                            text,
+                            sender: "我".to_string(),
+                            timestamp_ms: crate::system_time_millis(),
+                        },
+                    );
+                    if let Ok(json) = serde_json::to_string(&req) {
                         let sent = live
                             .endpoint
-                            .send_channel_data("chat", false, json.as_bytes());
+                            .send_channel_data("cmd", false, json.as_bytes());
                         if !sent {
                             crate::set_message_window_status(
                                 session_idx,
-                                "发送失败：chat 通道未就绪".to_string(),
+                                "发送失败：cmd 通道未就绪".to_string(),
                             );
                         }
                     }
@@ -348,7 +353,11 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                 && live.endpoint.channel_label(*cid).as_deref() == Some("cmd")
                 && let Ok(response) = serde_json::from_slice::<CmdResponse>(data)
             {
-                crate::append_terminal_output(session_idx, format_cmd_response(&response));
+                if let CmdResult::Chat { sender, text } = &response.result {
+                    crate::append_chat_message(session_idx, sender.clone(), text.clone(), false);
+                } else {
+                    crate::append_terminal_output(session_idx, format_cmd_response(&response));
+                }
             }
             // #75 远程光标：被控端经 cursor 通道广播位置 → UI 叠加（与 macOS UI 一致）。
             if let ClientEvent::ChannelData(cid, _, data) = &ev
@@ -358,13 +367,6 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                 crate::with_session_ui_state(&ui_weak, session_idx, move |s| {
                     s.cursor = Some((cx, cy));
                 });
-            }
-            // #458 聊天消息：被控端经 chat 通道回传 → 聊天窗口消息列表。
-            if let ClientEvent::ChannelData(cid, _, data) = &ev
-                && live.endpoint.channel_label(*cid).as_deref() == Some("chat")
-                && let Some((sender, text)) = crate::decode_chat_text(data)
-            {
-                crate::append_chat_message(session_idx, sender, text, false);
             }
             if let ClientEvent::Media(data) = ev {
                 media_evts += 1;
