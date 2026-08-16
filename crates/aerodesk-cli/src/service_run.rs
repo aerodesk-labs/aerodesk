@@ -132,9 +132,11 @@ struct Supervisor {
 impl Supervisor {
     fn new() -> Self {
         let settings = ServiceSettings::load();
-        // 启动时已有活动会话：进入让位态但不 spawn（会话内 desktop 自带 #450
-        // presence，避免双实例）；仅服务运行期发生的 Logon 事件才 spawn。
-        let user_session = session::active_session().is_some();
+        // 启动时已有已登录会话（含锁屏/断开态——desktop 进程仍在、自带 #450
+        // presence）：进入让位态但不 spawn（避免双实例）；仅服务运行期发生的
+        // Logon 事件才 spawn。判据须用 logged_in_session：锁屏（Connected）
+        // 不是"无会话"，用 active_session 会误判致双 presence。
+        let user_session = session::logged_in_session().is_some();
         let mut sup = Supervisor {
             settings,
             user_session,

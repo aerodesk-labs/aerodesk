@@ -5,8 +5,8 @@
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::RemoteDesktop::{
-    WTS_CONNECTSTATE_CLASS, WTS_CURRENT_SERVER_HANDLE, WTS_SESSION_INFOW, WTSActive,
-    WTSEnumerateSessionsW, WTSFreeMemory, WTSQueryUserToken,
+    WTS_CONNECTSTATE_CLASS, WTS_CURRENT_SERVER_HANDLE, WTS_SESSION_INFOW, WTSActive, WTSConnected,
+    WTSDisconnected, WTSDown, WTSEnumerateSessionsW, WTSFreeMemory, WTSIdle, WTSQueryUserToken,
 };
 use windows::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, PROCESS_INFORMATION, STARTUPINFOW,
@@ -17,13 +17,23 @@ use windows::core::{PCWSTR, PWSTR};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionInfo {
     pub id: u32,
-    /// WTS_ACTIVE：已登录且连接到输入设备（登录界面/断开态为 false）。
+    /// WTS_ACTIVE：已登录且连接到输入设备。
     pub active: bool,
+    /// 存在已登录用户（Active=在用 / Connected=锁屏 / Disconnected=断开保留，
+    /// 如 fast user switching、RDP 断开）——会话内进程仍在运行。
+    /// 区别于 `active`：登录界面阶段所有会话均无 logged-in 用户。
+    pub logged_in: bool,
 }
 
 /// 状态枚举值归一（便于单测映射，不直接依赖生成类型的比较行为）。
 fn state_is_active(state: WTS_CONNECTSTATE_CLASS) -> bool {
     state == WTSActive
+}
+
+/// 是否有已登录用户（WTSActive/WTSConnected/WTSDisconnected 三态都意味着
+/// 用户已登录、会话内进程存活;仅锁屏≠断开登录)。
+fn state_is_logged_in(state: WTS_CONNECTSTATE_CLASS) -> bool {
+    state == WTSActive || state == WTSConnected || state == WTSDisconnected
 }
 
 /// 枚举本机全部 WTS 会话。
@@ -40,6 +50,7 @@ pub fn enumerate() -> Result<Vec<SessionInfo>, String> {
                 out.push(SessionInfo {
                     id: s.SessionId,
                     active: state_is_active(s.State),
+                    logged_in: state_is_logged_in(s.State),
                 });
             }
             WTSFreeMemory(ptr.cast());
@@ -48,12 +59,24 @@ pub fn enumerate() -> Result<Vec<SessionInfo>, String> {
     }
 }
 
-/// 活动（已登录）会话 id；无活动会话（登录界面）返回 `None`。
+/// 活动（已登录且在用）会话 id;无则 `None`。
 pub fn active_session() -> Option<u32> {
     enumerate()
         .ok()?
         .into_iter()
         .find(|s| s.active)
+        .map(|s| s.id)
+}
+
+/// 任一已登录用户会话 id（含锁屏 Connected / 断开 Disconnected——会话内
+/// 进程仍存活，desktop 自带 presence 在线）。登录界面阶段（无人登录过/
+/// 已注销）返回 `None`。#470 让位状态机的初始判据必须用它而非
+/// `active_session`：锁屏不是"无会话"，否则服务与会话内 desktop 双 presence。
+pub fn logged_in_session() -> Option<u32> {
+    enumerate()
+        .ok()?
+        .into_iter()
+        .find(|s| s.logged_in && s.id != 0)
         .map(|s| s.id)
 }
 
@@ -116,6 +139,20 @@ fn spawn_with_token(exe: &str, token: HANDLE) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 让位判据:Active/Connected/Disconnected 均算"有已登录会话";
+    /// 登录界面阶段(Idle/Down 等)不算。锁屏误判会导致双 presence。
+    #[test]
+    fn logged_in_state_mapping() {
+        assert!(state_is_logged_in(WTSActive));
+        assert!(
+            state_is_logged_in(WTSConnected),
+            "锁屏=Connected,须算已登录"
+        );
+        assert!(state_is_logged_in(WTSDisconnected));
+        assert!(!state_is_logged_in(WTSIdle));
+        assert!(!state_is_logged_in(WTSDown));
+    }
 
     /// 任意上下文可枚举（登录界面/服务态/用户态均返回列表，至少含 session 0）。
     #[test]
