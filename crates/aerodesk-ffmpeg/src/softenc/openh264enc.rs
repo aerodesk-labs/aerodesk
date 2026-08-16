@@ -58,7 +58,7 @@ impl OpenH264Encoder {
     }
 
     /// 编码一帧 RGBA，输出 AnnexB；关键帧含 SPS/PPS。
-    pub fn encode_rgba(&mut self, rgba: &[u8]) -> Result<Option<crate::EncodedFrame>, String> {
+    pub fn encode_rgba(&mut self, rgba: &[u8]) -> Result<Option<super::EncodedFrame>, String> {
         let yuv = rgba_to_i420_packed(rgba, self.width, self.height);
         let buf = YUVBuffer::from_vec(yuv, self.width, self.height);
         let stream = self
@@ -88,7 +88,7 @@ impl OpenH264Encoder {
                 i += 1;
             }
         }
-        Ok(Some(crate::EncodedFrame {
+        Ok(Some(super::EncodedFrame {
             data,
             keyframe,
             pts: 0,
@@ -99,7 +99,7 @@ impl OpenH264Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decode::SoftDecoder;
+    use crate::softenc::decode::SoftDecoder;
 
     /// OpenH264 编码 → OpenH264 解码回环（Windows/Linux 软编软解验证）。
     /// #277 跨平台抽象：泛型函数只依赖 core `Encoder`/`Decoder` trait 即可
@@ -208,7 +208,7 @@ impl aerodesk_core::platform::Encoder for OpenH264Encoder {
         let Some(raw) = &frame.raw else {
             return Err("openh264 encoder requires raw BGRA frame".into());
         };
-        let rgba = crate::bgra_to_rgba(raw);
+        let rgba = super::bgra_to_rgba(raw);
         let Some(out) = self.encode_rgba(&rgba)? else {
             return Ok(None);
         };

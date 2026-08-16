@@ -5,6 +5,7 @@ pub mod audio;
 pub mod decode;
 pub mod encode;
 pub mod mux;
+pub mod softenc;
 
 // #3 Windows 观看端硬解（D3D11VA/DXVA2，raw FFI；仅 Windows 编译）。
 #[cfg(windows)]

@@ -12,58 +12,7 @@ use slint::ComponentHandle;
 /// 当前观看会话。连接在后台线程执行，断开/重连在锁内串行切换。
 static ACTIVE_VIEWER: Mutex<Option<ViewerSession>> = Mutex::new(None);
 
-slint::slint! {
-    import { Button } from "std-widgets.slint";
-
-    export component IosAppWindow inherits Window {
-        title: "AeroDesk";
-        in-out property <string> server: "ws://127.0.0.1:3003";
-        in-out property <string> room: "demo";
-        in-out property <string> status: "未连接";
-        callback connect(string, string);
-        callback disconnect();
-
-        VerticalLayout {
-            padding: 20px;
-            spacing: 12px;
-
-            Text {
-                text: "AeroDesk iOS/iPad (Slint)";
-                font-size: 20px;
-                horizontal-alignment: center;
-            }
-
-            TextInput {
-                text <=> root.server;
-                single-line: true;
-            }
-
-            TextInput {
-                text <=> root.room;
-                single-line: true;
-            }
-
-            HorizontalLayout {
-                spacing: 10px;
-
-                Button {
-                    text: "连接";
-                    clicked => { root.connect(root.server, root.room); }
-                }
-
-                Button {
-                    text: "断开";
-                    clicked => { root.disconnect(); }
-                }
-            }
-
-            Text {
-                text: root.status;
-                wrap: word-wrap;
-            }
-        }
-    }
-}
+slint::include_modules!();
 
 fn reset_viewer() {
     let mut guard: MutexGuard<'_, Option<ViewerSession>> =
@@ -79,7 +28,7 @@ fn set_viewer(viewer: ViewerSession) {
 /// 供 Swift 调用的 Slint 启动入口（阻塞运行事件循环）。
 #[unsafe(no_mangle)]
 pub extern "C" fn ad_slint_run() {
-    let window = IosAppWindow::new().expect("failed to create Slint window");
+    let window = MobileAppWindow::new().expect("failed to create Slint window");
 
     let weak = window.as_weak();
     window.on_connect(

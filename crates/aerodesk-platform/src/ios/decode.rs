@@ -556,7 +556,7 @@ impl aerodesk_core::platform::Decoder for HevcDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aerodesk_softenc::encode::X264Encoder;
+    use aerodesk_ffmpeg::softenc::encode::X264Encoder;
 
     #[test]
     fn parses_last_nal_without_truncation() {

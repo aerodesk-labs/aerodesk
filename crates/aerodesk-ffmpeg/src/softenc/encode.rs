@@ -82,7 +82,7 @@ impl X264Encoder {
     }
 
     /// 编码一帧 RGB24 图像。
-    pub fn encode(&mut self, rgb: &[u8]) -> Result<Option<crate::EncodedFrame>, String> {
+    pub fn encode(&mut self, rgb: &[u8]) -> Result<Option<super::EncodedFrame>, String> {
         let (y, u, v) = rgb_to_i420(rgb, self.width, self.height);
         let y_plane = Plane {
             stride: self.width as i32,
@@ -112,7 +112,7 @@ impl X264Encoder {
         if bytes.is_empty() {
             return Ok(None);
         }
-        Ok(Some(crate::EncodedFrame {
+        Ok(Some(super::EncodedFrame {
             data: bytes.to_vec(),
             keyframe: picture.keyframe(),
             pts,
@@ -186,7 +186,7 @@ impl aerodesk_core::platform::Encoder for X264Encoder {
         let Some(raw) = &frame.raw else {
             return Err("x264 encoder requires raw BGRA frame".into());
         };
-        let rgb = crate::bgra_to_rgb(raw);
+        let rgb = super::bgra_to_rgb(raw);
         let Some(out) = self.encode(&rgb)? else {
             return Ok(None);
         };

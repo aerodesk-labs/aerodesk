@@ -11,6 +11,9 @@ crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 
+[build-dependencies]
+slint-build = "1"
+
 [target.'cfg(target_os = "ios")'.dependencies]
 aerodesk-platform = { path = "../aerodesk-platform" }
 aerodesk-core = { path = "../aerodesk-core" }

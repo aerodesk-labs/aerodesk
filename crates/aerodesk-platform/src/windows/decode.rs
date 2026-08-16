@@ -3,7 +3,7 @@
 //! DXVA2 路径只在 Windows 编译；非 Windows 主机仍可 re-export OpenH264
 //! 软解，保证 workspace 的 host check 与测试可用。
 
-pub use aerodesk_softenc::decode::SoftDecoder;
+pub use aerodesk_ffmpeg::softenc::decode::SoftDecoder;
 
 #[cfg(windows)]
 mod dxva2 {

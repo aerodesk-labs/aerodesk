@@ -42,7 +42,7 @@ impl SoftDecoder {
 #[cfg(all(test, not(windows)))]
 mod tests {
     use super::*;
-    use crate::encode::X264Encoder;
+    use crate::softenc::encode::X264Encoder;
 
     /// x264 编码 → OpenH264 解码 → RGBA 回环（#3/#4 软解验证）。
     #[test]

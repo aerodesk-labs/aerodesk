@@ -13,6 +13,9 @@ crate-type = ["rlib", "cdylib"]
 jni = "0.21"
 aerodesk-core = { path = "../aerodesk-core" }
 
+[build-dependencies]
+slint-build = "1"
+
 [target.'cfg(target_os = "android")'.dependencies]
 aerodesk-platform = { path = "../aerodesk-platform" }
 slint = { version = "1", default-features = false, features = ["std", "backend-android-activity-06", "renderer-software", "compat-1-2"] }
