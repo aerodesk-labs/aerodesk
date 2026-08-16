@@ -14,6 +14,8 @@ mod cli_video_decoder;
 mod clipboard;
 mod cmd_exec;
 mod file_transfer;
+#[cfg(windows)]
+mod service_run;
 
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
@@ -198,10 +200,38 @@ fn run() {
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| "aerodesk-cli.exe".into());
             match aerodesk_platform::windows::service::install(&exe) {
-                Ok(()) => println!(
-                    "service installed and started: {}",
-                    aerodesk_platform::windows::service::SERVICE_NAME
-                ),
+                Ok(()) => {
+                    println!(
+                        "service installed and started: {}",
+                        aerodesk_platform::windows::service::SERVICE_NAME
+                    );
+                    // #470 D2：同步机器级配置（用户设置 → ProgramData）。
+                    match service_run::sync_settings_from_user() {
+                        Ok(s) => println!(
+                            "service config synced: server={} device_id={}",
+                            if s.server.is_empty() {
+                                "(未配置)"
+                            } else {
+                                &s.server
+                            },
+                            if s.device_id.is_empty() {
+                                "(未配置)"
+                            } else {
+                                &s.device_id
+                            }
+                        ),
+                        Err(e) => println!(
+                            "warn: 服务配置未同步（{e}）；可运行桌面端生成设置后重装，或手动编辑 {}",
+                            service_run::ServiceSettings::path().display()
+                        ),
+                    }
+                    // #470 D7：HKCU 自启共存提示（双实例 = 同 device-id 双在线）。
+                    if let Ok(Some(cmd)) = aerodesk_platform::windows::autostart::installed() {
+                        println!(
+                            "提示：检测到 HKCU 登录后自启（{cmd}）；服务模式下建议 --remove-autostart 移除，避免双实例"
+                        );
+                    }
+                }
                 Err(e) => {
                     eprintln!("service install failed: {e}");
                     std::process::exit(1);
@@ -253,23 +283,16 @@ fn run() {
         }
         return;
     }
-    // #470 服务运行入口（SCM 以 `"<exe>" --service` 启动）：M1 骨架 = 日志心跳；
-    // M2 接信令常驻（signal_presence），M3 接 WTS 会话仲裁。
+    // #470 服务运行入口（SCM 以 `"<exe>" --service` 启动）：
+    // M2 信令常驻（ProgramData 配置 + SignalPresence）+ M3 WTS 会话让位仲裁。
     if args.iter().any(|a| a == "--service") {
         #[cfg(windows)]
         {
             init_service_log();
-            info!("aerodesk-service 启动（#470 M1 骨架）");
-            let body = |stop: aerodesk_platform::windows::service::StopFlag| {
-                let mut beats = 0u64;
-                while !stop.stopped() {
-                    beats += 1;
-                    info!("service heartbeat #{beats}");
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-                }
-                info!("service body 结束（共 {beats} 次心跳）");
-            };
-            if let Err(e) = aerodesk_platform::windows::service::run(Box::new(body)) {
+            info!("aerodesk-service 启动（#470：信令常驻 + 会话仲裁）");
+            if let Err(e) =
+                aerodesk_platform::windows::service::run(Box::new(service_run::service_body))
+            {
                 eprintln!("service run failed: {e}");
                 std::process::exit(1);
             }
@@ -277,6 +300,28 @@ fn run() {
         #[cfg(not(windows))]
         {
             eprintln!("--service 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
+    // #470 服务配置查看（调试辅助：路径 + 生效值）。
+    if args.iter().any(|a| a == "--service-config") {
+        #[cfg(windows)]
+        {
+            let s = service_run::ServiceSettings::load();
+            println!("path: {}", service_run::ServiceSettings::path().display());
+            println!(
+                "server={}\ndevice_id={}\ntoken={}\nspawn_ui={}\nui_exe={}",
+                s.server,
+                s.device_id,
+                if s.token.is_empty() { "(空)" } else { "***" },
+                s.spawn_ui,
+                s.ui_exe
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--service-config 仅 Windows 支持");
             std::process::exit(1);
         }
         return;

@@ -26,19 +26,40 @@ const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
 /// ERROR_ACCESS_DENIED：非管理员操作 SCM。
 const ERROR_ACCESS_DENIED: i32 = 5;
 
-/// 服务体签名：接收停止信号，循环自查直至 SCM Stop/Shutdown。
-type ServiceBody = Box<dyn FnOnce(StopFlag) + Send>;
-static SERVICE_BODY: Mutex<Option<ServiceBody>> = Mutex::new(None);
+/// WTS 会话变化原因（re-export 供服务体 match）。
+pub use windows_service::service::SessionChangeReason;
 
-/// SCM 停止信号：控制处理器收到 Stop/Shutdown 时置位。
-#[derive(Clone)]
-pub struct StopFlag(Arc<AtomicBool>);
+/// 服务体收到的事件（SCM 控制处理器转发，#470 M3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceEvent {
+    /// WTS 会话变化（原因 + 发生变化的会话 id）。
+    SessionChange {
+        reason: SessionChangeReason,
+        session_id: u32,
+    },
+}
 
-impl StopFlag {
+/// 服务体运行上下文：停止信号 + SCM 转发事件。
+/// `wait_event` 兼任节拍 sleep（事件到达即提前唤醒）。
+pub struct ServiceCtx {
+    stop: Arc<AtomicBool>,
+    events: mpsc::Receiver<ServiceEvent>,
+}
+
+impl ServiceCtx {
     pub fn stopped(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.stop.load(Ordering::SeqCst)
+    }
+
+    /// 等待事件至超时；无事件/通道关闭返回 `None`。
+    pub fn wait_event(&self, d: Duration) -> Option<ServiceEvent> {
+        self.events.recv_timeout(d).ok()
     }
 }
+
+/// 服务体签名：接收运行上下文，循环自查直至 SCM Stop/Shutdown。
+type ServiceBody = Box<dyn FnOnce(ServiceCtx) + Send>;
+static SERVICE_BODY: Mutex<Option<ServiceBody>> = Mutex::new(None);
 
 /// SCM/Win32 错误转可读信息；非管理员给显式提示（M1 验收：非管理员安装被明确拒绝）。
 fn friendly(e: windows_service::Error) -> String {
@@ -176,12 +197,21 @@ fn service_main(_args: Vec<OsString>) {
 fn service_loop() -> Result<(), String> {
     let stop = Arc::new(AtomicBool::new(false));
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
+    let (event_tx, event_rx) = mpsc::channel::<ServiceEvent>();
     let handler = service_control_handler::register(SERVICE_NAME, {
         let stop = stop.clone();
         move |ctrl| match ctrl {
             ServiceControl::Stop | ServiceControl::Shutdown => {
                 stop.store(true, Ordering::SeqCst);
                 let _ = shutdown_tx.send(());
+                ServiceControlHandlerResult::NoError
+            }
+            // #470 M3：会话变化转发给服务体（让位状态机驱动源）。
+            ServiceControl::SessionChange(param) => {
+                let _ = event_tx.send(ServiceEvent::SessionChange {
+                    reason: param.reason,
+                    session_id: param.notification.session_id,
+                });
                 ServiceControlHandlerResult::NoError
             }
             // Interrogate 由 crate 自动应答当前状态。
@@ -196,7 +226,8 @@ fn service_loop() -> Result<(), String> {
             .set_service_status(ServiceStatus {
                 service_type: ServiceType::OWN_PROCESS,
                 current_state: state,
-                controls_accepted: ServiceControlAccept::STOP,
+                controls_accepted: ServiceControlAccept::STOP
+                    | ServiceControlAccept::SESSION_CHANGE,
                 exit_code: ServiceExitCode::Win32(0),
                 checkpoint,
                 wait_hint: Duration::from_secs(5),
@@ -206,12 +237,15 @@ fn service_loop() -> Result<(), String> {
     };
 
     set_status(ServiceState::StartPending, 1)?;
-    event_log("aerodesk-service 启动（#470 M1 骨架）", false);
+    event_log("aerodesk-service 启动（#470：信令常驻 + 会话仲裁）", false);
     if let Some(body) = SERVICE_BODY.lock().unwrap().take() {
-        let stop_flag = StopFlag(stop);
+        let ctx = ServiceCtx {
+            stop,
+            events: event_rx,
+        };
         std::thread::Builder::new()
             .name("service-body".into())
-            .spawn(move || body(stop_flag))
+            .spawn(move || body(ctx))
             .map_err(|e| format!("启动服务体线程失败：{e}"))?;
     }
     set_status(ServiceState::Running, 0)?;
@@ -224,7 +258,7 @@ fn service_loop() -> Result<(), String> {
         }
     }
     set_status(ServiceState::StopPending, 1)?;
-    // 给服务体收尾窗口（M1 体为 5s 心跳轮询，1s 后基本已退出）。
+    // 给服务体收尾窗口（presence stop + 状态上报约 1s 内完成）。
     std::thread::sleep(Duration::from_secs(1));
     set_status(ServiceState::Stopped, 0)?;
     event_log("aerodesk-service 停止", false);
