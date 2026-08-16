@@ -66,7 +66,7 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     needs: changes
-    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false'
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false')
     strategy:
       fail-fast: false
       matrix:
@@ -399,7 +399,7 @@ jobs:
   # 曾导致 Xcode 无法链接；此处每次 push/PR 都验证模拟器 + 真机 slice 可编译可链接。
   ios-app-build:
     needs: changes
-    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false'
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false')
     name: iOS app build (sim + device)
     runs-on: macos-latest
     env:
@@ -449,7 +449,7 @@ jobs:
   # 内联回归）→ App 自动连接观看 → 解码帧 + HEVC 解码路径断言。
   ios-sim-e2e:
     needs: changes
-    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false'
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false')
     name: iOS simulator e2e (viewer)
     runs-on: macos-15
     env:
@@ -486,7 +486,7 @@ jobs:
   # Windows 主控端运行态自测：#3 观看端建链（Git Bash + headless Edge 发布 + Windows UI ICE 断言）。
   windows-ui-e2e:
     needs: changes
-    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false'
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false')
     name: Windows UI e2e (viewer)
     runs-on: windows-latest
     env:
@@ -526,7 +526,7 @@ jobs:
   # Linux 主控端运行态自测：#4 观看端真实媒体（Xvfb 无头跑 Slint UI → 本地 SFU → 解码帧断言）。
   linux-ui-e2e:
     needs: changes
-    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false'
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false')
     name: Linux UI e2e (viewer)
     runs-on: ubuntu-latest
     env:
@@ -558,7 +558,7 @@ jobs:
   # 动态挑选最新 NDK，避免镜像版本漂移导致脚本 fallback 路径失效。
   android-apk-build:
     needs: changes
-    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false'
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false')
     name: Android APK build (arm64-v8a)
     runs-on: ubuntu-latest
     env:
