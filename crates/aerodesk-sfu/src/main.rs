@@ -1426,11 +1426,20 @@ fn web_request(
         return Response::text(reason).with_status_code(503);
     }
 
-    // 房间 → 分片路由（哈希 locality + 负载级联）
-    let shard = router
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .choose(&room);
+    // 房间 → 分片路由：同房间粘性优先（复用已分配 shard），否则哈希 locality + 负载级联。
+    // 修复：publisher 先加入 shard 0 后负载升高，viewer 再加入时 choose 会跳到 shard 1，
+    // 同房间被拆到不同 shard 导致媒体不互通。
+    let shard = {
+        let existing = shared.room_shards(&room);
+        if let Some(&first) = existing.first() {
+            first
+        } else {
+            router
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .choose(&room)
+        }
+    };
     info!("POST /start room={room} -> shard {shard}");
     let room_for_release = room.clone();
     let res = shard_txs[shard].send(ShardCommand::AddClient { rtc, room, role });
