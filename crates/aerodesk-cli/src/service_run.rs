@@ -286,8 +286,8 @@ mod tests {
     /// 服务配置序列化兼容：缺字段走 serde default（spawn_ui=true 等旧文件兼容）。
     #[test]
     fn settings_defaults_on_missing_fields() {
-        let s: ServiceSettings = serde_json::from_str(r#"{"server":"ws://127.0.0.1:3003/ws"}"#)
-            .expect("缺字段应可解析");
+        let s: ServiceSettings =
+            serde_json::from_str(r#"{"server":"ws://127.0.0.1:3003/ws"}"#).expect("缺字段应可解析");
         assert_eq!(s.server, "ws://127.0.0.1:3003/ws");
         assert_eq!(s.device_id, "");
         assert_eq!(s.token, "");
@@ -302,13 +302,17 @@ mod tests {
     fn presence_connects_when_signal_available() {
         let probe = std::net::TcpStream::connect(("127.0.0.1", 3003));
         if probe.is_err() {
-            eprintln!("presence_connects_when_signal_available：本地 3003 无 signal server，跳过执行");
+            eprintln!(
+                "presence_connects_when_signal_available：本地 3003 无 signal server，跳过执行"
+            );
             return;
         }
         drop(probe);
-        let config = PresenceConfig::new("ws://127.0.0.1:3003/ws", "svc-unit-test", Role::Publisher)
-            .with_auto_accept(false);
-        let mut presence = SignalPresence::new(config).with_read_timeout(Duration::from_millis(200));
+        let config =
+            PresenceConfig::new("ws://127.0.0.1:3003/ws", "svc-unit-test", Role::Publisher)
+                .with_auto_accept(false);
+        let mut presence =
+            SignalPresence::new(config).with_read_timeout(Duration::from_millis(200));
         presence.start();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
