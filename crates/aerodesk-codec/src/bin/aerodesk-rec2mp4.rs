@@ -18,7 +18,7 @@ fn main() {
     }
     let input = arg(&args, "--input").expect("--input required");
     let output = arg(&args, "--output").expect("--output required");
-    match aerodesk_ffmpeg::mux::adrec_to_container(
+    match aerodesk_codec::mux::adrec_to_container(
         PathBuf::from(&input).as_path(),
         PathBuf::from(&output).as_path(),
     ) {

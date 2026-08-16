@@ -3,7 +3,7 @@
 //! DXVA2 路径只在 Windows 编译；非 Windows 主机仍可 re-export OpenH264
 //! 软解，保证 workspace 的 host check 与测试可用。
 
-pub use aerodesk_ffmpeg::softenc::decode::SoftDecoder;
+pub use aerodesk_codec::softenc::decode::SoftDecoder;
 
 #[cfg(windows)]
 mod dxva2 {
@@ -12,16 +12,16 @@ mod dxva2 {
 
     /// Windows 观看端硬件解码器（DXVA2 / D3D11VA，H.264/HEVC → RGBA）。
     ///
-    /// 底层复用 `aerodesk_ffmpeg::hw_decode::FfmpegHwDecoder` 的 raw FFI 实现；
+    /// 底层复用 `aerodesk_codec::hw_decode::FfmpegHwDecoder` 的 raw FFI 实现；
     /// 构造失败（无 GPU/驱动）时由 CLI/UI 回退 OpenH264 软解。
     pub struct Dxva2Decoder {
-        inner: aerodesk_ffmpeg::hw_decode::FfmpegHwDecoder,
+        inner: aerodesk_codec::hw_decode::FfmpegHwDecoder,
     }
 
     impl Dxva2Decoder {
         pub fn new() -> Result<Self, String> {
             Ok(Self {
-                inner: aerodesk_ffmpeg::hw_decode::FfmpegHwDecoder::new()?,
+                inner: aerodesk_codec::hw_decode::FfmpegHwDecoder::new()?,
             })
         }
 

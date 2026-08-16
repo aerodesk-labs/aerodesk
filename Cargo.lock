@@ -41,16 +41,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aerodesk-admin"
-version = "0.1.0"
-dependencies = [
- "rouille",
- "serde_json",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "aerodesk-android"
 version = "0.1.0"
 dependencies = [
@@ -77,8 +67,8 @@ dependencies = [
 name = "aerodesk-cli"
 version = "0.1.0"
 dependencies = [
+ "aerodesk-codec",
  "aerodesk-core",
- "aerodesk-ffmpeg",
  "aerodesk-platform",
  "aerodesk-protocol",
  "pcap-file",
@@ -90,6 +80,17 @@ dependencies = [
  "tracing-subscriber",
  "tungstenite",
  "videotoolbox",
+]
+
+[[package]]
+name = "aerodesk-codec"
+version = "0.1.0"
+dependencies = [
+ "aerodesk-core",
+ "ffmpeg-next",
+ "openh264",
+ "tracing",
+ "x264",
 ]
 
 [[package]]
@@ -117,11 +118,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "aerodesk-dashboard"
+version = "0.1.0"
+dependencies = [
+ "rouille",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "aerodesk-desktop"
 version = "0.1.0"
 dependencies = [
+ "aerodesk-codec",
  "aerodesk-core",
- "aerodesk-ffmpeg",
  "aerodesk-platform",
  "aerodesk-protocol",
  "embed-resource",
@@ -137,17 +148,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "winit",
-]
-
-[[package]]
-name = "aerodesk-ffmpeg"
-version = "0.1.0"
-dependencies = [
- "aerodesk-core",
- "ffmpeg-next",
- "openh264",
- "tracing",
- "x264",
 ]
 
 [[package]]
@@ -181,8 +181,8 @@ dependencies = [
 name = "aerodesk-platform"
 version = "0.1.0"
 dependencies = [
+ "aerodesk-codec",
  "aerodesk-core",
- "aerodesk-ffmpeg",
  "aerodesk-protocol",
  "apple-cf",
  "block2 0.6.2",

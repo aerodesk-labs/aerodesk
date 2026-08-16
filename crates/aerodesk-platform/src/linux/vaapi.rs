@@ -6,7 +6,7 @@
 //! 收到 VAAPI surface 后 `av_hwframe_transfer_data` 回读 NV12 → RGBA。
 //!
 //! 本模块仅 Linux 编译；设备不可用（无 /dev/dri、驱动缺失）时 `new()` 返回
-//! Err，由上层回退到软编/软解（aerodesk-ffmpeg::softenc）。
+//! Err，由上层回退到软编/软解（aerodesk-codec::softenc）。
 //!
 //! 设备路径：`AERODESK_VAAPI_DEVICE` 环境变量覆盖，默认 `/dev/dri/renderD128`。
 

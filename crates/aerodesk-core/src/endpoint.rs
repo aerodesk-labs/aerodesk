@@ -125,7 +125,7 @@ impl Endpoint {
     }
 
     /// 仅启用指定视频 codec 的端点（H264/H265/VP9/AV1 + PCMU 音频），
-    /// 配合 aerodesk-ffmpeg 编码器（#74）。
+    /// 配合 aerodesk-codec 编码器（#74）。
     pub fn new_with_codec(codec: crate::media_pipeline::Codec) -> Self {
         use crate::media_pipeline::Codec;
         let mut config = Rtc::builder();

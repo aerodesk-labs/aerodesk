@@ -11,10 +11,10 @@ members = [
     "crates/aerodesk-android",
     "crates/aerodesk-ohos",
     "crates/aerodesk-desktop",
-    "crates/aerodesk-ffmpeg",
+    "crates/aerodesk-codec",
     "crates/aerodesk-bridge",
     "crates/aerodesk-mcp",
-    "crates/aerodesk-admin",
+    "crates/aerodesk-dashboard",
     "crates/aerodesk-platform",
 ]
 

@@ -1,18 +1,18 @@
-# AeroDesk 运维 dashboard（aerodesk-admin）
+# AeroDesk 运维 dashboard（aerodesk-dashboard）
 
-`aerodesk-admin` 是一个独立的只读运维代理 + 单页 dashboard（#369），
+`aerodesk-dashboard` 是一个独立的只读运维代理 + 单页 dashboard（#369），
 复用 SFU/signal 现有内部 API，不新增后端耦合。
 
 ```
-浏览器 --HTTP--> aerodesk-admin(:3080) --(X-Internal-Token)--> SFU(:3002) / session|record|metrics
+浏览器 --HTTP--> aerodesk-dashboard(:3080) --(X-Internal-Token)--> SFU(:3002) / session|record|metrics
                                           \--(无鉴权)-----------> signal(:3003) / healthz
 ```
 
 ## 构建
 
 ```sh
-cargo build --release -p aerodesk-admin
-# 产物：target/release/aerodesk-admin
+cargo build --release -p aerodesk-dashboard
+# 产物：target/release/aerodesk-dashboard
 ```
 
 ## 运行
@@ -28,7 +28,7 @@ cargo build --release -p aerodesk-admin
 ```sh
 INTERNAL_TOKEN=<sfu-token> ADMIN_TOKEN=<dashboard-token> \
 SFU_ADMIN_URL=http://127.0.0.1:3002 SIGNAL_ADMIN_URL=http://127.0.0.1:3003 \
-./target/release/aerodesk-admin
+./target/release/aerodesk-dashboard
 ```
 
 打开 `http://<host>:3080/`，顶部输入 `ADMIN_TOKEN` 后即可看到房间/客户端/录制/负载/TURN/健康。
@@ -46,7 +46,7 @@ Environment=ADMIN_TOKEN=CHANGE_ME
 Environment=SFU_ADMIN_URL=http://127.0.0.1:3002
 Environment=SIGNAL_ADMIN_URL=http://127.0.0.1:3003
 Environment=ADMIN_BIND=127.0.0.1:3080
-ExecStart=/usr/local/bin/aerodesk-admin
+ExecStart=/usr/local/bin/aerodesk-dashboard
 Restart=on-failure
 
 [Install]

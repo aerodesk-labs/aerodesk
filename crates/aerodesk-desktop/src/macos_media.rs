@@ -37,7 +37,7 @@ fn default_recv_dir() -> std::path::PathBuf {
 enum UiDecoder {
     H264(H264Decoder),
     Hevc(HevcDecoder),
-    Ffmpeg(aerodesk_ffmpeg::decode::FfmpegDecoder),
+    Ffmpeg(aerodesk_codec::decode::FfmpegDecoder),
 }
 
 impl UiDecoder {
@@ -48,7 +48,7 @@ impl UiDecoder {
                 Some(UiDecoder::Hevc(HevcDecoder::new()))
             }
             Codec::Hevc | Codec::Vp9 | Codec::Av1 => {
-                aerodesk_ffmpeg::decode::FfmpegDecoder::new(codec)
+                aerodesk_codec::decode::FfmpegDecoder::new(codec)
                     .ok()
                     .map(UiDecoder::Ffmpeg)
             }
@@ -295,7 +295,7 @@ pub fn run_viewer(
     /// 当前 AudioSink 采样率（codec 切换时重建，防 8k↔48k 重采样变速）。
     let mut sink_rate: u32 = 0;
     // #73 Opus 音频：libopus 解码（惰性创建）。
-    let mut opus_decoder: Option<aerodesk_ffmpeg::audio::OpusDecoder> = None;
+    let mut opus_decoder: Option<aerodesk_codec::audio::OpusDecoder> = None;
     let mut audio_played: u64 = 0;
     let mut audio_dropped: u64 = 0;
     let mut audio_buffered: usize = 0;
@@ -489,21 +489,21 @@ pub fn run_viewer(
                             audio_dropped += 1;
                         } else {
                             if opus_decoder.is_none() {
-                                opus_decoder = aerodesk_ffmpeg::audio::OpusDecoder::new().ok();
+                                opus_decoder = aerodesk_codec::audio::OpusDecoder::new().ok();
                             }
                             let pcm = opus_decoder
                                 .as_mut()
                                 .and_then(|dec| dec.decode(&data.data).ok().flatten())
                                 .unwrap_or_default();
                             if audio_sink.is_none()
-                                || sink_rate != aerodesk_ffmpeg::audio::OPUS_SAMPLE_RATE
+                                || sink_rate != aerodesk_codec::audio::OPUS_SAMPLE_RATE
                             {
                                 audio_sink =
                                     aerodesk_platform::macos::audio::AudioSink::new_with_rate(
-                                        aerodesk_ffmpeg::audio::OPUS_SAMPLE_RATE,
+                                        aerodesk_codec::audio::OPUS_SAMPLE_RATE,
                                     )
                                     .ok();
-                                sink_rate = aerodesk_ffmpeg::audio::OPUS_SAMPLE_RATE;
+                                sink_rate = aerodesk_codec::audio::OPUS_SAMPLE_RATE;
                             }
                             avsync.on_audio(data.time.numer(), data.time.denom());
                             jitter.push(avsync.audio_time_secs(), pcm);
@@ -940,7 +940,7 @@ mod tests {
             n
         }
 
-        use aerodesk_ffmpeg::encode::FfmpegEncoder;
+        use aerodesk_codec::encode::FfmpegEncoder;
         for codec in [Codec::H264, Codec::Hevc] {
             let mut enc = FfmpegEncoder::new(320, 180, 30, 1_000_000, codec).expect("encoder");
             enc.request_keyframe();
@@ -994,7 +994,7 @@ mod tests {
             rendered
         }
 
-        use aerodesk_ffmpeg::encode::FfmpegEncoder;
+        use aerodesk_codec::encode::FfmpegEncoder;
         for codec in [Codec::H264, Codec::Hevc] {
             let mut enc = FfmpegEncoder::new(320, 180, 30, 1_000_000, codec).expect("encoder");
             enc.request_keyframe();
@@ -1028,7 +1028,7 @@ mod tests {
     /// #74 UI 解码器（硬解优先 + FFmpeg 回退）对全部 codec 回环出 RGBA。
     #[test]
     fn ui_decoder_decodes_all_codecs() {
-        use aerodesk_ffmpeg::encode::FfmpegEncoder;
+        use aerodesk_codec::encode::FfmpegEncoder;
 
         let (w, h) = (320u32, 180u32);
         for codec in [Codec::H264, Codec::Hevc, Codec::Vp9, Codec::Av1] {

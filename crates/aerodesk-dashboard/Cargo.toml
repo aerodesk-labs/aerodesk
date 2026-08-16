@@ -1,5 +1,5 @@
 [package]
-name = "aerodesk-admin"
+name = "aerodesk-dashboard"
 description = "AeroDesk ops admin dashboard: read-only proxy over SFU/signal internal APIs"
 version.workspace = true
 edition.workspace = true

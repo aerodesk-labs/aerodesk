@@ -1,4 +1,4 @@
-# aerodesk-softenc 与 aerodesk-ffmpeg 差异与合并评估
+# aerodesk-softenc 与 aerodesk-codec 差异与合并评估
 
 ## 1. 两个 crate 的职责
 
@@ -15,7 +15,7 @@
   - 桌面三端可用（Windows 仅 OpenH264 编码 + 解码）
   - 移动端当前不直接使用（项目选择 MediaCodec / VideoToolbox，而非 FFmpeg 不支持移动端）
 
-### aerodesk-ffmpeg
+### aerodesk-codec
 - 定位：**FFmpeg 多格式编解码 / 音频 / 容器**
 - 依赖：
   - `ffmpeg-next = "8"`
@@ -30,7 +30,7 @@
 
 ## 2. 关键差异
 
-| 维度 | aerodesk-softenc | aerodesk-ffmpeg |
+| 维度 | aerodesk-softenc | aerodesk-codec |
 | --- | --- | --- |
 | 依赖重量 | 轻（OpenH264 + 可选 x264） | 重（FFmpeg 全家桶） |
 | Codec 覆盖 | H.264 为主 | H.264/HEVC/AV1/VP9 |
@@ -45,7 +45,7 @@
 
 1. **依赖策略不同**
    - `aerodesk-softenc` 设计为无 FFmpeg 也能跑，适合轻量回退。
-   - `aerodesk-ffmpeg` 需要完整 FFmpeg，Windows/macOS/Linux 构建与打包差异大。
+   - `aerodesk-codec` 需要完整 FFmpeg，Windows/macOS/Linux 构建与打包差异大。
 
 2. **平台裁剪不同**
    - 移动端构建不希望拉入 FFmpeg；如果合并，`aerodesk-platform` 或端侧会
@@ -64,7 +64,7 @@
 **从当前依赖关系看，可以合并。** FFmpeg 已经是 desktop/CLI 的硬依赖，softenc 的 H.264 回退路径与 FFmpeg 的 libx264/libopenh264 重叠；继续保留两个 crate 属于历史边界，不是技术必需。
 
 - `aerodesk-softenc`：轻量 H.264 软编解码回退
-- `aerodesk-ffmpeg`：重型多格式/音频/录制层
+- `aerodesk-codec`：重型多格式/音频/录制层
 
 可选优化不是“合并”，而是：
 - 在 `aerodesk-core` 或 `aerodesk-platform` 里定义统一 codec trait/facade
@@ -74,5 +74,5 @@
 ## 5. 建议
 
 - 短期：可保留现状，但不应把 softenc 当作长期独立层。
-- 中期：优先把 softenc 的 H.264 回退逻辑并入 `aerodesk-ffmpeg`，删除 vendored `x264` crate；若仍有纯类型/转换需求，再抽一个
+- 中期：优先把 softenc 的 H.264 回退逻辑并入 `aerodesk-codec`，删除 vendored `x264` crate；若仍有纯类型/转换需求，再抽一个
   `aerodesk-codec-common`，但只放纯 Rust 类型与转换，不引入 FFmpeg/x264。
