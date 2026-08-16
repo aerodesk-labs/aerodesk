@@ -190,6 +190,98 @@ fn run() {
         return;
     }
 
+    // #470 Windows 系统服务（需管理员）：安装/移除/查询 + 服务运行入口。
+    if args.iter().any(|a| a == "--install-service") {
+        #[cfg(windows)]
+        {
+            let exe = std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "aerodesk-cli.exe".into());
+            match aerodesk_platform::windows::service::install(&exe) {
+                Ok(()) => println!(
+                    "service installed and started: {}",
+                    aerodesk_platform::windows::service::SERVICE_NAME
+                ),
+                Err(e) => {
+                    eprintln!("service install failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--install-service 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.iter().any(|a| a == "--remove-service") {
+        #[cfg(windows)]
+        {
+            match aerodesk_platform::windows::service::remove() {
+                Ok(true) => println!("service removed"),
+                Ok(false) => println!("service not installed"),
+                Err(e) => {
+                    eprintln!("service remove failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--remove-service 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.iter().any(|a| a == "--service-status") {
+        #[cfg(windows)]
+        {
+            match aerodesk_platform::windows::service::status() {
+                Ok(Some(s)) => println!("installed: {s}"),
+                Ok(None) => println!("not installed"),
+                Err(e) => {
+                    eprintln!("service query failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--service-status 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
+    // #470 服务运行入口（SCM 以 `"<exe>" --service` 启动）：M1 骨架 = 日志心跳；
+    // M2 接信令常驻（signal_presence），M3 接 WTS 会话仲裁。
+    if args.iter().any(|a| a == "--service") {
+        #[cfg(windows)]
+        {
+            init_service_log();
+            info!("aerodesk-service 启动（#470 M1 骨架）");
+            let body = |stop: aerodesk_platform::windows::service::StopFlag| {
+                let mut beats = 0u64;
+                while !stop.stopped() {
+                    beats += 1;
+                    info!("service heartbeat #{beats}");
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+                info!("service body 结束（共 {beats} 次心跳）");
+            };
+            if let Err(e) = aerodesk_platform::windows::service::run(Box::new(body)) {
+                eprintln!("service run failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--service 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let role = arg(&args, "--role").unwrap_or_else(|| "viewer".into());
     let signal = arg(&args, "--signal").unwrap_or_else(|| "ws://127.0.0.1:3003/ws".into());
     let signal = if signal.contains("/ws") {
@@ -623,6 +715,67 @@ fn init_log() {
         .with(fmt::layer().with_writer(std::io::stderr))
         .with(filter)
         .init();
+}
+
+/// #470 服务态日志：写 `%ProgramData%\AeroDesk\logs\service.log`。SYSTEM 服务
+/// 无控制台、无用户 HOME（docs/PRELOGIN_WINDOWS_SERVICE.md D2），ProgramData
+/// 不可用时回退 stderr（便于手动 `--service` 调试）。
+#[cfg(windows)]
+fn init_service_log() {
+    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_writer(service_log_sink()))
+        .with(filter)
+        .init();
+}
+
+#[cfg(windows)]
+fn service_log_sink() -> ServiceLogSink {
+    let dir = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".into());
+    let dir = std::path::Path::new(&dir).join("AeroDesk").join("logs");
+    let open = std::fs::create_dir_all(&dir).and_then(|_| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("service.log"))
+    });
+    match open {
+        Ok(f) => ServiceLogSink::File(std::sync::Arc::new(f)),
+        Err(_) => ServiceLogSink::Stderr,
+    }
+}
+
+/// 服务日志落点：ProgramData 文件优先，回退 stderr。逐事件克隆句柄，M1 心跳量级无压力。
+#[cfg(windows)]
+#[derive(Clone)]
+enum ServiceLogSink {
+    File(std::sync::Arc<std::fs::File>),
+    Stderr,
+}
+
+#[cfg(windows)]
+impl std::io::Write for ServiceLogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            ServiceLogSink::File(f) => (&**f).write(buf),
+            ServiceLogSink::Stderr => std::io::stderr().write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            ServiceLogSink::File(f) => (&**f).flush(),
+            ServiceLogSink::Stderr => std::io::stderr().flush(),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ServiceLogSink {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
 }
 
 /// 连接信令 + 建立 Endpoint（公共步骤）。返回 (signal, endpoint, mut socket, video_mid, audio_mid)。

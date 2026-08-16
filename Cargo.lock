@@ -58,6 +58,7 @@ dependencies = [
  "aerodesk-platform",
  "jni 0.21.1",
  "slint",
+ "slint-build",
 ]
 
 [[package]]
@@ -156,6 +157,7 @@ dependencies = [
  "aerodesk-core",
  "aerodesk-platform",
  "slint",
+ "slint-build",
 ]
 
 [[package]]
@@ -211,6 +213,7 @@ dependencies = [
  "videotoolbox",
  "windows 0.58.0",
  "windows 0.62.2",
+ "windows-service",
  "x11rb",
  "x264",
 ]
@@ -3280,7 +3283,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -5058,7 +5061,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.45.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8113,6 +8116,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8316,6 +8325,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "windows-service"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d24d6bcc7f734a4091ecf8d7a64c5f7d7066f45585c1861eba06449909609c8a"
+dependencies = [
+ "bitflags 2.13.1",
+ "widestring",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
