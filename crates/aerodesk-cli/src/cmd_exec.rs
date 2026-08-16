@@ -351,6 +351,8 @@ mod tests {
             CmdResult::File { error, .. } => error.as_deref().unwrap_or(""),
             CmdResult::ProcessList { error, .. } => error.as_deref().unwrap_or(""),
             CmdResult::Killed { error, .. } => error.as_deref().unwrap_or(""),
+            // Chat 变体无 error 字段（#458 聊天回执不参与 busy 语义）。
+            CmdResult::Chat { .. } => "",
         }
     }
 
