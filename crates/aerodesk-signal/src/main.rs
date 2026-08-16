@@ -1127,6 +1127,9 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
     info!("session open");
     // 本连接加入时的 peer_id：用于校验 Description.from 属于本连接（防冒用）。
     let mut own_peer_id: Option<String> = None;
+    // #467：Join 时声明的 dc_ready 能力（会在 offer/answer 通道 DCEP 完成后发
+    // signal_ready），Description 代理 /start 时透传给 SFU 做重协商门控。
+    let mut own_dc_ready = false;
 
     loop {
         let msg = match ws.lock().unwrap_or_else(|e| e.into_inner()).next() {
@@ -1165,7 +1168,9 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 room,
                 role,
                 auth_token,
+                dc_ready,
             } => {
+                own_dc_ready = dc_ready;
                 // 房间名校验（防 query 注入 + 注册表滥用）。
                 if !bridge::sanitize_room(&room) {
                     send(
@@ -1480,7 +1485,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                     .and_then(|peers| peers.iter().find(|p| p.id == from))
                     .map(|p| p.role)
                     .unwrap_or(Role::Viewer);
-                match proxy_to_sfu(&config, &room, role, &description) {
+                match proxy_to_sfu(&config, &room, role, own_dc_ready, &description) {
                     Ok(answer) => send(
                         ws.clone(),
                         SignalMessage::Description {
@@ -1771,11 +1776,14 @@ fn forward_to_peer(rooms: &Rooms, to: &str, msg: SignalMessage) -> bool {
     true
 }
 
-/// 调用 SFU 内部接口：POST /start?room=xxx&role=xxx（body = SDP offer JSON）
+/// 调用 SFU 内部接口：POST /start?room=xxx&role=xxx[&dc_ready=1]（body = SDP offer JSON）
+/// #467：dc_ready=1 声明客户端会在 offer/answer 通道 DCEP 完成后发 signal_ready，
+/// SFU 据此门控重协商时机（旧客户端不携带，走兼容路径）。
 fn proxy_to_sfu(
     config: &Config,
     room: &str,
     role: Role,
+    dc_ready: bool,
     description: &str,
 ) -> Result<String, String> {
     let role_name = match role {
@@ -1783,7 +1791,10 @@ fn proxy_to_sfu(
         Role::Viewer => "viewer",
     };
     let sfu = &config.sfu_urls[selected_sfu_idx(&config.sfu_urls, room)];
-    let url = format!("{sfu}/start?room={room}&role={role_name}");
+    let mut url = format!("{sfu}/start?room={room}&role={role_name}");
+    if dc_ready {
+        url.push_str("&dc_ready=1");
+    }
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(10))
         .build();

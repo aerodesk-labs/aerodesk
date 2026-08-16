@@ -31,7 +31,13 @@ use aerodesk_sfu::recorder::Recorder;
 pub enum ShardCommand {
     /// 新客户端（信令线程创建 Rtc 后送入）。
     /// role 用于 #12 角色校验：viewer 禁止发布媒体。
-    AddClient { rtc: Rtc, room: String, role: Role },
+    /// dc_ready（#467）：/start 声明客户端会发 signal_ready，SFU 据此门控重协商。
+    AddClient {
+        rtc: Rtc,
+        room: String,
+        role: Role,
+        dc_ready: bool,
+    },
     /// 跨分片事件（媒体/控制/UDP 转投）。
     Cross(CrossShardEvent),
     /// TCP 数据包（由 manager 按路由表分发）。
@@ -506,8 +512,13 @@ fn run_shard(
         // 1. 命令队列
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
-                ShardCommand::AddClient { rtc, room, role } => {
-                    let mut client = Client::new(rtc, role);
+                ShardCommand::AddClient {
+                    rtc,
+                    room,
+                    role,
+                    dc_ready,
+                } => {
+                    let mut client = Client::new(rtc, role, dc_ready);
                     client.recorder = shared.recorder.clone();
                     client.room = room.clone();
                     let id = client.id;
@@ -1048,6 +1059,11 @@ impl TrackOut {
 /// file 回传打满对端缓冲时挤掉 input/clipboard（#134）。
 const CHANNEL_PRIORITY_LEVELS: usize = 5;
 
+/// #467：signal_ready 宽限期（自 SFU 侧 offer/answer 通道打开起算）。
+/// ready 正常在通道打开后 ~1 RTT 到达；超时视为就绪包异常丢失，放行协商
+/// 退回旧行为（偶发），避免门控本身把客户端缺陷放大成永久黑屏。
+const SIGNAL_READY_GRACE: Duration = Duration::from_secs(5);
+
 fn channel_priority(label: &str) -> usize {
     match label {
         "input" => 0,     // 观看端输入：延迟最敏感
@@ -1067,11 +1083,20 @@ pub struct Client {
     pub bwe: BitrateController,
     pub rtc: Rtc,
     pub pending: Option<str0m::change::SdpPendingOffer>,
-    pub cid: Option<ChannelId>,
     pub channels: HashMap<String, ChannelId>,
     pub tracks_in: Vec<TrackInEntry>,
     pub tracks_out: Vec<TrackOut>,
     pub chosen_rid: Option<Rid>,
+    /// #467：/start 声明该客户端会在 offer/answer 通道 DCEP 完成后发
+    /// `{"type":"signal_ready"}`（旧客户端为 false，不门控，保持兼容）。
+    signal_ready_expected: bool,
+    /// #467：已收到客户端的 signal_ready（仅 `signal_ready_expected` 时参与门控）。
+    signal_ready: bool,
+    /// #467：signal_ready 等待锚点。初始为客户端创建时刻；offer/answer 通道
+    /// 在 SFU 侧打开时重置（ready 正常在其后 ~1 RTT 内到达）。超过
+    /// [`SIGNAL_READY_GRACE`] 仍未收到（客户端就绪包发送失败被吞等异常）则
+    /// 放行协商，退回旧行为——避免"声明了能力的客户端"因自身缺陷永久黑屏。
+    signal_ready_wait_since: Instant,
     /// 可选录制器引用（录制开启时非空）。
     recorder: Option<Arc<Recorder>>,
     /// #238 媒体质量快照（RTT/丢包/BWE）。
@@ -1092,7 +1117,7 @@ pub struct Client {
 }
 
 impl Client {
-    fn new(rtc: Rtc, role: Role) -> Client {
+    fn new(rtc: Rtc, role: Role, signal_ready_expected: bool) -> Client {
         static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
         let next_id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
         Client {
@@ -1102,11 +1127,13 @@ impl Client {
             bwe: BitrateController::default(),
             rtc,
             pending: None,
-            cid: None,
             channels: HashMap::new(),
             tracks_in: vec![],
             tracks_out: vec![],
             chosen_rid: None,
+            signal_ready_expected,
+            signal_ready: false,
+            signal_ready_wait_since: Instant::now(),
             recorder: None,
             qos: std::sync::Mutex::new(ClientQos::default()),
             pending_channel_out: std::array::from_fn(|_| VecDeque::new()),
@@ -1218,18 +1245,18 @@ impl Client {
                 Event::MediaData(data) => self.handle_media_data_in(data),
                 Event::KeyframeRequest(req) => self.handle_incoming_keyframe_req(req),
                 Event::ChannelOpen(cid, label) => {
-                    self.channels.insert(label, cid);
-                    if self.cid.is_none() {
-                        self.cid = Some(cid);
+                    // #467：offer/answer 通道在 SFU 侧打开时重置宽限锚点——
+                    // ready 正常在此后 ~1 RTT 到达，从这一刻起算而非客户端创建
+                    // 时刻，避免宽限期被 ICE/DTLS 建立时长挤占。
+                    if label == "offer/answer" && self.signal_ready_expected && !self.signal_ready {
+                        self.signal_ready_wait_since = Instant::now();
                     }
+                    self.channels.insert(label, cid);
                     Propagated::Noop
                 }
                 Event::ChannelData(data) => self.handle_channel_data(data),
                 Event::ChannelClose(cid) => {
                     self.channels.retain(|_, v| *v != cid);
-                    if self.cid == Some(cid) {
-                        self.cid = None;
-                    }
                     Propagated::Noop
                 }
                 Event::EgressBitrateEstimate(v) => {
@@ -1367,9 +1394,26 @@ impl Client {
     }
 
     fn negotiate_if_needed(&mut self) -> bool {
-        if self.cid.is_none() || self.pending.is_some() {
+        if self.pending.is_some() {
             return false;
         }
+        // #467：声明了 dc_ready 的客户端，必须等它 offer/answer 通道 DCEP 完成后
+        // 发来的 signal_ready 才发起重协商——此前 viewer 端 str0m 可能尚未注册
+        // 通道，写出的 offer 被丢弃 → viewer 不回 answer → pending 永久卡死。
+        // 宽限兜底：超时仍未收到 ready（就绪包异常丢失/客户端缺陷）时放行，
+        // 退回旧的偶发行为，避免永久黑屏；正常路径 ready ~1 RTT 内必达不受影响。
+        if self.signal_ready_expected
+            && !self.signal_ready
+            && self.signal_ready_wait_since.elapsed() < SIGNAL_READY_GRACE
+        {
+            return false;
+        }
+        // #467：offer 固定写 offer/answer 通道（按 label 取）。此前取"第一个打开
+        // 的通道"，跨 stream 无顺序保证，首个 ChannelOpen 可能是 input 等业务
+        // 通道，offer 写错通道后被 viewer 当业务数据丢弃。
+        let Some(&signal_cid) = self.channels.get("offer/answer") else {
+            return false;
+        };
         for track in &mut self.tracks_out {
             if let TrackOutState::Open(m) = track.state
                 && track.track_in.upgrade().is_none()
@@ -1406,7 +1450,7 @@ impl Client {
         let Some((offer, pending)) = change.apply() else {
             return false;
         };
-        let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) else {
+        let Some(mut channel) = self.rtc.channel(signal_cid) else {
             return false;
         };
         let json = serde_json::to_string(&offer).unwrap();
@@ -1420,7 +1464,7 @@ impl Client {
     fn handle_channel_data(&mut self, d: ChannelData) -> Propagated {
         use str0m::change::{SdpAnswer, SdpOffer};
         if let Ok(offer) = serde_json::from_slice::<'_, SdpOffer>(&d.data) {
-            self.handle_offer(offer);
+            self.handle_offer(offer, d.id);
             return Propagated::Noop;
         }
         if let Ok(answer) = serde_json::from_slice::<'_, SdpAnswer>(&d.data) {
@@ -1442,6 +1486,20 @@ impl Client {
             return Propagated::Noop;
         };
         if label == "offer/answer" {
+            // #467：客户端就绪声明——offer/answer 通道 DCEP 已完成（opener 侧收到
+            // ACK 后才会发），此后 SFU 发出的重协商 offer 不会再落在未注册通道上。
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&d.data)
+                && v.get("type").and_then(|t| t.as_str()) == Some("signal_ready")
+            {
+                if !self.signal_ready {
+                    info!(
+                        "Client ({}) signal_ready：offer/answer 通道就绪，允许重协商",
+                        *self.id
+                    );
+                }
+                self.signal_ready = true;
+                return Propagated::Noop;
+            }
             warn!("Unrecognized data on signal channel");
             return Propagated::Noop;
         }
@@ -1582,7 +1640,10 @@ impl Client {
         }
     }
 
-    fn handle_offer(&mut self, offer: str0m::change::SdpOffer) {
+    /// 处理客户端经 offer/answer 通道发来的重协商 offer。
+    /// #467：answer 回写到 offer 到达的那条通道（`reply_cid`）——此前固定写
+    /// "第一个打开的通道"，跨 stream 无顺序保证，可能写错通道被对端当业务数据丢弃。
+    fn handle_offer(&mut self, offer: str0m::change::SdpOffer, reply_cid: ChannelId) {
         // #12：viewer 禁止通过重协商发布媒体（初始 offer 在 /start 处同样校验）。
         if self.role == Role::Viewer && offer_sends_media(&offer.to_sdp_string()) {
             warn!(
@@ -1604,10 +1665,7 @@ impl Client {
                 _ => {}
             }
         }
-        let mut channel = self
-            .cid
-            .and_then(|id| self.rtc.channel(id))
-            .expect("channel to be open");
+        let mut channel = self.rtc.channel(reply_cid).expect("channel to be open");
         let json = serde_json::to_string(&answer).unwrap();
         channel
             .write(false, json.as_bytes())
@@ -1874,7 +1932,7 @@ mod tests {
     #[test]
     fn pending_out_queues_by_priority_and_retains_when_unregistered() {
         use str0m::Rtc;
-        let mut client = Client::new(Rtc::builder().build(Instant::now()), Role::Viewer);
+        let mut client = Client::new(Rtc::builder().build(Instant::now()), Role::Viewer, false);
         // 先入 file（低优先级），再入 input（高优先级）
         assert!(client.enqueue_pending("file", vec![0u8; 100], true));
         assert!(client.enqueue_pending("input", vec![1u8; 10], false));
@@ -2088,7 +2146,7 @@ fn pending_out_retains_when_channel_missing() {
     let now = std::time::Instant::now();
     let mut rtc = str0m::Rtc::new(now);
     let cid = rtc.sdp_api().add_channel("input".into());
-    let mut client = Client::new(rtc, crate::shard::Role::Publisher);
+    let mut client = Client::new(rtc, crate::shard::Role::Publisher, false);
     assert!(client.channels.is_empty());
 
     let data = ChannelData {
@@ -2120,4 +2178,315 @@ fn pending_out_retains_when_channel_missing() {
         data.data.len(),
         "rtc 通道不可用时也应保留"
     );
+}
+
+// ---------- #467：signal_ready 门控回归（真实 str0m 对驱微缩 e2e） ----------
+
+/// 伪 viewer：最小驱动（同 dc_multi_channel.rs 的 Node 思路），记录通道事件。
+struct MiniViewer {
+    rtc: Rtc,
+    sock: UdpSocket,
+    sfu_addr: SocketAddr,
+    opened: Vec<(ChannelId, String)>,
+    received: Vec<(String, Vec<u8>)>,
+}
+
+impl MiniViewer {
+    fn channel_of(&self, label: &str) -> Option<ChannelId> {
+        self.opened
+            .iter()
+            .find(|(_, l)| l == label)
+            .map(|(c, _)| *c)
+    }
+
+    fn send(&mut self, label: &str, data: &[u8]) -> bool {
+        let Some(cid) = self.channel_of(label) else {
+            return false;
+        };
+        let Some(mut ch) = self.rtc.channel(cid) else {
+            return false;
+        };
+        ch.write(false, data).unwrap_or(false)
+    }
+
+    fn pump(&mut self) {
+        let now = Instant::now();
+        let local = self.sock.local_addr().unwrap();
+        let mut buf = [0u8; 2048];
+        while let Ok((n, source)) = self.sock.recv_from(&mut buf) {
+            if let Ok(contents) = buf[..n].try_into() {
+                let _ = self.rtc.handle_input(Input::Receive(
+                    now,
+                    Receive {
+                        proto: Protocol::Udp,
+                        source,
+                        destination: local,
+                        contents,
+                    },
+                ));
+            }
+        }
+        let _ = self.rtc.handle_input(Input::Timeout(now));
+        while let Ok(o) = self.rtc.poll_output() {
+            match o {
+                Output::Transmit(t) => {
+                    let _ = self.sock.send_to(&t.contents, self.sfu_addr);
+                }
+                Output::Timeout(_) => break,
+                Output::Event(e) => match e {
+                    Event::ChannelOpen(cid, label) => self.opened.push((cid, label)),
+                    Event::ChannelData(d) => {
+                        let label = self
+                            .opened
+                            .iter()
+                            .rev()
+                            .find(|(c, _)| *c == d.id)
+                            .map(|(_, l)| l.clone())
+                            .unwrap_or_else(|| format!("cid{:?}", d.id));
+                        self.received.push((label, d.data.to_vec()));
+                    }
+                    _ => {}
+                },
+            }
+        }
+    }
+}
+
+/// SFU Client 单连接泵：收包 → 超时 → 排空输出（内含 negotiate_if_needed 门控）。
+fn pump_sfu_client(
+    client: &mut Client,
+    sock: &UdpSocket,
+    tcp: &Arc<Mutex<HashMap<SocketAddr, TcpStream>>>,
+    metrics: &ShardMetrics,
+) {
+    let now = Instant::now();
+    let mut buf = [0u8; 2048];
+    while let Ok((n, source)) = sock.recv_from(&mut buf) {
+        if let Ok(contents) = buf[..n].try_into() {
+            client.handle_input(Input::Receive(
+                now,
+                Receive {
+                    proto: Protocol::Udp,
+                    source,
+                    destination: sock.local_addr().unwrap(),
+                    contents,
+                },
+            ));
+        }
+    }
+    client.handle_input(Input::Timeout(now));
+    loop {
+        if !client.rtc.is_alive() {
+            break;
+        }
+        if let Propagated::Timeout(_) = client.poll_output(sock, tcp, metrics) {
+            break;
+        }
+    }
+}
+
+/// 建立真实连接：viewer 初始 offer（offer/answer + input 通道）→ SFU Client。
+/// 返回 (viewer, client, sfu_sock, track)：track 是"publisher 已发布轨"的强引用，
+/// 必须由调用方持有到测试结束——Client.tracks_out 只存 Weak（生产中由 publisher
+/// 的 tracks_in 持有），提前 drop 会让 upgrade() 失败、add_media 不触发。
+fn connect_mini_viewer(dc_ready: bool) -> (MiniViewer, Client, UdpSocket, Arc<TrackIn>) {
+    use str0m::Candidate;
+    let now = Instant::now();
+
+    let mut vrtc = Rtc::new(now);
+    let vsock = UdpSocket::bind("127.0.0.1:0").expect("viewer bind");
+    vsock.set_read_timeout(Some(Duration::from_millis(10))).ok();
+    let vaddr = vsock.local_addr().unwrap();
+    vrtc.add_local_candidate(Candidate::host(vaddr, "udp").unwrap())
+        .unwrap();
+
+    let mut change = vrtc.sdp_api();
+    change.add_channel("offer/answer".into());
+    change.add_channel("input".into());
+    let (offer, vpending) = change.apply().expect("viewer offer");
+
+    let sfu_sock = UdpSocket::bind("127.0.0.1:0").expect("sfu bind");
+    // 非阻塞泵必需：无包时 recv_from 最多等 10ms，否则测试线程永久挂起。
+    sfu_sock
+        .set_read_timeout(Some(Duration::from_millis(10)))
+        .ok();
+    let mut srtc = Rtc::new(now);
+    srtc.add_local_candidate(Candidate::host(sfu_sock.local_addr().unwrap(), "udp").unwrap())
+        .unwrap();
+    let answer = srtc.sdp_api().accept_offer(offer).expect("accept");
+    vrtc.sdp_api()
+        .accept_answer(vpending, answer)
+        .expect("answer");
+
+    let mut client = Client::new(srtc, Role::Viewer, dc_ready);
+    // 复现 publisher 先加入：viewer 加入时即 replay TrackOpen → tracks_out=ToOpen。
+    let track = Arc::new(TrackIn {
+        origin: ClientId(999),
+        room: "r467".into(),
+        mid: Mid::from("5"),
+        kind: MediaKind::Video,
+    });
+    client.handle_track_open(Arc::downgrade(&track));
+
+    let viewer = MiniViewer {
+        rtc: vrtc,
+        sock: vsock,
+        sfu_addr: sfu_sock.local_addr().unwrap(),
+        opened: Vec::new(),
+        received: Vec::new(),
+    };
+    (viewer, client, sfu_sock, track)
+}
+
+fn mini_pump_until(
+    viewer: &mut MiniViewer,
+    client: &mut Client,
+    sfu_sock: &UdpSocket,
+    cond: impl Fn(&MiniViewer, &Client) -> bool,
+    what: &str,
+) {
+    let tcp: Arc<Mutex<HashMap<SocketAddr, TcpStream>>> = Arc::new(Mutex::new(HashMap::new()));
+    let metrics = ShardMetrics::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut iters = 0usize;
+    while !cond(viewer, client) {
+        assert!(Instant::now() < deadline, "等待超时：{what}");
+        viewer.pump();
+        pump_sfu_client(client, sfu_sock, &tcp, &metrics);
+        std::thread::sleep(Duration::from_millis(5));
+        iters += 1;
+        if iters % 100 == 0 {
+            eprintln!(
+                "[probe] {what}: iters={iters} ready={} expected={} pending={} channels={:?} viewer_opened={:?} viewer_recv={:?}",
+                client.signal_ready,
+                client.signal_ready_expected,
+                client.pending.is_some(),
+                client.channels.keys().collect::<Vec<_>>(),
+                viewer.opened,
+                viewer.received,
+            );
+        }
+    }
+}
+
+/// #467 主回归：声明 dc_ready 的 viewer 在发 signal_ready 前，SFU 不发重协商
+/// offer（pending 保持 None，viewer 收不到任何 offer）；发来 signal_ready 后
+/// 立即协商，offer 恰好落在 offer/answer 通道上。
+#[test]
+fn signal_ready_gates_renegotiation_until_ready() {
+    let (mut viewer, mut client, sfu_sock, _track) = connect_mini_viewer(true);
+    mini_pump_until(
+        &mut viewer,
+        &mut client,
+        &sfu_sock,
+        |v, c| {
+            v.rtc.is_connected()
+                && c.rtc.is_connected()
+                && v.channel_of("offer/answer").is_some()
+                && c.channels.contains_key("offer/answer")
+        },
+        "连接与 DCEP 完成",
+    );
+
+    // 门控期：通道已双向就绪（viewer 已收 ACK）、tracks_out=ToOpen，但 ready 未到
+    // → negotiate 不发生：pending 为 None，viewer 不应收到任何 offer。
+    assert!(client.signal_ready_expected && !client.signal_ready);
+    assert!(client.pending.is_none(), "ready 之前不得发起协商");
+    assert!(
+        !viewer
+            .received
+            .iter()
+            .any(|(l, d)| l == "offer/answer" && is_sdp_offer_json(d)),
+        "ready 之前 viewer 不应收到重协商 offer"
+    );
+
+    // viewer 声明就绪（endpoint.rs：ChannelOpen("offer/answer") 即 DCEP ACK 已收）。
+    assert!(viewer.send("offer/answer", br#"{"type":"signal_ready"}"#));
+
+    mini_pump_until(
+        &mut viewer,
+        &mut client,
+        &sfu_sock,
+        |_, c| c.pending.is_some(),
+        "ready 后 SFU 发出重协商 offer",
+    );
+    // offer 必须落在 offer/answer 通道（而非"第一个打开的通道"——此处 input
+    // 可能先开，正是原竞态的写错通道路径）。
+    mini_pump_until(
+        &mut viewer,
+        &mut client,
+        &sfu_sock,
+        |v, _| {
+            v.received
+                .iter()
+                .any(|(l, d)| l == "offer/answer" && is_sdp_offer_json(d))
+        },
+        "viewer 在 offer/answer 通道收到 offer",
+    );
+    assert!(!client.channels.is_empty());
+}
+
+/// 兼容回归：旧客户端（未声明 dc_ready）不发 signal_ready，SFU 仍照常协商，
+/// offer 同样落在 offer/answer 通道。
+#[test]
+fn legacy_client_negotiates_without_signal_ready() {
+    let (mut viewer, mut client, sfu_sock, _track) = connect_mini_viewer(false);
+    mini_pump_until(
+        &mut viewer,
+        &mut client,
+        &sfu_sock,
+        |v, c| {
+            v.rtc.is_connected()
+                && c.rtc.is_connected()
+                && v.channel_of("offer/answer").is_some()
+                && c.pending.is_some()
+                // 等到 offer 实际送达 viewer（pending 置位只代表 SFU 已写出）。
+                && v.received
+                    .iter()
+                    .any(|(l, d)| l == "offer/answer" && is_sdp_offer_json(d))
+        },
+        "旧客户端不受门控影响，正常收到重协商 offer",
+    );
+}
+
+/// #467 宽限兜底：声明了 dc_ready 但 ready 迟迟不到（就绪包异常丢失）时，
+/// 超过 SIGNAL_READY_GRACE 放行协商——门控不得把客户端缺陷放大成永久黑屏。
+#[test]
+fn signal_ready_gate_falls_back_after_grace() {
+    let (mut viewer, mut client, sfu_sock, _track) = connect_mini_viewer(true);
+    // 连接与通道打开（正常阶段），但 viewer 故意不发 signal_ready。
+    mini_pump_until(
+        &mut viewer,
+        &mut client,
+        &sfu_sock,
+        |v, c| {
+            v.rtc.is_connected()
+                && c.rtc.is_connected()
+                && v.channel_of("offer/answer").is_some()
+                && c.channels.contains_key("offer/answer")
+        },
+        "连接与 DCEP 完成",
+    );
+    assert!(client.pending.is_none(), "宽限期内不得发起协商");
+    // 时间快进过宽限期（测试不真等 5s：直接回拨锚点）。
+    client.signal_ready_wait_since -= SIGNAL_READY_GRACE + Duration::from_secs(1);
+    mini_pump_until(
+        &mut viewer,
+        &mut client,
+        &sfu_sock,
+        |v, _| {
+            v.received
+                .iter()
+                .any(|(l, d)| l == "offer/answer" && is_sdp_offer_json(d))
+        },
+        "宽限期超时后放行协商，offer 送达 viewer",
+    );
+}
+
+/// 判断数据是否为 str0m SdpOffer JSON（{"type":"offer",...}）。
+fn is_sdp_offer_json(d: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(d)
+        .ok()
+        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s == "offer"))
+        .unwrap_or(false)
 }

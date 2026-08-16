@@ -1369,6 +1369,8 @@ fn web_request(
             return Response::text("role required (publisher|viewer)").with_status_code(403);
         }
     };
+    // #467：dc_ready=1 声明客户端会发 signal_ready（旧客户端不带 → 兼容路径）。
+    let dc_ready = param("dc_ready").as_deref() == Some("1");
 
     let mut data = request.data().expect("body to be available");
     let offer: str0m::change::SdpOffer =
@@ -1440,9 +1442,14 @@ fn web_request(
                 .choose(&room)
         }
     };
-    info!("POST /start room={room} -> shard {shard}");
+    info!("POST /start room={room} -> shard {shard} dc_ready={dc_ready}");
     let room_for_release = room.clone();
-    let res = shard_txs[shard].send(ShardCommand::AddClient { rtc, room, role });
+    let res = shard_txs[shard].send(ShardCommand::AddClient {
+        rtc,
+        room,
+        role,
+        dc_ready,
+    });
     if res.is_err() {
         warn!("Failed to deliver client to shard {shard}");
         shared.release(&room_for_release);
