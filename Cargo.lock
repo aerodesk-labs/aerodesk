@@ -58,6 +58,7 @@ dependencies = [
  "aerodesk-platform",
  "jni 0.21.1",
  "slint",
+ "slint-build",
 ]
 
 [[package]]
@@ -156,6 +157,7 @@ dependencies = [
  "aerodesk-core",
  "aerodesk-platform",
  "slint",
+ "slint-build",
 ]
 
 [[package]]
