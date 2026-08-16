@@ -115,8 +115,30 @@ fn probe_audio() {
 }
 
 fn run() {
-    init_log();
     let args: Vec<String> = std::env::args().collect();
+    // #470 服务态必须最先分流：init_log() 会占用全局 tracing subscriber，
+    // 服务分支的 init_service_log() 二次 init 会 panic（双订阅）→ 服务进程
+    // 秒死 → SCM 报 1053（CI 实测教训，本地直跑 --service 前记得也无 stderr 消费者）。
+    if args.iter().any(|a| a == "--service") {
+        #[cfg(windows)]
+        {
+            init_service_log();
+            info!("aerodesk-service 启动（#470：信令常驻 + 会话仲裁）");
+            if let Err(e) =
+                aerodesk_platform::windows::service::run(Box::new(service_run::service_body))
+            {
+                eprintln!("service run failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--service 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
+    init_log();
     if args.iter().any(|a| a == "--issue-token") {
         issue_token(&args);
         return;
@@ -283,28 +305,9 @@ fn run() {
         }
         return;
     }
-    // #470 服务运行入口（SCM 以 `"<exe>" --service` 启动）：
-    // M2 信令常驻（ProgramData 配置 + SignalPresence）+ M3 WTS 会话让位仲裁。
-    if args.iter().any(|a| a == "--service") {
-        #[cfg(windows)]
-        {
-            init_service_log();
-            info!("aerodesk-service 启动（#470：信令常驻 + 会话仲裁）");
-            if let Err(e) =
-                aerodesk_platform::windows::service::run(Box::new(service_run::service_body))
-            {
-                eprintln!("service run failed: {e}");
-                std::process::exit(1);
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            eprintln!("--service 仅 Windows 支持");
-            std::process::exit(1);
-        }
-        return;
-    }
     // #470 服务配置查看（调试辅助：路径 + 生效值）。
+    // 注：--service 运行入口已前移至 run() 顶部（须先于 init_log 分流，
+    // 见函数头注释），此处不再重复。
     if args.iter().any(|a| a == "--service-config") {
         #[cfg(windows)]
         {

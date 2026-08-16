@@ -179,10 +179,15 @@ fn state_display(s: ServiceState) -> &'static str {
 
 /// 服务入口（由 SCM 派发调用）：注册控制处理器并驱动状态机，阻塞直至服务停止。
 /// 直接在控制台运行会因无 SCM 派发上下文而失败——提示先 `--install-service`。
+/// 失败路径写事件日志——SCM 报 1053(服务未及时响应)时,服务进程早退的
+/// 真实原因只能从事件日志/服务日志文件找到(CI 实测教训)。
 pub fn run(body: ServiceBody) -> Result<(), String> {
     SERVICE_BODY.lock().unwrap().replace(body);
     service_dispatcher::start(SERVICE_NAME, ffi_service_main).map_err(|e| {
-        format!("SCM dispatcher 启动失败（请经服务管理器启动，或先 --install-service）：{e}")
+        let msg =
+            format!("SCM dispatcher 启动失败（请经服务管理器启动，或先 --install-service）：{e}");
+        event_log(&msg, true);
+        msg
     })
 }
 

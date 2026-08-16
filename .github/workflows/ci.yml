@@ -161,7 +161,17 @@ jobs:
           BIN="$(pwd)/svc-smoke/aerodesk-cli.exe"
           test -f "$BIN"
           out=$("$BIN" --service-status); echo "$out"; [ "$out" = "not installed" ]
-          "$BIN" --install-service
+          # install 失败时 dump SCM 视角(服务配置/状态/事件日志)定位进程早退原因(1053 教训)。
+          if ! "$BIN" --install-service; then
+            echo "== 诊断:sc query/qc =="
+            sc query AeroDeskService || true
+            sc qc AeroDeskService || true
+            echo "== 诊断:SCM 事件日志(最近 5 条) =="
+            wevtutil qe System "/q:*[System[Provider[@Name='Service Control Manager']]]" /c:5 /rd:true /f:text || true
+            echo "== 诊断:服务日志文件 =="
+            tail -30 "$PROGRAMDATA/AeroDesk/logs/service.log" 2>/dev/null || echo "(无 service.log——进程死在 init_service_log 之前)"
+            exit 1
+          fi
           out=$("$BIN" --service-status); echo "$out"; echo "$out" | grep -q "运行中"
           "$BIN" --remove-service
           out=$("$BIN" --service-status); echo "$out"; [ "$out" = "not installed" ]
