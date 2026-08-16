@@ -32,9 +32,6 @@ aerodesk/
 │   ├── aerodesk-platform/   # 平台实现收敛层：macos/windows/linux/ios/android/ohos 各平台 trait 实现 ✅
 │   ├── aerodesk-desktop/    # 桌面端侧 UI/UX（Slint，Win/macOS/Linux）✅
 │   ├── aerodesk-cli/        # CLI：publisher（pcap/x264/VT/screen 四种源）+ viewer ✅
-│   ├── aerodesk-macos/      # macOS 平台实现兼容壳（实现已迁 aerodesk-platform）✅
-│   ├── aerodesk-windows/    # Windows 平台实现兼容壳（实现已迁 aerodesk-platform）✅
-│   ├── aerodesk-linux/      # Linux 平台实现兼容壳（实现已迁 aerodesk-platform）✅
 │   ├── aerodesk-ios/        # iOS/iPad FFI 薄壳 + Slint 宿主（平台实现已迁 aerodesk-platform）✅
 │   ├── aerodesk-android/    # Android JNI 薄壳 + Slint 宿主（平台实现已迁 aerodesk-platform）🔨 P3
 │   ├── aerodesk-ohos/       # HarmonyOS NAPI 薄壳（平台实现已迁 aerodesk-platform）🔨 P4

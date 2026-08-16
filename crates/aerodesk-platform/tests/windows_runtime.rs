@@ -8,9 +8,9 @@
 //! #277：统一走 core `MediaSource` / `InputInjector` trait + 真实协议事件。
 
 use aerodesk_core::platform::{InputInjector, MediaSource};
+use aerodesk_platform::windows::capture::DxgiCapturer;
+use aerodesk_platform::windows::inject::SendInputInjector;
 use aerodesk_protocol::input::{ButtonState, InputEvent, Modifiers, MouseButton};
-use aerodesk_windows::capture::DxgiCapturer;
-use aerodesk_windows::inject::SendInputInjector;
 use std::sync::Mutex;
 
 /// 同一 output 同时只允许一个 duplication（DXGI 限制）：运行级 DXGI 测试
@@ -161,13 +161,13 @@ fn mf_camera_lists_and_captures() {
     // #385 Windows 摄像头（MF SourceReader）：枚举 + 采集首帧（BGRA）。
     // 无摄像头（CI/裸机）时 SKIP；有设备（如虚拟摄像头）必须出帧。
     use aerodesk_core::platform::CameraSource;
-    let cams = aerodesk_windows::camera::list_cameras();
+    let cams = aerodesk_platform::windows::camera::list_cameras();
     if cams.is_empty() {
         eprintln!("SKIP: no camera device（真机/虚拟摄像头验证）");
         return;
     }
     eprintln!("cameras: {cams:?}");
-    let mut cam = match aerodesk_windows::camera::MfCamera::new(Some("0")) {
+    let mut cam = match aerodesk_platform::windows::camera::MfCamera::new(Some("0")) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("SKIP: MfCamera::new: {e}");

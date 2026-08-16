@@ -132,7 +132,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # aerodesk-desktop(Linux) → aerodesk-linux(VAAPI, ffmpeg-next) + softenc(x264)：
+      # aerodesk-desktop(Linux) → aerodesk-platform::linux(VAAPI, ffmpeg-next) + softenc(x264)：
       # 与 CI test job 的 ubuntu System deps 一致。
       - name: System deps
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev libasound2-dev libx264-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev libswresample-dev libpostproc-dev libavdevice-dev libpipewire-0.3-dev libspa-0.2-dev rpm

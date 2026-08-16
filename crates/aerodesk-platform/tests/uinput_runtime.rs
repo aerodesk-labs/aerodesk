@@ -6,7 +6,7 @@
 //! 可用 `AERODESK_UINPUT=/path` 覆盖设备路径（容器/devtmpfs 场景）。
 
 use aerodesk_core::platform::InputInjector;
-use aerodesk_linux::inject::UinputInjector;
+use aerodesk_platform::linux::inject::UinputInjector;
 use aerodesk_protocol::input::{ButtonState, InputEvent, Modifiers, MouseButton};
 
 fn uinput_available() -> bool {

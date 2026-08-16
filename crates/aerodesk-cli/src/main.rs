@@ -1458,7 +1458,7 @@ impl LinuxInjector {
                 }
             }
         } else {
-            // Wayland：portal RemoteDesktop 优先（#319；aerodesk-linux 依赖固定启用 pipewire）。
+            // Wayland：portal RemoteDesktop 优先（#319；aerodesk-platform 依赖固定启用 pipewire）。
             {
                 match aerodesk_platform::linux::portal_inject::PortalInjector::new() {
                     Ok(i) => {
@@ -2947,7 +2947,7 @@ fn publisher_ffmpeg(
 /// FfmpegEncoder（H265/VP9/AV1）。H.264 走原 VtEncoder 零拷贝路径。
 /// 需要屏幕录制权限（TCC）。
 /// Windows 屏幕采集发布端（被控端）：DXGI Desktop Duplication → OpenH264 软编 → SFU。
-/// 输入注入走 SendInput（aerodesk-windows）；系统音频走 WASAPI loopback
+/// 输入注入走 SendInput（aerodesk-platform）；系统音频走 WASAPI loopback
 /// （采集系统正在播放的声音，失败回退合成音）；需要交互桌面会话（DXGI 输出可用）。
 #[cfg(target_os = "windows")]
 #[allow(clippy::too_many_arguments)] // 采集参数（显示器/缩放/码率/编解码），与既有 publisher 系列同风格。

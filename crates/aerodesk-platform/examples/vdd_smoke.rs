@@ -10,7 +10,7 @@
 fn main() {
     #[cfg(windows)]
     {
-        use aerodesk_windows::vdd::VirtualDisplayManager;
+        use aerodesk_platform::windows::vdd::VirtualDisplayManager;
         use std::time::Duration;
 
         let width: u32 = std::env::args()
