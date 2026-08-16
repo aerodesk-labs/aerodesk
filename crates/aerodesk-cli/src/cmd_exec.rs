@@ -345,12 +345,14 @@ mod tests {
     use aerodesk_protocol::cmd::CmdAction;
 
     /// 取各变体的 error 字段（busy 响应必带）。
+    /// #474：Chat 变体无 error 字段（#458），busy 态不会产生 Chat 结果，返回空。
     fn busy_err(r: &CmdResult) -> &str {
         match r {
             CmdResult::Run { error, .. } => error.as_deref().unwrap_or(""),
             CmdResult::File { error, .. } => error.as_deref().unwrap_or(""),
             CmdResult::ProcessList { error, .. } => error.as_deref().unwrap_or(""),
             CmdResult::Killed { error, .. } => error.as_deref().unwrap_or(""),
+            CmdResult::Chat { .. } => "",
         }
     }
 
