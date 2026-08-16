@@ -1470,7 +1470,10 @@ impl Client {
                 && v.get("type").and_then(|t| t.as_str()) == Some("signal_ready")
             {
                 if !self.signal_ready {
-                    info!("Client ({}) signal_ready：offer/answer 通道就绪，允许重协商", *self.id);
+                    info!(
+                        "Client ({}) signal_ready：offer/answer 通道就绪，允许重协商",
+                        *self.id
+                    );
                 }
                 self.signal_ready = true;
                 return Propagated::Noop;
@@ -1640,10 +1643,7 @@ impl Client {
                 _ => {}
             }
         }
-        let mut channel = self
-            .rtc
-            .channel(reply_cid)
-            .expect("channel to be open");
+        let mut channel = self.rtc.channel(reply_cid).expect("channel to be open");
         let json = serde_json::to_string(&answer).unwrap();
         channel
             .write(false, json.as_bytes())
@@ -2171,12 +2171,19 @@ struct MiniViewer {
 
 impl MiniViewer {
     fn channel_of(&self, label: &str) -> Option<ChannelId> {
-        self.opened.iter().find(|(_, l)| l == label).map(|(c, _)| *c)
+        self.opened
+            .iter()
+            .find(|(_, l)| l == label)
+            .map(|(c, _)| *c)
     }
 
     fn send(&mut self, label: &str, data: &[u8]) -> bool {
-        let Some(cid) = self.channel_of(label) else { return false };
-        let Some(mut ch) = self.rtc.channel(cid) else { return false };
+        let Some(cid) = self.channel_of(label) else {
+            return false;
+        };
+        let Some(mut ch) = self.rtc.channel(cid) else {
+            return false;
+        };
         ch.write(false, data).unwrap_or(false)
     }
 
@@ -2285,7 +2292,9 @@ fn connect_mini_viewer(dc_ready: bool) -> (MiniViewer, Client, UdpSocket, Arc<Tr
     srtc.add_local_candidate(Candidate::host(sfu_sock.local_addr().unwrap(), "udp").unwrap())
         .unwrap();
     let answer = srtc.sdp_api().accept_offer(offer).expect("accept");
-    vrtc.sdp_api().accept_answer(vpending, answer).expect("answer");
+    vrtc.sdp_api()
+        .accept_answer(vpending, answer)
+        .expect("answer");
 
     let mut client = Client::new(srtc, Role::Viewer, dc_ready);
     // 复现 publisher 先加入：viewer 加入时即 replay TrackOpen → tracks_out=ToOpen。
@@ -2385,10 +2394,11 @@ fn signal_ready_gates_renegotiation_until_ready() {
         &mut viewer,
         &mut client,
         &sfu_sock,
-        |v, _| v
-            .received
-            .iter()
-            .any(|(l, d)| l == "offer/answer" && is_sdp_offer_json(d)),
+        |v, _| {
+            v.received
+                .iter()
+                .any(|(l, d)| l == "offer/answer" && is_sdp_offer_json(d))
+        },
         "viewer 在 offer/answer 通道收到 offer",
     );
     assert!(!client.channels.is_empty());
@@ -2421,10 +2431,6 @@ fn legacy_client_negotiates_without_signal_ready() {
 fn is_sdp_offer_json(d: &[u8]) -> bool {
     serde_json::from_slice::<serde_json::Value>(d)
         .ok()
-        .and_then(|v| {
-            v.get("type")
-                .and_then(|t| t.as_str())
-                .map(|s| s == "offer")
-        })
+        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s == "offer"))
         .unwrap_or(false)
 }

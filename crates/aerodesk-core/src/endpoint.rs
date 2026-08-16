@@ -552,9 +552,7 @@ impl Endpoint {
                 // 才发重协商 offer——消除"DCEP 未完成即写 offer 被对端丢弃"的竞态。
                 if label == "offer/answer"
                     && let Some(mut channel) = self.rtc.channel(cid)
-                    && channel
-                        .write(false, br#"{"type":"signal_ready"}"#)
-                        .is_err()
+                    && channel.write(false, br#"{"type":"signal_ready"}"#).is_err()
                 {
                     tracing::warn!("发送 signal_ready 失败（通道刚打开即写失败）");
                 }

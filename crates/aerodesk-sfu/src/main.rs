@@ -1444,13 +1444,12 @@ fn web_request(
     };
     info!("POST /start room={room} -> shard {shard} dc_ready={dc_ready}");
     let room_for_release = room.clone();
-    let res =
-        shard_txs[shard].send(ShardCommand::AddClient {
-            rtc,
-            room,
-            role,
-            dc_ready,
-        });
+    let res = shard_txs[shard].send(ShardCommand::AddClient {
+        rtc,
+        room,
+        role,
+        dc_ready,
+    });
     if res.is_err() {
         warn!("Failed to deliver client to shard {shard}");
         shared.release(&room_for_release);
