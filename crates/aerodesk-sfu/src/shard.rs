@@ -1064,6 +1064,12 @@ const CHANNEL_PRIORITY_LEVELS: usize = 5;
 /// 退回旧行为（偶发），避免门控本身把客户端缺陷放大成永久黑屏。
 const SIGNAL_READY_GRACE: Duration = Duration::from_secs(5);
 
+/// #477：重协商 offer 发出后等待 answer 的超时。有损路径（TURN 中继）上
+/// viewer 的大消息 answer（~9KB 多 SCTP chunk）可能永不到达——超时即丢弃
+/// pending 并复位重协商，未应答的 add 不进会话状态、重建 offer 的 mid
+/// 自洽，不会与旧 answer 冲突。
+const PENDING_ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn channel_priority(label: &str) -> usize {
     match label {
         "input" => 0,     // 观看端输入：延迟最敏感
@@ -1092,6 +1098,8 @@ pub struct Client {
     signal_ready_expected: bool,
     /// #467：已收到客户端的 signal_ready（仅 `signal_ready_expected` 时参与门控）。
     signal_ready: bool,
+    /// #477：当前 pending offer 的发出时刻（answer 超时判定用）。
+    pending_since: Instant,
     /// #467：signal_ready 等待锚点。初始为客户端创建时刻；offer/answer 通道
     /// 在 SFU 侧打开时重置（ready 正常在其后 ~1 RTT 内到达）。超过
     /// [`SIGNAL_READY_GRACE`] 仍未收到（客户端就绪包发送失败被吞等异常）则
@@ -1133,6 +1141,7 @@ impl Client {
             chosen_rid: None,
             signal_ready_expected,
             signal_ready: false,
+            pending_since: Instant::now(),
             signal_ready_wait_since: Instant::now(),
             recorder: None,
             qos: std::sync::Mutex::new(ClientQos::default()),
@@ -1328,6 +1337,14 @@ impl Client {
     }
 
     fn handle_media_added(&mut self, mid: Mid, kind: MediaKind) -> Propagated {
+        // #477：viewer 禁止发布媒体（#12），其 Rtc 上出现的 m-line（初始 offer 的
+        // recvonly、SFU 侧 add_media 后的本地事件）都不该成为入站轨。此前无差别
+        // 生成 track_in 并 replay 给全房间——viewer 的 recvonly m-line 被当成
+        // "viewer 发布的轨"，导致 publisher 与 viewer 自己各多一条幻影出站轨、
+        // 被迫做无意义的重协商（每加入一个 viewer 一轮 6KB offer/answer 往返）。
+        if self.role == Role::Viewer {
+            return Propagated::Noop;
+        }
         let track_in = TrackInEntry {
             id: Arc::new(TrackIn {
                 origin: self.id,
@@ -1395,7 +1412,17 @@ impl Client {
 
     fn negotiate_if_needed(&mut self) -> bool {
         if self.pending.is_some() {
-            return false;
+            // #477：answer 丢失容忍——pending 超时（有损路径上 answer 可能永不到达）
+            // 丢弃并复位，继续走本轮重建全新 offer；未应答的 add 不进会话状态，
+            // 重建 offer 的 mid 自洽。旧 answer 迟到会因 mid 不在 offer 中被
+            // handle_answer 丢弃（不再 panic）。
+            if self.pending_since.elapsed() > PENDING_ANSWER_TIMEOUT {
+                let _ = self.pending.take();
+                self.reset_negotiating();
+                warn!("Client ({}) 重协商 answer 超时未达，复位重试", *self.id);
+            } else {
+                return false;
+            }
         }
         // #467：声明了 dc_ready 的客户端，必须等它 offer/answer 通道 DCEP 完成后
         // 发来的 signal_ready 才发起重协商——此前 viewer 端 str0m 可能尚未注册
@@ -1458,7 +1485,19 @@ impl Client {
             .write(false, json.as_bytes())
             .expect("to write offer");
         self.pending = Some(pending);
+        self.pending_since = Instant::now();
         true
+    }
+
+    /// #477：协商中断后复位出站轨状态，待下一轮 negotiate_if_needed 重建。
+    fn reset_negotiating(&mut self) {
+        for track in &mut self.tracks_out {
+            match track.state {
+                TrackOutState::Negotiating(_) => track.state = TrackOutState::ToOpen,
+                TrackOutState::NegotiatingStop(m) => track.state = TrackOutState::ToStop(m),
+                _ => {}
+            }
+        }
     }
 
     fn handle_channel_data(&mut self, d: ChannelData) -> Propagated {
@@ -1674,10 +1713,17 @@ impl Client {
 
     fn handle_answer(&mut self, answer: str0m::change::SdpAnswer) {
         if let Some(pending) = self.pending.take() {
-            self.rtc
-                .sdp_api()
-                .accept_answer(pending, answer)
-                .expect("answer to be accepted");
+            // #477：过期/不匹配的 answer（如超时重试后旧 answer 迟到，mid 不在
+            // 当前 offer 中）不再 panic——那会杀死整个分片线程。丢弃并复位，
+            // 下一轮 negotiate 重建。
+            if let Err(e) = self.rtc.sdp_api().accept_answer(pending, answer) {
+                warn!(
+                    "Client ({}) answer 与当前 offer 不匹配（丢弃，复位重协商）：{e:?}",
+                    *self.id
+                );
+                self.reset_negotiating();
+                return;
+            }
             for track in &mut self.tracks_out {
                 if let TrackOutState::Negotiating(m) = track.state {
                     track.state = TrackOutState::Open(m);
@@ -2489,4 +2535,116 @@ fn is_sdp_offer_json(d: &[u8]) -> bool {
         .ok()
         .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s == "offer"))
         .unwrap_or(false)
+}
+
+/// #477 M1：viewer 的 MediaAdded 不生成 track_in（初始 offer 的 recvonly
+/// m-line 与 SFU 侧 add_media 都是幻影源），publisher 的照常。
+#[test]
+fn viewer_media_added_is_not_track_in() {
+    use str0m::media::Mid;
+    let mut v = Client::new(Rtc::builder().build(Instant::now()), Role::Viewer, true);
+    assert!(matches!(
+        v.handle_media_added(Mid::from("0"), MediaKind::Video),
+        Propagated::Noop
+    ));
+    assert!(v.tracks_in.is_empty(), "viewer 不应产生入站轨");
+
+    let mut p = Client::new(Rtc::builder().build(Instant::now()), Role::Publisher, true);
+    assert!(matches!(
+        p.handle_media_added(Mid::from("0"), MediaKind::Video),
+        Propagated::TrackOpen(..)
+    ));
+    assert_eq!(p.tracks_in.len(), 1);
+}
+
+/// #477 M3a：pending 超时（answer 丢失）后复位并重建 offer——viewer 应收到
+/// 第二份重协商 offer，而不是 pending 永久卡死。
+#[test]
+fn pending_answer_timeout_renegotiates() {
+    let (mut viewer, mut client, sfu_sock, _track) = connect_mini_viewer(true);
+    mini_pump_until(
+        &mut viewer,
+        &mut client,
+        &sfu_sock,
+        |v, c| {
+            v.rtc.is_connected()
+                && c.rtc.is_connected()
+                && v.channel_of("offer/answer").is_some()
+                && c.channels.contains_key("offer/answer")
+        },
+        "连接与 DCEP 完成",
+    );
+    // 声明就绪（门控放行），第一份 offer 发出并送达。
+    assert!(viewer.send("offer/answer", br#"{"type":"signal_ready"}"#));
+    mini_pump_until(
+        &mut viewer,
+        &mut client,
+        &sfu_sock,
+        |v, c| {
+            c.pending.is_some()
+                && v.received
+                    .iter()
+                    .any(|(l, d)| l == "offer/answer" && is_sdp_offer_json(d))
+        },
+        "第一份 offer 发出并送达",
+    );
+    // 模拟 answer 丢失：把 pending 计时拨过超时，应复位并重建第二份 offer。
+    client.pending_since -= PENDING_ANSWER_TIMEOUT + Duration::from_secs(1);
+    mini_pump_until(
+        &mut viewer,
+        &mut client,
+        &sfu_sock,
+        |v, c| {
+            c.pending.is_some()
+                && v.received
+                    .iter()
+                    .filter(|(l, d)| l == "offer/answer" && is_sdp_offer_json(d))
+                    .count()
+                    >= 2
+        },
+        "超时后重建第二份 offer 并送达",
+    );
+}
+
+/// #477 M3b：过期/不匹配的 answer（mid 不在当前 offer）不得 panic（旧实现
+/// .expect 会杀死整个分片线程），应丢弃并复位待重协商。
+#[test]
+fn stale_answer_is_dropped_without_panic() {
+    let (mut viewer, mut client, sfu_sock, _track) = connect_mini_viewer(true);
+    mini_pump_until(
+        &mut viewer,
+        &mut client,
+        &sfu_sock,
+        |v, c| {
+            v.rtc.is_connected()
+                && c.rtc.is_connected()
+                && v.channel_of("offer/answer").is_some()
+                && c.channels.contains_key("offer/answer")
+        },
+        "连接与 DCEP 完成",
+    );
+    assert!(viewer.send("offer/answer", br#"{"type":"signal_ready"}"#));
+    mini_pump_until(
+        &mut viewer,
+        &mut client,
+        &sfu_sock,
+        |_, c| c.pending.is_some(),
+        "pending 就位",
+    );
+    // 构造可解析但 mid 不匹配的最小 answer。
+    let sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n\
+               m=video 9 UDP/TLS/RTP/SAVPF 96\r\nc=IN IP4 0.0.0.0\r\na=mid:zz\r\n\
+               a=rtpmap:96 VP8/90000\r\na=inactive\r\n";
+    let json = format!(r#"{{"type":"answer","sdp":{}}}"#, serde_json::json!(sdp));
+    let answer: str0m::change::SdpAnswer =
+        serde_json::from_str(&json).expect("最小 answer 应可解析");
+    client.handle_answer(answer); // 不得 panic
+    assert!(client.pending.is_none(), "不匹配 answer 应丢弃 pending");
+    assert!(
+        client
+            .tracks_out
+            .iter()
+            .all(|t| matches!(t.state, TrackOutState::ToOpen)),
+        " Negotiating 应复位为 ToOpen 待重协商"
+    );
 }

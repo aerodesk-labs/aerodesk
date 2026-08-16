@@ -57,6 +57,10 @@ pub struct Endpoint {
     /// 本端 offer 中视频 m-line 的 mid 顺序（screen→camera，观看端 recvonly）。
     /// 用于从远端重协商 offer 里剔除本端 m-line，得到对端新增的发送轨。
     local_video_mids: Vec<str0m::media::Mid>,
+    /// #477：ICE 连接状态标志（Connected/Completed 置位、Disconnected 复位）。
+    /// 供 connect 阶段判断建链——不能靠 poll_event 消费 IceConnected 事件，
+    /// 会话循环还要靠它启动编码器/文件请求等。
+    ice_connected: bool,
 }
 
 impl Default for Endpoint {
@@ -66,6 +70,12 @@ impl Default for Endpoint {
 }
 
 impl Endpoint {
+    /// #477：ICE 是否已连接（查询状态，不消费事件队列——IceConnected 事件
+    /// 仍会投递给会话循环启动编码器等）。
+    pub fn ice_connected(&self) -> bool {
+        self.ice_connected
+    }
+
     pub fn new() -> Self {
         let mut config = Rtc::builder();
         {
@@ -88,6 +98,7 @@ impl Endpoint {
             camera_direction: str0m::media::Direction::SendRecv,
             remote_send_video_mids: Vec::new(),
             local_video_mids: Vec::new(),
+            ice_connected: false,
         }
     }
 
@@ -121,6 +132,7 @@ impl Endpoint {
             camera_direction: str0m::media::Direction::SendRecv,
             remote_send_video_mids: Vec::new(),
             local_video_mids: Vec::new(),
+            ice_connected: false,
         }
     }
 
@@ -165,6 +177,7 @@ impl Endpoint {
             camera_direction: str0m::media::Direction::SendRecv,
             remote_send_video_mids: Vec::new(),
             local_video_mids: Vec::new(),
+            ice_connected: false,
         }
     }
 
@@ -539,8 +552,14 @@ impl Endpoint {
             Event::IceConnectionStateChange(v) => {
                 use str0m::IceConnectionState::*;
                 match v {
-                    Connected | Completed => self.events.push_back(ClientEvent::IceConnected),
-                    Disconnected => self.events.push_back(ClientEvent::IceDisconnected),
+                    Connected | Completed => {
+                        self.ice_connected = true;
+                        self.events.push_back(ClientEvent::IceConnected)
+                    }
+                    Disconnected => {
+                        self.ice_connected = false;
+                        self.events.push_back(ClientEvent::IceDisconnected)
+                    }
                     _ => {}
                 }
             }
