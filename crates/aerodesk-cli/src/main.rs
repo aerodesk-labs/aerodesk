@@ -869,7 +869,6 @@ fn connect_inner(
     {
         let ice_deadline =
             Instant::now() + Duration::from_secs(if socket.turn().is_some() { 15 } else { 5 });
-        let mut ice_connected = false;
         while Instant::now() < ice_deadline && endpoint.is_alive() {
             socket
                 .set_read_timeout(Some(Duration::from_millis(10)))
@@ -899,16 +898,13 @@ fn connect_inner(
                     Output::Event(_) => {}
                 }
             }
-            while let Some(ev) = endpoint.poll_event() {
-                if let ClientEvent::IceConnected = ev {
-                    ice_connected = true;
-                }
-            }
-            if ice_connected {
+            // 查状态标志而非 poll_event：事件队列留给会话循环（IceConnected
+            // 触发编码器启动、ChannelOpen 触发文件请求等），消费掉会破坏它们。
+            if endpoint.ice_connected() {
                 break;
             }
         }
-        if !ice_connected {
+        if !endpoint.ice_connected() {
             return Err("ICE 连接超时（直连 5s / TURN 15s 未建立）".into());
         }
         info!("ICE connected (connect 阶段)");
