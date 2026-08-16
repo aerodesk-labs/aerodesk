@@ -62,13 +62,14 @@ type ServiceBody = Box<dyn FnOnce(ServiceCtx) + Send>;
 static SERVICE_BODY: Mutex<Option<ServiceBody>> = Mutex::new(None);
 
 /// SCM/Win32 错误转可读信息；非管理员给显式提示（M1 验收：非管理员安装被明确拒绝）。
+/// 注意 crate 的 `Error::Winapi` Display 只印 "IO error in winapi call"（吞掉 io 错误），
+/// 须自行透出 code + message 才能定位。
 fn friendly(e: windows_service::Error) -> String {
-    let raw = match &e {
-        windows_service::Error::Winapi(io) => io.raw_os_error(),
-        _ => None,
-    };
-    match raw {
-        Some(ERROR_ACCESS_DENIED) => "需要管理员权限（以管理员身份运行）".into(),
+    match &e {
+        windows_service::Error::Winapi(io) => match io.raw_os_error() {
+            Some(ERROR_ACCESS_DENIED) => "需要管理员权限（以管理员身份运行）".into(),
+            _ => format!("{e}（os error {:?}：{io}）", io.raw_os_error()),
+        },
         _ => format!("{e}"),
     }
 }
