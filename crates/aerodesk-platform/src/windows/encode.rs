@@ -4,8 +4,8 @@
 //! H.264 Encoder MFT（优先枚举硬件 MFT，失败再枚举软件 MFT）→ AnnexB 码流。
 //! MF 初始化或编码器创建失败时，由宿主（aerodesk-cli）回退 OpenH264 软编。
 
-pub use aerodesk_ffmpeg::softenc::EncodedFrame;
-pub use aerodesk_ffmpeg::softenc::openh264enc::OpenH264Encoder as SoftEncoder;
+pub use aerodesk_codec::softenc::EncodedFrame;
+pub use aerodesk_codec::softenc::openh264enc::OpenH264Encoder as SoftEncoder;
 
 #[cfg(windows)]
 use aerodesk_core::media_pipeline::{Codec, EncodedUnit};

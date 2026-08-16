@@ -45,7 +45,7 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
-      # aerodesk-desktop(macOS) 依赖 aerodesk-ffmpeg(ffmpeg-next) + x264（与 CI test job 一致）。
+      # aerodesk-desktop(macOS) 依赖 aerodesk-codec(ffmpeg-next) + x264（与 CI test job 一致）。
       - name: Install ffmpeg/x264
         run: brew install x264 ffmpeg
 
@@ -166,7 +166,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # aerodesk-desktop/aerodesk-cli(Windows) 依赖 aerodesk-ffmpeg(ffmpeg-next)：与
+      # aerodesk-desktop/aerodesk-cli(Windows) 依赖 aerodesk-codec(ffmpeg-next)：与
       # test job 同款 BtbN 8.1 预编译共享构建（FFMPEG_DIR + PATH）。
       - name: System deps (Windows FFmpeg dev libs)
         shell: pwsh

@@ -44,10 +44,10 @@ objc2-core-video = "0.3"
 objc2-foundation = "0.3"
 objc2-core-foundation = "0.3"
 cpal = "0.15"
-aerodesk-ffmpeg = { path = "../aerodesk-ffmpeg" }
+aerodesk-codec = { path = "../aerodesk-codec" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-aerodesk-ffmpeg = { path = "../aerodesk-ffmpeg" }
+aerodesk-codec = { path = "../aerodesk-codec" }
 # #470 SCM 服务生命周期与控制处理器（事件日志走 windows crate feature）。
 windows-service = "0.7"
 # ADR-0001：虚拟显示器（Parsec VDD）。其传递依赖 windows 0.62 与下方 0.58 并存，
@@ -76,7 +76,7 @@ windows = { version = "0.58", features = [
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-aerodesk-ffmpeg = { path = "../aerodesk-ffmpeg" }
+aerodesk-codec = { path = "../aerodesk-codec" }
 x11rb = { version = "0.13", features = ["xtest"] }
 libc = "0.2"
 ffmpeg-next = "8"
@@ -95,4 +95,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 aerodesk-core = { path = "../aerodesk-core" }
-aerodesk-ffmpeg = { path = "../aerodesk-ffmpeg" }
+aerodesk-codec = { path = "../aerodesk-codec" }

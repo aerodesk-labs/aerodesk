@@ -210,7 +210,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     let mut audio_frames: u64 = 0;
     let mut audio_played: u64 = 0;
     // #73 Opus（48kHz）解码器（惰性创建；不可用时仅统计不播放）。
-    let mut opus_decoder: Option<aerodesk_ffmpeg::audio::OpusDecoder> = None;
+    let mut opus_decoder: Option<aerodesk_codec::audio::OpusDecoder> = None;
     // #136 关键帧请求：首包/不连续/切层时向 SFU 发 PLI（节流 1s）。
     let mut last_kf_request: Option<std::time::Instant> = None;
     let mut last_kf_rid: Option<str0m::media::Rid> = None;
@@ -371,7 +371,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
             if let ClientEvent::Media(data) = ev {
                 media_evts += 1;
                 // #73 音频识别：用协商 codec（PCMU/Opus）区分，不按 mid（SFU 转发
-                // 用本地 mid）。当前播放 PCMU（默认音频）；Opus 需 aerodesk-ffmpeg 非
+                // 用本地 mid）。当前播放 PCMU（默认音频）；Opus 需 aerodesk-codec 非
                 // macOS 依赖，留后续。
                 if data.params.spec().codec == str0m::format::Codec::PCMU {
                     audio_frames += 1;
@@ -392,7 +392,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                 if data.params.spec().codec == str0m::format::Codec::Opus {
                     audio_frames += 1;
                     if opus_decoder.is_none() {
-                        opus_decoder = aerodesk_ffmpeg::audio::OpusDecoder::new().ok();
+                        opus_decoder = aerodesk_codec::audio::OpusDecoder::new().ok();
                     }
                     if audio_sink.is_none() {
                         audio_sink =

@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 sha2 = "0.10"
-aerodesk-ffmpeg = { path = "../aerodesk-ffmpeg" }
+aerodesk-codec = { path = "../aerodesk-codec" }
 str0m = { workspace = true, features = ["rust-crypto"] }
 aerodesk-core = { path = "../aerodesk-core" }
 aerodesk-protocol.workspace = true

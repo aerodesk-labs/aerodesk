@@ -1,5 +1,5 @@
 [package]
-name = "aerodesk-ffmpeg"
+name = "aerodesk-codec"
 description = "AeroDesk FFmpeg codecs: H.265/HEVC + AV1 + VP9 (+H.264), hardware-accelerated when available"
 version.workspace = true
 edition.workspace = true

@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicBool;
 /// 枚举封装避免 `Box<dyn Decoder>`（trait 无 Box 兜底实现）；
 /// `Decoder::configure` 按实际 codec 重建（H.264/HEVC/VP9/AV1）。
 enum ViewerDecoder {
-    Soft(aerodesk_ffmpeg::softenc::decode::SoftDecoder),
+    Soft(aerodesk_codec::softenc::decode::SoftDecoder),
     #[cfg(target_os = "linux")]
     Vaapi(aerodesk_platform::linux::vaapi::VaapiDecoder),
     // #3 Windows 观看端硬解（DXVA2）；设备创建失败时回退 OpenH264 软解
@@ -81,7 +81,7 @@ fn mk_viewer_decoder() -> Result<ViewerDecoder, String> {
         }
     }
     Ok(ViewerDecoder::Soft(
-        aerodesk_ffmpeg::softenc::decode::SoftDecoder::new()?,
+        aerodesk_codec::softenc::decode::SoftDecoder::new()?,
     ))
 }
 

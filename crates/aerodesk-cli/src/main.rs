@@ -20,6 +20,7 @@ mod service_run;
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
+use aerodesk_codec::encode::FfmpegEncoder;
 use aerodesk_core::access_unit::AccessUnitAssembler;
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media::{Vp8Frame, parse_vp8_pcap};
@@ -27,7 +28,6 @@ use aerodesk_core::media_socket::MediaSocket;
 use aerodesk_core::platform::SystemWakeLock;
 use aerodesk_core::turn_client::setup_turn;
 use aerodesk_core::{Endpoint, media_pipeline::Codec, signaling::WsSignalClient};
-use aerodesk_ffmpeg::encode::FfmpegEncoder;
 use aerodesk_protocol::input::{
     ButtonState, INPUT_PROTOCOL_VERSION, InputEvent, InputFrame, Modifiers, MouseButton,
 };
@@ -1188,7 +1188,7 @@ struct AudioTicker {
     phase: u32,
     codec: AudioCodec,
     /// Opus 编码器（首次发帧时惰性创建；libopus 缺失时回退 PCMU）。
-    opus: Option<aerodesk_ffmpeg::audio::OpusEncoder>,
+    opus: Option<aerodesk_codec::audio::OpusEncoder>,
 }
 
 impl AudioTicker {
@@ -1235,7 +1235,7 @@ impl AudioTicker {
                 AudioCodec::Opus => {
                     // 惰性初始化：libopus 不可用（ffmpeg 未编译）时回退 PCMU。
                     if self.opus.is_none() {
-                        match aerodesk_ffmpeg::audio::OpusEncoder::new(64_000) {
+                        match aerodesk_codec::audio::OpusEncoder::new(64_000) {
                             Ok(enc) => self.opus = Some(enc),
                             Err(err) => {
                                 warn!("opus encoder init failed, fallback PCMU: {err}");
@@ -1315,7 +1315,7 @@ impl aerodesk_core::platform::AudioCapturer for NoAudioCapture {
 struct RealAudioSender<C: aerodesk_core::platform::AudioCapturer<Error = String>> {
     cap: C,
     /// Opus 编码器（--audio-opus；libopus 缺失时回退 PCMU）。
-    opus: Option<aerodesk_ffmpeg::audio::OpusEncoder>,
+    opus: Option<aerodesk_codec::audio::OpusEncoder>,
     /// 48kHz 单声道 i16 缓冲（Opus 直用；PCMU 先 6:1 降采样到 8k）。
     buf48: Vec<i16>,
     /// 8kHz 单声道 i16 缓冲（PCMU 用）。
@@ -1329,7 +1329,7 @@ struct RealAudioSender<C: aerodesk_core::platform::AudioCapturer<Error = String>
 impl<C: aerodesk_core::platform::AudioCapturer<Error = String>> RealAudioSender<C> {
     fn new(cap: C, audio_opus: bool) -> Self {
         let opus = if audio_opus {
-            match aerodesk_ffmpeg::audio::OpusEncoder::new(64_000) {
+            match aerodesk_codec::audio::OpusEncoder::new(64_000) {
                 Ok(enc) => Some(enc),
                 Err(err) => {
                     warn!("opus encoder init failed, fallback PCMU: {err}");
@@ -2032,7 +2032,7 @@ fn viewer(
     let mut seen_video = false;
     let mut decoded_frames: u64 = 0;
     // #73 Opus 音频：libopus 解码（惰性创建；不可用时降级为仅统计）。
-    let mut opus_decoder: Option<aerodesk_ffmpeg::audio::OpusDecoder> = None;
+    let mut opus_decoder: Option<aerodesk_codec::audio::OpusDecoder> = None;
     // #173 媒体静默检测：收到过包后连续无包超过阈值视为会话死亡（str0m is_alive
     // 在 recvonly 场景下不触发 ICE Failed，需主动探活）。
     let mut last_rx: Option<Instant> = None;
@@ -2132,7 +2132,7 @@ fn viewer(
                             audio_frames += 1;
                             audio_bytes += data.data.len() as u64;
                             if opus_decoder.is_none() {
-                                opus_decoder = aerodesk_ffmpeg::audio::OpusDecoder::new().ok();
+                                opus_decoder = aerodesk_codec::audio::OpusDecoder::new().ok();
                             }
                             let pcm = opus_decoder
                                 .as_mut()
@@ -2577,8 +2577,8 @@ fn publisher_x264(
     audio: bool,
     audio_opus: bool,
 ) {
+    use aerodesk_codec::softenc::encode::X264Encoder;
     use aerodesk_core::synthetic::SyntheticSource;
-    use aerodesk_ffmpeg::softenc::encode::X264Encoder;
     use str0m::media::Rid;
 
     const FPS: u32 = 30;
@@ -2939,7 +2939,7 @@ fn publisher_generic<
     let mut audio_ticker = AudioTicker::new(audio_opus);
     // #385：摄像头第二路视频轨（--camera，BGRA → FFmpeg 软编 → camera_mid）。
     let mut camera_cap = camera_cap;
-    let mut camera_enc: Option<aerodesk_ffmpeg::encode::FfmpegEncoder> = None;
+    let mut camera_enc: Option<aerodesk_codec::encode::FfmpegEncoder> = None;
     // 摄像头编码器初始化失败（如奇数分辨率）时停用摄像头轨，避免逐帧重试刷告警。
     let mut camera_dead = false;
     let mut camera_pts = 0i64;
@@ -3099,7 +3099,7 @@ fn publisher_generic<
                     if camera_enc.is_none() {
                         // 编码器初始化失败降级停用摄像头轨（仅告警一次，不 panic；
                         // 旧实现 expect 在奇数分辨率等场景一错即崩）。
-                        camera_enc = match aerodesk_ffmpeg::encode::FfmpegEncoder::new(
+                        camera_enc = match aerodesk_codec::encode::FfmpegEncoder::new(
                             frame.width,
                             frame.height,
                             30,
@@ -3249,14 +3249,14 @@ fn publisher_capture_windows(
     // #3/#8：屏幕采集改用 FFmpeg 编码器——Windows h264_mf/hevc_mf 硬件编码
     // （2560x1440/4K 源头不再受 OpenH264 软编瓶颈），不可用时自动回退
     // libx264/libx265 软编；同时让 --codec h265/vp9/av1 在屏幕采集路径真实生效。
-    let encoder =
-        match aerodesk_ffmpeg::encode::FfmpegEncoder::new(w, h, FPS, bitrate as u64, codec) {
-            Ok(e) => e,
-            Err(e) => {
-                error!("FFmpeg encoder init failed: {e}");
-                return;
-            }
-        };
+    let encoder = match aerodesk_codec::encode::FfmpegEncoder::new(w, h, FPS, bitrate as u64, codec)
+    {
+        Ok(e) => e,
+        Err(e) => {
+            error!("FFmpeg encoder init failed: {e}");
+            return;
+        }
+    };
     // #3 Windows 系统音频：WASAPI loopback 采集系统播放的声音；失败回退合成音。
     let audio_cap: Option<aerodesk_platform::windows::audio_capture::WasapiLoopbackCapture> =
         if audio {
@@ -3420,8 +3420,8 @@ fn publisher_capture_linux(
             }
         }
         other => {
-            // HEVC/VP9/AV1：FFmpeg 软编（BGRA 输入，全平台 aerodesk-ffmpeg）。
-            match aerodesk_ffmpeg::encode::FfmpegEncoder::new(w, h, FPS, 8_000_000, other) {
+            // HEVC/VP9/AV1：FFmpeg 软编（BGRA 输入，全平台 aerodesk-codec）。
+            match aerodesk_codec::encode::FfmpegEncoder::new(w, h, FPS, 8_000_000, other) {
                 Ok(e) => LinuxScreenEncoder::Ffmpeg(e),
                 Err(e) => {
                     error!("ffmpeg encoder init failed: {e}");
@@ -3518,7 +3518,7 @@ impl aerodesk_core::platform::MediaSource for LinuxScreenSource {
 enum LinuxScreenEncoder {
     Vaapi(aerodesk_platform::linux::vaapi::VaapiEncoder),
     Soft(aerodesk_platform::linux::encode::SoftEncoder),
-    Ffmpeg(aerodesk_ffmpeg::encode::FfmpegEncoder),
+    Ffmpeg(aerodesk_codec::encode::FfmpegEncoder),
 }
 
 #[cfg(target_os = "linux")]
@@ -3583,7 +3583,7 @@ fn publisher_capture_ffmpeg(
     codec: Codec,
     initial_display: usize,
 ) {
-    use aerodesk_ffmpeg::encode::FfmpegEncoder;
+    use aerodesk_codec::encode::FfmpegEncoder;
     use aerodesk_platform::macos::capture::ScreenCapture;
 
     // 采集分辨率：0,0 = 按显示器原生宽高比等比缩放（与 VT 路径 publisher_capture
@@ -3908,7 +3908,7 @@ fn publisher_capture(
 
     // 摄像头第二路视频轨（--camera）：AVFoundation 采集 + FFmpeg 软编（BGRA）。
     let mut camera_cap: Option<aerodesk_platform::macos::camera::MacCamera> = None;
-    let mut camera_enc: Option<aerodesk_ffmpeg::encode::FfmpegEncoder> = None;
+    let mut camera_enc: Option<aerodesk_codec::encode::FfmpegEncoder> = None;
     let mut camera_pts = 0i64;
     let camera_pts_inc = 90_000 / 30;
     let mut camera_frames = 0u64;
@@ -4090,7 +4090,7 @@ fn publisher_capture(
                             } else {
                                 1_500_000
                             };
-                            match aerodesk_ffmpeg::encode::FfmpegEncoder::new(
+                            match aerodesk_codec::encode::FfmpegEncoder::new(
                                 frame.width,
                                 frame.height,
                                 30,

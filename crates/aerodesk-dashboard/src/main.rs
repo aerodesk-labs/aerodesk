@@ -1,4 +1,4 @@
-//! aerodesk-admin —— 只读运维代理 + 单页 dashboard（#369）。
+//! aerodesk-dashboard —— 只读运维代理 + 单页 dashboard（#369）。
 //!
 //! 复用 SFU/signal 现有内部 API，不新增后端耦合：本进程只做
 //! 「静态页托管 + 带 INTERNAL_TOKEN 的鉴权代理 + 少量指标解析」。
@@ -236,7 +236,7 @@ fn main() {
     let token = env_or("INTERNAL_TOKEN", "");
     let admin_token = env_or("ADMIN_TOKEN", "");
     tracing::info!(
-        "aerodesk-admin listening on http://{bind} (sfu={sfu} signal={signal} auth={})",
+        "aerodesk-dashboard listening on http://{bind} (sfu={sfu} signal={signal} auth={})",
         if admin_token.is_empty() { "off" } else { "on" }
     );
     let bind_url = bind.clone();

@@ -7,13 +7,13 @@
 use aerodesk_core::media_pipeline::{Codec, EncodedUnit, VideoFrame};
 
 #[cfg(windows)]
-use aerodesk_ffmpeg::softenc::decode::SoftDecoder;
+use aerodesk_codec::softenc::decode::SoftDecoder;
 #[cfg(windows)]
 use aerodesk_platform::windows::decode::Dxva2Decoder;
 
 pub enum CliVideoDecoder {
     #[cfg(not(windows))]
-    Soft(aerodesk_ffmpeg::decode::FfmpegDecoder),
+    Soft(aerodesk_codec::decode::FfmpegDecoder),
     #[cfg(windows)]
     Dxva2(Dxva2Decoder),
     #[cfg(windows)]
@@ -49,7 +49,7 @@ impl CliVideoDecoder {
 
         #[cfg(not(windows))]
         {
-            Ok(Self::Soft(aerodesk_ffmpeg::decode::FfmpegDecoder::new(
+            Ok(Self::Soft(aerodesk_codec::decode::FfmpegDecoder::new(
                 codec,
             )?))
         }

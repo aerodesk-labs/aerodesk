@@ -556,7 +556,7 @@ impl aerodesk_core::platform::Decoder for HevcDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aerodesk_ffmpeg::softenc::encode::X264Encoder;
+    use aerodesk_codec::softenc::encode::X264Encoder;
 
     #[test]
     fn parses_last_nal_without_truncation() {
@@ -627,8 +627,8 @@ mod tests {
     fn decodes_hevc_frames() {
         // libx265/hevc_videotoolbox 关键帧 + P 帧 → VideoToolbox HEVC 硬解。
         // macOS 宿主机上 videotoolbox 可解 HEVC（iOS 同 API）。
+        use aerodesk_codec::encode::FfmpegEncoder;
         use aerodesk_core::media_pipeline::Codec;
-        use aerodesk_ffmpeg::encode::FfmpegEncoder;
         let mut enc =
             FfmpegEncoder::new(320, 180, 30, 1_000_000, Codec::Hevc).expect("hevc encoder");
         enc.request_keyframe();

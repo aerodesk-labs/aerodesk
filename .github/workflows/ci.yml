@@ -521,7 +521,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # #3/#378：aerodesk-desktop 自全平台依赖 aerodesk-ffmpeg 起，Windows 构建需
+      # #3/#378：aerodesk-desktop 自全平台依赖 aerodesk-codec 起，Windows 构建需
       # FFmpeg 开发库（与 test job 同款 BtbN 8.1 预编译包），否则 ffmpeg-sys-next
       # build 失败（Windows UI e2e 无法验证观看端）。
       - name: System deps (Windows FFmpeg dev libs)

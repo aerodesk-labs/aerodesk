@@ -19,7 +19,7 @@ codec id：0=none 1=H264 2=H265 3=VP8 4=VP9 5=AV1 6=Opus 7=PCMU。
 ## 转 MP4/WebM（H.264/H.265/VP9/AV1）
 
 ```sh
-cargo build -p aerodesk-ffmpeg --bin aerodesk-rec2mp4
+cargo build -p aerodesk-codec --bin aerodesk-rec2mp4
 aerodesk-rec2mp4 --input <room.adrec> --output <out.mp4|out.webm>
 ```
 
