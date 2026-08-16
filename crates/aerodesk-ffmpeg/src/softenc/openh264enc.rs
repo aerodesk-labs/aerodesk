@@ -98,8 +98,8 @@ impl OpenH264Encoder {
 
 #[cfg(test)]
 mod tests {
+    use super::decode::SoftDecoder;
     use super::*;
-    use crate::decode::SoftDecoder;
 
     /// OpenH264 编码 → OpenH264 解码回环（Windows/Linux 软编软解验证）。
     /// #277 跨平台抽象：泛型函数只依赖 core `Encoder`/`Decoder` trait 即可
