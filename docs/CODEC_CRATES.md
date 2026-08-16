@@ -13,7 +13,7 @@
   - BGRA/RGBA/RGB 色彩转换工具
 - 平台：
   - 桌面三端可用（Windows 仅 OpenH264 编码 + 解码）
-  - 移动端基本不使用（移动端走 MediaCodec / VideoToolbox）
+  - 移动端当前不直接使用（项目选择 MediaCodec / VideoToolbox，而非 FFmpeg 不支持移动端）
 
 ### aerodesk-ffmpeg
 - 定位：**FFmpeg 多格式编解码 / 音频 / 容器**
@@ -26,7 +26,7 @@
   - MP4/容器封装
 - 平台：
   - 桌面/CLI 使用
-  - 移动端不直接使用（移动端用系统 native codec）
+  - 移动端当前不直接使用（项目选择系统 native codec，而非 FFmpeg 无法编译移动端）
 
 ## 2. 关键差异
 
@@ -37,7 +37,7 @@
 | 音频 | 无 | 有 |
 | 容器/录制 | 无 | 有 MP4 mux |
 | 硬件加速 | 无 | 有 |
-| 移动端 | 不适用 | 不适用 |
+| 移动端 | 当前未使用 | 当前未使用 |
 | Windows x264 | 禁用 | 支持 FFmpeg x264 软编 |
 | 构建风险 | 低 | 高（ffmpeg-sys-next / pkg-config / 预编译库） |
 
@@ -61,7 +61,7 @@
 
 ## 4. 结论
 
-**不建议合并。** 当前拆分是合理的边界：
+**从当前依赖关系看，可以合并。** FFmpeg 已经是 desktop/CLI 的硬依赖，softenc 的 H.264 回退路径与 FFmpeg 的 libx264/libopenh264 重叠；继续保留两个 crate 属于历史边界，不是技术必需。
 
 - `aerodesk-softenc`：轻量 H.264 软编解码回退
 - `aerodesk-ffmpeg`：重型多格式/音频/录制层
@@ -73,6 +73,6 @@
 
 ## 5. 建议
 
-- 短期：保留两个 crate。
-- 中期：如果发现大量重复的像素转换、编码器选择逻辑，再抽一个
+- 短期：可保留现状，但不应把 softenc 当作长期独立层。
+- 中期：优先把 softenc 的 H.264 回退逻辑并入 `aerodesk-ffmpeg`，删除 vendored `x264` crate；若仍有纯类型/转换需求，再抽一个
   `aerodesk-codec-common`，但只放纯 Rust 类型与转换，不引入 FFmpeg/x264。
