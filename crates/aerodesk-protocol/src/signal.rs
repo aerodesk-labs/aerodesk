@@ -31,6 +31,11 @@ pub enum SignalMessage {
         room: String,
         role: Role,
         auth_token: Option<String>,
+        /// #467：客户端能力声明——会在 offer/answer 通道 DCEP 完成后发送
+        /// `{"type":"signal_ready"}` 就绪包，SFU 据此门控重协商时机。
+        /// 旧客户端不带该字段（serde 缺省 false），SFU 走不门控的兼容路径。
+        #[serde(default)]
+        dc_ready: bool,
     },
     /// 加入成功：房间内已有 peer 与 TURN 配置。
     Joined {
@@ -122,10 +127,22 @@ mod tests {
             room: "room-1".into(),
             role: Role::Publisher,
             auth_token: Some("token".into()),
+            dc_ready: true,
         };
         let back: SignalMessage =
             serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
         assert_eq!(msg, back);
+    }
+
+    /// #467：旧客户端 Join 不带 dc_ready 字段 → 缺省 false，双向兼容。
+    #[test]
+    fn join_without_dc_ready_defaults_false() {
+        let json = r#"{"type":"join","room":"r","role":"viewer","auth_token":null}"#;
+        let msg: SignalMessage = serde_json::from_str(json).unwrap();
+        let SignalMessage::Join { dc_ready, .. } = msg else {
+            panic!("not a Join")
+        };
+        assert!(!dc_ready);
     }
 
     #[test]

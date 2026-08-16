@@ -115,6 +115,9 @@ impl WsSignalClient {
                 room: room.into(),
                 role,
                 auth_token: auth_token.map(|s| s.to_string()),
+                // #467：声明会在 offer/answer 通道 DCEP 完成后发 signal_ready，
+                // SFU 据此门控重协商，消除 DCEP 窗口内的 offer 丢失竞态。
+                dc_ready: true,
             })?;
             match self.recv()? {
                 SignalMessage::Redirect { url, .. } => {

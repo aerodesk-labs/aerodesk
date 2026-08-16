@@ -547,6 +547,15 @@ impl Endpoint {
             Event::MediaData(data) => self.events.push_back(ClientEvent::Media(data)),
             Event::ChannelOpen(cid, label) => {
                 self.channel_labels.insert(cid, label.clone());
+                // #467：offer/answer 通道在 opener 侧收到 DCEP ACK 才会触发本事件，
+                // 即通道双向确已就绪。此刻主动向 SFU 声明 signal_ready，SFU 收到后
+                // 才发重协商 offer——消除"DCEP 未完成即写 offer 被对端丢弃"的竞态。
+                if label == "offer/answer"
+                    && let Some(mut channel) = self.rtc.channel(cid)
+                    && channel.write(false, br#"{"type":"signal_ready"}"#).is_err()
+                {
+                    tracing::warn!("发送 signal_ready 失败（通道刚打开即写失败）");
+                }
                 self.events.push_back(ClientEvent::ChannelOpen(label, cid))
             }
             Event::ChannelData(d) => {

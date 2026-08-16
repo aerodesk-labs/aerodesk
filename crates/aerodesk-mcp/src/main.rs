@@ -570,15 +570,8 @@ fn format_result(resp: &aerodesk_protocol::cmd::CmdResponse) -> (String, bool) {
                 (format!("killed pid {pid}"), true)
             }
         }
-        // #458 聊天回执:MCP 侧呈现为文本(时间戳不参与成败判断)。
-        CmdResult::Chat { text, sender, .. } => (
-            if sender.is_empty() {
-                text.clone()
-            } else {
-                format!("{sender}: {text}")
-            },
-            true,
-        ),
+        // #458 Chat 回执：无 error 语义，直接呈现发送者与文本。
+        CmdResult::Chat { sender, text } => (format!("[chat] {sender}: {text}"), true),
     }
 }
 
