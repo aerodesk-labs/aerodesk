@@ -38,6 +38,14 @@ pub enum CmdAction {
     ListProcesses,
     /// 结束进程（pid 0/1 默认禁止）。
     KillProcess { pid: u32 },
+    /// #458 发消息：双向文本消息（复用 cmd 通道，避免新增 data channel 破坏媒体协商）。
+    Chat {
+        text: String,
+        #[serde(default)]
+        sender: String,
+        #[serde(default)]
+        timestamp_ms: u64,
+    },
 }
 
 /// 命令/文件/进程响应（被控端 → 控制端）。
@@ -77,6 +85,12 @@ pub enum CmdResult {
         pid: u32,
         #[serde(default)]
         error: Option<String>,
+    },
+    /// 发消息回显（被控端收到 Chat 后回给观看端）。
+    Chat {
+        #[serde(default)]
+        sender: String,
+        text: String,
     },
 }
 
@@ -142,6 +156,7 @@ impl CmdResult {
             CmdResult::File { error, .. } => error.is_none(),
             CmdResult::ProcessList { error, .. } => error.is_none(),
             CmdResult::Killed { error, .. } => error.is_none(),
+            CmdResult::Chat { .. } => true,
         }
     }
 }

@@ -70,6 +70,10 @@ fn busy_result(action: &CmdAction) -> CmdResult {
             pid: *pid,
             error: Some(busy()),
         },
+        CmdAction::Chat { .. } => CmdResult::Chat {
+            sender: String::new(),
+            text: String::new(),
+        },
     }
 }
 
@@ -209,6 +213,10 @@ fn execute(action: &CmdAction) -> CmdResult {
                 pid: *pid,
                 error: Some(e),
             },
+        },
+        CmdAction::Chat { text, sender, .. } => CmdResult::Chat {
+            sender: sender.clone(),
+            text: text.clone(),
         },
     }
 }
