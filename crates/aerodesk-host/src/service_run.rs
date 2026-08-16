@@ -281,9 +281,59 @@ impl Supervisor {
     }
 }
 
+/// #471 M1：登录界面 helper 主循环——回连服务（loopback TCP，零 FFI IPC）。
+/// 协议（行式 UTF-8）：`hello <token>` 握手；服务发 `ping` 回 `pong`；
+/// `shutdown` 退出。M2 起扩展帧下行/输入上行（长度前缀二进制帧）。
+pub fn logon_helper_main(addr: &str, token: &str) -> Result<(), String> {
+    use std::io::{BufRead, BufReader, Write};
+    let stream =
+        std::net::TcpStream::connect(addr).map_err(|e| format!("回连服务 {addr} 失败：{e}"))?;
+    let mut writer = stream
+        .try_clone()
+        .map_err(|e| format!("clone 流失败：{e}"))?;
+    writeln!(writer, "hello {token}").map_err(|e| format!("握手发送失败：{e}"))?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = reader
+            .read_line(&mut line)
+            .map_err(|e| format!("读服务消息失败：{e}"))?;
+        if n == 0 {
+            return Err("服务侧断开".into());
+        }
+        match line.trim() {
+            "ping" => writeln!(writer, "pong").map_err(|e| format!("心跳回复失败：{e}"))?,
+            "shutdown" => return Ok(()),
+            other => info!("logon-helper 收到未知消息：{other}（M2 帧协议接入点）"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M1 联测：本地 listener 模拟服务侧,helper 握手/心跳/退出全链路。
+    #[test]
+    fn logon_helper_handshake_ping_shutdown() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let server = std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            let (mut s, _) = listener.accept().expect("accept");
+            let mut r = BufReader::new(s.try_clone().unwrap());
+            let mut line = String::new();
+            r.read_line(&mut line).unwrap();
+            assert_eq!(line.trim(), "hello t0ken");
+            writeln!(s, "ping").unwrap();
+            r.read_line(&mut line).unwrap(); // 复用 line:读 pong(追加后 trim 校验)
+            assert!(line.trim().ends_with("pong"));
+            writeln!(s, "shutdown").unwrap();
+        });
+        logon_helper_main(&addr, "t0ken").expect("helper 应正常退出");
+        server.join().expect("server 线程");
+    }
 
     /// 服务配置序列化兼容：缺字段走 serde default（spawn_ui=true 等旧文件兼容）。
     #[test]

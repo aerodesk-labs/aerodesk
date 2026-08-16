@@ -16,10 +16,12 @@ mod cli_video_decoder;
 mod clipboard;
 mod cmd_exec;
 mod file_transfer;
+#[cfg(windows)]
+mod service_run;
+
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
-use aerodesk_codec::audio::RealAudioSender;
 use aerodesk_codec::encode::FfmpegEncoder;
 use aerodesk_core::access_unit::AccessUnitAssembler;
 use aerodesk_core::endpoint::ClientEvent;
@@ -116,8 +118,29 @@ fn probe_audio() {
 
 fn run() {
     let args: Vec<String> = std::env::args().collect();
+    // #470 服务态必须最先分流：init_log() 会占用全局 tracing subscriber，
+    // 服务分支的 init_service_log() 二次 init 会 panic（双订阅）→ 服务进程
+    // 秒死 → SCM 报 1053（CI 实测教训，本地直跑 --service 前记得也无 stderr 消费者）。
+    if args.iter().any(|a| a == "--service") {
+        #[cfg(windows)]
+        {
+            init_service_log();
+            info!("aerodesk-service 启动（#470：信令常驻 + 会话仲裁）");
+            if let Err(e) =
+                aerodesk_platform::windows::service::run(Box::new(service_run::service_body))
+            {
+                eprintln!("service run failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--service 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
     init_log();
-
     if args.iter().any(|a| a == "--issue-token") {
         issue_token(&args);
         return;
@@ -188,6 +211,143 @@ fn run() {
         #[cfg(not(windows))]
         {
             eprintln!("--autostart-status 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // #470 Windows 系统服务（需管理员）：安装/移除/查询 + 服务运行入口。
+    if args.iter().any(|a| a == "--install-service") {
+        #[cfg(windows)]
+        {
+            let exe = std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "aerodesk-cli.exe".into());
+            match aerodesk_platform::windows::service::install(&exe) {
+                Ok(()) => {
+                    println!(
+                        "service installed and started: {}",
+                        aerodesk_platform::windows::service::SERVICE_NAME
+                    );
+                    // #470 D2：同步机器级配置（用户设置 → ProgramData）。
+                    match service_run::sync_settings_from_user() {
+                        Ok(s) => println!(
+                            "service config synced: server={} device_id={}",
+                            if s.server.is_empty() {
+                                "(未配置)"
+                            } else {
+                                &s.server
+                            },
+                            if s.device_id.is_empty() {
+                                "(未配置)"
+                            } else {
+                                &s.device_id
+                            }
+                        ),
+                        Err(e) => println!(
+                            "warn: 服务配置未同步（{e}）；可运行桌面端生成设置后重装，或手动编辑 {}",
+                            service_run::ServiceSettings::path().display()
+                        ),
+                    }
+                    // #470 D7：HKCU 自启共存提示（双实例 = 同 device-id 双在线）。
+                    if let Ok(Some(cmd)) = aerodesk_platform::windows::autostart::installed() {
+                        println!(
+                            "提示：检测到 HKCU 登录后自启（{cmd}）；服务模式下建议 --remove-autostart 移除，避免双实例"
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("service install failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--install-service 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.iter().any(|a| a == "--remove-service") {
+        #[cfg(windows)]
+        {
+            match aerodesk_platform::windows::service::remove() {
+                Ok(true) => println!("service removed"),
+                Ok(false) => println!("service not installed"),
+                Err(e) => {
+                    eprintln!("service remove failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--remove-service 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.iter().any(|a| a == "--service-status") {
+        #[cfg(windows)]
+        {
+            match aerodesk_platform::windows::service::status() {
+                Ok(Some(s)) => println!("installed: {s}"),
+                Ok(None) => println!("not installed"),
+                Err(e) => {
+                    eprintln!("service query failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--service-status 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
+    // #470 服务配置查看（调试辅助：路径 + 生效值）。
+    // 注：--service 运行入口已前移至 run() 顶部（须先于 init_log 分流，
+    // 见函数头注释），此处不再重复。
+    if args.iter().any(|a| a == "--service-config") {
+        #[cfg(windows)]
+        {
+            let s = service_run::ServiceSettings::load();
+            println!("path: {}", service_run::ServiceSettings::path().display());
+            println!(
+                "server={}\ndevice_id={}\ntoken={}\nspawn_ui={}\nui_exe={}",
+                s.server,
+                s.device_id,
+                if s.token.is_empty() { "(空)" } else { "***" },
+                s.spawn_ui,
+                s.ui_exe
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--service-config 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
+    // #471 M1：登录界面 helper 入口——由服务经 winlogon token 拉起（#470
+    // spawn_logon_helper），回连服务 loopback TCP；M2 起承载采集/注入。
+    if args.iter().any(|a| a == "--logon-helper") {
+        #[cfg(windows)]
+        {
+            let port = arg(&args, "--port").unwrap_or_else(|| "0".into());
+            let token = arg(&args, "--token").unwrap_or_default();
+            let addr = format!("127.0.0.1:{port}");
+            info!("logon-helper 启动：回连 {addr}");
+            if let Err(e) = service_run::logon_helper_main(&addr, &token) {
+                eprintln!("logon-helper 退出：{e}");
+                std::process::exit(1);
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--logon-helper 仅 Windows 支持");
             std::process::exit(1);
         }
         return;
@@ -626,6 +786,67 @@ fn init_log() {
         .with(fmt::layer().with_writer(std::io::stderr))
         .with(filter)
         .init();
+}
+
+/// #470 服务态日志：写 `%ProgramData%\AeroDesk\logs\service.log`。SYSTEM 服务
+/// 无控制台、无用户 HOME（docs/PRELOGIN_WINDOWS_SERVICE.md D2），ProgramData
+/// 不可用时回退 stderr（便于手动 `--service` 调试）。
+#[cfg(windows)]
+fn init_service_log() {
+    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_writer(service_log_sink()))
+        .with(filter)
+        .init();
+}
+
+#[cfg(windows)]
+fn service_log_sink() -> ServiceLogSink {
+    let dir = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".into());
+    let dir = std::path::Path::new(&dir).join("AeroDesk").join("logs");
+    let open = std::fs::create_dir_all(&dir).and_then(|_| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("service.log"))
+    });
+    match open {
+        Ok(f) => ServiceLogSink::File(std::sync::Arc::new(f)),
+        Err(_) => ServiceLogSink::Stderr,
+    }
+}
+
+/// 服务日志落点：ProgramData 文件优先，回退 stderr。逐事件克隆句柄，M1 心跳量级无压力。
+#[cfg(windows)]
+#[derive(Clone)]
+enum ServiceLogSink {
+    File(std::sync::Arc<std::fs::File>),
+    Stderr,
+}
+
+#[cfg(windows)]
+impl std::io::Write for ServiceLogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            ServiceLogSink::File(f) => (&**f).write(buf),
+            ServiceLogSink::Stderr => std::io::stderr().write(buf),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            ServiceLogSink::File(f) => (&**f).flush(),
+            ServiceLogSink::Stderr => std::io::stderr().flush(),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ServiceLogSink {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
 }
 
 /// 连接信令 + 建立 Endpoint（公共步骤）。返回 (signal, endpoint, mut socket, video_mid, audio_mid)。
@@ -1108,6 +1329,110 @@ impl aerodesk_core::platform::AudioCapturer for NoAudioCapture {
 
     fn next_samples(&mut self, _max: usize) -> Result<Vec<f32>, String> {
         Ok(Vec::new())
+    }
+}
+
+/// #73 真实系统音频发送：系统音频采集（core `AudioCapturer`，f32 mono 48k）
+/// → Opus/PCMU。macOS：SCK audio-only SCStream；Linux：PipeWire sink 捕获（#316）。
+/// 采集失败时由调用方回退 AudioTicker（合成音）。
+struct RealAudioSender<C: aerodesk_core::platform::AudioCapturer<Error = String>> {
+    cap: C,
+    /// Opus 编码器（--audio-opus；libopus 缺失时回退 PCMU）。
+    opus: Option<aerodesk_codec::audio::OpusEncoder>,
+    /// 48kHz 单声道 i16 缓冲（Opus 直用；PCMU 先 6:1 降采样到 8k）。
+    buf48: Vec<i16>,
+    /// 8kHz 单声道 i16 缓冲（PCMU 用）。
+    buf8: Vec<i16>,
+    pts48: u64,
+    pts8: u64,
+    /// 下一帧发送时间（20ms 节拍；一次只发一帧，避免 WriteWithoutPoll 突发）。
+    next_send: Instant,
+}
+
+impl<C: aerodesk_core::platform::AudioCapturer<Error = String>> RealAudioSender<C> {
+    fn new(cap: C, audio_opus: bool) -> Self {
+        let opus = if audio_opus {
+            match aerodesk_codec::audio::OpusEncoder::new(64_000) {
+                Ok(enc) => Some(enc),
+                Err(err) => {
+                    warn!("opus encoder init failed, fallback PCMU: {err}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        Self {
+            cap,
+            opus,
+            buf48: Vec::new(),
+            buf8: Vec::new(),
+            pts48: 0,
+            pts8: 0,
+            next_send: Instant::now(),
+        }
+    }
+
+    /// 排空采集样本并按 20ms 节拍补发**一帧**完整音频（防 WriteWithoutPoll 突发）。
+    fn tick(&mut self, endpoint: &mut Endpoint, mid: str0m::media::Mid, now: Instant) {
+        if now < self.next_send {
+            return;
+        }
+        let samples = self.cap.next_samples(48_000 * 5).unwrap_or_default();
+        if !samples.is_empty() {
+            self.buf48.extend(
+                samples
+                    .into_iter()
+                    .map(|v| (v.clamp(-1.0, 1.0) * 32767.0) as i16),
+            );
+        }
+
+        // Opus（48k）：一次一帧；不足 960 样本时等下一拍。
+        if self.opus.is_some() {
+            if self.buf48.len() >= 960 {
+                let frame: Vec<i16> = self.buf48.drain(..960).collect();
+                let data = self
+                    .opus
+                    .as_mut()
+                    .and_then(|enc| enc.encode(&frame).ok().flatten());
+                if let Some(data) = data {
+                    let rtp_time = str0m::media::MediaTime::new(
+                        self.pts48 * 960,
+                        str0m::media::Frequency::FORTY_EIGHT_KHZ,
+                    );
+                    if let Err(e) = endpoint.send_audio_frame_opus(mid, data, rtp_time) {
+                        warn!("send opus audio failed: {e:?}");
+                    }
+                }
+                self.pts48 += 1;
+                self.next_send = now + Duration::from_millis(20);
+            } else {
+                self.next_send = now + Duration::from_millis(5);
+            }
+            return;
+        }
+
+        // PCMU（8kHz 电话级）：48k → 8k 6:1 降采样（简单平均），一次一帧。
+        let mut i = 0;
+        while i + 6 <= self.buf48.len() {
+            let sum: i32 = self.buf48[i..i + 6].iter().map(|&x| x as i32).sum();
+            self.buf8.push((sum / 6) as i16);
+            i += 6;
+        }
+        self.buf48.drain(..i);
+        if self.buf8.len() >= 160 {
+            let frame: Vec<i16> = self.buf8.drain(..160).collect();
+            let data = aerodesk_core::pcmu::pcmu_encode(&frame);
+            let rtp_time =
+                str0m::media::MediaTime::new(self.pts8 * 160, str0m::media::Frequency::EIGHT_KHZ);
+            if let Err(e) = endpoint.send_audio_frame(mid, data, rtp_time) {
+                warn!("send pcmu audio failed: {e:?}");
+            }
+            self.pts8 += 1;
+            self.next_send = now + Duration::from_millis(20);
+        } else {
+            self.next_send = now + Duration::from_millis(5);
+        }
     }
 }
 
@@ -2685,11 +3010,6 @@ fn publisher_generic<
     let mut next_camera = Instant::now();
     let mut next_frame = Instant::now();
     let mut pts = 0i64;
-    // #477 机制 B（静态屏零输出）：缓存末帧原始像素。屏幕静止时 DXGI 等变化
-    // 驱动采集源不再产出新帧，晚加入 viewer 永远等不到首帧（服务器端录制
-    // 零字节实证）；无新帧 ≥2s 时以缓存末帧强制 IDR 心跳重发。
-    let mut last_frame_raw: Option<(Vec<u8>, u32, u32)> = None;
-    let mut last_capture_at = Instant::now();
     // #8 端到端延迟：合成光标轨迹（30Hz）。
     let cursor_start = Instant::now();
     let mut last_cursor = Instant::now();
@@ -2806,77 +3126,26 @@ fn publisher_generic<
             // 屏幕静止时摄像头轨冻结、sleep 节拍失效）。
             // 运行期编码错误降级为丢帧 + 告警：硬件编码器可能瞬时失败（模式切换/
             // 设备丢失），不应 panic 整个发布端（旧实现 expect 一错即崩）。
-            //
-            // #477 机制 B：无新帧 ≥2s（静态屏）时以缓存末帧强制 IDR 心跳重发，
-            // 保证晚加入 viewer 在 ≤2s 内拿到可解码关键帧（静态 IDR 帧间压缩
-            // 后仅几十 KB，带宽可忽略）。
-            let encoded = match source.next_frame() {
-                Ok(Some(frame)) => {
-                    if let Some(raw) = frame.raw.as_ref() {
-                        last_frame_raw = Some((raw.clone(), frame.width, frame.height));
-                    }
-                    last_capture_at = Instant::now();
-                    encoder.encode(&frame)
-                }
-                Ok(None) => {
-                    if last_capture_at.elapsed() >= Duration::from_secs(2)
-                        && let Some((raw, w, h)) = last_frame_raw.as_ref()
-                    {
-                        last_capture_at = Instant::now();
-                        let hb = aerodesk_core::platform::VideoFrame {
-                            platform: None,
-                            handle: None,
-                            raw: Some(raw.clone()),
-                            width: *w,
-                            height: *h,
-                            pts_ms: 0,
-                        };
-                        encoder.request_keyframe();
-                        debug!("static-screen heartbeat IDR");
-                        // 重建后的编码器需喂满管线深度才吐包（本机 h264_mf
-                        // 实测 12 帧；libx264 约 1-2 帧）。静屏没有"下一帧"
-                        // 来冲刷——连喂同帧 16 次（超出部分仅产生近零字节的
-                        // 重复 P 帧，每 2s 约 30-60ms CPU，可忽略）。
-                        let mut out = None;
-                        for _ in 0..16 {
-                            match encoder.encode(&hb) {
-                                Ok(Some(unit)) => {
-                                    out = Some(unit);
-                                    break;
-                                }
-                                Ok(None) => {}
-                                Err(e) => {
-                                    warn!("heartbeat encode: {e}");
-                                    break;
-                                }
-                            }
+            match source.next_frame() {
+                Ok(Some(frame)) => match encoder.encode(&frame) {
+                    Ok(Some(unit)) => {
+                        let rtp_time = str0m::media::MediaTime::new(
+                            pts as u64 * 3000,
+                            str0m::media::Frequency::NINETY_KHZ,
+                        );
+                        if let Err(e) = endpoint.send_video_frame(video_mid, unit.data, rtp_time) {
+                            warn!("send frame failed: {e:?}");
                         }
-                        Ok(out)
-                    } else {
-                        Ok(None)
+                        if unit.keyframe {
+                            debug!("sent keyframe #{pts}");
+                        }
+                        pts += 1;
                     }
-                }
-                Err(e) => {
-                    warn!("source next_frame: {e}");
-                    Ok(None)
-                }
-            };
-            match encoded {
-                Ok(Some(unit)) => {
-                    let rtp_time = str0m::media::MediaTime::new(
-                        pts as u64 * 3000,
-                        str0m::media::Frequency::NINETY_KHZ,
-                    );
-                    if let Err(e) = endpoint.send_video_frame(video_mid, unit.data, rtp_time) {
-                        warn!("send frame failed: {e:?}");
-                    }
-                    if unit.keyframe {
-                        debug!("sent keyframe #{pts}");
-                    }
-                    pts += 1;
-                }
+                    Ok(None) => {}
+                    Err(e) => warn!("encode failed（丢帧继续）: {e}"),
+                },
                 Ok(None) => {}
-                Err(e) => warn!("encode failed（丢帧继续）: {e}"),
+                Err(e) => warn!("source next_frame: {e}"),
             }
         }
 
