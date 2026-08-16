@@ -1059,6 +1059,11 @@ impl TrackOut {
 /// file 回传打满对端缓冲时挤掉 input/clipboard（#134）。
 const CHANNEL_PRIORITY_LEVELS: usize = 5;
 
+/// #467：signal_ready 宽限期（自 SFU 侧 offer/answer 通道打开起算）。
+/// ready 正常在通道打开后 ~1 RTT 到达；超时视为就绪包异常丢失，放行协商
+/// 退回旧行为（偶发），避免门控本身把客户端缺陷放大成永久黑屏。
+const SIGNAL_READY_GRACE: Duration = Duration::from_secs(5);
+
 fn channel_priority(label: &str) -> usize {
     match label {
         "input" => 0,     // 观看端输入：延迟最敏感
@@ -1087,6 +1092,11 @@ pub struct Client {
     signal_ready_expected: bool,
     /// #467：已收到客户端的 signal_ready（仅 `signal_ready_expected` 时参与门控）。
     signal_ready: bool,
+    /// #467：signal_ready 等待锚点。初始为客户端创建时刻；offer/answer 通道
+    /// 在 SFU 侧打开时重置（ready 正常在其后 ~1 RTT 内到达）。超过
+    /// [`SIGNAL_READY_GRACE`] 仍未收到（客户端就绪包发送失败被吞等异常）则
+    /// 放行协商，退回旧行为——避免"声明了能力的客户端"因自身缺陷永久黑屏。
+    signal_ready_wait_since: Instant,
     /// 可选录制器引用（录制开启时非空）。
     recorder: Option<Arc<Recorder>>,
     /// #238 媒体质量快照（RTT/丢包/BWE）。
@@ -1123,6 +1133,7 @@ impl Client {
             chosen_rid: None,
             signal_ready_expected,
             signal_ready: false,
+            signal_ready_wait_since: Instant::now(),
             recorder: None,
             qos: std::sync::Mutex::new(ClientQos::default()),
             pending_channel_out: std::array::from_fn(|_| VecDeque::new()),
@@ -1234,6 +1245,12 @@ impl Client {
                 Event::MediaData(data) => self.handle_media_data_in(data),
                 Event::KeyframeRequest(req) => self.handle_incoming_keyframe_req(req),
                 Event::ChannelOpen(cid, label) => {
+                    // #467：offer/answer 通道在 SFU 侧打开时重置宽限锚点——
+                    // ready 正常在此后 ~1 RTT 到达，从这一刻起算而非客户端创建
+                    // 时刻，避免宽限期被 ICE/DTLS 建立时长挤占。
+                    if label == "offer/answer" && self.signal_ready_expected && !self.signal_ready {
+                        self.signal_ready_wait_since = Instant::now();
+                    }
                     self.channels.insert(label, cid);
                     Propagated::Noop
                 }
@@ -1383,7 +1400,12 @@ impl Client {
         // #467：声明了 dc_ready 的客户端，必须等它 offer/answer 通道 DCEP 完成后
         // 发来的 signal_ready 才发起重协商——此前 viewer 端 str0m 可能尚未注册
         // 通道，写出的 offer 被丢弃 → viewer 不回 answer → pending 永久卡死。
-        if self.signal_ready_expected && !self.signal_ready {
+        // 宽限兜底：超时仍未收到 ready（就绪包异常丢失/客户端缺陷）时放行，
+        // 退回旧的偶发行为，避免永久黑屏；正常路径 ready ~1 RTT 内必达不受影响。
+        if self.signal_ready_expected
+            && !self.signal_ready
+            && self.signal_ready_wait_since.elapsed() < SIGNAL_READY_GRACE
+        {
             return false;
         }
         // #467：offer 固定写 offer/answer 通道（按 label 取）。此前取"第一个打开
@@ -2424,6 +2446,40 @@ fn legacy_client_negotiates_without_signal_ready() {
                     .any(|(l, d)| l == "offer/answer" && is_sdp_offer_json(d))
         },
         "旧客户端不受门控影响，正常收到重协商 offer",
+    );
+}
+
+/// #467 宽限兜底：声明了 dc_ready 但 ready 迟迟不到（就绪包异常丢失）时，
+/// 超过 SIGNAL_READY_GRACE 放行协商——门控不得把客户端缺陷放大成永久黑屏。
+#[test]
+fn signal_ready_gate_falls_back_after_grace() {
+    let (mut viewer, mut client, sfu_sock, _track) = connect_mini_viewer(true);
+    // 连接与通道打开（正常阶段），但 viewer 故意不发 signal_ready。
+    mini_pump_until(
+        &mut viewer,
+        &mut client,
+        &sfu_sock,
+        |v, c| {
+            v.rtc.is_connected()
+                && c.rtc.is_connected()
+                && v.channel_of("offer/answer").is_some()
+                && c.channels.contains_key("offer/answer")
+        },
+        "连接与 DCEP 完成",
+    );
+    assert!(client.pending.is_none(), "宽限期内不得发起协商");
+    // 时间快进过宽限期（测试不真等 5s：直接回拨锚点）。
+    client.signal_ready_wait_since -= SIGNAL_READY_GRACE + Duration::from_secs(1);
+    mini_pump_until(
+        &mut viewer,
+        &mut client,
+        &sfu_sock,
+        |v, _| {
+            v.received
+                .iter()
+                .any(|(l, d)| l == "offer/answer" && is_sdp_offer_json(d))
+        },
+        "宽限期超时后放行协商，offer 送达 viewer",
     );
 }
 
