@@ -1,0 +1,62 @@
+// AeroDesk 移动端共享 Slint UI（iOS/iPad / Android 共用）。
+// OHOS 暂无 Slint backend，用 ArkTS 复刻同结构。
+import { Button } from "std-widgets.slint";
+
+export component MobileAppWindow inherits Window {
+    title: "AeroDesk";
+    preferred-width: 420px;
+    preferred-height: 720px;
+
+    in-out property <string> server: "ws://127.0.0.1:3003";
+    in-out property <string> room: "demo";
+    in-out property <string> status: "未连接";
+
+    callback connect(string, string);
+    callback disconnect();
+    callback open_settings();
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+
+        Text {
+            text: "AeroDesk";
+            font-size: 22px;
+            horizontal-alignment: center;
+        }
+
+        TextInput {
+            text <=> root.server;
+            single-line: true;
+        }
+
+        TextInput {
+            text <=> root.room;
+            single-line: true;
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+
+            Button {
+                text: "连接";
+                clicked => { root.connect(root.server, root.room); }
+            }
+
+            Button {
+                text: "断开";
+                clicked => { root.disconnect(); }
+            }
+
+            Button {
+                text: "设置";
+                clicked => { root.open_settings(); }
+            }
+        }
+
+        Text {
+            text: root.status;
+            wrap: word-wrap;
+        }
+    }
+}

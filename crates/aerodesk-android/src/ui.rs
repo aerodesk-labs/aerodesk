@@ -14,58 +14,7 @@ use slint::ComponentHandle;
 /// 只负责把状态和句柄保存起来，真正的连接操作由 Rust 端直接完成。
 static ACTIVE_VIEWER: Mutex<Option<ViewerSession>> = Mutex::new(None);
 
-slint::slint! {
-    import { Button } from "std-widgets.slint";
-
-    export component AndroidAppWindow inherits Window {
-        title: "AeroDesk";
-        in-out property <string> server: "ws://127.0.0.1:3003";
-        in-out property <string> room: "demo";
-        in-out property <string> status: "未连接";
-        callback connect(string, string);
-        callback disconnect();
-
-        VerticalLayout {
-            padding: 20px;
-            spacing: 12px;
-
-            Text {
-                text: "AeroDesk Android (Slint)";
-                font-size: 20px;
-                horizontal-alignment: center;
-            }
-
-            TextInput {
-                text <=> root.server;
-                single-line: true;
-            }
-
-            TextInput {
-                text <=> root.room;
-                single-line: true;
-            }
-
-            HorizontalLayout {
-                spacing: 10px;
-
-                Button {
-                    text: "连接";
-                    clicked => { root.connect(root.server, root.room); }
-                }
-
-                Button {
-                    text: "断开";
-                    clicked => { root.disconnect(); }
-                }
-            }
-
-            Text {
-                text: root.status;
-                wrap: word-wrap;
-            }
-        }
-    }
-}
+slint::include_modules!();
 
 /// 取走并销毁旧会话，避免重复连接时后台线程泄漏。
 fn reset_viewer() {
@@ -87,7 +36,7 @@ fn set_viewer(viewer: ViewerSession) {
 #[unsafe(no_mangle)]
 pub extern "C" fn android_main(app: slint::android::AndroidApp) {
     slint::android::init(app).expect("failed to initialize Slint Android backend");
-    let window = AndroidAppWindow::new().expect("failed to create Slint window");
+    let window = MobileAppWindow::new().expect("failed to create Slint window");
 
     let weak = window.as_weak();
     window.on_connect(
