@@ -788,7 +788,7 @@ fn connect_inner(
 
     // #157 M2：join 返回 TURN 配置时建立中继传输（失败仅告警，直连兜底）。
     let turn_transport = turn.as_ref().and_then(|tc| setup_turn(tc, loopback_signal));
-    let socket = MediaSocket::new(direct, turn_transport);
+    let mut socket = MediaSocket::new(direct, turn_transport);
 
     let mut endpoint = match codec {
         None => Endpoint::new(),
@@ -863,6 +863,56 @@ fn connect_inner(
         .map_err(|e| format!("accept answer: {e}"))?;
 
     info!("SDP negotiated, awaiting ICE...");
+    // #477：ICE 等待收敛到 connect 阶段——超时显式失败（调用方的重连包装会
+    // 重试），不再进入会话循环静默空转（观测窗内表现为"0 帧"假失败，实际
+    // 是 ICE 从未建立）。TURN 路径建链慢（实测中继下 5-12s），给 15s。
+    {
+        let ice_deadline =
+            Instant::now() + Duration::from_secs(if socket.turn().is_some() { 15 } else { 5 });
+        let mut ice_connected = false;
+        while Instant::now() < ice_deadline && endpoint.is_alive() {
+            socket
+                .set_read_timeout(Some(Duration::from_millis(10)))
+                .ok();
+            let mut buf = [0u8; 2048];
+            if let Ok((n, source)) = socket.recv_from(&mut buf)
+                && let Ok(contents) = buf[..n].try_into()
+            {
+                let _ = endpoint.handle_input(Input::Receive(
+                    Instant::now(),
+                    Receive {
+                        proto: Protocol::Udp,
+                        source,
+                        destination: socket.local_addr().unwrap(),
+                        contents,
+                    },
+                ));
+            }
+            let _ = endpoint.handle_timeout(Instant::now());
+            while let Some(output) = endpoint.poll_output() {
+                match output {
+                    Output::Transmit(t) => {
+                        let _ = socket.send_to(&t.contents, t.destination);
+                    }
+                    // Timeout 必须退出本轮排空（否则 100% CPU 死循环，见 core 注释）。
+                    Output::Timeout(_) => break,
+                    Output::Event(_) => {}
+                }
+            }
+            while let Some(ev) = endpoint.poll_event() {
+                if let ClientEvent::IceConnected = ev {
+                    ice_connected = true;
+                }
+            }
+            if ice_connected {
+                break;
+            }
+        }
+        if !ice_connected {
+            return Err("ICE 连接超时（直连 5s / TURN 15s 未建立）".into());
+        }
+        info!("ICE connected (connect 阶段)");
+    }
     let video_mid = video_mid.ok_or("no video mid")?;
     Ok((signal, endpoint, socket, video_mid, audio_mid, camera_mid))
 }
