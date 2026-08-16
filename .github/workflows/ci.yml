@@ -137,6 +137,22 @@ jobs:
       - name: test
         run: cargo test --workspace ${{ matrix.skip_crates }} ${{ matrix.features }}
 
+      # #470 Windows 服务生命周期冒烟（runner 具管理员权限）：安装→启动→
+      # 查询→移除→终态。服务体在无配置下安全空转（presence 不启动，仅日志），
+      # 登录界面/让位切换仍需 VM 人工联调（docs/PRELOGIN_WINDOWS_SERVICE.md §9）。
+      - name: service lifecycle smoke (Windows only)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -e
+          BIN=target/debug/aerodesk-cli.exe
+          test -f "$BIN"
+          out=$("$BIN" --service-status); echo "$out"; [ "$out" = "not installed" ]
+          "$BIN" --install-service
+          out=$("$BIN" --service-status); echo "$out"; echo "$out" | grep -q "运行中"
+          "$BIN" --remove-service
+          out=$("$BIN" --service-status); echo "$out"; [ "$out" = "not installed" ]
+
       # 端到端冒烟依赖 macOS 专属编码器（aerodesk-cli ← aerodesk-platform::macos），
       # 跨平台编译/单测已由三平台矩阵覆盖。
       - name: e2e smoke (macOS only)
