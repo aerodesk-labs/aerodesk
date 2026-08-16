@@ -150,6 +150,9 @@ jobs:
         shell: bash
         run: |
           set -e
+          # cargo test 只产测试容器(deps/<bin>-<hash>.exe),不落 target/debug/<bin>.exe——
+          # 显式链出可执行文件(全量已编译,仅链接,秒级)。
+          cargo build -p aerodesk-cli
           BIN=target/debug/aerodesk-cli.exe
           test -f "$BIN"
           out=$("$BIN" --service-status); echo "$out"; [ "$out" = "not installed" ]
