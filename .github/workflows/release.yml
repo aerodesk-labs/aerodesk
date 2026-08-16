@@ -45,12 +45,12 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
-      # aerodesk-ui(macOS) 依赖 aerodesk-ffmpeg(ffmpeg-next) + x264（与 CI test job 一致）。
+      # aerodesk-desktop(macOS) 依赖 aerodesk-ffmpeg(ffmpeg-next) + x264（与 CI test job 一致）。
       - name: Install ffmpeg/x264
         run: brew install x264 ffmpeg
 
       - name: Build release (aarch64)
-        run: cargo build --release --target aarch64-apple-darwin -p aerodesk-ui
+        run: cargo build --release --target aarch64-apple-darwin -p aerodesk-desktop
 
       - name: Import Developer ID certificate (temporary keychain)
         env:
@@ -72,7 +72,7 @@ jobs:
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           bash scripts/assemble-macos-app.sh "$VERSION" \
-            target/aarch64-apple-darwin/release/aerodesk-ui dist/AeroDesk.app
+            target/aarch64-apple-darwin/release/aerodesk-desktop dist/AeroDesk.app
 
       - name: Sign app (hardened runtime + timestamp)
         run: |
@@ -132,13 +132,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # aerodesk-ui(Linux) → aerodesk-linux(VAAPI, ffmpeg-next) + softenc(x264)：
+      # aerodesk-desktop(Linux) → aerodesk-platform::linux(VAAPI, ffmpeg-next) + softenc(x264)：
       # 与 CI test job 的 ubuntu System deps 一致。
       - name: System deps
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev libasound2-dev libx264-dev libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavfilter-dev libswresample-dev libpostproc-dev libavdevice-dev libpipewire-0.3-dev libspa-0.2-dev rpm
 
       - name: Build release
-        run: cargo build --release -p aerodesk-ui
+        run: cargo build --release -p aerodesk-desktop
 
       - name: Package Linux (deb + tar.gz + rpm + AppImage)
         run: bash scripts/package-linux.sh
@@ -166,7 +166,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # aerodesk-ui/aerodesk-cli(Windows) 依赖 aerodesk-ffmpeg(ffmpeg-next)：与
+      # aerodesk-desktop/aerodesk-cli(Windows) 依赖 aerodesk-ffmpeg(ffmpeg-next)：与
       # test job 同款 BtbN 8.1 预编译共享构建（FFMPEG_DIR + PATH）。
       - name: System deps (Windows FFmpeg dev libs)
         shell: pwsh
@@ -183,7 +183,7 @@ jobs:
 
       - name: Build release (win64)
         shell: bash
-        run: cargo build --release -p aerodesk-ui -p aerodesk-cli
+        run: cargo build --release -p aerodesk-desktop -p aerodesk-cli
 
       - name: Package Windows (portable ZIP)
         shell: bash

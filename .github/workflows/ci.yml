@@ -73,12 +73,12 @@ jobs:
             # #4 Wayland/PipeWire 采集是可选 feature（默认关，避免 UI 的
             # slint system-tray→zbus 与 ashpd 的 zbus/tokio 冲突）；CI 显式启用覆盖。
             # #306：aerodesk-cli 纳入 Linux 编译/测试（原生被控端宿主）。
-            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios
-            features: --features aerodesk-linux/pipewire
+            skip_crates: --exclude aerodesk-ios
+            features: --features aerodesk-platform/pipewire
           - os: windows-latest
             # #3：Windows CLI 已跨平台化（DXGI+OpenH264+SendInput），纳入编译/测试；
-            # x264 与 aerodesk-linux 仍排除（MSVC 下 C 库/平台采集批次）。
-            skip_crates: --exclude aerodesk-macos --exclude aerodesk-ios --exclude aerodesk-linux --exclude x264
+            # x264 仍排除（MSVC 下 C 库批次）。
+            skip_crates: --exclude aerodesk-ios --exclude x264
             features: 
     runs-on: ${{ matrix.os }}
     env:
@@ -137,7 +137,7 @@ jobs:
       - name: test
         run: cargo test --workspace ${{ matrix.skip_crates }} ${{ matrix.features }}
 
-      # 端到端冒烟依赖 macOS 专属编码器（aerodesk-cli ← aerodesk-macos），
+      # 端到端冒烟依赖 macOS 专属编码器（aerodesk-cli ← aerodesk-platform::macos），
       # 跨平台编译/单测已由三平台矩阵覆盖。
       - name: e2e smoke (macOS only)
         if: runner.os == 'macOS'
@@ -352,8 +352,8 @@ jobs:
       - name: windows adapter
         if: runner.os == 'Windows'
         # --examples：编译验证 vdd_smoke（#140，真机验收示例）。
-        # -p aerodesk-ui：#3 主控端真实媒体（PR #159）Windows 编译验证。
-        run: cargo check -p aerodesk-windows -p aerodesk-ui --examples
+        # -p aerodesk-desktop：#3 主控端真实媒体（PR #159）Windows 编译验证。
+        run: cargo check -p aerodesk-platform -p aerodesk-desktop --examples
       # #3 Windows→Web 验收：本机 Edge 观看端全链路回归
       # （signaling→ICE/DTLS/SCTP→视频轨→输入回传）。合成源发布端不受静态桌面
       # 影响；Edge 由 windows-latest runner 预装；playwright-core 由脚本 npm i。
@@ -369,10 +369,10 @@ jobs:
         run: ./scripts/display-switch-e2e-win.ps1
       - name: linux adapter
         if: runner.os == 'Linux'
-        run: cargo check -p aerodesk-linux -p aerodesk-ui
+        run: cargo check -p aerodesk-platform -p aerodesk-desktop
       - name: macos/ios adapters + cli
         if: runner.os == 'macOS'
-        run: cargo check -p aerodesk-macos -p aerodesk-ios -p aerodesk-cli
+        run: cargo check -p aerodesk-platform -p aerodesk-ios -p aerodesk-cli
 
   # iOS App 双 slice 构建回归：#14 类链接回归（XCFramework/扁平静态库路径错位）
   # 曾导致 Xcode 无法链接；此处每次 push/PR 都验证模拟器 + 真机 slice 可编译可链接。
@@ -482,7 +482,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # #3/#378：aerodesk-ui 自全平台依赖 aerodesk-ffmpeg 起，Windows 构建需
+      # #3/#378：aerodesk-desktop 自全平台依赖 aerodesk-ffmpeg 起，Windows 构建需
       # FFmpeg 开发库（与 test job 同款 BtbN 8.1 预编译包），否则 ffmpeg-sys-next
       # build 失败（Windows UI e2e 无法验证观看端）。
       - name: System deps (Windows FFmpeg dev libs)
@@ -571,10 +571,13 @@ jobs:
         run: |
           SDK="/usr/local/lib/android/sdk"
           NDK="$(ls "$SDK/ndk" | sort -V | tail -1)"
+          PLATFORM="$(ls "$SDK/platforms" | sort -V | tail -1)"
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$SDK/ndk/$NDK" >> "$GITHUB_ENV"
-          echo "Using Android SDK: $SDK, NDK: $NDK"
-
+          echo "ANDROID_PLATFORM=$PLATFORM" >> "$GITHUB_ENV"
+          echo "ANDROID_JAR=$SDK/platforms/$PLATFORM/android.jar" >> "$GITHUB_ENV"
+          echo "Using Android SDK: $SDK, NDK: $NDK, platform: $PLATFORM"
       - name: Build Rust .so (arm64-v8a)
         run: bash scripts/build-android-lib.sh
 

@@ -1,0 +1,28 @@
+#pragma code_page(65001)
+1 VERSIONINFO
+FILEVERSION @@FILEVERSION@@
+PRODUCTVERSION @@PRODUCTVERSION@@
+FILEFLAGSMASK 0x3f
+FILEFLAGS 0x0
+FILEOS 0x40004
+FILETYPE 0x1
+FILESUBTYPE 0x0
+{
+BLOCK "StringFileInfo"
+{
+BLOCK "040904b0"
+{
+VALUE "ProductVersion", "@@VERSION@@"
+VALUE "ProductName", "AeroDesk"
+VALUE "FileVersion", "@@VERSION@@"
+VALUE "FileDescription", "AeroDesk remote desktop client (viewer/controller)"
+VALUE "LegalCopyright", "AeroDesk Labs"
+VALUE "OriginalFilename", "aerodesk-desktop.exe"
+}
+}
+BLOCK "VarFileInfo"
+{
+VALUE "Translation", 0x409, 1200
+}
+}
+1 ICON "../../app-assets/aerodesk.ico"

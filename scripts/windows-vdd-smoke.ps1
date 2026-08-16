@@ -6,7 +6,7 @@
 #
 # 前置：
 #   - 下载 parsec-vdd 驱动包（nomi-san/parsec-vdd，含 nefconw.exe）放到 vendor/parsec-vdd/
-#   - 先构建示例：cargo build -p aerodesk-windows --release --examples
+#   - 先构建示例：cargo build -p aerodesk-platform --release --examples
 param(
     [switch]$Install,
     [int]$Width = 3840,
@@ -45,7 +45,7 @@ if (-not (Test-ParsecVdd)) {
 
 $exe = Join-Path $PSScriptRoot "..\target\release\examples\vdd_smoke.exe"
 if (-not (Test-Path $exe)) {
-    Write-Host "未找到示例二进制；请先执行：cargo build -p aerodesk-windows --release --examples" -ForegroundColor Yellow
+    Write-Host "未找到示例二进制；请先执行：cargo build -p aerodesk-platform --release --examples" -ForegroundColor Yellow
     exit 3
 }
 Write-Host "运行 vdd_smoke ${Width}x${Height}@${Hz} ..."

@@ -1,0 +1,63 @@
+[package]
+name = "aerodesk-desktop"
+description = "AeroDesk desktop UI/UX shell (Slint): connect/device/settings for Windows/macOS/Linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+slint = { version = "1", default-features = false, features = ["std", "backend-winit", "renderer-software", "system-tray", "raw-window-handle-06", "compat-1-2"] }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+str0m = { workspace = true, features = ["rust-crypto"] }
+aerodesk-core = { path = "../aerodesk-core" }
+aerodesk-protocol = { path = "../aerodesk-protocol" }
+# 桌面端侧只依赖平台实现层，不再直接引用分散的 aerodesk-{macos,windows,linux}。
+aerodesk-platform = { path = "../aerodesk-platform" }
+# 非 macOS 主控端真实媒体：OpenH264 软解（全平台）；macOS 用 VideoToolbox 不依赖。
+aerodesk-softenc = { path = "../aerodesk-softenc" }
+# #73 观看端 Opus 解码（generic_viewer 非 macOS 音频播放；macOS 由 macos_media 使用）。
+aerodesk-ffmpeg = { path = "../aerodesk-ffmpeg" }
+# 一次性密码/设备 ID 用系统 CSPRNG（wasm32 下由下方 target 依赖启用 js 后端）
+getrandom = "0.2"
+# macOS“显示主窗口”置前：经 raw-window-handle 拿到 NSView 做 makeKeyAndOrderFront/deminiaturize。
+raw-window-handle = "0.6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+i-slint-backend-winit = "1.17"
+winit = "0.30"
+
+[build-dependencies]
+slint-build = "1"
+
+# #7 Windows 应用图标 + 版本资源（嵌入 exe；用 link-arg 直接传对象，确保资源被链接）。
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "2"
+
+[dev-dependencies]
+# 无头 Slint 测试后端：UI 链路 e2e（session_refresh_ui/present_frame/session_cleanup）。
+i-slint-backend-testing = "1.17"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+# ── Linux 打包（cargo-deb，release workflow linux job 使用）──────────────────
+# depends=$auto：构建机（ubuntu-latest）上经 dpkg-shlibdeps 自动探测动态库
+# （ffmpeg 6.1 / x264 / xkbcommon / fontconfig 等），避免硬编码版本号。
+[package.metadata.deb]
+name = "aerodesk"
+maintainer = "AeroDesk Labs <aerodesk-labs@users.noreply.github.com>"
+copyright = "2026 AeroDesk Labs"
+# license 取自 [package] license，cargo-deb 无独立 license 字段（v3.7 schema）
+depends = "$auto"
+section = "net"
+priority = "optional"
+# target/release/ 是 cargo-deb 的魔法前缀（自动指向真实 target 目录）；
+# app-assets 在 crate 外，用相对 CARGO_MANIFEST_DIR 的 ../../ 路径（cargo-deb #68）。
+assets = [
+  ["target/release/aerodesk-desktop", "usr/bin/", "755"],
+  ["../../app-assets/icon-1024.png", "usr/share/icons/hicolor/512x512/apps/aerodesk.png", "644"],
+  ["../../app-assets/aerodesk.desktop", "usr/share/applications/aerodesk.desktop", "644"],
+]

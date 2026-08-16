@@ -36,20 +36,20 @@ bash scripts/package-linux.sh      # dist/aerodesk_<版本>_amd64.deb + tar.gz +
 `.github/workflows/release.yml`（参考 ../abb 项目的 Build & Release 流水线）：
 
 - **触发**：打 `v*` tag 自动构建并发布 GitHub Release；`workflow_dispatch` 手动触发只出产物
-- **macOS**：`cargo build --release --target aarch64-apple-darwin -p aerodesk-ui`
+- **macOS**：`cargo build --release --target aarch64-apple-darwin -p aerodesk-desktop`
   → `scripts/assemble-macos-app.sh` 组装 `.app`（版本号取自 Cargo.toml、图标 `app-assets/AppIcon.icns`）
   → Developer ID 签名（临时 keychain，secrets：`APPLE_CERT_P12`/`APPLE_CERT_PASSWORD`/`APPLE_TEAM_ID`）
   → notarytool 公证 + stapler 装订 → DMG（拖拽安装）→ DMG 签名/公证/装订 → 上传 Release
-- **Linux**：`cargo build --release -p aerodesk-ui` → `scripts/package-linux.sh`
+- **Linux**：`cargo build --release -p aerodesk-desktop` → `scripts/package-linux.sh`
   → `cargo-deb` `.deb`（`depends=$auto` 自动探测）+ 便携 `tar.gz` + `rpmbuild` `.rpm` + `linuxdeploy` AppImage
   → 上传 Release（无签名，GPG 签名仓库可选）
-- **Windows**：`cargo build --release -p aerodesk-ui -p aerodesk-cli` → `scripts/package-windows.sh`
-  → 便携 ZIP（aerodesk-ui.exe + aerodesk-cli.exe + FFmpeg 共享 DLL + 图标 + README）+ **WiX v4+ MSI**
+- **Windows**：`cargo build --release -p aerodesk-desktop -p aerodesk-cli` → `scripts/package-windows.sh`
+  → 便携 ZIP（aerodesk-desktop.exe + aerodesk-cli.exe + FFmpeg 共享 DLL + 图标 + README）+ **WiX v4+ MSI**
   （`packaging/windows/AeroDesk.wxs`，dotnet tool wix，Program Files + 开始菜单/桌面快捷方式）
   → 上传 Release（无签名；代码签名证书待补）
 - **所需 secrets**：`APPLE_CERT_P12`（Developer ID Application 证书 base64）、`APPLE_CERT_PASSWORD`、
   `APPLE_TEAM_ID`、`APPLE_ID`、`APPLE_APP_PASSWORD`
-- **Windows**：aerodesk-ui 非 macOS 分支已可观看（generic viewer），WiX/MSIX 打包 job 待补
+- **Windows**：aerodesk-desktop 非 macOS 分支已可观看（generic viewer），WiX/MSIX 打包 job 待补
 
 本地打包（不签名/公证，自测用）：
 

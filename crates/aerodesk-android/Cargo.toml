@@ -1,18 +1,18 @@
 [package]
 name = "aerodesk-android"
-description = "AeroDesk Android adapter: MediaCodec decode, MediaProjection capture, AccessibilityService input injection (P3 skeleton)"
+description = "AeroDesk Android JNI + Slint host (platform implementation moved to aerodesk-platform)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-[dependencies]
-aerodesk-core = { path = "../aerodesk-core" }
-str0m = { workspace = true, features = ["rust-crypto"] }
-tracing.workspace = true
-serde_json.workspace = true
-aerodesk-protocol = { path = "../aerodesk-protocol" }
-jni = "0.21"
-
 [lib]
 crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+jni = "0.21"
+aerodesk-core = { path = "../aerodesk-core" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+aerodesk-platform = { path = "../aerodesk-platform" }
+slint = { version = "1", default-features = false, features = ["std", "backend-android-activity-06", "renderer-software", "compat-1-2"] }

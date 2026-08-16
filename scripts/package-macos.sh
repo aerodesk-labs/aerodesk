@@ -18,11 +18,11 @@ VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 [ -n "$VERSION" ] || { echo "无法从 Cargo.toml 读取版本" >&2; exit 1; }
 echo "== 版本: $VERSION"
 
-echo "[1/3] cargo release 编译 -p aerodesk-ui …"
-cargo build --release -p aerodesk-ui
+echo "[1/3] cargo release 编译 -p aerodesk-desktop …"
+cargo build --release -p aerodesk-desktop
 
 echo "[2/3] 组装 dist/AeroDesk.app …"
-bash scripts/assemble-macos-app.sh "$VERSION" target/release/aerodesk-ui dist/AeroDesk.app
+bash scripts/assemble-macos-app.sh "$VERSION" target/release/aerodesk-desktop dist/AeroDesk.app
 
 if [ "$MAKE_DMG" = "1" ]; then
   echo "[3/3] 打包 DMG（拖拽安装）…"

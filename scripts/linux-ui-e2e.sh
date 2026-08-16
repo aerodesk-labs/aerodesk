@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Linux 主控端（aerodesk-ui）运行态端到端：Xvfb 无头跑 Slint UI 观看真实媒体。
+# Linux 主控端（aerodesk-desktop）运行态端到端：Xvfb 无头跑 Slint UI 观看真实媒体。
 # 发布端用 headless Chrome 屏幕共享（Web 被控端，ubuntu runner 预装 Chrome），
 # 同时验证 Web 被控端 ↔ Linux 主控端互操作。
 # 依赖：xvfb、Chrome、playwright-core、UI 系统库（CI ubuntu System deps 已装）。
@@ -10,7 +10,7 @@ cd "$ROOT"
 ROOM="${1:-linuxui-$(date +%s)}"
 
 echo "== [1/7] 构建（Linux 编不了 aerodesk-cli——CI 排除，故 publisher 用 Web）"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-ui
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-desktop
 
 E2E_DIR="${WEB_E2E_DIR:-/tmp/linux-ui-e2e}"
 mkdir -p "$E2E_DIR"
@@ -44,7 +44,7 @@ sleep 1
 
 echo "== [2.5/7] Linux 被控端运行级自测（X11 采集 + XTest 注入）"
 cd "$ROOT"
-DISPLAY=:99 cargo test -p aerodesk-linux --test x11_runtime 2>&1 | tail -12
+DISPLAY=:99 cargo test -p aerodesk-platform --test x11_runtime 2>&1 | tail -12
 
 echo "== [3/7] 启动 SFU/signal"
 REC="$(mktemp -d)"
@@ -67,8 +67,8 @@ set -e
 sleep 3
 
 echo "== [5/7] 启动 Linux UI（Xvfb，自动连接观看）"
-ls -la "$ROOT/target/debug/aerodesk-ui" || echo "UI BINARY MISSING"
-RUST_LOG=debug DISPLAY=:99 "$ROOT/target/debug/aerodesk-ui" \
+ls -la "$ROOT/target/debug/aerodesk-desktop" || echo "UI BINARY MISSING"
+RUST_LOG=debug DISPLAY=:99 "$ROOT/target/debug/aerodesk-desktop" \
   -server 127.0.0.1:3003 -room "$ROOM" -autoconnect >/tmp/linuxui-ui.log 2>&1 &
 UI_PID=$!
 sleep 5

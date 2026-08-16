@@ -39,7 +39,7 @@ pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_connect<'local>(
     env.new_string(status).expect("jstring alloc").into_raw()
 }
 
-use crate::viewer::ViewerSession;
+use aerodesk_platform::android::viewer::ViewerSession;
 use jni::objects::JByteArray;
 
 /// 创建观看会话（连接 + 后台收流）。返回指针（jlong），失败为 0。
@@ -93,7 +93,7 @@ pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerSendInput<'loc
     ptr: jlong,
     json: JString<'local>,
 ) -> jboolean {
-    let viewer = ptr as *mut crate::viewer::ViewerSession;
+    let viewer = ptr as *mut aerodesk_platform::android::viewer::ViewerSession;
     if viewer.is_null() {
         return JNI_FALSE;
     }
@@ -130,7 +130,7 @@ pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerTakeAnnexB<'lo
     }
 }
 
-use crate::publisher::PublisherSession;
+use aerodesk_platform::android::publisher::PublisherSession;
 use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jbyteArray, jlong};
 
 /// 创建发布会话（被控端）。返回指针（jlong），失败为 0。

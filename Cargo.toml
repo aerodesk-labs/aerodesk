@@ -6,18 +6,16 @@ members = [
     "crates/aerodesk-core",
     "crates/aerodesk-signal",
     "crates/aerodesk-cli",
-    "crates/aerodesk-macos",
     "crates/aerodesk-softenc",
     "crates/aerodesk-ios",
     "crates/aerodesk-android",
-    "crates/aerodesk-linux",
-    "crates/aerodesk-windows",
     "crates/aerodesk-ohos",
-    "crates/aerodesk-ui",
+    "crates/aerodesk-desktop",
     "crates/aerodesk-ffmpeg",
     "crates/aerodesk-bridge",
     "crates/aerodesk-mcp",
     "crates/aerodesk-admin",
+    "crates/aerodesk-platform",
 ]
 
 [workspace.package]
