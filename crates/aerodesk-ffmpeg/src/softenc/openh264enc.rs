@@ -58,7 +58,7 @@ impl OpenH264Encoder {
     }
 
     /// 编码一帧 RGBA，输出 AnnexB；关键帧含 SPS/PPS。
-    pub fn encode_rgba(&mut self, rgba: &[u8]) -> Result<Option<crate::EncodedFrame>, String> {
+    pub fn encode_rgba(&mut self, rgba: &[u8]) -> Result<Option<super::EncodedFrame>, String> {
         let yuv = rgba_to_i420_packed(rgba, self.width, self.height);
         let buf = YUVBuffer::from_vec(yuv, self.width, self.height);
         let stream = self
@@ -88,7 +88,7 @@ impl OpenH264Encoder {
                 i += 1;
             }
         }
-        Ok(Some(crate::EncodedFrame {
+        Ok(Some(super::EncodedFrame {
             data,
             keyframe,
             pts: 0,

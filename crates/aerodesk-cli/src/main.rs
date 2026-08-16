@@ -2328,7 +2328,7 @@ fn publisher_x264(
     audio_opus: bool,
 ) {
     use aerodesk_core::synthetic::SyntheticSource;
-    use aerodesk_softenc::encode::X264Encoder;
+    use aerodesk_ffmpeg::softenc::encode::X264Encoder;
     use str0m::media::Rid;
 
     const FPS: u32 = 30;

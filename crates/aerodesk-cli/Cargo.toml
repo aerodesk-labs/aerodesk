@@ -11,7 +11,7 @@ aerodesk-ffmpeg = { path = "../aerodesk-ffmpeg" }
 str0m = { workspace = true, features = ["rust-crypto"] }
 aerodesk-core = { path = "../aerodesk-core" }
 aerodesk-protocol.workspace = true
-aerodesk-softenc = { path = "../aerodesk-softenc" }
+
 # CLI 端侧只依赖平台实现层，平台差异由 cfg 模块收敛。
 aerodesk-platform = { path = "../aerodesk-platform" }
 tungstenite = "0.30"
