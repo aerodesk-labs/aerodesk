@@ -72,25 +72,25 @@
 ## 4. 实施步骤(里程碑,每步后 rustfmt/cargo test/clippy 自验)
 
 **M1 SCM 服务骨架**
-- [ ] 引入 `windows-service`;`platform/windows/service.rs`:`install/remove/start/stop/status` + `run_service`(控制处理器 + 心跳)
-- [ ] cli:`--install-service/--remove-service/--service-status`(管理员检测,参照 autostart 子命令)
-- [ ] 日志初始化(文件 + 事件日志)
+- [x] 引入 `windows-service`;`platform/windows/service.rs`:`install/remove/start/stop/status` + `run_service`(控制处理器 + 心跳)
+- [x] cli:`--install-service/--remove-service/--service-status`(管理员检测,参照 autostart 子命令)
+- [x] 日志初始化(文件 + 事件日志)
 - 验收:`sc query` 全生命周期;非管理员安装被明确拒绝。
 
 **M2 服务内信令常驻**
-- [ ] ProgramData 配置读写模块(缺省回退编译默认 + 事件日志告警)
-- [ ] `--service` 主循环:SignalPresence 启动/健康检查/重连
+- [x] ProgramData 配置读写模块(缺省回退编译默认 + 事件日志告警)
+- [x] `--service` 主循环:SignalPresence 启动/健康检查/重连
 - 验收:装服务 → 注销到登录界面 → 信令侧设备在线(手测脚本断言 presence 注册)。
 
 **M3 WTS 会话仲裁**
-- [ ] `platform/windows/session.rs`:`WTSEnumerateSessions`、`WTSRegisterSessionNotificationEx`(服务侧)、`WTSQueryUserToken`、`CreateProcessAsUser` 包装(非服务上下文 → detect-and-return,见测试策略)
-- [ ] 状态机(D3):LOGON 让位 / LOGOFF 回位;spawn `aerodesk-desktop.exe`
+- [x] `platform/windows/session.rs`:`WTSEnumerateSessions`、`WTSRegisterSessionNotificationEx`(服务侧)、`WTSQueryUserToken`、`CreateProcessAsUser` 包装(非服务上下文 → detect-and-return,见测试策略)
+- [x] 状态机(D3):LOGON 让位 / LOGOFF 回位;spawn `aerodesk-desktop.exe`
 - 验收:登录 → desktop 进程起来、服务信令断开;注销 → 服务重新在线;全程 `sc query` RUNNING。
 
 **M4 收尾**
-- [ ] HKCU 共存提示(D7)
-- [ ] `scripts/win-service-e2e.ps1`:安装→(注销/无会话)→断言在线→登录→断言让位→卸载
-- [ ] README/docs 服务章节;PR 按 #470 验收清单逐条对照
+- [x] HKCU 共存提示(D7)
+- [x] `scripts/win-service-e2e.ps1`:安装→(注销/无会话)→断言在线→登录→断言让位→卸载
+- [x] README/docs 服务章节;PR 按 #470 验收清单逐条对照
 
 ## 5. 测试与验证策略
 
@@ -124,3 +124,26 @@
 | 3 注销/锁屏服务不掉线、状态正确 | M3 状态机 |
 | 4 `--remove-service` 无残留 | M1 + M4 e2e |
 | 5 本地门禁全绿、服务路径手测记录附 PR | 每里程碑自验 + M4 |
+
+## 9. 使用与运维（#470 落地后）
+
+```powershell
+# 安装（管理员 PowerShell；装好即启动，并从用户设置同步机器级配置）
+aerodesk-cli.exe --install-service
+aerodesk-cli.exe --service-status      # 运行中 pid=…
+aerodesk-cli.exe --service-config      # %ProgramData%\AeroDesk\service-settings.json 生效值
+aerodesk-cli.exe --remove-service      # 停止并移除
+```
+
+- **配置**：`%ProgramData%\AeroDesk\service-settings.json`（server/device_id/token/spawn_ui/ui_exe），
+  安装时自 `~/.aerodesk-settings.json` 同步；手改后 30s 内热重载。
+- **日志**：`%ProgramData%\AeroDesk\logs\service.log`（ProgramData 不可用回退 stderr）+
+  Windows 事件日志（source=AeroDeskService；未注册消息 DLL 时“找不到描述”属预期）。
+- **生命周期冒烟**：`scripts/win-service-e2e.sh`（Git Bash，管理员）。
+
+### 人工联调清单（VM/物理机，脚本不可自动化）
+
+1. 装服务 → 注销 → 登录界面：signal 日志应见设备 Join 在线（NoSession 态）；
+2. 登录界面输入凭据登录：服务日志「WTS Logon→让位」，桌面端被 spawn；
+3. 注销：服务日志「WTS Logoff→回位 NoSession」，信令重新在线；
+4. 重启整机重复 1–2（AutoStart 生效）。
