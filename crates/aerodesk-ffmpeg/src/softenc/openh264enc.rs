@@ -208,7 +208,7 @@ impl aerodesk_core::platform::Encoder for OpenH264Encoder {
         let Some(raw) = &frame.raw else {
             return Err("openh264 encoder requires raw BGRA frame".into());
         };
-        let rgba = crate::bgra_to_rgba(raw);
+        let rgba = super::bgra_to_rgba(raw);
         let Some(out) = self.encode_rgba(&rgba)? else {
             return Ok(None);
         };
