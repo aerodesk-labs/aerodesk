@@ -288,6 +288,89 @@ impl Supervisor {
     }
 }
 
+// ---------- #471 M2：登录界面帧源 ----------
+
+/// 登录界面帧（BGRA，与 windows::CapturedFrame 同构；跨采集实现统一）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogonFrame {
+    pub width: u32,
+    pub height: u32,
+    pub bgra: Vec<u8>,
+}
+
+/// #471 M2 帧源：实测矩阵 A（服务 S0 直抓）/B（helper 抓）二选一为默认，
+/// 合成源供单测/e2e。适配器接线随切片三（编码发送）落地。
+pub trait LogonFrameSource {
+    /// 取下一帧；无帧（采集未就绪/连接断开）返回 `None`，调用方下轮再试。
+    fn next_frame(&mut self) -> Option<LogonFrame>;
+}
+
+/// 合成帧源（测试/e2e）：每帧按计数渐变填充，无外部依赖。
+pub struct SyntheticLogonSource {
+    width: u32,
+    height: u32,
+    frame: u32,
+}
+
+impl SyntheticLogonSource {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            frame: 0,
+        }
+    }
+}
+
+impl LogonFrameSource for SyntheticLogonSource {
+    fn next_frame(&mut self) -> Option<LogonFrame> {
+        let base = (self.frame % 64) as u8;
+        self.frame += 1;
+        // 每像素 4 字节 BGRA，首像素埋帧计数便于 e2e 断言帧序。
+        let px = [base, 0x80, 0x80, 0xff];
+        let mut bgra = px.repeat((self.width * self.height) as usize);
+        bgra[0] = (self.frame & 0xff) as u8;
+        Some(LogonFrame {
+            width: self.width,
+            height: self.height,
+            bgra,
+        })
+    }
+}
+
+/// helper→服务 帧协议（M1 行协议的二进制扩展）：
+/// `frame\n` 行头 + LE u32 宽/高 + BGRA 裸载荷。
+pub fn encode_helper_frame(f: &LogonFrame) -> Vec<u8> {
+    let mut out = Vec::with_capacity(6 + 8 + f.bgra.len());
+    out.extend_from_slice(b"frame\n");
+    out.extend_from_slice(&f.width.to_le_bytes());
+    out.extend_from_slice(&f.height.to_le_bytes());
+    out.extend_from_slice(&f.bgra);
+    out
+}
+
+/// 从 `buf` 起始处解码一帧，返回 (帧, 消费字节数)；不足一帧返回 `None`。
+pub fn decode_helper_frame(buf: &[u8]) -> Option<(LogonFrame, usize)> {
+    let head = b"frame\n";
+    if buf.len() < head.len() + 8 || &buf[..head.len()] != head {
+        return None;
+    }
+    let width = u32::from_le_bytes(buf[6..10].try_into().ok()?);
+    let height = u32::from_le_bytes(buf[10..14].try_into().ok()?);
+    let len = (width as usize) * (height as usize) * 4;
+    if buf.len() < 14 + len {
+        return None;
+    }
+    Some((
+        LogonFrame {
+            width,
+            height,
+            bgra: buf[14..14 + len].to_vec(),
+        },
+        14 + len,
+    ))
+}
+
 /// #471 M1：登录界面 helper 主循环——回连服务（loopback TCP，零 FFI IPC）。
 /// 协议（行式 UTF-8）：`hello <token>` 握手；服务发 `ping` 回 `pong`；
 /// `shutdown` 退出。M2 起扩展帧下行/输入上行（长度前缀二进制帧）。
@@ -320,6 +403,28 @@ pub fn logon_helper_main(addr: &str, token: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #471 M2：helper 帧协议 roundtrip + 半包容错（流式解码场景）。
+    #[test]
+    fn helper_frame_codec_roundtrip_and_partial() {
+        let mut src = SyntheticLogonSource::new(8, 4);
+        let frame = src.next_frame().expect("合成源应有帧");
+        let wire = encode_helper_frame(&frame);
+        let (back, used) = decode_helper_frame(&wire).expect("完整帧应可解码");
+        assert_eq!(back, frame);
+        assert_eq!(used, wire.len());
+        // 半包：截断后不可解码,补齐后成功。
+        assert!(decode_helper_frame(&wire[..wire.len() - 1]).is_none());
+    }
+
+    /// 合成源帧序埋点：首像素随帧计数变化（e2e 断言帧推进用）。
+    #[test]
+    fn synthetic_source_frame_counter() {
+        let mut src = SyntheticLogonSource::new(4, 4);
+        let f1 = src.next_frame().unwrap();
+        let f2 = src.next_frame().unwrap();
+        assert_ne!(f1.bgra[0], f2.bgra[0], "帧计数埋点应递增");
+    }
 
     /// M1 联测：本地 listener 模拟服务侧,helper 握手/心跳/退出全链路。
     #[test]
