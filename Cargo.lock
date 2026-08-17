@@ -89,6 +89,7 @@ dependencies = [
  "aerodesk-core",
  "ffmpeg-next",
  "openh264",
+ "str0m",
  "tracing",
  "x264",
 ]
@@ -147,6 +148,7 @@ dependencies = [
  "str0m",
  "tracing",
  "tracing-subscriber",
+ "videotoolbox",
  "winit",
 ]
 

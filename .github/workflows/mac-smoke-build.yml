@@ -1,0 +1,46 @@
+# macOS 冒烟打包(手动派发)：release 构建 aerodesk-desktop → assemble .app(签名)
+# → zip 上传 artifact——供 Mac 真机互控冒烟(#487)下载部署,无需在 Mac 上装 Rust。
+name: Mac smoke build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mac-smoke-app:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # workspace 里 aerodesk-sfu 的 dev-dep str0m-netem 是路径依赖(../../../str0m)，
+      # 解析 workspace 时必须能读到(与 ci.yml 同款)。
+      - name: Checkout str0m (netem dev-dep)
+        shell: bash
+        run: |
+          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
+            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
+          fi
+
+      - name: System deps (FFmpeg via Homebrew)
+        run: brew install ffmpeg
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Build desktop (release)
+        run: cargo build -p aerodesk-desktop --release
+
+      - name: Assemble AeroDesk.app
+        run: |
+          mkdir -p dist
+          ./scripts/assemble-macos-app.sh 0.0.0-smoke target/release/aerodesk-desktop dist/AeroDesk.app
+          cd dist && zip -r -q aerodesk-mac-smoke.zip AeroDesk.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aerodesk-mac-smoke
+          path: dist/aerodesk-mac-smoke.zip
+          retention-days: 7
