@@ -26,6 +26,9 @@ pub struct DxgiCapturer {
     /// 缩放目标宽高（0 = 原生；切换显示器后保持同一输出分辨率，编码器无需重建）。
     target_w: u32,
     target_h: u32,
+    /// #477 机制 B：DXGI 纯变化驱动，屏幕完全静止（合成器无呈现）时首帧永不到来
+    /// （服务器端录制零字节实证）。用 GDI BitBlt 主动引导一次首帧。
+    bootstrapped: bool,
 }
 
 #[cfg(windows)]
@@ -146,6 +149,7 @@ impl DxgiCapturer {
                 display,
                 target_w,
                 target_h,
+                bootstrapped: false,
             })
         }
     }
@@ -185,6 +189,92 @@ impl DxgiCapturer {
         }
     }
 
+    /// #477 机制 B：GDI BitBlt 主动截取当前桌面作为首帧引导。
+    /// DXGI duplication 纯变化驱动，桌面完全静止（无窗口/光标/时钟跳动触发
+    /// 合成器呈现）时 AcquireNextFrame 永远超时——首帧缺失会级联成：发布循环
+    /// 末帧缓存为空 → 心跳无从重发 → viewer 永远等不到首帧。仅引导一次；
+    /// 失败返回 None（保持旧行为，首帧仍由首个真实变化帧提供）。
+    fn gdi_bootstrap_frame(&mut self) -> Option<CapturedFrame> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Gdi::{
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap,
+            CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits,
+            ReleaseDC, SRCCOPY, SelectObject,
+        };
+        let (dx, dy, w, h) = self.display_rect;
+        unsafe {
+            let hdc_screen = GetDC(HWND::default());
+            if hdc_screen.is_invalid() {
+                return None;
+            }
+            let hdc_mem = CreateCompatibleDC(hdc_screen);
+            let hbmp = CreateCompatibleBitmap(hdc_screen, w as i32, h as i32);
+            if hbmp.is_invalid() || hdc_mem.is_invalid() {
+                ReleaseDC(HWND::default(), hdc_screen);
+                return None;
+            }
+            let old = SelectObject(hdc_mem, windows::Win32::Graphics::Gdi::HGDIOBJ(hbmp.0));
+            let blit = BitBlt(
+                hdc_mem, 0, 0, w as i32, h as i32, hdc_screen, dx, dy, SRCCOPY,
+            );
+            let mut bgra: Option<Vec<u8>> = None;
+            if blit.is_ok() {
+                // biHeight 取负 = top-down（DXGI 路径同为 top-down，消费方一致）。
+                let mut bi = BITMAPINFO {
+                    bmiHeader: BITMAPINFOHEADER {
+                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: w as i32,
+                        biHeight: -(h as i32),
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB.0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let mut buf = vec![0u8; w as usize * h as usize * 4];
+                let got = GetDIBits(
+                    hdc_mem,
+                    hbmp,
+                    0,
+                    h,
+                    Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
+                    &mut bi,
+                    DIB_RGB_COLORS,
+                );
+                if got == h as i32 {
+                    bgra = Some(buf);
+                } else {
+                    tracing::warn!("#477 GDI 引导 GetDIBits 失败：got={got} h={h}");
+                }
+            } else {
+                let e = blit.err();
+                tracing::warn!("#477 GDI 引导 BitBlt 失败：{e:?}");
+            }
+            SelectObject(hdc_mem, old);
+            let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(hbmp.0));
+            let _ = DeleteDC(hdc_mem);
+            ReleaseDC(HWND::default(), hdc_screen);
+
+            let mut bgra = bgra?;
+            // 32bpp DIB 为 BGRA（alpha 未定义，编码走 RGB 三分量不受影响）。
+            if self.out_width != w || self.out_height != h {
+                bgra = scale_bgra(&bgra, w, h, self.out_width, self.out_height);
+            }
+            let pts_us = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_micros() as i64)
+                .unwrap_or(0);
+            Some(CapturedFrame {
+                bgra,
+                width: self.out_width,
+                height: self.out_height,
+                pts_us,
+            })
+        }
+    }
+
     /// 取下一帧（阻塞最多 16ms）。无新帧/错误返回 None。
     pub fn capture_frame(&mut self) -> Option<CapturedFrame> {
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -208,8 +298,21 @@ impl DxgiCapturer {
                 .AcquireNextFrame(16, &mut info, &mut resource)
                 .is_err()
             {
+                // #477 机制 B：首个变化帧到来之前用 GDI 引导当前桌面内容，
+                // 让发布循环拿到首帧（并进入心跳维护）；仅此一次。
+                if !self.bootstrapped {
+                    self.bootstrapped = true;
+                    let f = self.gdi_bootstrap_frame();
+                    if f.is_some() {
+                        tracing::info!("#477 GDI 首帧引导成功");
+                    } else {
+                        tracing::warn!("#477 GDI 首帧引导失败（回退等待首个变化帧）");
+                    }
+                    return f;
+                }
                 return None;
             }
+            self.bootstrapped = true;
             let Some(res) = resource else {
                 let _ = duplication.ReleaseFrame();
                 return None;
