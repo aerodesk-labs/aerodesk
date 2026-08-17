@@ -6,6 +6,10 @@
 //!   buffer / AudioSink 单声道管线兼容）
 //! - str0m Opus 协商参数：PT 111 / 48kHz / 2 声道（见 str0m codec_config）
 
+use std::time::{Duration, Instant};
+
+use tracing::warn;
+
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::ChannelLayout;
 use ffmpeg_next::codec::packet::Packet;
@@ -164,6 +168,114 @@ impl OpusDecoder {
     }
 }
 
+/// #73 真实系统音频发送：系统音频采集（core `AudioCapturer`，f32 mono 48k）
+/// → Opus/PCMU。macOS：SCK audio-only SCStream；Linux：PipeWire sink 捕获（#316）。
+/// 采集失败时由调用方回退 AudioTicker（合成音）。
+pub struct RealAudioSender<C: aerodesk_core::platform::AudioCapturer<Error = String>> {
+    cap: C,
+    /// Opus 编码器（--audio-opus；libopus 缺失时回退 PCMU）。
+    opus: Option<OpusEncoder>,
+    /// 48kHz 单声道 i16 缓冲（Opus 直用；PCMU 先 6:1 降采样到 8k）。
+    buf48: Vec<i16>,
+    /// 8kHz 单声道 i16 缓冲（PCMU 用）。
+    buf8: Vec<i16>,
+    pts48: u64,
+    pts8: u64,
+    /// 下一帧发送时间（20ms 节拍；一次只发一帧，避免 WriteWithoutPoll 突发）。
+    next_send: Instant,
+}
+
+impl<C: aerodesk_core::platform::AudioCapturer<Error = String>> RealAudioSender<C> {
+    pub fn new(cap: C, audio_opus: bool) -> Self {
+        let opus = if audio_opus {
+            match OpusEncoder::new(64_000) {
+                Ok(enc) => Some(enc),
+                Err(err) => {
+                    warn!("opus encoder init failed, fallback PCMU: {err}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        Self {
+            cap,
+            opus,
+            buf48: Vec::new(),
+            buf8: Vec::new(),
+            pts48: 0,
+            pts8: 0,
+            next_send: Instant::now(),
+        }
+    }
+
+    /// 排空采集样本并按 20ms 节拍补发**一帧**完整音频（防 WriteWithoutPoll 突发）。
+    pub fn tick(
+        &mut self,
+        endpoint: &mut aerodesk_core::Endpoint,
+        mid: str0m::media::Mid,
+        now: std::time::Instant,
+    ) {
+        if now < self.next_send {
+            return;
+        }
+        let samples = self.cap.next_samples(48_000 * 5).unwrap_or_default();
+        if !samples.is_empty() {
+            self.buf48.extend(
+                samples
+                    .into_iter()
+                    .map(|v| (v.clamp(-1.0, 1.0) * 32767.0) as i16),
+            );
+        }
+
+        // Opus（48k）：一次一帧；不足 960 样本时等下一拍。
+        if self.opus.is_some() {
+            if self.buf48.len() >= 960 {
+                let frame: Vec<i16> = self.buf48.drain(..960).collect();
+                let data = self
+                    .opus
+                    .as_mut()
+                    .and_then(|enc| enc.encode(&frame).ok().flatten());
+                if let Some(data) = data {
+                    let rtp_time = str0m::media::MediaTime::new(
+                        self.pts48 * 960,
+                        str0m::media::Frequency::FORTY_EIGHT_KHZ,
+                    );
+                    if let Err(e) = endpoint.send_audio_frame_opus(mid, data, rtp_time) {
+                        warn!("send opus audio failed: {e:?}");
+                    }
+                }
+                self.pts48 += 1;
+                self.next_send = now + Duration::from_millis(20);
+            } else {
+                self.next_send = now + Duration::from_millis(5);
+            }
+            return;
+        }
+
+        // PCMU（8kHz 电话级）：48k → 8k 6:1 降采样（简单平均），一次一帧。
+        let mut i = 0;
+        while i + 6 <= self.buf48.len() {
+            let sum: i32 = self.buf48[i..i + 6].iter().map(|&x| x as i32).sum();
+            self.buf8.push((sum / 6) as i16);
+            i += 6;
+        }
+        self.buf48.drain(..i);
+        if self.buf8.len() >= 160 {
+            let frame: Vec<i16> = self.buf8.drain(..160).collect();
+            let data = aerodesk_core::pcmu::pcmu_encode(&frame);
+            let rtp_time =
+                str0m::media::MediaTime::new(self.pts8 * 160, str0m::media::Frequency::EIGHT_KHZ);
+            if let Err(e) = endpoint.send_audio_frame(mid, data, rtp_time) {
+                warn!("send pcmu audio failed: {e:?}");
+            }
+            self.pts8 += 1;
+            self.next_send = now + Duration::from_millis(20);
+        } else {
+            self.next_send = now + Duration::from_millis(5);
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

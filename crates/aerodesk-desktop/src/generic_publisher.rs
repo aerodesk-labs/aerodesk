@@ -6,7 +6,7 @@
 //! no-op 桩（`RULE_可达性`：调用点与定义点同 cfg 门控，未接入平台不编译平台引用）。
 
 /// 校验被控端发布房间号：本机 ID 即房间号；空/未初始化返回 None。
-fn valid_publisher_room(device_id: &str) -> Option<String> {
+pub(crate) fn valid_publisher_room(device_id: &str) -> Option<String> {
     let room = device_id.trim();
     if room.is_empty() || room == "—" {
         None
@@ -36,16 +36,28 @@ pub fn stop_publisher(ui: &crate::AppWindow) {
     imp::stop_publisher(ui);
 }
 
-/// 非 Windows 的非 macOS 平台当前未接入被控端发布：提示但不破坏 UI。
-#[cfg(not(windows))]
+/// macOS 被控端：SCK+VT+CGEvent 实现（#487 互控最高优先级）。
+#[cfg(target_os = "macos")]
 pub fn start_publisher(ui: &crate::AppWindow) {
-    ui.set_settings_status("被控端发布当前仅 Windows 实现".into());
+    crate::macos_publisher::start_publisher(ui);
 }
 
-/// 非 Windows 的非 macOS 平台停止为 no-op（保持调用点对称，见 RULE 可达性）。
-#[cfg(not(windows))]
+/// macOS 被控端停止。
+#[cfg(target_os = "macos")]
 pub fn stop_publisher(ui: &crate::AppWindow) {
-    ui.set_settings_status("被控端发布当前仅 Windows 实现".into());
+    crate::macos_publisher::stop_publisher(ui);
+}
+
+/// 其余平台（Linux 等）当前未接入被控端发布：提示但不破坏 UI。
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn start_publisher(ui: &crate::AppWindow) {
+    ui.set_settings_status("被控端发布当前仅 Windows/macOS 实现".into());
+}
+
+/// 其余平台停止为 no-op（保持调用点对称，见 RULE 可达性）。
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn stop_publisher(ui: &crate::AppWindow) {
+    ui.set_settings_status("被控端发布当前仅 Windows/macOS 实现".into());
 }
 
 /// Windows 被控端实现。独立 cfg 模块避免在 Linux/macOS 引用 `aerodesk-platform`。

@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 aerodesk-core = { path = "../aerodesk-core" }
+str0m = { workspace = true, features = ["rust-crypto"] }
 openh264 = "0.9.7"
 tracing.workspace = true
 ffmpeg-next = "8"

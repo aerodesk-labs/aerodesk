@@ -14,6 +14,8 @@ mod generic_viewer;
 mod keymap;
 #[cfg(target_os = "macos")]
 mod macos_media;
+#[cfg(target_os = "macos")]
+mod macos_publisher;
 use slint::Model;
 
 use aerodesk_core::platform::{AppShell, FilePicker, Permissions, Renderer};
