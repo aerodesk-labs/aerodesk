@@ -1,0 +1,16 @@
+[package]
+name = "aerodesk-host"
+description = "AeroDesk 宿主二进制(#492)：被控系统服务(SYSTEM 常驻)与登录界面 helper 承载，从 aerodesk-cli 拆出"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aerodesk-core = { path = "../aerodesk-core" }
+aerodesk-protocol.workspace = true
+aerodesk-platform = { path = "../aerodesk-platform" }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

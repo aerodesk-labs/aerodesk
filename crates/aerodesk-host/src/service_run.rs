@@ -1,6 +1,6 @@
 //! #470 服务运行体（`--service`，SYSTEM 进程内执行）：
-//! - M2：机器级配置 + `SignalPresence` 信令常驻（断线退避重连、30s 配置热重载）；
-//! - M3：WTS 会话让位状态机——`NoSession`（服务在线，登录界面）⇄
+//!   - M2：机器级配置 + `SignalPresence` 信令常驻（断线退避重连、30s 配置热重载）；
+//!   - M3：WTS 会话让位状态机——`NoSession`（服务在线，登录界面）⇄
 //!   `UserSession`（服务让位断开，spawn 桌面 UI）。
 //! 设计见 docs/PRELOGIN_WINDOWS_SERVICE.md（D2/D3/D4）。
 

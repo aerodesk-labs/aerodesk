@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # #470 Windows 服务生命周期冒烟：install → status → config → remove（需管理员）。
-# 前置：cargo build -p aerodesk-cli（FFmpeg DLL 需在 PATH，见 ci.yml Windows 步骤）。
+# 前置：cargo build -p aerodesk-host（FFmpeg DLL 需在 PATH，见 ci.yml Windows 步骤）。
 # 登录界面在线/锁屏/让位切换属人工联调（VM），步骤见
 # docs/PRELOGIN_WINDOWS_SERVICE.md §9。
 set -euo pipefail
 cd "$(dirname "$0")/.."
-BIN="${AERODESK_CLI:-target/debug/aerodesk-cli.exe}"
-[ -f "$BIN" ] || { echo "未找到 $BIN（先 cargo build -p aerodesk-cli）" >&2; exit 1; }
+BIN="${AERODESK_HOST:-target/debug/aerodesk-host.exe}"
+[ -f "$BIN" ] || { echo "未找到 $BIN（先 cargo build -p aerodesk-host）" >&2; exit 1; }
 
 echo "== 初始状态（未装应为 not installed）"
 "$BIN" --service-status
