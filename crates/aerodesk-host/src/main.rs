@@ -10,6 +10,48 @@ mod service_run;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // #471 前台调试入口:绕过 SCM 直跑服务体(foreground_ctx 永不停止),
+    // 本地/CI e2e 无需管理员;--force-media 让位态强制拉起登录界面媒体。
+    if args.iter().any(|a| a == "--service-fg") {
+        #[cfg(windows)]
+        {
+            init_log();
+            let force_media = args.iter().any(|a| a == "--force-media");
+            info!("aerodesk-service 前台模式(--service-fg)");
+            let ctx = aerodesk_platform::windows::service::foreground_ctx();
+            service_run::service_body_with(ctx, force_media);
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--service-fg 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
+    // #471 登录界面 helper 入口(由服务经 winlogon token 拉起):
+    // --capture=DDA 真采集 / --capture-synthetic=确定性联调。
+    if args.iter().any(|a| a == "--logon-helper") {
+        #[cfg(windows)]
+        {
+            init_log();
+            let port = arg(&args, "--port").unwrap_or_else(|| "0".into());
+            let token = arg(&args, "--token").unwrap_or_default();
+            let capture = args.iter().any(|a| a == "--capture");
+            let synthetic = args.iter().any(|a| a == "--capture-synthetic");
+            let addr = format!("127.0.0.1:{port}");
+            info!("logon-helper 启动：回连 {addr}（capture={capture} synthetic={synthetic}）");
+            if let Err(e) = service_run::logon_helper_main(&addr, &token, capture, synthetic) {
+                eprintln!("logon-helper 退出：{e}");
+                std::process::exit(1);
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--logon-helper 仅 Windows 支持");
+            std::process::exit(1);
+        }
+        return;
+    }
     // #470 服务态必须最先分流：init_log() 会占用全局 tracing subscriber，
     // 服务分支的 init_service_log() 二次 init 会 panic（双订阅）→ 服务进程
     // 秒死 → SCM 报 1053（CI 实测教训，本地直跑 --service 前记得也无 stderr 消费者）。
@@ -162,6 +204,22 @@ fn main() {
 /// 无控制台、无用户 HOME（docs/PRELOGIN_WINDOWS_SERVICE.md D2），ProgramData
 /// 不可用时回退 stderr（便于手动 `--service` 调试）。
 #[cfg(windows)]
+fn arg(args: &[String], key: &str) -> Option<String> {
+    args.iter()
+        .find_map(|a| a.strip_prefix(&format!("{key}=")).map(|v| v.to_string()))
+}
+
+/// 调试模式(stderr)日志——service-fg/logon-helper 用;服务态走 init_service_log。
+fn init_log() {
+    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("aerodesk_host=info"));
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_writer(std::io::stderr))
+        .with(filter)
+        .init();
+}
+
 fn init_service_log() {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));

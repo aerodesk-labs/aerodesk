@@ -404,10 +404,29 @@ fn run_media(
     } else {
         Some(token.as_str())
     };
-    let Ok((_signal, mut endpoint, mut socket, video_mid, _audio_mid, _camera_mid)) =
-        crate::connect(&server, &room, Role::Publisher, auth, false)
-    else {
-        warn!("登录界面媒体连接失败（server={server} room={room}）");
+    // host 无 cli 的 connect():走 core 泛型连接(desktop 发布端同款)。
+    let mut live = match aerodesk_core::connect::connect_live_role_codec(
+        &server,
+        &room,
+        Role::Publisher,
+        auth,
+        Some(Codec::H264),
+    ) {
+        Ok(l) => l,
+        Err(e) => {
+            warn!("登录界面媒体连接失败（server={server} room={room}）：{e}");
+            return;
+        }
+    };
+    let (mut endpoint, mut socket, video_mid, _audio_mid) = (
+        live.endpoint,
+        live.socket,
+        live.video_mid.ok_or_else(|| {
+            warn!("登录界面媒体连接失败：无视频 mid");
+        }),
+        live.audio_mid,
+    );
+    let Ok(video_mid) = video_mid else {
         return;
     };
     // #471 M3 帧源解析:
