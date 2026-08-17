@@ -8,7 +8,6 @@
 slint::include_modules!();
 #[cfg(not(target_os = "macos"))]
 mod generic_media;
-#[cfg(not(target_os = "macos"))]
 mod generic_publisher;
 mod generic_viewer;
 mod keymap;
@@ -1498,12 +1497,7 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                             crate::with_ui(&uiw, move |ui| {
                                 if ui.get_inc_enabled() {
                                     let _ = p.lock().unwrap().accept_call();
-                                    #[cfg(not(target_os = "macos"))]
                                     crate::generic_publisher::start_publisher(ui);
-                                    #[cfg(target_os = "macos")]
-                                    {
-                                        let _ = ui;
-                                    }
                                     ui.set_status(format!("接听来自 {from} 的呼叫").into());
                                 } else {
                                     let _ = p.lock().unwrap().reject_call(Some("未开启被控"));
@@ -1515,12 +1509,7 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                         | aerodesk_core::signal_presence::PresenceEvent::CallTimeout { .. } => {
                             let uiw = ui_weak.clone();
                             crate::with_ui(&uiw, |ui| {
-                                #[cfg(not(target_os = "macos"))]
                                 crate::generic_publisher::stop_publisher(ui);
-                                #[cfg(target_os = "macos")]
-                                {
-                                    let _ = ui;
-                                }
                             });
                         }
                     }
@@ -1953,14 +1942,10 @@ fn pick_file_and_send(ui: slint::Weak<AppWindow>) {
     });
 }
 
-/// 「开启被控」开关接入：Windows 启动/停止屏幕发布线程；macOS 暂不实现。
+/// 「开启被控」开关接入：Windows/macOS 各自启动/停止屏幕发布线程
+/// （#487 互控：macOS 已接入 macos_publisher）。
 fn handle_toggle_inc(ui: &AppWindow) {
-    #[cfg(not(target_os = "macos"))]
     crate::generic_publisher::toggle_publisher(ui);
-    #[cfg(target_os = "macos")]
-    {
-        let _ = ui;
-    }
 }
 
 fn main() -> Result<(), slint::PlatformError> {
