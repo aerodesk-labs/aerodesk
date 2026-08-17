@@ -5,6 +5,7 @@
 
 use tracing::info;
 
+#[cfg(windows)]
 mod service_run;
 
 fn main() {
