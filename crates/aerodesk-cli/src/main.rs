@@ -2946,6 +2946,11 @@ fn publisher_generic<
     let mut next_camera = Instant::now();
     let mut next_frame = Instant::now();
     let mut pts = 0i64;
+    // #477 机制 B（静态屏零输出）：缓存末帧原始像素。屏幕静止时 DXGI 等变化
+    // 驱动采集源不再产出新帧，晚加入 viewer 永远等不到首帧（服务器端录制
+    // 零字节实证）；无新帧 ≥2s 时以缓存末帧强制 IDR 心跳重发。
+    let mut last_frame_raw: Option<(Vec<u8>, u32, u32)> = None;
+    let mut last_capture_at = Instant::now();
     // #8 端到端延迟：合成光标轨迹（30Hz）。
     let cursor_start = Instant::now();
     let mut last_cursor = Instant::now();
@@ -3062,26 +3067,59 @@ fn publisher_generic<
             // 屏幕静止时摄像头轨冻结、sleep 节拍失效）。
             // 运行期编码错误降级为丢帧 + 告警：硬件编码器可能瞬时失败（模式切换/
             // 设备丢失），不应 panic 整个发布端（旧实现 expect 一错即崩）。
-            match source.next_frame() {
-                Ok(Some(frame)) => match encoder.encode(&frame) {
-                    Ok(Some(unit)) => {
-                        let rtp_time = str0m::media::MediaTime::new(
-                            pts as u64 * 3000,
-                            str0m::media::Frequency::NINETY_KHZ,
-                        );
-                        if let Err(e) = endpoint.send_video_frame(video_mid, unit.data, rtp_time) {
-                            warn!("send frame failed: {e:?}");
-                        }
-                        if unit.keyframe {
-                            debug!("sent keyframe #{pts}");
-                        }
-                        pts += 1;
+            //
+            // #477 机制 B：无新帧 ≥2s（静态屏）时以缓存末帧强制 IDR 心跳重发，
+            // 保证晚加入 viewer 在 ≤2s 内拿到可解码关键帧（静态 IDR 帧间压缩
+            // 后仅几十 KB，带宽可忽略）。
+            let encoded = match source.next_frame() {
+                Ok(Some(frame)) => {
+                    if let Some(raw) = frame.raw.as_ref() {
+                        last_frame_raw = Some((raw.clone(), frame.width, frame.height));
                     }
-                    Ok(None) => {}
-                    Err(e) => warn!("encode failed（丢帧继续）: {e}"),
-                },
+                    last_capture_at = Instant::now();
+                    encoder.encode(&frame)
+                }
+                Ok(None) => {
+                    if last_capture_at.elapsed() >= Duration::from_secs(2)
+                        && let Some((raw, w, h)) = last_frame_raw.as_ref()
+                    {
+                        last_capture_at = Instant::now();
+                        let hb = aerodesk_core::platform::VideoFrame {
+                            platform: None,
+                            handle: None,
+                            raw: Some(raw.clone()),
+                            width: *w,
+                            height: *h,
+                            pts_ms: 0,
+                        };
+                        encoder.request_keyframe();
+                        debug!("static-screen heartbeat IDR");
+                        encoder.encode(&hb)
+                    } else {
+                        Ok(None)
+                    }
+                }
+                Err(e) => {
+                    warn!("source next_frame: {e}");
+                    Ok(None)
+                }
+            };
+            match encoded {
+                Ok(Some(unit)) => {
+                    let rtp_time = str0m::media::MediaTime::new(
+                        pts as u64 * 3000,
+                        str0m::media::Frequency::NINETY_KHZ,
+                    );
+                    if let Err(e) = endpoint.send_video_frame(video_mid, unit.data, rtp_time) {
+                        warn!("send frame failed: {e:?}");
+                    }
+                    if unit.keyframe {
+                        debug!("sent keyframe #{pts}");
+                    }
+                    pts += 1;
+                }
                 Ok(None) => {}
-                Err(e) => warn!("source next_frame: {e}"),
+                Err(e) => warn!("encode failed（丢帧继续）: {e}"),
             }
         }
 
