@@ -41,10 +41,14 @@ pub struct ServiceSettings {
     /// #471 M2：启动即发布登录界面媒体（e2e/联调模式；生产由呼叫接听触发）。
     #[serde(default)]
     pub auto_publish: bool,
-    /// #471 M2：帧源（`synthetic`=合成源；`auto` 预留——实测矩阵 A/B 定
-    /// S0 直抓/helper 抓后接线，当前回落合成）。
+    /// #471 M2：帧源（`synthetic`=合成源；`helper`=M3 实测 B 路径（helper
+    /// 回连上行真采集帧）；`auto` 预留——实测矩阵 A/B 定稿后接 S0 直抓）。
     #[serde(default)]
     pub frame_source: String,
+    /// #471 M3：helper 回连端口（0=临时分配——真机由服务拉起 helper 时用；
+    /// 本地联调固定端口手动起 helper）。
+    #[serde(default)]
+    pub helper_port: u16,
 }
 
 fn default_true() -> bool {
@@ -365,14 +369,16 @@ impl HeadlessMedia {
 fn media_start(settings: &ServiceSettings) -> HeadlessMedia {
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();
-    let (server, room, token) = (
+    let (server, room, token, frame_source, helper_port) = (
         settings.server.clone(),
         settings.device_id.clone(),
         settings.token.clone(),
+        settings.frame_source.clone(),
+        settings.helper_port,
     );
     let handle = std::thread::Builder::new()
         .name("logon-media".into())
-        .spawn(move || run_media(server, room, token, stop2))
+        .spawn(move || run_media(server, room, token, frame_source, helper_port, stop2))
         .expect("spawn logon-media");
     HeadlessMedia {
         stop,
@@ -382,7 +388,14 @@ fn media_start(settings: &ServiceSettings) -> HeadlessMedia {
 
 /// 媒体主循环：帧源→编码→`send_video_frame`，同 cli publisher 驱动模式
 /// （UDP 输入→timeout→poll_output→poll_event，1ms 粒度 sleep）。
-fn run_media(server: String, room: String, token: String, stop: Arc<AtomicBool>) {
+fn run_media(
+    server: String,
+    room: String,
+    token: String,
+    frame_source: String,
+    helper_port: u16,
+    stop: Arc<AtomicBool>,
+) {
     use aerodesk_core::Endpoint;
     use str0m::net::{Protocol, Receive};
     use str0m::{Input, Output};
@@ -397,8 +410,20 @@ fn run_media(server: String, room: String, token: String, stop: Arc<AtomicBool>)
         warn!("登录界面媒体连接失败（server={server} room={room}）");
         return;
     };
-    // M2：合成源起步（`auto` 待实测矩阵 A/B 接 S0/helper 帧 source）。
-    let mut source = Box::new(SyntheticLogonSource::new(640, 360));
+    // M2：合成源起步；`helper` 模式（M3 实测 B 路径）起 listener 等 helper
+    // 回连上行真采集帧（本机联调手动起 helper,真机由服务经 winlogon token
+    // 拉起——接线随实测矩阵定稿）。10s 等 delegate 不到回退合成源。
+    let mut source: Box<dyn LogonFrameSource + Send> = if frame_source == "helper" {
+        match helper_source_or_fallback(helper_port) {
+            Ok(s) => Box::new(s),
+            Err(e) => {
+                warn!("helper 帧源不可用，回退合成源：{e}");
+                Box::new(SyntheticLogonSource::new(640, 360))
+            }
+        }
+    } else {
+        Box::new(SyntheticLogonSource::new(640, 360))
+    };
     let mut encoder =
         match aerodesk_codec::encode::FfmpegEncoder::new(640, 360, 30, 1_500_000, Codec::H264) {
             Ok(e) => e,
@@ -409,6 +434,8 @@ fn run_media(server: String, room: String, token: String, stop: Arc<AtomicBool>)
         };
     info!("登录界面媒体线程启动（合成源 640x360@30 H264，room={room}）");
     let mut pts: u64 = 0;
+    let mut stat_at = Instant::now();
+    let mut stat_at = Instant::now();
     let mut connected = false;
     let mut next_frame = Instant::now();
     loop {
@@ -467,6 +494,10 @@ fn run_media(server: String, room: String, token: String, stop: Arc<AtomicBool>)
                     Err(e) => warn!("encode：{e}"),
                 }
             }
+        }
+        if stat_at.elapsed() >= Duration::from_secs(5) {
+            stat_at = Instant::now();
+            info!("媒体已发 {pts} 帧");
         }
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -556,32 +587,184 @@ pub fn decode_helper_frame(buf: &[u8]) -> Option<(LogonFrame, usize)> {
     ))
 }
 
+/// #471 M3:helper 帧源客户端——服务侧 listener,读 helper 上行的 TCP 帧流。
+/// `next_frame` 非阻塞读 + 流式解码(半包缓存于 `buf`);无完整帧返回 `None`
+/// 下轮再试,对端断开返回 `None`(由调用方决定重连/回退)。
+struct HelperFrameSource {
+    stream: std::net::TcpStream,
+    buf: Vec<u8>,
+}
+
+impl HelperFrameSource {
+    /// 在 `port`(0=临时分配)上等 helper 回连(10s 超时),握手校验 hello 行。
+    fn accept_on(port: u16) -> Result<Self, String> {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port))
+            .map_err(|e| format!("helper listener bind({port})：{e}"))?;
+        let real = listener.local_addr().map_err(|e| e.to_string())?.port();
+        info!("helper 帧源：等待 helper 回连 127.0.0.1:{real}（10s 超时）");
+        listener.set_nonblocking(false).map_err(|e| e.to_string())?;
+        let (mut stream, peer) = listener
+            .accept()
+            .map_err(|e| format!("等待 helper 回连超时/失败：{e}"))?;
+        stream.set_nodelay(true).ok();
+        // 握手：helper 先发 "hello <token>" 行（token 联调场景不校验内容）。
+        // 逐字节读——BufReader 会把紧跟首行的帧字节吞进内部缓冲随 drop 丢失
+        // （实测教训：helper 握手后 33ms 即发首帧）。
+        use std::io::Read;
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        let mut line = Vec::new();
+        let mut b = [0u8; 1];
+        loop {
+            stream
+                .read_exact(&mut b)
+                .map_err(|e| format!("helper 握手读失败：{e}"))?;
+            line.push(b[0]);
+            if b[0] == b'\n' {
+                break;
+            }
+        }
+        let line = String::from_utf8_lossy(&line).to_string();
+        if !line.trim().starts_with("hello") {
+            return Err(format!("helper 握手异常：{line:?}（peer {peer}）"));
+        }
+        stream.set_read_timeout(Some(Duration::from_millis(1))).ok();
+        info!("helper 帧源已连接（peer {peer}）");
+        Ok(HelperFrameSource {
+            stream,
+            buf: Vec::new(),
+        })
+    }
+}
+
+impl LogonFrameSource for HelperFrameSource {
+    fn next_frame(&mut self) -> Option<LogonFrame> {
+        use std::io::Read;
+        let mut chunk = [0u8; 65536];
+        // 连续读到 WouldBlock/TimedOut:一帧 ~900KB 需多次 read,若每次 read 后
+        // 空返回,凑帧期每轮都付 1ms-timeout 的 15.6ms 时钟粒度 → 实测 3.6fps;
+        // 内核缓冲有数据时 read 立即返回,循环读可在单个等待周期内凑满整帧。
+        loop {
+            if let Some((frame, used)) = decode_helper_frame(&self.buf) {
+                self.buf.drain(..used);
+                return Some(frame);
+            }
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return None, // helper 断开
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    return None; // 暂无更多数据,未凑齐帧,下轮再试
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+}
+
+/// 组装 helper 帧源(端口 0 = 临时分配;返回错误由调用方回退合成源)。
+fn helper_source_or_fallback(port: u16) -> Result<HelperFrameSource, String> {
+    HelperFrameSource::accept_on(port)
+}
+
 /// #471 M1：登录界面 helper 主循环——回连服务（loopback TCP，零 FFI IPC）。
 /// 协议（行式 UTF-8）：`hello <token>` 握手；服务发 `ping` 回 `pong`；
 /// `shutdown` 退出。M2 起扩展帧下行/输入上行（长度前缀二进制帧）。
-pub fn logon_helper_main(addr: &str, token: &str) -> Result<(), String> {
+/// `capture`：同时采集当前 desktop（DxgiCapturer 缩放到目标分辨率）按
+/// 30fps 上行帧（M3 实测 B 路径——本机用户会话可联调,真机 winlogon 桌面
+/// 由服务经 winlogon token 拉起本入口）。读侧保持非阻塞以应答 ping/shutdown。
+pub fn logon_helper_main(
+    addr: &str,
+    token: &str,
+    capture: bool,
+    synthetic: bool,
+) -> Result<(), String> {
     use std::io::{BufRead, BufReader, Write};
     let stream =
         std::net::TcpStream::connect(addr).map_err(|e| format!("回连服务 {addr} 失败：{e}"))?;
+    stream
+        .set_nodelay(true)
+        .map_err(|e| format!("nodelay：{e}"))?;
     let mut writer = stream
         .try_clone()
         .map_err(|e| format!("clone 流失败：{e}"))?;
     writeln!(writer, "hello {token}").map_err(|e| format!("握手发送失败：{e}"))?;
     let mut reader = BufReader::new(stream);
+    // 读超时 30ms 定步长:写侧保持阻塞(整流非阻塞会让 write 撞 10035,
+    // 实测);有帧时 read 立即返回,空闲时循环按 30ms 步进,30fps 门限不受
+    // Windows 1ms→15.6ms 时钟粒度拖累。
+    reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_millis(30)))
+        .ok();
+    // 采集器：失败降级为纯心跳 helper（联调环境无显示器/权限时仍可验证控制面）。
+    // synthetic：联调/CI 模式——上行合成帧（确定性验证链路，不依赖桌面重绘）；
+    // 真值（DDA 采 winlogon/用户桌面）在 VM/真机走 capture 分支。
+    let mut synth = if synthetic {
+        Some(SyntheticLogonSource::new(640, 360))
+    } else {
+        None
+    };
+    let mut capturer = if capture && synth.is_none() {
+        match aerodesk_platform::windows::capture::DxgiCapturer::new_with_scale(640, 360) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                warn!("helper DDA 采集初始化失败，降级纯心跳：{e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut next_frame = Instant::now();
+    let mut sent: u64 = 0;
+    let mut stat_at = Instant::now();
     let mut line = String::new();
     loop {
+        // 控制面：非阻塞读一行（多数轮次 WouldBlock 直接走采集）。
         line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .map_err(|e| format!("读服务消息失败：{e}"))?;
-        if n == 0 {
-            return Err("服务侧断开".into());
+        match reader.read_line(&mut line) {
+            Ok(0) => return Err("服务侧断开".into()),
+            Ok(_) => match line.trim() {
+                "ping" => writeln!(writer, "pong").map_err(|e| format!("心跳回复失败：{e}"))?,
+                "shutdown" => {
+                    info!("helper 收到 shutdown，退出（已发 {sent} 帧）");
+                    return Ok(());
+                }
+                other => info!("logon-helper 收到未知消息：{other}"),
+            },
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(format!("读服务消息失败：{e}")),
         }
-        match line.trim() {
-            "ping" => writeln!(writer, "pong").map_err(|e| format!("心跳回复失败：{e}"))?,
-            "shutdown" => return Ok(()),
-            other => info!("logon-helper 收到未知消息：{other}（M2 帧协议接入点）"),
+        // 数据面：30fps 上行帧。
+        if (capturer.is_some() || synth.is_some()) && Instant::now() >= next_frame {
+            next_frame += Duration::from_millis(33);
+            let frame = if let Some(s) = synth.as_mut() {
+                s.next_frame()
+            } else if let Some(f) = capturer.as_mut().and_then(|c| c.capture_frame()) {
+                Some(LogonFrame {
+                    width: f.width,
+                    height: f.height,
+                    bgra: f.bgra,
+                })
+            } else {
+                None
+            };
+            if let Some(frame) = frame {
+                if let Err(e) = writer.write_all(&encode_helper_frame(&frame)) {
+                    return Err(format!("帧上行失败：{e}"));
+                }
+                sent += 1;
+            }
         }
+        if stat_at.elapsed() >= Duration::from_secs(5) {
+            stat_at = Instant::now();
+            info!("helper 采集上行：累计 {sent} 帧");
+        }
+        std::thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -628,7 +811,7 @@ mod tests {
             assert!(line.trim().ends_with("pong"));
             writeln!(s, "shutdown").unwrap();
         });
-        logon_helper_main(&addr, "t0ken").expect("helper 应正常退出");
+        logon_helper_main(&addr, "t0ken", false, false).expect("helper 应正常退出");
         server.join().expect("server 线程");
     }
 

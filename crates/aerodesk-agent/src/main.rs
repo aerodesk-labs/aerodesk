@@ -358,9 +358,11 @@ fn run() {
         {
             let port = arg(&args, "--port").unwrap_or_else(|| "0".into());
             let token = arg(&args, "--token").unwrap_or_default();
+            let capture = args.iter().any(|a| a == "--capture");
+            let synthetic = args.iter().any(|a| a == "--capture-synthetic");
             let addr = format!("127.0.0.1:{port}");
-            info!("logon-helper 启动：回连 {addr}");
-            if let Err(e) = service_run::logon_helper_main(&addr, &token) {
+            info!("logon-helper 启动：回连 {addr}（capture={capture} synthetic={synthetic}）");
+            if let Err(e) = service_run::logon_helper_main(&addr, &token, capture, synthetic) {
                 eprintln!("logon-helper 退出：{e}");
                 std::process::exit(1);
             }
