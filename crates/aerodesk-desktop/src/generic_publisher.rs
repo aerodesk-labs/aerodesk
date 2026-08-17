@@ -68,6 +68,7 @@ mod imp {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
+    use aerodesk_codec::audio::RealAudioSender;
     use aerodesk_core::Endpoint;
     use aerodesk_core::connect::connect_live_role_codec;
     use aerodesk_core::endpoint::ClientEvent;
@@ -79,7 +80,7 @@ mod imp {
     use aerodesk_protocol::signal::Role;
     use slint::ComponentHandle;
     use str0m::Output;
-    use str0m::media::{Frequency, MediaTime, Mid};
+    use str0m::media::{Frequency, MediaTime};
     use str0m::net::Protocol;
 
     const FPS: u32 = 30;
@@ -219,9 +220,11 @@ mod imp {
         .ok();
 
         // 真实系统音频（WASAPI loopback → PCMU）；失败仅告警，视频照常发布。
+        // #487：PcmuAudioSender 与 aerodesk-codec::audio::RealAudioSender 的
+        // PCMU 路径完全重复，统一用后者（20ms 节拍逻辑单份维护）。
         let mut audio_sender = if audio {
             match aerodesk_platform::windows::audio_capture::WasapiLoopbackCapture::start() {
-                Ok(cap) => Some(PcmuAudioSender::new(cap)),
+                Ok(cap) => Some(RealAudioSender::new(cap, false)),
                 Err(e) => {
                     tracing::warn!("WASAPI 回环采集失败，被控端仅发布视频: {e}");
                     None
@@ -403,60 +406,6 @@ mod imp {
                 }
             }
             _ => {}
-        }
-    }
-
-    /// WASAPI 48kHz f32 样本 → PCMU 8kHz 20ms 帧（6:1 降采样），一次补一帧。
-    struct PcmuAudioSender {
-        cap: aerodesk_platform::windows::audio_capture::WasapiLoopbackCapture,
-        buf48: Vec<i16>,
-        buf8: Vec<i16>,
-        pts: u64,
-        next_send: Instant,
-    }
-
-    impl PcmuAudioSender {
-        fn new(cap: aerodesk_platform::windows::audio_capture::WasapiLoopbackCapture) -> Self {
-            Self {
-                cap,
-                buf48: Vec::new(),
-                buf8: Vec::new(),
-                pts: 0,
-                next_send: Instant::now(),
-            }
-        }
-
-        fn tick(&mut self, endpoint: &mut Endpoint, mid: Mid, now: Instant) {
-            if now < self.next_send {
-                return;
-            }
-            let samples = self.cap.next_samples(48_000 * 5);
-            self.buf48.extend(
-                samples
-                    .into_iter()
-                    .map(|v| (v.clamp(-1.0, 1.0) * 32767.0) as i16),
-            );
-
-            let mut i = 0;
-            while i + 6 <= self.buf48.len() {
-                let sum: i32 = self.buf48[i..i + 6].iter().map(|&x| x as i32).sum();
-                self.buf8.push((sum / 6) as i16);
-                i += 6;
-            }
-            self.buf48.drain(..i);
-
-            if self.buf8.len() >= 160 {
-                let frame: Vec<i16> = self.buf8.drain(..160).collect();
-                let data = aerodesk_core::pcmu::pcmu_encode(&frame);
-                let rtp_time = MediaTime::new(self.pts * 160, Frequency::EIGHT_KHZ);
-                if let Err(e) = endpoint.send_audio_frame(mid, data, rtp_time) {
-                    tracing::warn!("发送 PCMU 音频失败: {e:?}");
-                }
-                self.pts += 1;
-                self.next_send = now + Duration::from_millis(20);
-            } else {
-                self.next_send = now + Duration::from_millis(5);
-            }
         }
     }
 }
