@@ -280,10 +280,10 @@ fn prometheus_body(
         Some(srv) => format!(
             "# TYPE aerodesk_sfu_turn_allocations gauge\n\
              # TYPE aerodesk_sfu_turn_allocations_total counter\n\
-             # TYPE aerodesk_sfu_turn_evictions counter\n\
+             # TYPE aerodesk_sfu_turn_evictions_total counter\n\
              aerodesk_sfu_turn_allocations {}\n\
              aerodesk_sfu_turn_allocations_total {}\n\
-             aerodesk_sfu_turn_evictions {}\n",
+             aerodesk_sfu_turn_evictions_total {}\n",
             srv.active_allocations(),
             srv.allocations_total(),
             srv.evictions_total()
@@ -1303,7 +1303,7 @@ fn web_request(
             "shards": shards,
             "turn_allocations": turn_server.as_ref().map(|s| s.active_allocations()),
             "turn_allocations_total": turn_server.as_ref().map(|s| s.allocations_total()),
-            "turn_evictions": turn_server.as_ref().map(|s| s.evictions_total()),
+            "turn_evictions_total": turn_server.as_ref().map(|s| s.evictions_total()),
             "recordings_active": shared.recorder.as_ref().map(|r| r.active_count()).unwrap_or(0),
         });
         return Response::from_data(

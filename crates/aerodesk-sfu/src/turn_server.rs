@@ -86,6 +86,9 @@ struct Allocation {
     relayed: SocketAddr,
     client_ip: IpAddr,
     expires: Arc<AtomicU64>,
+    /// 最近一次 Refresh/创建时刻（#482：驱逐判定的真信号——"≥450s 未刷新"，
+    /// 而非剩余寿命代理量；短租期客户端（Refresh 可请求低至 60s）不会被误伤）。
+    last_refresh: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     state: Arc<Mutex<AllocState>>,
 }
@@ -419,38 +422,100 @@ fn sweep_expired_locked(allocs: &mut HashMap<ClientKey, Allocation>) -> usize {
     expired.len()
 }
 
-/// #482：驱逐"陈旧"的最旧 allocation——崩溃/被 kill 的客户端残留没有 Refresh，
-/// expires 持续走低；存活客户端每 300s 刷新，剩余寿命恒 ≥ lifetime/2。
-/// 仅驱逐剩余寿命 < lifetime/4 的（≈ 至少 450s 未刷新，几乎必死），
-/// 存活客户端永不误伤；剩余寿命仍多时返回 None（调用方按 486 处理）。
+/// #482：找出"陈旧"驱逐候选（只读，不破坏）——崩溃/被 kill 的客户端残留没有
+/// Refresh，`last_refresh` 冻结；存活客户端按自身 granted lifetime 刷新，默认
+/// 600s 租期每 300s 刷新，剩余寿命恒 ≥ lifetime/2。
+/// 仅驱逐"≥ lifetime·3/4（默认 450s）未刷新"的（几乎必死）；以"最久未刷新"
+/// 为序而非剩余寿命——短租期客户端（Refresh 可请求低至 60s，剩余寿命恒 < 150s）
+/// 永不误伤。无候选时返回 None（调用方按 486 处理，且不做任何破坏）。
 /// `client_ip` 为 Some 时只在同 IP 内选（per-IP 配额路径）。
-fn evict_stale_locked(
-    allocs: &mut HashMap<ClientKey, Allocation>,
+fn stale_candidate_locked(
+    allocs: &HashMap<ClientKey, Allocation>,
     client_ip: Option<IpAddr>,
     lifetime: u64,
 ) -> Option<ClientKey> {
     let now = unix_now();
-    let threshold = lifetime / 4;
+    let stale_after = lifetime / 4 * 3; // 默认 600 → 450s
     let oldest = allocs
         .iter()
         .filter(|(_, a)| client_ip.map(|ip| a.client_ip == ip).unwrap_or(true))
-        .min_by_key(|(_, a)| a.expires.load(Ordering::SeqCst))
+        .min_by_key(|(_, a)| a.last_refresh.load(Ordering::SeqCst))
         .map(|(k, _)| *k)?;
-    let remaining = allocs
+    let idle = allocs
         .get(&oldest)
-        .map(|a| a.expires.load(Ordering::SeqCst).saturating_sub(now))
+        .map(|a| now.saturating_sub(a.last_refresh.load(Ordering::SeqCst)))
         .unwrap_or(0);
-    if remaining >= threshold {
-        return None;
+    (idle >= stale_after).then_some(oldest)
+}
+
+/// #482 配额门（须持有 allocations 锁调用）：
+/// 仅配额超限时按需清扫过期项（周期 sweep 30s 仍负责常规回收）；仍超限则探测
+/// "最久未刷新 ≥ lifetime·3/4"的陈旧候选，任一超限维度无候选 → 拒绝且零副作用
+/// （不驱逐任何现存 allocation）。允许时驱逐陈旧项并插入新 allocation。
+/// 返回 (实际驱逐数, 是否允许)。提取为纯函数以支持确定性单测——集成测试中
+/// udp_run 线程的周期 sweep 会抢占按需清扫，无法区分是谁扫的。
+fn quota_gate_locked(
+    allocs: &mut HashMap<ClientKey, Allocation>,
+    key: ClientKey,
+    alloc: Allocation,
+    client_ip: IpAddr,
+    max_total: usize,
+    max_per_ip: usize,
+    lifetime: u64,
+) -> (usize, bool) {
+    let total_enabled = max_total > 0;
+    let ip_enabled = max_per_ip > 0;
+    let mut total_over = total_enabled && allocs.len() >= max_total;
+    let mut ip_count = if ip_enabled {
+        allocs.values().filter(|a| a.client_ip == client_ip).count()
+    } else {
+        0
+    };
+    let mut ip_over = ip_enabled && ip_count >= max_per_ip;
+    // 仅配额已满才按需清扫（周期 sweep 30s 仍负责常规回收）——避免每次
+    // Allocate 全表扫描；清扫后配额可能已释放，重新判定。
+    if total_over || ip_over {
+        let _ = sweep_expired_locked(allocs);
+        total_over = total_enabled && allocs.len() >= max_total;
+        ip_count = if ip_enabled {
+            allocs.values().filter(|a| a.client_ip == client_ip).count()
+        } else {
+            0
+        };
+        ip_over = ip_enabled && ip_count >= max_per_ip;
     }
-    if let Some(a) = allocs.remove(&oldest) {
-        a.stop.store(true, Ordering::SeqCst);
-        warn!(
-            "TURN quota evict: {oldest:?} relayed={} stale={}s（陈旧残留，驱逐）",
-            a.relayed, remaining
-        );
+    // 先探测各超限维度的可驱逐候选（只读）："最久未刷新 ≥ lifetime·3/4"
+    // 的陈旧残留；任一超限维度无候选 → 486，且不驱逐任何现存 allocation
+    // （保持旧行为零副作用，避免"毁了一个还照样拒绝"）。
+    let total_candidate = if total_over {
+        stale_candidate_locked(allocs, None, lifetime)
+    } else {
+        None
+    };
+    let ip_candidate = if ip_over {
+        stale_candidate_locked(allocs, Some(client_ip), lifetime)
+    } else {
+        None
+    };
+    if (total_over && total_candidate.is_none()) || (ip_over && ip_candidate.is_none()) {
+        return (0, false);
     }
-    Some(oldest)
+    let mut evicted: Vec<ClientKey> = Vec::new();
+    for cand in [total_candidate, ip_candidate].into_iter().flatten() {
+        if evicted.contains(&cand) {
+            continue;
+        }
+        if let Some(a) = allocs.remove(&cand) {
+            a.stop.store(true, Ordering::SeqCst);
+            warn!(
+                "TURN quota evict: {cand:?} relayed={}（陈旧残留，驱逐）",
+                a.relayed
+            );
+            evicted.push(cand);
+        }
+    }
+    allocs.insert(key, alloc);
+    (evicted.len(), true)
 }
 
 // ---------- TCP/TLS 控制面 ----------
@@ -552,6 +617,10 @@ fn tcp_conn_loop(
     acceptor: Option<Arc<rustls::ServerConfig>>,
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(TCP_READ_TIMEOUT))?;
+    // 写超时：#482 驱逐/过期可能把 relay 线程停在 ClientSink::Tcp 的 write_all 上
+    // （客户端停读则永久阻塞 → 线程+socket+relay 端口泄漏）；超时后写失败被
+    // `let _ =` 吞掉，relay 线程回到循环顶部观察到 stop 正常退出。
+    stream.set_write_timeout(Some(Duration::from_secs(15))).ok();
     stream.set_nodelay(true).ok();
     let peer_ip = stream
         .peer_addr()
@@ -754,12 +823,28 @@ fn handle_allocate(
     sink: &ClientSink,
     txid: [u8; 12],
 ) {
-    if shared
-        .allocations
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .contains_key(&key)
-    {
+    // 同四元组重试：现存项未过期 → 437（锁外发送——TCP 客户端的 write_all 有 15s
+    // 写超时，锁内发送会把全局 allocations 锁拖住，殃及所有客户端的控制面）；
+    // 已过期 → 顺手回收后继续走正常分配流程。否则客户端崩溃重连复用同源端口时，
+    // 过期残留把新 Allocate 楔在 437 最多 30s（配额门内的按需 sweep 只在
+    // "其他 key 占满配额"时触发，重复 key 自身轮不到）。
+    let dup_live = {
+        let mut allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
+        let live = allocs
+            .get(&key)
+            .is_some_and(|a| unix_now() < a.expires.load(Ordering::SeqCst));
+        if !live {
+            if let Some(a) = allocs.remove(&key) {
+                a.stop.store(true, Ordering::SeqCst);
+                debug!(
+                    "TURN allocation expired (dup-key retry): {key:?} relayed={}",
+                    a.relayed
+                );
+            }
+        }
+        live
+    };
+    if dup_live {
         send_error(server, sink, txid, MSG_ALLOCATE, 437, false, shared);
         return;
     }
@@ -783,32 +868,8 @@ fn handle_allocate(
         ClientKey::Udp(a) => a.ip(),
         ClientKey::Tcp { ip, .. } => ip,
     };
-    {
-        let mut allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
-        // #482：先按需清扫（周期 sweep 30s + 控制面单线程，可能撞上"到期
-        // 未扫"的假满）；仍超限时驱逐"陈旧"最旧 allocation（≥450s 未刷新
-        // 的残留，存活客户端每 300s 刷新永不误伤），避免 486 楔死。
-        let _ = sweep_expired_locked(&mut allocs);
-        if shared.max_allocs_total > 0 && allocs.len() >= shared.max_allocs_total {
-            if evict_stale_locked(&mut allocs, None, shared.default_lifetime as u64).is_none() {
-                send_error(server, sink, txid, MSG_ALLOCATE, 486, false, shared);
-                return;
-            }
-            shared.evicted_total.fetch_add(1, Ordering::Relaxed);
-        }
-        if shared.max_allocs_per_ip > 0
-            && allocs.values().filter(|a| a.client_ip == client_ip).count()
-                >= shared.max_allocs_per_ip
-        {
-            if evict_stale_locked(&mut allocs, Some(client_ip), shared.default_lifetime as u64)
-                .is_none()
-            {
-                send_error(server, sink, txid, MSG_ALLOCATE, 486, false, shared);
-                return;
-            }
-            shared.evicted_total.fetch_add(1, Ordering::Relaxed);
-        }
-    }
+    // #482：先预绑定 relay（失败 → 500，零副作用）——配额检查/驱逐改为
+    // "先探测后删除"，不再出现"驱逐了残留却因后续 bind 失败白毁一个 allocation"。
     let ipv6 = std::env::var("SFU_TURN_IPV6")
         .map(|v| v == "1")
         .unwrap_or(false);
@@ -835,6 +896,7 @@ fn handle_allocate(
     };
     let relayed = SocketAddr::new(shared.host, relay_port);
     let expires = Arc::new(AtomicU64::new(unix_now() + shared.default_lifetime as u64));
+    let last_refresh = Arc::new(AtomicU64::new(unix_now()));
     let stop = Arc::new(AtomicBool::new(false));
     let state = Arc::new(Mutex::new(AllocState {
         channels: HashMap::new(),
@@ -846,6 +908,38 @@ fn handle_allocate(
         UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).expect("fallback bind")
     }));
     let sink_for_relay = sink.clone();
+    // 配额检查、按需清扫、驱逐与插入同一把锁（并发 Allocate 无法越限插入）；
+    // 486 在任何破坏发生前返回（零副作用）。逻辑见 quota_gate_locked。
+    let (evicted, allowed) = {
+        let mut allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
+        quota_gate_locked(
+            &mut allocs,
+            key,
+            Allocation {
+                relay: relay_arc.clone(),
+                relayed,
+                client_ip,
+                expires: expires.clone(),
+                last_refresh: last_refresh.clone(),
+                stop: stop.clone(),
+                state: state.clone(),
+            },
+            client_ip,
+            shared.max_allocs_total,
+            shared.max_allocs_per_ip,
+            shared.default_lifetime as u64,
+        )
+    };
+    if !allowed {
+        send_error(server, sink, txid, MSG_ALLOCATE, 486, false, shared);
+        return;
+    }
+    if evicted > 0 {
+        shared
+            .evicted_total
+            .fetch_add(evicted as u64, Ordering::Relaxed);
+    }
+    shared.created_total.fetch_add(1, Ordering::Relaxed);
     let _relay_thread = spawn_relay(
         relay_arc.clone(),
         server_arc,
@@ -854,22 +948,6 @@ fn handle_allocate(
         stop.clone(),
         state.clone(),
     );
-    shared.created_total.fetch_add(1, Ordering::Relaxed);
-    shared
-        .allocations
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(
-            key,
-            Allocation {
-                relay: relay_arc,
-                relayed,
-                client_ip,
-                expires,
-                stop,
-                state,
-            },
-        );
     debug!("TURN allocation: {key:?} user={username} relayed={relayed}");
     let body = vec![
         (ATTR_XOR_RELAYED_ADDRESS, encode_xor_peer(relayed)),
@@ -988,13 +1066,19 @@ fn handle_refresh(
         send_error(server, sink, txid, MSG_REFRESH, 401, true, shared);
         return;
     }
+    // 畸形包防御：ATTR_LIFETIME 值不足 4 字节时 `v[..4]` 会 panic 打掉整个
+    // udp_run 线程（远程可触发 DoS）；用 get(..4) 优雅降级为默认 lifetime。
     let requested = find_attr(pkt, ATTR_LIFETIME)
-        .map(|v| u32::from_be_bytes(v[..4].try_into().unwrap_or([0; 4])))
+        .and_then(|v| {
+            v.get(..4)
+                .map(|s| u32::from_be_bytes(s.try_into().unwrap()))
+        })
         .unwrap_or(shared.default_lifetime);
     let lifetime = requested.clamp(60, shared.default_lifetime);
-    alloc
-        .expires
-        .store(unix_now() + lifetime as u64, Ordering::SeqCst);
+    let now = unix_now();
+    alloc.expires.store(now + lifetime as u64, Ordering::SeqCst);
+    // #482：驱逐判定以"最近刷新时刻"为准（见 stale_candidate_locked）。
+    alloc.last_refresh.store(now, Ordering::SeqCst);
     let body = vec![(ATTR_LIFETIME, lifetime.to_be_bytes().to_vec())];
     let resp = build_stun(MSG_SUCCESS_BASE | MSG_REFRESH, &body, txid, None).unwrap_or_default();
     let _ = sink.send(server, &resp);
@@ -1048,6 +1132,35 @@ mod tests {
 
     // env 是进程全局的：设置 env 的测试（配额/deny/IPv6）串行化，避免并行互踩。
     static TESTS_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 测试期环境变量守卫：记录旧值并在 Drop 时还原——assert 失败（panic）也不
+    /// 残留配额 env，避免毒化同进程后续 spawn 的测试（拿到假 486）。
+    struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, &'static str)]) -> Self {
+            let saved = vars
+                .iter()
+                .map(|(k, v)| {
+                    let old = std::env::var_os(k);
+                    unsafe { std::env::set_var(k, v) };
+                    (*k, old)
+                })
+                .collect();
+            EnvGuard(saved)
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, old) in self.0.drain(..) {
+                match old {
+                    Some(v) => unsafe { std::env::set_var(k, v) },
+                    None => unsafe { std::env::remove_var(k) },
+                }
+            }
+        }
+    }
 
     #[test]
     fn frame_reader_rejects_bad_length_without_growing() {
@@ -1558,9 +1671,7 @@ mod tests {
     #[test]
     fn quota_per_ip_rejects_second_allocation() {
         let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("MAX_TURN_ALLOCS_PER_IP", "1");
-        }
+        let _env = EnvGuard::set(&[("MAX_TURN_ALLOCS_PER_IP", "1")]);
         let (server_addr, _srv) = spawn_udp("testsecret");
         let (u, p) = creds("testsecret");
         let c1 = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1573,18 +1684,13 @@ mod tests {
             Err(486),
             "同一 IP 第二个 allocation 应 486"
         );
-        unsafe {
-            std::env::remove_var("MAX_TURN_ALLOCS_PER_IP");
-        }
     }
 
     /// #222：TURN_LIFETIME_SEC 缩短 allocation lifetime（响应 ATTR_LIFETIME 生效）。
     #[test]
     fn lifetime_env_shortens_allocation() {
         let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("TURN_LIFETIME_SEC", "60");
-        }
+        let _env = EnvGuard::set(&[("TURN_LIFETIME_SEC", "60")]);
         let (server_addr, _srv) = spawn_udp("testsecret");
         let (u, p) = creds("testsecret");
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1621,19 +1727,16 @@ mod tests {
             Some(60),
             "ATTR_LIFETIME 应取 TURN_LIFETIME_SEC=60"
         );
-        unsafe {
-            std::env::remove_var("TURN_LIFETIME_SEC");
-        }
     }
 
     /// #204：全局配额超限 → 486（per-IP 放开）。
     #[test]
     fn quota_total_rejects_when_full() {
         let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("MAX_TURN_ALLOCS_TOTAL", "1");
-            std::env::set_var("MAX_TURN_ALLOCS_PER_IP", "0");
-        }
+        let _env = EnvGuard::set(&[
+            ("MAX_TURN_ALLOCS_TOTAL", "1"),
+            ("MAX_TURN_ALLOCS_PER_IP", "0"),
+        ]);
         let (server_addr, _srv) = spawn_udp("testsecret");
         let (u, p) = creds("testsecret");
         let c1 = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1642,13 +1745,11 @@ mod tests {
         let c2 = UdpSocket::bind("127.0.0.1:0").unwrap();
         c2.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         assert_eq!(udp_allocate_code(&c2, server_addr, &u, &p), Err(486));
-        unsafe {
-            std::env::remove_var("MAX_TURN_ALLOCS_TOTAL");
-            std::env::remove_var("MAX_TURN_ALLOCS_PER_IP");
-        }
     }
 
-    /// #482 辅助：把现存 allocation 的 expires 拨到 now+remaining（模拟陈旧/过期）。
+    /// #482 辅助：把现存 allocation 拨到"剩余 remaining 秒"的未刷新残留——
+    /// 同时拨 expires 与 last_refresh（last_refresh = now-(lifetime-remaining)，
+    /// 即模拟 granted=默认 lifetime 后从未刷新的死残留；短租期场景请直接写两个字段）。
     fn age_allocations(srv: &TurnServer, remaining: u64) {
         let mut allocs = srv
             .shared
@@ -1656,8 +1757,13 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         for a in allocs.values() {
+            let now = unix_now();
             a.expires
-                .store(unix_now().saturating_add(remaining), Ordering::SeqCst);
+                .store(now.saturating_add(remaining), Ordering::SeqCst);
+            a.last_refresh.store(
+                now.saturating_sub(DEFAULT_LIFETIME as u64 - remaining),
+                Ordering::SeqCst,
+            );
         }
     }
 
@@ -1665,16 +1771,16 @@ mod tests {
     #[test]
     fn quota_full_evicts_stale_allocation() {
         let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("MAX_TURN_ALLOCS_TOTAL", "1");
-            std::env::set_var("MAX_TURN_ALLOCS_PER_IP", "0");
-        }
+        let _env = EnvGuard::set(&[
+            ("MAX_TURN_ALLOCS_TOTAL", "1"),
+            ("MAX_TURN_ALLOCS_PER_IP", "0"),
+        ]);
         let (server_addr, srv) = spawn_udp("testsecret");
         let (u, p) = creds("testsecret");
         let c1 = UdpSocket::bind("127.0.0.1:0").unwrap();
         c1.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         assert!(udp_allocate_code(&c1, server_addr, &u, &p).is_ok());
-        // 陈旧但未过期：剩余 75s（< lifetime/4=150s）——"≥450s 未刷新"的死残留。
+        // 陈旧但未过期：剩余 75s ⟺ 未刷新 525s ≥ 450s——"≥450s 未刷新"的死残留。
         age_allocations(&srv, 75);
         let c2 = UdpSocket::bind("127.0.0.1:0").unwrap();
         c2.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
@@ -1684,26 +1790,22 @@ mod tests {
         );
         assert_eq!(srv.active_allocations(), 1);
         assert_eq!(srv.evictions_total(), 1);
-        unsafe {
-            std::env::remove_var("MAX_TURN_ALLOCS_TOTAL");
-            std::env::remove_var("MAX_TURN_ALLOCS_PER_IP");
-        }
     }
 
     /// #482：配额满且现存 allocation 新鲜（存活客户端）→ 仍 486，不驱逐。
     #[test]
     fn quota_full_fresh_allocation_still_486() {
         let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("MAX_TURN_ALLOCS_TOTAL", "1");
-            std::env::set_var("MAX_TURN_ALLOCS_PER_IP", "0");
-        }
+        let _env = EnvGuard::set(&[
+            ("MAX_TURN_ALLOCS_TOTAL", "1"),
+            ("MAX_TURN_ALLOCS_PER_IP", "0"),
+        ]);
         let (server_addr, srv) = spawn_udp("testsecret");
         let (u, p) = creds("testsecret");
         let c1 = UdpSocket::bind("127.0.0.1:0").unwrap();
         c1.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         assert!(udp_allocate_code(&c1, server_addr, &u, &p).is_ok());
-        // 新鲜：剩余 550s（存活客户端每 300s 刷新，剩余恒 ≥300s）。
+        // 新鲜：剩余 550s ⟺ 50s 前刚刷新（存活客户端每 300s 刷新，未刷新时长恒 ≤300s）。
         age_allocations(&srv, 550);
         let c2 = UdpSocket::bind("127.0.0.1:0").unwrap();
         c2.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
@@ -1714,49 +1816,80 @@ mod tests {
         );
         assert_eq!(srv.evictions_total(), 0);
         assert_eq!(srv.active_allocations(), 1);
-        unsafe {
-            std::env::remove_var("MAX_TURN_ALLOCS_TOTAL");
-            std::env::remove_var("MAX_TURN_ALLOCS_PER_IP");
-        }
     }
 
-    /// #482：到期未扫的 allocation 在配额检查时按需清扫，不产生 486。
+    /// #482：按需清扫走配额门纯函数路径——"已过期但刚刷新过"的残留（未刷新
+    /// 5s < 450s，非驱逐候选）只能被配额门内的 sweep 移除；删除该 sweep 此构造
+    /// 必 486。直接调用纯函数，杜绝集成测试里 udp_run 周期 sweep 抢占的假绿。
     #[test]
-    fn quota_full_sweeps_expired_on_demand() {
+    fn quota_gate_sweeps_expired_on_demand() {
         let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("MAX_TURN_ALLOCS_TOTAL", "1");
-            std::env::set_var("MAX_TURN_ALLOCS_PER_IP", "0");
-        }
+        let ip: IpAddr = "203.0.113.7".parse().unwrap();
+        let mk = |expires_in: i64| {
+            let now = unix_now();
+            Allocation {
+                relay: Arc::new(UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap()),
+                relayed: "127.0.0.1:9".parse().unwrap(),
+                client_ip: ip,
+                expires: Arc::new(AtomicU64::new(now.saturating_add_signed(expires_in))),
+                // 5s 前刚刷新过：未刷新时长 <450s，陈旧判定够不着，只能靠过期清扫。
+                last_refresh: Arc::new(AtomicU64::new(now - 5)),
+                stop: Arc::new(AtomicBool::new(false)),
+                state: Arc::new(Mutex::new(AllocState {
+                    channels: HashMap::new(),
+                    peer_channel: HashMap::new(),
+                    permissions: HashSet::new(),
+                })),
+            }
+        };
+        let mut allocs: HashMap<ClientKey, Allocation> = HashMap::new();
+        let old: ClientKey = ClientKey::Udp("203.0.113.7:50000".parse().unwrap());
+        let new: ClientKey = ClientKey::Udp("203.0.113.7:50001".parse().unwrap());
+        let old_alloc = mk(-10); // 10s 前已到期、5s 前刚刷新过
+        let old_stop = old_alloc.stop.clone();
+        allocs.insert(old, old_alloc);
+        let (evicted, allowed) = quota_gate_locked(&mut allocs, new, mk(600), ip, 1, 0, 600);
+        assert!(allowed, "配额门应清扫过期残留后放行");
+        assert_eq!(evicted, 0, "过期项走清扫路径，不计数为驱逐");
+        assert!(!allocs.contains_key(&old), "过期残留应被按需清扫移除");
+        assert!(allocs.contains_key(&new), "新 allocation 应已插入");
+        assert!(
+            old_stop.load(Ordering::SeqCst),
+            "被清扫项应置 stop 让 relay 线程退出"
+        );
+    }
+
+    /// #482：客户端崩溃重连复用同源端口时，同四元组的过期残留不再把新
+    /// Allocate 楔在 437——437 分支先回收已过期项（最多 30s 周期 sweep 的提前化）。
+    #[test]
+    fn duplicate_key_expired_residue_not_437() {
+        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::set(&[
+            ("MAX_TURN_ALLOCS_TOTAL", "1"),
+            ("MAX_TURN_ALLOCS_PER_IP", "0"),
+        ]);
         let (server_addr, srv) = spawn_udp("testsecret");
         let (u, p) = creds("testsecret");
         let c1 = UdpSocket::bind("127.0.0.1:0").unwrap();
         c1.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         assert!(udp_allocate_code(&c1, server_addr, &u, &p).is_ok());
-        // 已过期但周期 sweep（30s）未跑——配额检查应先按需清扫。
+        // 模拟上次会话已到期（未刷新残留），客户端用同一 socket（同四元组）重连。
         age_allocations(&srv, 0);
-        let c2 = UdpSocket::bind("127.0.0.1:0").unwrap();
-        c2.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         assert!(
-            udp_allocate_code(&c2, server_addr, &u, &p).is_ok(),
-            "到期未扫的残留不应阻塞新 allocation"
+            udp_allocate_code(&c1, server_addr, &u, &p).is_ok(),
+            "同四元组重试应回收过期残留后成功，而非 437"
         );
         assert_eq!(srv.active_allocations(), 1);
-        assert_eq!(srv.evictions_total(), 0, "清扫路径不算驱逐");
-        unsafe {
-            std::env::remove_var("MAX_TURN_ALLOCS_TOTAL");
-            std::env::remove_var("MAX_TURN_ALLOCS_PER_IP");
-        }
     }
 
     /// #482：per-IP 配额满且该 IP 残留陈旧 → 驱逐该 IP 最旧而非 486。
     #[test]
     fn quota_per_ip_evicts_stale_allocation() {
         let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("MAX_TURN_ALLOCS_PER_IP", "1");
-            std::env::set_var("MAX_TURN_ALLOCS_TOTAL", "0");
-        }
+        let _env = EnvGuard::set(&[
+            ("MAX_TURN_ALLOCS_PER_IP", "1"),
+            ("MAX_TURN_ALLOCS_TOTAL", "0"),
+        ]);
         let (server_addr, srv) = spawn_udp("testsecret");
         let (u, p) = creds("testsecret");
         let c1 = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1770,10 +1903,132 @@ mod tests {
             "同 IP 陈旧残留应被驱逐而非 486"
         );
         assert_eq!(srv.evictions_total(), 1);
-        unsafe {
-            std::env::remove_var("MAX_TURN_ALLOCS_PER_IP");
-            std::env::remove_var("MAX_TURN_ALLOCS_TOTAL");
+    }
+
+    /// #482：驱逐阈值边界（未刷新 ≥450s 驱逐）：剩余 130s（未刷新 470s）驱逐，
+    /// 剩余 170s（未刷新 430s）不驱逐——守住 lifetime·3/4 阈值本身。两侧各留
+    /// ≥20s 余量：不驱逐侧空闲随墙钟延迟增长，贴阈值 1s 会在 CI 负载下闪红。
+    #[test]
+    fn quota_full_stale_boundary_130_evicts_170_486() {
+        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::set(&[
+            ("MAX_TURN_ALLOCS_TOTAL", "1"),
+            ("MAX_TURN_ALLOCS_PER_IP", "0"),
+        ]);
+        let (server_addr, srv) = spawn_udp("testsecret");
+        let (u, p) = creds("testsecret");
+        let c1 = UdpSocket::bind("127.0.0.1:0").unwrap();
+        c1.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert!(udp_allocate_code(&c1, server_addr, &u, &p).is_ok());
+        age_allocations(&srv, 130); // 未刷新 470s ≥ 450 → 可驱逐（延迟只增空闲，方向安全）
+        let c2 = UdpSocket::bind("127.0.0.1:0").unwrap();
+        c2.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert!(
+            udp_allocate_code(&c2, server_addr, &u, &p).is_ok(),
+            "未刷新 470s 应驱逐而非 486"
+        );
+        assert_eq!(srv.evictions_total(), 1);
+
+        let (server_addr2, srv2) = spawn_udp("testsecret2");
+        let (u2, p2) = creds("testsecret2");
+        let c3 = UdpSocket::bind("127.0.0.1:0").unwrap();
+        c3.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert!(udp_allocate_code(&c3, server_addr2, &u2, &p2).is_ok());
+        age_allocations(&srv2, 170); // 未刷新 430s < 450 → 不驱逐（20s 余量抗调度延迟）
+        let c4 = UdpSocket::bind("127.0.0.1:0").unwrap();
+        c4.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert_eq!(
+            udp_allocate_code(&c4, server_addr2, &u2, &p2),
+            Err(486),
+            "未刷新 430s 不得驱逐"
+        );
+        assert_eq!(srv2.evictions_total(), 0);
+        assert_eq!(srv2.active_allocations(), 1);
+    }
+
+    /// #482 回归：短租期存活客户端（Refresh 请求 60s 租期、每 30s 刷新）剩余
+    /// 寿命恒 <150s，按"剩余寿命"判定必被误驱逐；按"未刷新时长"判定永不误伤。
+    #[test]
+    fn quota_full_short_lifetime_live_client_not_evicted() {
+        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::set(&[
+            ("MAX_TURN_ALLOCS_TOTAL", "1"),
+            ("MAX_TURN_ALLOCS_PER_IP", "0"),
+        ]);
+        let (server_addr, srv) = spawn_udp("testsecret");
+        let (u, p) = creds("testsecret");
+        let c1 = UdpSocket::bind("127.0.0.1:0").unwrap();
+        c1.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert!(udp_allocate_code(&c1, server_addr, &u, &p).is_ok());
+        // 模拟短租期存活客户端：expires=now+60（上次 Refresh 授予 60s 租期），
+        // 但 30s 前刚刷新过（存活）。
+        {
+            let mut allocs = srv
+                .shared
+                .allocations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for a in allocs.values() {
+                let now = unix_now();
+                a.expires.store(now + 60, Ordering::SeqCst);
+                a.last_refresh.store(now - 30, Ordering::SeqCst);
+            }
         }
+        let c2 = UdpSocket::bind("127.0.0.1:0").unwrap();
+        c2.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert_eq!(
+            udp_allocate_code(&c2, server_addr, &u, &p),
+            Err(486),
+            "短租期存活客户端不得被当陈旧驱逐"
+        );
+        assert_eq!(srv.evictions_total(), 0);
+        assert_eq!(srv.active_allocations(), 1);
+    }
+
+    /// #482 邻接修复回归：Refresh 携带 <4 字节的 ATTR_LIFETIME 是畸形包——
+    /// 旧实现 `v[..4]` 直接 panic 打掉 udp_run 线程（UDP 控制面整体 DoS）。
+    #[test]
+    fn refresh_malformed_lifetime_attr_does_not_panic() {
+        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (server_addr, srv) = spawn_udp("testsecret");
+        let (u, p) = creds("testsecret");
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        assert!(udp_allocate_code(&client, server_addr, &u, &p).is_ok());
+        // 无凭证 Refresh → 401 挑战，取 realm/nonce（与 udp_allocate_code 同款）。
+        let txid = [9u8; 12];
+        let req = build_stun(MSG_REFRESH, &[], txid, None).unwrap();
+        client.send_to(&req, server_addr).unwrap();
+        let mut buf = [0u8; 4096];
+        let (n, _) = client.recv_from(&mut buf).unwrap();
+        let (realm, nonce, err) = parse_common(&buf[..n]).unwrap();
+        assert_eq!(err, Some(401));
+        let realm = realm.unwrap();
+        let nonce = nonce.unwrap();
+        // 畸形包：ATTR_LIFETIME 值仅 2 字节（RFC 5766 要求 4 字节）。
+        let txid2 = [10u8; 12];
+        let req2 = build_stun(
+            MSG_REFRESH,
+            &[(ATTR_LIFETIME, vec![0x00, 0x3c])],
+            txid2,
+            Some((&u, &p, &realm, &nonce)),
+        )
+        .unwrap();
+        client.send_to(&req2, server_addr).unwrap();
+        let (n, _) = client.recv_from(&mut buf).unwrap();
+        let method = stun_method(&buf[..n]);
+        assert_eq!(
+            method,
+            MSG_SUCCESS_BASE | MSG_REFRESH,
+            "畸形 LIFETIME 不应 panic，应降级为默认 lifetime"
+        );
+        // UDP 控制面线程仍存活：新客户端还能成功分配。
+        let c2 = UdpSocket::bind("127.0.0.1:0").unwrap();
+        c2.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert!(udp_allocate_code(&c2, server_addr, &u, &p).is_ok());
+        assert_eq!(srv.active_allocations(), 2);
     }
 
     /// #204：TURN_DENIED_PEER_CIDRS 内 peer → CreatePermission 403。
