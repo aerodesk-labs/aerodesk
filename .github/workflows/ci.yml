@@ -152,7 +152,7 @@ jobs:
           set -e
           # cargo test 只产测试容器(deps/<bin>-<hash>.exe),不落 target/debug/<bin>.exe——
           # 显式链出可执行文件(全量已编译,仅链接,秒级)。
-          cargo build -p aerodesk-cli
+          cargo build -p aerodesk-host
           # SYSTEM 服务进程不吃 job shell 的 PATH(GITHUB_PATH 只对当前进程生效),
           # FFmpeg DLL 须与 exe 同目录(与便携包约定一致,LESSON: exe 与 DLL 同目录)。
           mkdir -p svc-smoke
