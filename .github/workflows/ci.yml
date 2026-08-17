@@ -152,13 +152,13 @@ jobs:
           set -e
           # cargo test 只产测试容器(deps/<bin>-<hash>.exe),不落 target/debug/<bin>.exe——
           # 显式链出可执行文件(全量已编译,仅链接,秒级)。
-          cargo build -p aerodesk-cli
+          cargo build -p aerodesk-host
           # SYSTEM 服务进程不吃 job shell 的 PATH(GITHUB_PATH 只对当前进程生效),
           # FFmpeg DLL 须与 exe 同目录(与便携包约定一致,LESSON: exe 与 DLL 同目录)。
           mkdir -p svc-smoke
-          cp target/debug/aerodesk-cli.exe svc-smoke/
+          cp target/debug/aerodesk-host.exe svc-smoke/
           cp "$FFMPEG_DIR"/bin/*.dll svc-smoke/
-          BIN="$(pwd)/svc-smoke/aerodesk-cli.exe"
+          BIN="$(pwd)/svc-smoke/aerodesk-host.exe"
           test -f "$BIN"
           out=$("$BIN" --service-status); echo "$out"; [ "$out" = "not installed" ]
           # install 失败时 dump SCM 视角(服务配置/状态/事件日志)定位进程早退原因(1053 教训)。

@@ -57,7 +57,7 @@
 
 | # | 决策 | 选择 | 理由 |
 |---|---|---|---|
-| D1 | 服务入口形态 | **`aerodesk-cli` 新增 `--service` 运行模式** + `--install-service` 等子命令 | cli 已依赖 core+platform、已有 autostart 子命令形态;**不进 aerodesk-desktop**(会把 slint 拖进 SYSTEM 进程) |
+| D1 | 服务入口形态 | **`aerodesk-cli` 新增 `--service` 运行模式** + `--install-service` 等子命令（#492 后拆分至 `aerodesk-host` 宿主二进制） | cli 已依赖 core+platform、已有 autostart 子命令形态;**不进 aerodesk-desktop**(会把 slint 拖进 SYSTEM 进程) |
 | D2 | 服务配置归属 | **`%ProgramData%\AeroDesk\service-settings.json`(机器级)**,UI/CLI 安装与修改设置时同步写入 | SYSTEM 无用户 HOME;禁止依赖 `USERPROFILE`(服务态未定义)。字段:`server_default` / `device_id` / `token_default` / `inc_*` |
 | D3 | 信令让位策略 | 状态机两态:**NoSession(服务在线)** ⇄ **UserSession(服务离线,会话进程在线)**,WTS_LOGON/LOGOFF 驱动 | 避免同 device-id 双 join 造成 SFU/会话管理双客户端;切换窗口数秒离线可接受(P1 媒体直发时再细化) |
 | D4 | spawn 会话进程 | `CreateProcessAsUser` + `CreateEnvironmentBlock`(不 LoadUserProfile,desktop exe 自行处理),exe 取服务自身同目录 | 最小权限/最小依赖;后续加 `--minimized` 参数避免登录后弹窗打断 |
@@ -129,10 +129,10 @@
 
 ```powershell
 # 安装（管理员 PowerShell；装好即启动，并从用户设置同步机器级配置）
-aerodesk-cli.exe --install-service
-aerodesk-cli.exe --service-status      # 运行中 pid=…
-aerodesk-cli.exe --service-config      # %ProgramData%\AeroDesk\service-settings.json 生效值
-aerodesk-cli.exe --remove-service      # 停止并移除
+aerodesk-host.exe --install-service
+aerodesk-host.exe --service-status      # 运行中 pid=…
+aerodesk-host.exe --service-config      # %ProgramData%\AeroDesk\service-settings.json 生效值
+aerodesk-host.exe --remove-service      # 停止并移除
 ```
 
 - **配置**：`%ProgramData%\AeroDesk\service-settings.json`（server/device_id/token/spawn_ui/ui_exe），

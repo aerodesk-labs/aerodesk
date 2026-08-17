@@ -153,6 +153,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "aerodesk-host"
+version = "0.1.0"
+dependencies = [
+ "aerodesk-core",
+ "aerodesk-platform",
+ "aerodesk-protocol",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "aerodesk-ios"
 version = "0.1.0"
 dependencies = [
