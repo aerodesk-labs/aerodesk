@@ -3094,7 +3094,25 @@ fn publisher_generic<
                         };
                         encoder.request_keyframe();
                         debug!("static-screen heartbeat IDR");
-                        encoder.encode(&hb)
+                        // 重建后的编码器需喂满管线深度才吐包（本机 h264_mf
+                        // 实测 12 帧；libx264 约 1-2 帧）。静屏没有"下一帧"
+                        // 来冲刷——连喂同帧 16 次（超出部分仅产生近零字节的
+                        // 重复 P 帧，每 2s 约 30-60ms CPU，可忽略）。
+                        let mut out = None;
+                        for _ in 0..16 {
+                            match encoder.encode(&hb) {
+                                Ok(Some(unit)) => {
+                                    out = Some(unit);
+                                    break;
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    warn!("heartbeat encode: {e}");
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(out)
                     } else {
                         Ok(None)
                     }
