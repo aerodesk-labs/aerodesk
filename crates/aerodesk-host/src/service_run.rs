@@ -2,11 +2,18 @@
 //!   - M2：机器级配置 + `SignalPresence` 信令常驻（断线退避重连、30s 配置热重载）；
 //!   - M3：WTS 会话让位状态机——`NoSession`（服务在线，登录界面）⇄
 //!   `UserSession`（服务让位断开，spawn 桌面 UI）。
-//! 设计见 docs/PRELOGIN_WINDOWS_SERVICE.md（D2/D3/D4）。
+//! - #471 M2：登录界面媒体链路（headless 线程，合成源起步，实测矩阵后接
+//!   S0 直抓/helper 抓帧源）。
+//! 设计见 docs/PRELOGIN_WINDOWS_SERVICE.md（D2/D3/D4）与
+//! docs/PRELOGIN_WINLOGON_CAPTURE.md（#471）。
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use aerodesk_core::endpoint::ClientEvent;
+use aerodesk_core::media_pipeline::Codec;
 use aerodesk_core::protocol::signal::Role;
 use aerodesk_core::signal_presence::{PresenceConfig, PresenceEvent, SignalPresence};
 use aerodesk_platform::windows::service::{ServiceCtx, ServiceEvent, SessionChangeReason};
@@ -31,6 +38,13 @@ pub struct ServiceSettings {
     pub spawn_ui: bool,
     /// spawn 目标覆盖；空 = 服务 exe 同目录 `aerodesk-desktop.exe`。
     pub ui_exe: String,
+    /// #471 M2：启动即发布登录界面媒体（e2e/联调模式；生产由呼叫接听触发）。
+    #[serde(default)]
+    pub auto_publish: bool,
+    /// #471 M2：帧源（`synthetic`=合成源；`auto` 预留——实测矩阵 A/B 定
+    /// S0 直抓/helper 抓后接线，当前回落合成）。
+    #[serde(default)]
+    pub frame_source: String,
 }
 
 fn default_true() -> bool {
@@ -100,7 +114,13 @@ pub fn sync_settings_from_user() -> Result<ServiceSettings, String> {
 /// 服务体入口：配置热重载 + 让位状态机 + presence 驱动。
 /// 节拍 500ms（`wait_event` 兼任 sleep 与事件唤醒）。
 pub fn service_body(ctx: ServiceCtx) {
-    let mut sup = Supervisor::new();
+    service_body_with(ctx, false);
+}
+
+/// 同 [`service_body`]，`force_media`：让位态仍强制拉起登录界面媒体
+/// （`--service-fg --force-media` 联调/e2e 专用，真机让位逻辑不受影响）。
+pub fn service_body_with(ctx: ServiceCtx, force_media: bool) {
+    let mut sup = Supervisor::new(force_media);
     let mut cfg_at = Instant::now();
     while !ctx.stopped() {
         if cfg_at.elapsed() >= Duration::from_secs(30) {
@@ -127,10 +147,12 @@ struct Supervisor {
     user_session: bool,
     presence: Option<SignalPresence>,
     last_status: String,
+    /// #471 M2：登录界面媒体线程（接听呼叫/auto_publish 启动）。
+    media: Option<HeadlessMedia>,
 }
 
 impl Supervisor {
-    fn new() -> Self {
+    fn new(force_media: bool) -> Self {
         let settings = ServiceSettings::load();
         // 启动时已有已登录会话（含锁屏/断开态——desktop 进程仍在、自带 #450
         // presence）：进入让位态但不 spawn（避免双实例）；仅服务运行期发生的
@@ -142,6 +164,7 @@ impl Supervisor {
             user_session,
             presence: None,
             last_status: String::new(),
+            media: None,
         };
         info!(
             "服务启动：mode={} server={} device_id={}",
@@ -163,6 +186,16 @@ impl Supervisor {
         );
         if !user_session {
             sup.presence_start();
+            // #471 M2：e2e/联调模式——启动即发布（生产由呼叫接听触发）。
+            if sup.settings.auto_publish {
+                info!("auto_publish 开启：启动登录界面媒体（联调/e2e 模式）");
+                sup.media = Some(media_start(&sup.settings));
+            }
+        } else if force_media {
+            // --service-fg --force-media：本机已有登录会话（让位态）仍强制拉起
+            // 登录界面媒体——本地/CI 联调 e2e 用（真机让位逻辑不受影响）。
+            info!("FORCE_MEDIA：让位态强制启动登录界面媒体（联调）");
+            sup.media = Some(media_start(&sup.settings));
         }
         sup
     }
@@ -215,6 +248,10 @@ impl Supervisor {
                     self.user_session = true;
                     info!("WTS Logon（session {session_id}）：进入让位态");
                     self.presence_stop();
+                    if let Some(mut m) = self.media.take() {
+                        info!("WTS Logon：停登录界面媒体，切会话内采集");
+                        m.stop_and_join();
+                    }
                     self.spawn_ui(session_id);
                 }
             }
@@ -277,15 +314,163 @@ impl Supervisor {
                     if let Err(e) = presence.accept_call() {
                         warn!("接听失败：{e}");
                     }
+                    // #471 M2：接听即启动登录界面媒体（合成源起步）。
+                    if self.media.is_none() {
+                        self.media = Some(media_start(&self.settings));
+                    }
                 }
-                other => info!("presence 事件：{other:?}"),
+                PresenceEvent::Hangup { call_id, .. } => {
+                    info!("呼叫挂断（{call_id}），停登录界面媒体");
+                    if let Some(mut m) = self.media.take() {
+                        m.stop_and_join();
+                    }
+                }
+                PresenceEvent::CallTimeout { call_id, .. } => {
+                    info!("呼叫超时（{call_id}），停登录界面媒体");
+                    if let Some(mut m) = self.media.take() {
+                        m.stop_and_join();
+                    }
+                }
             }
         }
     }
 
     fn shutdown(&mut self) {
+        if let Some(mut m) = self.media.take() {
+            m.stop_and_join();
+        }
         self.presence_stop();
     }
+}
+
+// ---------- #471 M2：headless 登录界面媒体线程 ----------
+
+/// 媒体线程句柄：独立线程全速驱动（33ms 帧节拍 + ICE/DTLS/RTP 收发），
+/// 服务体只管启停（500ms 节拍太粗，不适合媒体循环）。
+struct HeadlessMedia {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HeadlessMedia {
+    fn stop_and_join(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// 启动登录界面媒体线程（连接/编码失败在线程内记日志退出，不致命）。
+fn media_start(settings: &ServiceSettings) -> HeadlessMedia {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop2 = stop.clone();
+    let (server, room, token) = (
+        settings.server.clone(),
+        settings.device_id.clone(),
+        settings.token.clone(),
+    );
+    let handle = std::thread::Builder::new()
+        .name("logon-media".into())
+        .spawn(move || run_media(server, room, token, stop2))
+        .expect("spawn logon-media");
+    HeadlessMedia {
+        stop,
+        handle: Some(handle),
+    }
+}
+
+/// 媒体主循环：帧源→编码→`send_video_frame`，同 cli publisher 驱动模式
+/// （UDP 输入→timeout→poll_output→poll_event，1ms 粒度 sleep）。
+fn run_media(server: String, room: String, token: String, stop: Arc<AtomicBool>) {
+    use aerodesk_core::Endpoint;
+    use str0m::net::{Protocol, Receive};
+    use str0m::{Input, Output};
+    let auth = if token.is_empty() {
+        None
+    } else {
+        Some(token.as_str())
+    };
+    let Ok((_signal, mut endpoint, mut socket, video_mid, _audio_mid, _camera_mid)) =
+        crate::connect(&server, &room, Role::Publisher, auth, false)
+    else {
+        warn!("登录界面媒体连接失败（server={server} room={room}）");
+        return;
+    };
+    // M2：合成源起步（`auto` 待实测矩阵 A/B 接 S0/helper 帧 source）。
+    let mut source = Box::new(SyntheticLogonSource::new(640, 360));
+    let mut encoder =
+        match aerodesk_codec::encode::FfmpegEncoder::new(640, 360, 30, 1_500_000, Codec::H264) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("编码器初始化失败（硬编探测+软编回退均败，S0 环境实属预期待实测项 C）：{e}");
+                return;
+            }
+        };
+    info!("登录界面媒体线程启动（合成源 640x360@30 H264，room={room}）");
+    let mut pts: u64 = 0;
+    let mut connected = false;
+    let mut next_frame = Instant::now();
+    loop {
+        if stop.load(Ordering::SeqCst) || !endpoint.is_alive() {
+            break;
+        }
+        // UDP 输入（STUN/DTLS/RTP）。
+        socket.set_read_timeout(Some(Duration::from_millis(2))).ok();
+        let mut buf = [0u8; 2000];
+        if let Ok((n, src)) = socket.recv_from(&mut buf)
+            && let Ok(contents) = buf[..n].try_into()
+        {
+            let _ = endpoint.handle_input(Input::Receive(
+                Instant::now(),
+                Receive {
+                    proto: Protocol::Udp,
+                    source: src,
+                    destination: socket.local_addr().unwrap(),
+                    contents,
+                },
+            ));
+        }
+        let _ = endpoint.handle_timeout(Instant::now());
+        while let Some(out) = endpoint.poll_output() {
+            match out {
+                Output::Transmit(t) => {
+                    let _ = socket.send_to(&t.contents, t.destination);
+                }
+                Output::Timeout(_) => break,
+                Output::Event(_) => {}
+            }
+        }
+        while let Some(ev) = endpoint.poll_event() {
+            if let ClientEvent::IceConnected = ev {
+                connected = true;
+                info!("登录界面媒体 ICE connected");
+            }
+        }
+        // 帧发送（90kHz：30fps = 3000 ticks/帧）。
+        if connected && Instant::now() >= next_frame {
+            next_frame += Duration::from_millis(33);
+            if let Some(f) = source.next_frame() {
+                match encoder.encode_bgra(&f.bgra) {
+                    Ok(Some(unit)) => {
+                        // FFmpeg 编码输出直接进 RTP（annexb 转换是 macOS VT 路径专属）。
+                        let rtp_time = str0m::media::MediaTime::new(
+                            pts * 3000,
+                            str0m::media::Frequency::NINETY_KHZ,
+                        );
+                        if let Err(e) = endpoint.send_video_frame(video_mid, unit.data, rtp_time) {
+                            warn!("send frame：{e:?}");
+                        }
+                        pts += 1;
+                    }
+                    Ok(None) => {}
+                    Err(e) => warn!("encode：{e}"),
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    info!("登录界面媒体线程结束（共发 {pts} 帧）");
 }
 
 // ---------- #471 M2：登录界面帧源 ----------

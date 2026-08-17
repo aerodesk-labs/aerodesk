@@ -125,9 +125,11 @@ fn run() {
         #[cfg(windows)]
         {
             init_log();
+            // --force-media：让位态也强制拉起登录界面媒体（本地/CI e2e 联调）。
+            let force_media = args.iter().any(|a| a == "--force-media");
             info!("aerodesk-service 前台模式(--service-fg,#471 M2 调试/e2e)");
             let ctx = aerodesk_platform::windows::service::foreground_ctx();
-            service_run::service_body(ctx);
+            service_run::service_body_with(ctx, force_media);
         }
         #[cfg(not(windows))]
         {
