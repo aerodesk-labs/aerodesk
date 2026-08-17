@@ -410,19 +410,32 @@ fn run_media(
         warn!("登录界面媒体连接失败（server={server} room={room}）");
         return;
     };
-    // M2：合成源起步；`helper` 模式（M3 实测 B 路径）起 listener 等 helper
-    // 回连上行真采集帧（本机联调手动起 helper,真机由服务经 winlogon token
-    // 拉起——接线随实测矩阵定稿）。10s 等 delegate 不到回退合成源。
-    let mut source: Box<dyn LogonFrameSource + Send> = if frame_source == "helper" {
-        match helper_source_or_fallback(helper_port) {
+    // #471 M3 帧源解析:
+    //   synthetic           — 合成源(测试/联调)
+    //   auto(默认/空)       — S0 DDA 直抓(实测矩阵 A);失败回退 helper(矩阵 B);再回退合成
+    //   helper              — 直接走 helper(服务经 winlogon token 拉起,真机登录界面路径)
+    let mut source: Box<dyn LogonFrameSource + Send> = match frame_source.as_str() {
+        "synthetic" => Box::new(SyntheticLogonSource::new(640, 360)),
+        "helper" => match helper_frame_source_auto_spawn(helper_port) {
             Ok(s) => Box::new(s),
             Err(e) => {
                 warn!("helper 帧源不可用，回退合成源：{e}");
                 Box::new(SyntheticLogonSource::new(640, 360))
             }
-        }
-    } else {
-        Box::new(SyntheticLogonSource::new(640, 360))
+        },
+        _ => match DxgiFrameSource::new(640, 360) {
+            Ok(s) => Box::new(s),
+            Err(e) => {
+                warn!("S0 DDA 直抓不可用（{e}），回退 helper 帧源");
+                match helper_frame_source_auto_spawn(helper_port) {
+                    Ok(s) => Box::new(s),
+                    Err(e2) => {
+                        warn!("helper 帧源也不可用（{e2}），回退合成源");
+                        Box::new(SyntheticLogonSource::new(640, 360))
+                    }
+                }
+            }
+        },
     };
     let mut encoder =
         match aerodesk_codec::encode::FfmpegEncoder::new(640, 360, 30, 1_500_000, Codec::H264) {
@@ -596,10 +609,17 @@ struct HelperFrameSource {
 }
 
 impl HelperFrameSource {
-    /// 在 `port`(0=临时分配)上等 helper 回连(10s 超时),握手校验 hello 行。
-    fn accept_on(port: u16) -> Result<Self, String> {
+    /// 绑定 helper 回连端口（`port`=0 临时分配），返回 (listener, 实际端口)。
+    /// 与 [`Self::accept_on_listener`] 分离：服务需先知道端口才能拉起 helper。
+    fn bind(port: u16) -> Result<(std::net::TcpListener, u16), String> {
         let listener = std::net::TcpListener::bind(("127.0.0.1", port))
             .map_err(|e| format!("helper listener bind({port})：{e}"))?;
+        let real = listener.local_addr().map_err(|e| e.to_string())?.port();
+        Ok((listener, real))
+    }
+
+    /// 在已绑定 listener 上等 helper 回连(10s 超时),握手校验 hello 行。
+    fn accept_on_listener(listener: std::net::TcpListener) -> Result<Self, String> {
         let real = listener.local_addr().map_err(|e| e.to_string())?.port();
         info!("helper 帧源：等待 helper 回连 127.0.0.1:{real}（10s 超时）");
         listener.set_nonblocking(false).map_err(|e| e.to_string())?;
@@ -634,6 +654,12 @@ impl HelperFrameSource {
             buf: Vec::new(),
         })
     }
+
+    /// 在 `port`(0=临时分配)上等 helper 回连(10s 超时),握手校验 hello 行。
+    fn accept_on(port: u16) -> Result<Self, String> {
+        let (listener, _) = Self::bind(port)?;
+        Self::accept_on_listener(listener)
+    }
 }
 
 impl LogonFrameSource for HelperFrameSource {
@@ -663,9 +689,50 @@ impl LogonFrameSource for HelperFrameSource {
     }
 }
 
-/// 组装 helper 帧源(端口 0 = 临时分配;返回错误由调用方回退合成源)。
-fn helper_source_or_fallback(port: u16) -> Result<HelperFrameSource, String> {
-    HelperFrameSource::accept_on(port)
+/// #471 M3 真机路径：服务绑端口 → 经 winlogon token 拉起 helper 回连 →
+/// accept。SYSTEM 服务上下文专属（`--service-fg` 非服务态拉不起 helper，
+/// 失败由调用方回退）。真机登录界面即实测矩阵 B。
+fn helper_frame_source_auto_spawn(port: u16) -> Result<HelperFrameSource, String> {
+    let (listener, real) = HelperFrameSource::bind(port)?;
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("定位本 exe 失败：{e}"))?
+        .display()
+        .to_string();
+    let real_s = real.to_string();
+    let args = [
+        "--logon-helper",
+        "--port",
+        &real_s,
+        "--token",
+        "svc",
+        "--capture",
+    ];
+    session::spawn_logon_helper(&exe, &args)?;
+    info!("已请求经 winlogon token 拉起登录界面 helper（port {real}）");
+    HelperFrameSource::accept_on_listener(listener)
+}
+
+/// #471 实测矩阵 A：S0 服务进程直抓 DDA——登录界面画面走 GPU 输出，
+/// 不依赖目标 desktop。真机矩阵 A 的载体（能否采到登录界面为实测项）。
+struct DxgiFrameSource {
+    capturer: aerodesk_platform::windows::capture::DxgiCapturer,
+}
+
+impl DxgiFrameSource {
+    fn new(width: u32, height: u32) -> Result<Self, String> {
+        aerodesk_platform::windows::capture::DxgiCapturer::new_with_scale(width, height)
+            .map(|capturer| Self { capturer })
+    }
+}
+
+impl LogonFrameSource for DxgiFrameSource {
+    fn next_frame(&mut self) -> Option<LogonFrame> {
+        self.capturer.capture_frame().map(|f| LogonFrame {
+            width: f.width,
+            height: f.height,
+            bgra: f.bgra,
+        })
+    }
 }
 
 /// #471 M1：登录界面 helper 主循环——回连服务（loopback TCP，零 FFI IPC）。
