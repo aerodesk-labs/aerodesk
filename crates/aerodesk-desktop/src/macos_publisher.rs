@@ -25,7 +25,7 @@ use str0m::media::{Frequency, MediaTime};
 use str0m::net::Protocol;
 
 const FPS: u32 = 30;
-const DEFAULT_BITRATE_BPS: u64 = 8_000_000;
+const DEFAULT_BITRATE_BPS: u32 = 8_000_000;
 
 /// 当前发布线程的 stop 句柄（同一时刻只允许一个被控端发布线程）。
 static STOP: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
