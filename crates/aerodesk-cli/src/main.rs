@@ -14,7 +14,6 @@ mod cli_video_decoder;
 mod clipboard;
 mod cmd_exec;
 mod file_transfer;
-#[cfg(windows)]
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
