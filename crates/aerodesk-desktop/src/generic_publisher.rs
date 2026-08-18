@@ -1,4 +1,5 @@
-//! 非 macOS 桌面端被控端（屏幕发布）：Windows DXGI 采集 + OpenH264 软编
+//! 非 macOS 桌面端被控端（屏幕发布）：Windows DXGI 采集 + FFmpeg 编码
+//! （h264_mf 硬编优先、一帧探测回退 libx264；无 FFmpeg 环境兜底 OpenH264）
 //! + SendInput 输入注入。泛型循环只依赖 core `MediaSource`/`Encoder` 与
 //! `Endpoint`，平台差异收敛在适配器构造（本文件 `imp` 内的 Windows 工厂）。
 //!
@@ -197,19 +198,34 @@ mod imp {
         let mut injector = aerodesk_platform::windows::inject::SendInputInjector::new();
         injector.set_active_display(Some(display_rect));
 
-        // OpenH264 软编：Windows 无系统 x264 时的全平台回退，输入统一 BGRA。
-        let mut encoder = match aerodesk_platform::windows::encode::SoftEncoder::new(
-            w,
-            h,
-            FPS,
-            DEFAULT_BITRATE_KBPS,
-        ) {
-            Ok(e) => e,
-            Err(e) => {
-                set_publisher_status(&ui_weak, format!("OpenH264 编码器初始化失败：{e}"));
-                return;
-            }
-        };
+        // #506：与 cli screen 路径同款 FFmpeg 编码（h264_mf 硬编优先、一帧探测
+        // 回退 libx264）——1440p/4K 源头不再受 OpenH264 软编瓶颈；FFmpeg 不可用
+        // （DLL 缺失等）兜底 OpenH264 软编。输入统一 BGRA。
+        let mut encoder: Box<dyn Encoder<Error = String>> =
+            match aerodesk_codec::encode::FfmpegEncoder::new(
+                w,
+                h,
+                FPS,
+                u64::from(DEFAULT_BITRATE_KBPS) * 1_000,
+                Codec::H264,
+            ) {
+                Ok(e) => Box::new(e),
+                Err(ff_err) => {
+                    tracing::warn!("FFmpeg 编码器不可用({ff_err})，回退 OpenH264 软编");
+                    match aerodesk_platform::windows::encode::SoftEncoder::new(
+                        w,
+                        h,
+                        FPS,
+                        DEFAULT_BITRATE_KBPS,
+                    ) {
+                        Ok(e) => Box::new(e),
+                        Err(e) => {
+                            set_publisher_status(&ui_weak, format!("编码器初始化失败：{e}"));
+                            return;
+                        }
+                    }
+                }
+            };
 
         // #334：采集期间保持显示器唤醒（防闲置休眠后 DXGI 无输出）。
         let _keep_awake = SystemWakeLock::acquire(
@@ -308,7 +324,7 @@ mod imp {
                         pts += 1;
                     }
                     Ok(None) => {}
-                    Err(e) => tracing::warn!("OpenH264 编码失败: {e}"),
+                    Err(e) => tracing::warn!("视频编码失败: {e}"),
                 }
             }
 
