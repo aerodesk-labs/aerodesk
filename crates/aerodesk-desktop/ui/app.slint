@@ -1139,7 +1139,7 @@ export component AppWindow inherits Window {
                 if root.settings-tab == 1: VerticalLayout {
                     spacing: 12px;
                     Text { text: "默认信令服务器"; font-size: 15px; color: #212121; height: 20px; vertical-stretch: 0; }
-                    RdInput { text <=> root.server-default; placeholder: "129.226.150.174:14703 或 signal.aerodesk.io"; font-size: 14px; edited => { root.server-input = root.server-default; root.auto-save(); } }
+                    RdInput { text <=> root.server-default; placeholder: "signal.aerodesk.io 或 127.0.0.1:3003"; font-size: 14px; edited => { root.server-input = root.server-default; root.auto-save(); } }
                     // #504 显式 TLS 选择：默认关（ws://）；自建明文服务器填裸地址即可直连，
                     // 不再被「非回环默认 wss」的启发式卡在 TLS 握手。
                     Switch { text: "使用 TLS 加密（wss://）——自建明文服务器请保持关闭（默认）"; checked <=> root.server-tls; toggled => { root.set-server-tls(root.server-tls); root.auto-save(); } }
