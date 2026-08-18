@@ -1,6 +1,6 @@
 //! 输入注入：SendInput（鼠标绝对坐标/按键/滚轮）。
 
-use aerodesk_protocol::input::{ButtonState, InputEvent, MouseButton};
+use aerodesk_protocol::input::{ButtonState, InputEvent, Modifiers, MouseButton};
 
 /// 平台无关键码（协议）→ Windows Virtual-Key（VK_*）。
 pub fn vk_for_code(code: &str) -> Option<u16> {
@@ -142,22 +142,24 @@ impl aerodesk_core::platform::InputInjector for SendInputInjector {
                     let vk =
                         vk_for_code(code).ok_or_else(|| format!("unsupported key code: {code}"))?;
                     let down = *state == ButtonState::Pressed;
-                    let mods: [u16; 4] = [
-                        if modifiers.ctrl { 0x11 } else { 0 },
-                        if modifiers.shift { 0x10 } else { 0 },
-                        if modifiers.alt { 0x12 } else { 0 },
-                        if modifiers.meta { 0x5B } else { 0 },
-                    ];
+                    // #496 G1/G3：码位本身是修饰键时（如 mac 主控归一化后的
+                    // {MetaLeft, meta:true}），flag 推导的 VK 与码位 VK 相同——
+                    // 不重复注入：释放时 flags 已空，双 down/单 up 会把修饰键
+                    // 卡死（裸 Shift/Ctrl/Win 单按同病，预存在）。
+                    let mods: Vec<u16> = modifier_vks(modifiers)
+                        .into_iter()
+                        .filter(|m| *m != 0 && *m != vk)
+                        .collect();
                     let mut inputs = Vec::new();
                     if down {
-                        for m in mods.into_iter().filter(|m| *m != 0) {
-                            inputs.push(key(m as u32, true));
+                        for m in &mods {
+                            inputs.push(key(*m as u32, true));
                         }
                         inputs.push(key(vk as u32, true));
                     } else {
                         inputs.push(key(vk as u32, false));
-                        for m in mods.into_iter().filter(|m| *m != 0) {
-                            inputs.push(key(m as u32, false));
+                        for m in &mods {
+                            inputs.push(key(*m as u32, false));
                         }
                     }
                     inputs
@@ -325,6 +327,17 @@ fn wheel_mouse_data(dy: f32) -> u32 {
     ((dy.clamp(-100.0, 100.0) * 120.0) as i32) as u32
 }
 
+/// ctrl/shift/alt/meta → 修饰键 VK（未按下为 0）。注入时需与码位 VK 去重
+/// （见 inject 的 Key 分支，#496 G1/G3）。
+fn modifier_vks(modifiers: &Modifiers) -> [u16; 4] {
+    [
+        if modifiers.ctrl { 0x11 } else { 0 },
+        if modifiers.shift { 0x10 } else { 0 },
+        if modifiers.alt { 0x12 } else { 0 },
+        if modifiers.meta { 0x5B } else { 0 },
+    ]
+}
+
 #[cfg(windows)]
 fn key(code: u32, down: bool) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -408,5 +421,56 @@ mod tests {
         // 超界增量 clamp 到 ±100 格（±12000），不溢出 i32。
         assert_eq!(wheel_mouse_data(1_000_000.0) as i32, 12_000);
         assert_eq!(wheel_mouse_data(-1_000_000.0) as i32, -12_000);
+    }
+
+    /// #496 G1/G3 回归：码位 VK 与 flag VK 相同时去重，否则 down×2/up×1 卡键。
+    #[test]
+    fn modifier_dedupe_excludes_code_vk() {
+        let dedupe = |vk: u16, m: &Modifiers| -> Vec<u16> {
+            modifier_vks(m)
+                .into_iter()
+                .filter(|x| *x != 0 && *x != vk)
+                .collect()
+        };
+        // mac 主控归一化后的 Cmd：{MetaLeft, meta:true} → 只注入一次 VK_LWIN。
+        let m = Modifiers {
+            ctrl: false,
+            shift: false,
+            alt: false,
+            meta: true,
+        };
+        assert!(dedupe(0x5B, &m).is_empty(), "MetaLeft+meta 应去重");
+        // mac 物理 Control：{ControlLeft, ctrl:true} → 只注入一次 VK_CONTROL。
+        let m = Modifiers {
+            ctrl: true,
+            shift: false,
+            alt: false,
+            meta: false,
+        };
+        assert!(dedupe(0x11, &m).is_empty(), "ControlLeft+ctrl 应去重");
+        // 裸 Shift 单按（预存在同病）：{ShiftLeft, shift:true} → 去重。
+        let m = Modifiers {
+            ctrl: false,
+            shift: true,
+            alt: false,
+            meta: false,
+        };
+        assert!(dedupe(0x10, &m).is_empty(), "ShiftLeft+shift 应去重");
+        // 普通键组合不受影响：KeyA(0x41)+ctrl+shift → [0x11, 0x10]。
+        let m = Modifiers {
+            ctrl: true,
+            shift: true,
+            alt: false,
+            meta: false,
+        };
+        assert_eq!(dedupe(0x41, &m), vec![0x11, 0x10]);
+        // 修饰键码位 + 其他修饰：{ControlLeft, ctrl:false, meta:true} → 保留 meta。
+        let m = Modifiers {
+            ctrl: false,
+            shift: false,
+            alt: false,
+            meta: true,
+        };
+        assert_eq!(dedupe(0x11, &m), vec![0x5B]);
     }
 }

@@ -693,6 +693,10 @@ fn send_key_to_slot(
         INPUT_CAPTURING.store(false, Ordering::SeqCst);
         return true;
     }
+    // #496 G1/G3：Slint 在 macOS 交换 Control↔Super 键码文本，flags 交换
+    // （下方）后键码必须同步交换，wire 键码与 flags 才一致。
+    #[cfg(target_os = "macos")]
+    let code = keymap::macos_swap_control_meta(code);
     let state = if state == 0 {
         aerodesk_protocol::input::ButtonState::Pressed
     } else {
@@ -2254,6 +2258,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 weak.unwrap().invoke_toggle_input();
                 return true;
             }
+            // #496 G1/G3：与 send_key_to_slot 同——macOS 上键码与 flags 同步交换。
+            #[cfg(target_os = "macos")]
+            let code = keymap::macos_swap_control_meta(code);
             let state = if state == 0 {
                 aerodesk_protocol::input::ButtonState::Pressed
             } else {

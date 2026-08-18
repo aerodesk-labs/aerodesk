@@ -91,6 +91,20 @@ pub fn key_code_for_text(text: &str) -> Option<&'static str> {
     }
 }
 
+/// #496 G1/G3：Slint 在 macOS 把 Control↔Super 的键码文本互换（物理 Cmd 到达
+/// 时文本是 ControlLeft）。main.rs 对 flags 做了 ctrl↔meta 交换，键码必须同步
+/// 交换，否则 wire 键码与 flags 矛盾——被控端按键码+flag 双重注入，释放时
+/// flags 已空，修饰键卡死。非 macOS 平台不得调用（Slint 不交换）。
+pub fn macos_swap_control_meta(code: &'static str) -> &'static str {
+    match code {
+        "ControlLeft" => "MetaLeft",
+        "ControlRight" => "MetaRight",
+        "MetaLeft" => "ControlLeft",
+        "MetaRight" => "ControlRight",
+        _ => code,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +156,17 @@ mod tests {
         assert_eq!(key_code_for_text("é"), None);
         assert_eq!(key_code_for_text("\u{f735}"), None); // Menu：注入层不支持
         assert_eq!(key_code_for_text("abc"), None);
+    }
+
+    /// #496：mac 交换映射——Control↔Meta 四种键码互换，其余原样。
+    #[test]
+    fn macos_swap_control_meta_swaps_four_codes_only() {
+        assert_eq!(macos_swap_control_meta("ControlLeft"), "MetaLeft");
+        assert_eq!(macos_swap_control_meta("ControlRight"), "MetaRight");
+        assert_eq!(macos_swap_control_meta("MetaLeft"), "ControlLeft");
+        assert_eq!(macos_swap_control_meta("MetaRight"), "ControlRight");
+        assert_eq!(macos_swap_control_meta("KeyA"), "KeyA");
+        assert_eq!(macos_swap_control_meta("ShiftLeft"), "ShiftLeft");
+        assert_eq!(macos_swap_control_meta("AltRight"), "AltRight");
     }
 }
