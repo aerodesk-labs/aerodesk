@@ -294,10 +294,16 @@ impl DxgiCapturer {
             };
             let mut info = windows::Win32::Graphics::Dxgi::DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource: Option<IDXGIResource> = None;
-            if duplication
-                .AcquireNextFrame(16, &mut info, &mut resource)
-                .is_err()
-            {
+            if let Err(e) = duplication.AcquireNextFrame(16, &mut info, &mut resource) {
+                // WAIT_TIMEOUT（静止屏）是常态；其余错误（ACCESS_LOST 等）首现告警——
+                // 全错误静默曾让「发布端零帧」排查无门（虚拟显示驱动致盲实例）。
+                if e.code().0 as u32 != 0x887A0027 {
+                    static ACQ_WARNED: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if !ACQ_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        tracing::warn!("DXGI AcquireNextFrame 非超时错误: code={:?} {e}", e.code());
+                    }
+                }
                 // #477 机制 B：首个变化帧到来之前用 GDI 引导当前桌面内容，
                 // 让发布循环拿到首帧（并进入心跳维护）；仅此一次。
                 if !self.bootstrapped {

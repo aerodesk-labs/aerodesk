@@ -216,6 +216,35 @@ pub fn force_relay_env() -> bool {
         .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
+/// 从 SDP 回答 JSON 中剔除回环（127.0.0.1 / ::1）候选条目；解析失败原样返回。
+/// 形状无关：递归遍历 Value，删除任何"含 candidate: 且含回环地址"的字符串元素。
+fn strip_loopback_remote_candidates(answer_json: &str) -> String {
+    fn is_loopback_candidate(s: &str) -> bool {
+        s.contains("candidate:") && (s.contains(" 127.0.0.1 ") || s.contains(" ::1 "))
+    }
+    fn walk(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Array(items) => {
+                items.retain(|i| i.as_str().is_none_or(|s| !is_loopback_candidate(s)));
+                for i in items {
+                    walk(i);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for val in map.values_mut() {
+                    walk(val);
+                }
+            }
+            _ => {}
+        }
+    }
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(answer_json) else {
+        return answer_json.to_string();
+    };
+    walk(&mut v);
+    serde_json::to_string(&v).unwrap_or_else(|_| answer_json.to_string())
+}
+
 /// 连接并保留活跃会话（指定视频 codec；#216 桥接客户端复用）。
 /// `codec=None` 用默认（与 `connect_live_role` 一致）。
 pub fn connect_live_role_codec(
@@ -346,6 +375,15 @@ fn connect_live_role_impl(
     let answer_json = signal
         .exchange_description(&offer_json)
         .map_err(|e| format!("answer: {e}"))?;
+    // 非回环信令时剔除回答里的回环候选：SFU 为同机客户端附带 127.0.0.1 候选
+    // （#216 桥/本机 CLI），远端客户端拿到后 ICE 可能把发送对端切到本机回环
+    // ——发布端媒体全丢进黑洞（观看端仅收流不受影响）。对远端客户端而言，
+    // 服务器的回环候选永无意义，剔除无条件正确。
+    let answer_json = if loopback_signal {
+        answer_json
+    } else {
+        strip_loopback_remote_candidates(&answer_json)
+    };
     let answer: str0m::change::SdpAnswer =
         serde_json::from_str(&answer_json).map_err(|e| format!("answer parse: {e}"))?;
     endpoint
@@ -444,4 +482,36 @@ pub fn connect_role(
         peer_id: live.peer_id.clone(),
         ice_connected: live.ice_connected,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_loopback_remote_candidates;
+
+    #[test]
+    fn strips_loopback_candidates_and_keeps_the_rest() {
+        let json = r#"{"sdp":{"media":[{"candidates":[
+            "candidate:1 1 UDP 2130706431 127.0.0.1 14778 typ host",
+            "candidate:2 1 UDP 2130706431 129.226.150.174 14778 typ host",
+            "candidate:3 1 UDP 2130706431 ::1 14778 typ host"
+        ],"mid":"0"}]},"type":"answer"}"#;
+        let out = strip_loopback_remote_candidates(json);
+        assert!(!out.contains("127.0.0.1"), "回环候选应被剔除: {out}");
+        assert!(!out.contains("::1"), "v6 回环候选应被剔除: {out}");
+        assert!(out.contains("129.226.150.174"), "公网候选必须保留: {out}");
+    }
+
+    #[test]
+    fn keeps_non_candidate_mentions_and_invalid_json_passthrough() {
+        // 非候选字符串里的回环地址（如描述文本）不得误删
+        let json = r#"{"note":"server at 127.0.0.1 is loopback","candidates":["candidate:1 1 UDP 1 10.0.0.2 9 typ host"]}"#;
+        let out = strip_loopback_remote_candidates(json);
+        assert!(
+            out.contains("server at 127.0.0.1"),
+            "非候选文本应保留: {out}"
+        );
+        assert!(out.contains("10.0.0.2"));
+        // 非法 JSON 原样返回
+        assert_eq!(strip_loopback_remote_candidates("not json"), "not json");
+    }
 }
