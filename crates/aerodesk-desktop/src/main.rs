@@ -1471,6 +1471,13 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
 /// PRESENCE（先停掉旧连接），设置页「连接 / 登录」按钮可经 [`stop_signal_presence`]
 /// 停止后重建——连点按钮不会泄漏旧线程。
 fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: String, tls: bool) {
+    // 先停旧句柄再校验早退（#505 审查 minor）：以空参调用等于「只停不连」，
+    // 函数契约上「换配置」与「停旧」解耦，调用方不必自行先 stop。
+    if let Some(old) = PRESENCE.lock().unwrap().take() {
+        old.stop.store(true, Ordering::SeqCst);
+        old.presence.lock().unwrap().stop();
+        ui.set_presence_active(false);
+    }
     let server = aerodesk_core::signaling::normalize_signal_url_with_tls(&server, tls);
     if server.is_empty() || room.is_empty() || room == "—" {
         return;
@@ -1490,13 +1497,8 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
     ));
     let stop = Arc::new(AtomicBool::new(false));
     {
-        // 登记前原子替换旧句柄：旧线程下一轮循环（≤300ms）退出。
-        let mut slot = PRESENCE.lock().unwrap();
-        if let Some(old) = slot.take() {
-            old.stop.store(true, Ordering::SeqCst);
-            old.presence.lock().unwrap().stop();
-        }
-        *slot = Some(PresenceHandle {
+        // 登记新句柄（旧句柄已在函数入口停止）。
+        *PRESENCE.lock().unwrap() = Some(PresenceHandle {
             stop: stop.clone(),
             presence: presence.clone(),
         });
@@ -1512,6 +1514,9 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                     break;
                 }
                 let st = presence.lock().unwrap().poll();
+                // Stopped（含外部 stop 后的兜底复位）时同步 presence-active，
+                // 避免按钮文案停在「断开」（#505 审查 minor）。
+                let active = !matches!(st, aerodesk_core::signal_presence::PresenceStatus::Stopped);
                 let (text, online) = match st {
                     aerodesk_core::signal_presence::PresenceStatus::Stopped => {
                         ("信令未连接".to_string(), false)
@@ -1529,6 +1534,7 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                 crate::with_ui(&ui_weak, move |ui| {
                     ui.set_signal_status(text.into());
                     ui.set_signal_online(online);
+                    ui.set_presence_active(active);
                 });
 
                 // #456 被呼叫时再出流：接听→启动 publisher；挂断/超时→停止 publisher。
@@ -1572,8 +1578,9 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
         .expect("spawn signal presence");
 }
 
-/// 停止当前信令 presence（设置页「断开」按钮，#504）：置停止位、断开 WebSocket、
-/// 即时复位状态条；presence 线程在下一轮循环（≤300ms）退出并清句柄。
+/// 停止当前信令 presence（设置页「断开」按钮，#504）：take 句柄、置停止位、
+/// 断开 WebSocket、即时复位状态条；presence 线程在下一轮循环（≤300ms）退出，
+/// 仅兜底复位一次状态条（句柄已由本函数回收）。
 fn stop_signal_presence(ui: &AppWindow) {
     let handle = PRESENCE.lock().unwrap().take();
     if let Some(handle) = handle {
@@ -1586,7 +1593,7 @@ fn stop_signal_presence(ui: &AppWindow) {
 }
 
 /// 「连接 / 登录」按钮（#504）：已连接则断开；未连接则按设置页当前
-/// 服务器地址 + TLS 开关 + 默认凭证重建 presence（旧连接先停掉）。
+/// 服务器地址 + TLS 开关 + 默认凭证重建 presence（旧连接由 spawn 入口停掉）。
 fn connect_signal_from_settings(ui: &AppWindow) {
     if ui.get_presence_active() {
         stop_signal_presence(ui);
@@ -1598,7 +1605,6 @@ fn connect_signal_from_settings(ui: &AppWindow) {
         ui.set_settings_status("请先填写信令服务器地址".into());
         return;
     }
-    stop_signal_presence(ui); // 防御：清除可能残留的旧连接
     let room = ui.get_device_id().to_string();
     let token = ui.get_token_default().to_string();
     spawn_signal_presence(ui, server, room, token, SERVER_TLS.load(Ordering::SeqCst));
