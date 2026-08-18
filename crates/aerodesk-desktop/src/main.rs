@@ -6,15 +6,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 slint::include_modules!();
-#[cfg(not(target_os = "macos"))]
-mod generic_media;
-mod generic_publisher;
-mod generic_viewer;
-mod keymap;
-#[cfg(target_os = "macos")]
-mod macos_media;
-#[cfg(target_os = "macos")]
-mod macos_publisher;
+// #508 B1：会话引擎（viewer/publisher，含 macOS 专用路径）已全部迁入
+// aerodesk-session；本 crate 只保留 Slint 适配层（SessionUi 实现 + 帧呈现）。
+// 纯键位逻辑同名 re-export，保持调用点不变。
+use aerodesk_session::keymap;
 use slint::Model;
 
 use aerodesk_core::platform::{AppShell, FilePicker, Permissions, Renderer};
@@ -25,31 +20,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 #[cfg(not(target_os = "macos"))]
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_RECENTS: usize = 10;
 const DEMO_W: u32 = 320;
 const DEMO_H: u32 = 180;
 
-/// #72 UI → 会话文件/剪贴板命令（经 mpsc 传到 run_viewer 线程）。
-#[derive(Debug, PartialEq, Eq)]
-pub enum FileCmd {
-    /// 发送一个文件。
-    SendFile(std::path::PathBuf),
-    /// 把文本写入被控端剪贴板。
-    SendClipboard(String),
-    /// 把图片（PNG）写入被控端剪贴板（#271）。
-    SendClipboardImage(Vec<u8>),
-    /// 取消当前发送。
-    Cancel,
-}
-
-/// #458 UI → 会话聊天命令（经 mpsc 传到 run_viewer 线程）。
-#[derive(Debug, PartialEq, Eq)]
-pub enum ChatCmd {
-    /// 发送一条文本消息。
-    Send(String),
-}
+/// #508 B1：FileCmd/ChatCmd 定义已迁入 aerodesk-session；re-export 保持调用点不变。
+pub use aerodesk_session::{ChatCmd, FileCmd};
 
 /// #72 拖放发送纯路由（可单测）：把文件交给会话 file 通道，返回状态文案。
 pub fn dispatch_dropped_files(
@@ -78,39 +55,6 @@ pub fn dispatch_dropped_files(
             files.len() - 1
         )
     }
-}
-
-/// 当前墙钟（unix 毫秒），用于聊天消息 timestamp_ms。
-pub(crate) fn system_time_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-/// 解析 `chat` data channel 收到的 JSON 文本。
-///
-/// #458 只依赖 JSON 形状（`sender` 可选、`text` 必填），不依赖协议侧可能尚未
-/// 合入的具体 Rust 类型，避免 UI 分支与并行 protocol 改动耦合。
-pub(crate) fn decode_chat_text(data: &[u8]) -> Option<(String, String)> {
-    let value: serde_json::Value = serde_json::from_slice(data).ok()?;
-    let text = value
-        .get("text")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if text.is_empty() {
-        return None;
-    }
-    let sender = value
-        .get("sender")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("对方")
-        .to_string();
-    Some((sender, text))
 }
 
 /// 主控端视频区像素坐标 → 远端归一化坐标（0..1）。
@@ -874,6 +818,76 @@ pub fn session_joined_weak(ui_weak: &slint::Weak<AppWindow>, slot: usize) {
     with_ui(ui_weak, move |ui| session_joined(ui, slot));
 }
 
+/// #508 B1：会话引擎 → Slint UI 的适配器（槽位与窗口弱引用含在实现内）。
+/// aerodesk-session 经 [`aerodesk_session::SessionUi`] 调用；全部写入最终落到
+/// 与 B1 前完全相同的 UI 助手函数（with_ui 排队到 UI 线程），行为零变化。
+#[derive(Clone)]
+struct SlintSessionUi {
+    ui: slint::Weak<AppWindow>,
+    slot: usize,
+}
+
+impl SlintSessionUi {
+    fn new(ui: slint::Weak<AppWindow>, slot: usize) -> Self {
+        Self { ui, slot }
+    }
+}
+
+impl aerodesk_session::SessionUi for SlintSessionUi {
+    fn set_status(&self, msg: String) {
+        with_ui(&self.ui, move |ui| ui.set_status(msg.into()));
+    }
+    fn set_conn_state(&self, state: i32) {
+        with_ui(&self.ui, move |ui| ui.set_conn_state(state));
+    }
+    fn set_log(&self, msg: String) {
+        with_ui(&self.ui, move |ui| ui.set_log(msg.into()));
+    }
+    fn session_status(&self, msg: String) {
+        session_set_status(&self.ui, self.slot, msg);
+    }
+    fn joined(&self) {
+        session_joined_weak(&self.ui, self.slot);
+    }
+    fn cleanup(&self, terminal: Option<String>) {
+        session_cleanup_weak(&self.ui, self.slot, terminal);
+    }
+    fn set_remote_cursor(&self, x: f32, y: f32) {
+        with_session_ui_state(&self.ui, self.slot, move |s| s.cursor = Some((x, y)));
+    }
+    fn add_recent(&self, room: &str, server: &str) {
+        let (room, server) = (room.to_string(), server.to_string());
+        with_ui(&self.ui, move |ui| add_recent(ui, &room, &server));
+    }
+    fn append_terminal_output(&self, text: String) {
+        append_terminal_output(self.slot, text);
+    }
+    fn append_chat_message(&self, sender: String, text: String, own: bool) {
+        append_chat_message(self.slot, sender, text, own);
+    }
+    fn set_message_window_status(&self, status: String) {
+        set_message_window_status(self.slot, status);
+    }
+    fn update_file_window_progress(&self, progress: f32, label: String, status: String) {
+        update_file_window_progress(self.slot, progress, label, status);
+    }
+    fn clear_file_window_progress(&self, status: Option<String>) {
+        clear_file_window_progress(self.slot, status);
+    }
+    fn main_session_status(&self, msg: String) {
+        with_ui(&self.ui, move |ui| ui.set_session_status(msg.into()));
+    }
+    fn set_file_progress(&self, progress: f32, label: String) {
+        with_session_ui_state(&self.ui, self.slot, move |s| {
+            s.file_progress = progress;
+            s.file_label = label;
+        });
+    }
+    fn set_camera_available(&self, available: bool) {
+        with_ui(&self.ui, move |ui| ui.set_camera_available(available));
+    }
+}
+
 /// 由 SESSIONS 顺序构建 (标签, 帧数组)。
 /// 帧存在各会话句柄里（按稳定 slot 归属）：断开中间会话后剩余会话仍显示自己的帧。
 #[derive(Copy, Clone)]
@@ -1428,12 +1442,11 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
         .spawn(move || {
             #[cfg(target_os = "macos")]
             {
-                crate::macos_media::run_viewer(
+                aerodesk_session::macos_media::run_viewer(
                     server_url,
                     room,
                     Some(token),
-                    weak2.clone(),
-                    slot,
+                    SlintSessionUi::new(weak2.clone(), slot),
                     control_rx,
                     input_rx,
                     cmd_rx,
@@ -1443,22 +1456,32 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
                     volume,
                     show_camera,
                     stop,
+                    &FILE_TRANSFER_ENABLED,
+                    {
+                        let ui2 = weak2.clone();
+                        move |rgba: &[u8], w: usize, h: usize| {
+                            crate::present_frame(&ui2, rgba, w, h, slot)
+                        }
+                    },
                 );
             }
             #[cfg(not(target_os = "macos"))]
             {
-                crate::generic_media::run_generic_viewer(
+                aerodesk_session::generic_media::run_generic_viewer(
                     server_url,
                     room,
                     Some(token),
-                    weak2.clone(),
-                    slot,
+                    SlintSessionUi::new(weak2.clone(), slot),
                     input_rx,
                     cmd_rx,
                     file_cmd_rx,
                     chat_cmd_rx,
                     stop,
                     view_only,
+                    {
+                        let ui2 = weak2.clone();
+                        move || SlintRenderer::new(ui2.clone(), slot)
+                    },
                 );
             }
             with_ui(&weak2, |ui| ui.set_connecting(false));
@@ -1550,7 +1573,7 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                             crate::with_ui(&uiw, move |ui| {
                                 if ui.get_inc_enabled() {
                                     let _ = p.lock().unwrap().accept_call();
-                                    crate::generic_publisher::start_publisher(ui);
+                                    start_publisher_ui(ui);
                                     ui.set_status(format!("接听来自 {from} 的呼叫").into());
                                 } else {
                                     let _ = p.lock().unwrap().reject_call(Some("未开启被控"));
@@ -1562,7 +1585,7 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                         | aerodesk_core::signal_presence::PresenceEvent::CallTimeout { .. } => {
                             let uiw = ui_weak.clone();
                             crate::with_ui(&uiw, |ui| {
-                                crate::generic_publisher::stop_publisher(ui);
+                                stop_publisher_ui(ui);
                             });
                         }
                     }
@@ -2033,10 +2056,79 @@ fn pick_file_and_send(ui: slint::Weak<AppWindow>) {
     });
 }
 
-/// 「开启被控」开关接入：Windows/macOS 各自启动/停止屏幕发布线程
-/// （#487 互控：macOS 已接入 macos_publisher）。
+/// #508 B1：被控端事件 → Slint 属性映射。文案/语义与 B1 前 generic_publisher
+/// 的直接属性写完全一致（Starting=启动前三写；Status=四写含 online 判定；
+/// StartFailed=仅设置页；Stopped=停止三写）。
+fn publisher_event_sink(
+    ui_weak: &slint::Weak<AppWindow>,
+) -> aerodesk_session::generic_publisher::PublisherEventSink {
+    let ui_weak = ui_weak.clone();
+    std::sync::Arc::new(move |ev: aerodesk_session::PublisherEvent| match ev {
+        aerodesk_session::PublisherEvent::Starting => {
+            crate::with_ui(&ui_weak, |ui| {
+                ui.set_settings_status("正在启动被控端…".into());
+                ui.set_signal_status("正在连接信令…".into());
+                ui.set_signal_online(false);
+            });
+        }
+        aerodesk_session::PublisherEvent::Status(msg) => {
+            let online = msg.contains("已在线");
+            crate::with_ui(&ui_weak, move |ui| {
+                ui.set_status(msg.clone().into());
+                ui.set_settings_status(msg.clone().into());
+                ui.set_signal_status(msg.into());
+                ui.set_signal_online(online);
+            });
+        }
+        aerodesk_session::PublisherEvent::StartFailed(msg) => {
+            crate::with_ui(&ui_weak, move |ui| {
+                ui.set_settings_status(msg.into());
+            });
+        }
+        aerodesk_session::PublisherEvent::Stopped => {
+            crate::with_ui(&ui_weak, |ui| {
+                ui.set_settings_status("被控端已停止".into());
+                ui.set_signal_status("信令未连接（未开启被控）".into());
+                ui.set_signal_online(false);
+            });
+        }
+    })
+}
+
+/// #508 B1：从 UI 属性快照构建被控端配置（引擎不再回读 UI）。
+/// server 保持 UI 原样输入（协议归一化在 core 连接层，与被控路径原行为一致）。
+fn publisher_config_from_ui(ui: &AppWindow) -> aerodesk_session::PublisherConfig {
+    aerodesk_session::PublisherConfig {
+        server: ui.get_server_default().to_string(),
+        room: ui.get_device_id().to_string(),
+        token: ui.get_token_default().to_string(),
+        audio: ui.get_inc_audio(),
+        mouse: ui.get_inc_mouse(),
+        view_only: ui.get_inc_view_only(),
+    }
+}
+
+/// 启动被控端（UI 入口）。
+fn start_publisher_ui(ui: &AppWindow) {
+    aerodesk_session::generic_publisher::start_publisher(
+        publisher_config_from_ui(ui),
+        publisher_event_sink(&ui.as_weak()),
+    );
+}
+
+/// 停止被控端（UI 入口）。
+fn stop_publisher_ui(ui: &AppWindow) {
+    aerodesk_session::generic_publisher::stop_publisher(publisher_event_sink(&ui.as_weak()));
+}
+
+/// 「开启被控」开关接入：开启时启动发布线程，关闭时置 stop 退出线程
+/// （Windows/macOS 各自的发布实现由 aerodesk-session 按平台分发，#487）。
 fn handle_toggle_inc(ui: &AppWindow) {
-    crate::generic_publisher::toggle_publisher(ui);
+    if ui.get_inc_enabled() {
+        start_publisher_ui(ui);
+    } else {
+        stop_publisher_ui(ui);
+    }
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -3203,7 +3295,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 // #404 评审：触发前重读开关——用户在前 800ms 内关闭时不得再启动被控端，
                 // 否则界面上开关为关而采集/连接/「已启动」提示照常，需再开关一次才能停。
                 if ui.get_inc_enabled() {
-                    crate::generic_publisher::start_publisher(&ui);
+                    start_publisher_ui(&ui);
                 }
             }
         });
@@ -3560,21 +3652,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_chat_text_accepts_protocol_json_shape() {
-        let json = r#"{"sender":"alice","text":"hello 你好","timestamp_ms":1723766400123}"#;
-        let (sender, text) = decode_chat_text(json.as_bytes()).unwrap();
-        assert_eq!(sender, "alice");
-        assert_eq!(text, "hello 你好");
 
-        // sender 缺失时使用默认显示名，非法 JSON / 空文本不 panic。
-        let (sender, text) = decode_chat_text(br#"{"text":"hi"}"#).unwrap();
-        assert_eq!(sender, "对方");
-        assert_eq!(text, "hi");
-        assert!(decode_chat_text(b"not-json").is_none());
-        assert!(decode_chat_text(br#"{"text":"   "}"#).is_none());
-    }
-
-    #[test]
     fn device_groups_grouped_and_sorted() {
         let items: Vec<slint::SharedString> = vec![
             "NAS2 · demo · 10.0.0.2:3003 · 家庭".into(),

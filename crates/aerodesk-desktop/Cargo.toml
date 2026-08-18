@@ -16,6 +16,8 @@ aerodesk-core = { path = "../aerodesk-core" }
 aerodesk-protocol = { path = "../aerodesk-protocol" }
 # 桌面端侧只依赖平台实现层，不再直接引用分散的 aerodesk-{macos,windows,linux}。
 aerodesk-platform = { path = "../aerodesk-platform" }
+# #508 B1：会话编排层（viewer/publisher 引擎），UI 经 SessionUi 缝接线。
+aerodesk-session = { path = "../aerodesk-session" }
 # 非 macOS 主控端真实媒体：OpenH264 软解（全平台）；macOS 用 VideoToolbox 不依赖。
 
 # #73 观看端 Opus 解码（generic_viewer 非 macOS 音频播放；macOS 由 macos_media 使用）。
