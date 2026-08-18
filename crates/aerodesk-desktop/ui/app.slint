@@ -440,6 +440,10 @@ export component AppWindow inherits Window {
     in-out property <string> cmd-audit: "";
     in-out property <int> quality: 1;
     in-out property <string> server-default: "signal.aerodesk.io";
+    // #504 信令 TLS 开关（默认关=ws://，自建明文服务器适用；开=wss://）。
+    in-out property <bool> server-tls: false;
+    // #504 presence 常驻连接是否存在（设置页「连接 / 登录」按钮文案切换用）。
+    in-out property <bool> presence-active: false;
     in-out property <bool> remember-token: false;
     in-out property <string> token-default: "";
     in-out property <string> settings-status: "";
@@ -509,6 +513,9 @@ export component AppWindow inherits Window {
     callback cmd-audit-refresh();
     callback set-quality(int);
     callback set-translate-mode(int);
+    // #504 信令 TLS 开关写回 + 「连接 / 登录」按钮（连接/断开 presence）。
+    callback set-server-tls(bool);
+    callback connect-signal();
     callback set-peer-tab(int);
     callback toggle-favorite(string);
     callback refresh-peers();
@@ -1132,7 +1139,16 @@ export component AppWindow inherits Window {
                 if root.settings-tab == 1: VerticalLayout {
                     spacing: 12px;
                     Text { text: "默认信令服务器"; font-size: 15px; color: #212121; height: 20px; vertical-stretch: 0; }
-                    RdInput { text <=> root.server-default; placeholder: "signal.aerodesk.io 或 127.0.0.1:3003"; font-size: 14px; edited => { root.server-input = root.server-default; root.auto-save(); } }
+                    RdInput { text <=> root.server-default; placeholder: "129.226.150.174:14703 或 signal.aerodesk.io"; font-size: 14px; edited => { root.server-input = root.server-default; root.auto-save(); } }
+                    // #504 显式 TLS 选择：默认关（ws://）；自建明文服务器填裸地址即可直连，
+                    // 不再被「非回环默认 wss」的启发式卡在 TLS 握手。
+                    Switch { text: "使用 TLS 加密（wss://）——自建明文服务器请保持关闭（默认）"; checked <=> root.server-tls; toggled => { root.set-server-tls(root.server-tls); root.auto-save(); } }
+                    HorizontalLayout {
+                        cross-axis-alignment: center;
+                        spacing: 10px;
+                        RdButton { text: root.presence-active ? "断开" : "连接 / 登录"; width: 120px; clicked => { root.connect-signal(); } }
+                        Text { text: root.signal-status; font-size: 13px; color: root.signal-online ? #188038 : #7d7d84; vertical-alignment: center; }
+                    }
                     Text { text: "中继偏好：自动（直连失败走 TURN）"; font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                 }
                 if root.settings-tab == 2: VerticalLayout {
