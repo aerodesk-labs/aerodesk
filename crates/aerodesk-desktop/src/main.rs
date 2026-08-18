@@ -354,6 +354,9 @@ static CHAT_HISTORY: std::sync::Mutex<Vec<(usize, Vec<ChatHistoryEntry>)>> =
 /// 工具栏「输入」按钮控制——未捕获时鼠标/键盘/滚轮不转发被控端（F3）。
 pub static INPUT_CAPTURING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+/// 跨端修饰键翻译镜像（设置页三态开关写，发键点读）：
+/// 0=直通/物理保真 1=翻译到 Windows 2=翻译到 macOS（#496 G2）。
+pub static MODIFIER_TRANSLATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 /// 会话相关测试共享锁：多会话 e2e 与无头 UI 状态测试都操作全局 SESSIONS，
 /// 必须串行执行避免互相污染。
 #[cfg(test)]
@@ -716,6 +719,9 @@ fn send_key_to_slot(
         alt,
         meta,
     };
+    // #496 G2：跨端修饰键翻译（设置页三态开关；直通时原样返回）。
+    let (code, modifiers) =
+        keymap::translate_cross_end(code, &modifiers, MODIFIER_TRANSLATE.load(Ordering::SeqCst));
     let event = aerodesk_protocol::input::InputEvent::Key {
         code: code.to_string(),
         state,
@@ -2030,6 +2036,8 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_inc_mouse(settings.inc_mouse);
     ui.set_inc_view_only(settings.inc_view_only);
     ui.set_show_remote_cursor(settings.show_remote_cursor);
+    ui.set_translate_mode(settings.modifier_translate as i32);
+    MODIFIER_TRANSLATE.store(settings.modifier_translate, Ordering::SeqCst);
     ui.set_quality(settings.quality);
     // 服务器地址 UI 上只展示 host:port（协议/路径在连接时由
     // aerodesk_core::signaling::normalize_signal_url 自动补全）。
@@ -2280,6 +2288,12 @@ fn main() -> Result<(), slint::PlatformError> {
                 alt,
                 meta,
             };
+            // #496 G2：跨端修饰键翻译（设置页三态开关；直通时原样返回）。
+            let (code, modifiers) = keymap::translate_cross_end(
+                code,
+                &modifiers,
+                MODIFIER_TRANSLATE.load(Ordering::SeqCst),
+            );
             let event = aerodesk_protocol::input::InputEvent::Key {
                 code: code.to_string(),
                 state,
@@ -2849,6 +2863,26 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }
     });
+    ui.on_set_translate_mode({
+        let ui = ui.as_weak();
+        // #496 G2：跨端修饰键翻译三态——写回属性 + 镜像原子量（发键点读）。
+        move |v| {
+            let ui = ui.unwrap();
+            ui.set_translate_mode(v);
+            MODIFIER_TRANSLATE.store(v as u8, Ordering::SeqCst);
+            ui.set_settings_status(
+                format!(
+                    "跨端修饰键：{}",
+                    match v {
+                        1 => "翻译到 Windows",
+                        2 => "翻译到 macOS",
+                        _ => "直通（物理保真）",
+                    }
+                )
+                .into(),
+            );
+        }
+    });
     ui.on_set_quality({
         let ui = ui.as_weak();
         move |q| {
@@ -2872,6 +2906,8 @@ fn main() -> Result<(), slint::PlatformError> {
         let ui = ui.as_weak();
         move || {
             let ui = ui.unwrap();
+            // 跨端修饰键翻译即时生效（发键点读镜像，不等保存）。
+            MODIFIER_TRANSLATE.store(ui.get_translate_mode() as u8, Ordering::SeqCst);
             let mut device_pw = ui.get_device_pw().to_string();
             // 设置页安全 tab：本机接入密码非空则更新（清空表示不修改）。
             let pw_edit = ui.get_pw_edit().to_string();
@@ -2893,6 +2929,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 inc_mouse: ui.get_inc_mouse(),
                 inc_view_only: ui.get_inc_view_only(),
                 show_remote_cursor: ui.get_show_remote_cursor(),
+                modifier_translate: ui.get_translate_mode() as u8,
             };
             save_settings(&settings);
             // 即时生效：同步主页输入框（无需重启）。
@@ -3837,6 +3874,10 @@ struct AppSettings {
     /// 主流默认；蓝色半透明区别于真实鼠标）。
     #[serde(default)]
     show_remote_cursor: bool,
+    /// 跨端修饰键翻译：0=直通/物理保真 1=翻译到 Windows 2=翻译到 macOS
+    /// （#496 G2；默认直通，对齐主流远控软件物理保真惯例）。
+    #[serde(default)]
+    modifier_translate: u8,
 }
 
 fn default_true() -> bool {

@@ -433,6 +433,7 @@ export component AppWindow inherits Window {
     in-out property <float> frame-h: 0;
     // ---- 设置 ----
     in-out property <int> settings-tab: 0;          // 0=显示 1=网络 2=安全 3=快捷键 4=AI 远控
+    in-out property <int> translate-mode: 0;    // 0=直通 1=翻译到 Windows 2=翻译到 macOS（#496 G2）
     // #109 AI 远控：命令白名单 + 审计（本机管理入口）。
     in-out property <[string]> cmd-allowlist: [];
     in-out property <string> cmd-allowlist-input: "";
@@ -507,6 +508,7 @@ export component AppWindow inherits Window {
     callback cmd-allowlist-refresh();
     callback cmd-audit-refresh();
     callback set-quality(int);
+    callback set-translate-mode(int);
     callback set-peer-tab(int);
     callback toggle-favorite(string);
     callback refresh-peers();
@@ -1145,6 +1147,16 @@ export component AppWindow inherits Window {
                 }
                 if root.settings-tab == 3: VerticalLayout {
                     spacing: 12px;
+                    Text { text: "跨端修饰键翻译"; font-size: 15px; font-weight: 600; color: #212121; height: 20px; vertical-stretch: 0; }
+                    Text { text: "直通（默认）：Cmd=Win 键 / Ctrl=Ctrl，物理保真。翻译到 Windows：mac 主控 Cmd+C 等同远端 Ctrl+C（复制/粘贴可用）。翻译到 macOS：Win 主控 Ctrl+C 等同远端 Cmd+C。"; font-size: 13px; color: #7d7d84; height: 44px; vertical-stretch: 0; wrap: word-wrap; }
+                    HorizontalLayout {
+                        cross-axis-alignment: center;
+                        spacing: 8px;
+                        RdButton { text: "直通（物理保真）"; width: 140px; checked: root.translate-mode == 0; clicked => { root.set-translate-mode(0); root.auto-save(); } }
+                        RdButton { text: "翻译到 Windows"; width: 140px; checked: root.translate-mode == 1; clicked => { root.set-translate-mode(1); root.auto-save(); } }
+                        RdButton { text: "翻译到 macOS"; width: 130px; checked: root.translate-mode == 2; clicked => { root.set-translate-mode(2); root.auto-save(); } }
+                    }
+                    Text { text: "快捷键"; font-size: 15px; font-weight: 600; color: #212121; height: 20px; vertical-stretch: 0; }
                     Text { text: "全屏：F11（待绑定）"; font-size: 14px; color: #4d4d52; height: 18px; vertical-stretch: 0; }
                     Text { text: "输入捕获/释放：Esc（待绑定）"; font-size: 14px; color: #4d4d52; height: 18px; vertical-stretch: 0; }
                     Text { text: "断开：Ctrl+Alt+D（待绑定）"; font-size: 14px; color: #4d4d52; height: 18px; vertical-stretch: 0; }
