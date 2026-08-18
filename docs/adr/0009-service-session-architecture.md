@@ -36,13 +36,13 @@
    - **SYSTEM 服务**（已有）：被控仲裁、安全桌面/helper（#471/#472）、机器级配置；
    - **用户态 agent**（新增）：主控 viewer 引擎、登录后被控出流。主控不跑 SYSTEM——session 0 隔离对主控只有害处（看不到用户桌面交互、徒增权限面），对标 ToDesk 双进程。
 2. **desktop 退为纯 UI/UX**：不再直接持有 str0m endpoint / 媒体 socket（目标态）；经 IPC 完成会话建立、帧呈现、输入转发、授权与设置同步。
-3. **IPC（B2 定义）**：命名管道 loopback；控制面 JSON（版本化），帧面在共享内存与编码流直连之间以实测带宽/延迟数据选型（B2 验收强制附基准）。
+3. **IPC（B2 定义）**：命名管道 loopback；控制面 JSON（版本化），帧面在共享内存与编码流直连之间以实测数据选型（B2 验收强制附基准）。基准对比维度除带宽/延迟外必须含**「UI 进程是否仍需链接解码栈」**：编码流直连意味着 desktop 瘦身范围缩水为「引擎出、codec 留」（FFmpeg/VideoToolbox 仍随 UI 分发），与纯壳目标存在张力；共享内存（1080p RGBA 帧 ~8MB，memcpy 亚毫秒）与 <5ms p95 预算自洽且保持 desktop 不链接 codec。
 4. **落地顺序**（每批独立 PR/验收）：
    - **B1 引擎下沉**：`generic_media`/`generic_publisher`/`macos_media` 会话编排层抽为 `aerodesk-session` crate，desktop/host 均链接；行为等价（现有 UI e2e + 冒烟全绿）。B1 是 A/B 两案共需，先行不锁定终局。
    - **B2 IPC 协议**：控制面消息集 + 帧面选型基准 + 版本化策略。
    - **B3 被控迁移**：用户态被控出流收进 host agent，与 #471 helper 共用采集路径；desktop 仅留授权开关/状态。
    - **B4 主控迁移**：viewer 迁 agent，UI 关闭会话不死、重开挂回、多会话仲裁收口。
-5. **平台顺序**：先 Windows 跑通（与非登录态路线一致），macOS/Linux 服务化随后单独立项；macOS 侧 `macos_media` 仅在 B1 中原样搬迁，不改实现。
+5. **平台顺序**：先 Windows 跑通（与非登录态路线一致），macOS/Linux 服务化随后单独立项；macOS 侧 `macos_media` 仅在 B1 中原样搬迁，不改实现。macOS 子项的**已知风险**必须在立项时点名：TCC 的屏幕录制/辅助功能授权按**二进制签名身份**记录，重签名/换路径后授权静默失效（本仓库已踩 ad-hoc cdhash identity mismatch）——出流迁服务侧等于新增一个需授权的二进制身份，「权限身份迁移与重新授权 UX」（双进程分别授权引导，对齐 ToDesk mac 形态）是该子项的设计前置，不可落地后再补。
 6. **发布节奏**：B3 完成前发布物维持 desktop+cli；host 进 MSI/服务注册随 #473 在 B3/B4 间合入。
 
 ## 后果
