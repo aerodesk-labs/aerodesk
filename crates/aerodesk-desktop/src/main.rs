@@ -357,6 +357,16 @@ pub static INPUT_CAPTURING: std::sync::atomic::AtomicBool =
 /// 跨端修饰键翻译镜像（设置页三态开关写，发键点读）：
 /// 0=直通/物理保真 1=翻译到 Windows 2=翻译到 macOS（#496 G2）。
 pub static MODIFIER_TRANSLATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// 信令 TLS 开关镜像（设置页「网络」tab 写，信令 URL 归一化读）：
+/// false=默认非 TLS（ws://，自建明文服务器场景）；true=wss://（#504）。
+pub static SERVER_TLS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 信令 presence 常驻连接句柄（#504）：设置页「连接 / 登录」按钮可停止旧连接、
+/// 按当前服务器/TLS 选择重建。`stop` 置位后 presence 线程在下一轮循环退出。
+struct PresenceHandle {
+    stop: Arc<AtomicBool>,
+    presence: Arc<std::sync::Mutex<aerodesk_core::signal_presence::SignalPresence>>,
+}
+static PRESENCE: std::sync::Mutex<Option<PresenceHandle>> = std::sync::Mutex::new(None);
 /// 会话相关测试共享锁：多会话 e2e 与无头 UI 状态测试都操作全局 SESSIONS，
 /// 必须串行执行避免互相污染。
 #[cfg(test)]
@@ -1407,13 +1417,19 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
         });
     }
     let weak2 = ui.as_weak();
+    // #504 按设置页 TLS 开关归一化信令 URL（显式带 ws:// / wss:// 的输入不受影响）；
+    // `server` 原样保留用于状态条/最近列表展示。
+    let server_url = aerodesk_core::signaling::normalize_signal_url_with_tls(
+        &server,
+        SERVER_TLS.load(Ordering::SeqCst),
+    );
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(move || {
             #[cfg(target_os = "macos")]
             {
                 crate::macos_media::run_viewer(
-                    server,
+                    server_url,
                     room,
                     Some(token),
                     weak2.clone(),
@@ -1432,7 +1448,7 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
             #[cfg(not(target_os = "macos"))]
             {
                 crate::generic_media::run_generic_viewer(
-                    server,
+                    server_url,
                     room,
                     Some(token),
                     weak2.clone(),
@@ -1451,29 +1467,50 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
 }
 
 /// #446/#450 启动即自动连信令：后台常驻 presence，状态映射到主界面。
-fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: String) {
+/// #504：`tls` 决定裸地址补 ws:// 还是 wss://；句柄在 spawn 线程前原子登记到
+/// PRESENCE（先停掉旧连接），设置页「连接 / 登录」按钮可经 [`stop_signal_presence`]
+/// 停止后重建——连点按钮不会泄漏旧线程。
+fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: String, tls: bool) {
+    let server = aerodesk_core::signaling::normalize_signal_url_with_tls(&server, tls);
+    if server.is_empty() || room.is_empty() || room == "—" {
+        return;
+    }
+    let mut config = aerodesk_core::signal_presence::PresenceConfig::new(
+        server,
+        room,
+        aerodesk_protocol::signal::Role::Publisher,
+    )
+    .with_auto_accept(false); // #456 由 UI 根据「开启被控」授权决定是否接听
+    if !token.is_empty() {
+        config = config.with_auth_token(token);
+    }
+    let presence = std::sync::Arc::new(std::sync::Mutex::new(
+        aerodesk_core::signal_presence::SignalPresence::new(config)
+            .with_read_timeout(std::time::Duration::from_millis(500)),
+    ));
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        // 登记前原子替换旧句柄：旧线程下一轮循环（≤300ms）退出。
+        let mut slot = PRESENCE.lock().unwrap();
+        if let Some(old) = slot.take() {
+            old.stop.store(true, Ordering::SeqCst);
+            old.presence.lock().unwrap().stop();
+        }
+        *slot = Some(PresenceHandle {
+            stop: stop.clone(),
+            presence: presence.clone(),
+        });
+    }
+    ui.set_presence_active(true);
     let ui_weak = ui.as_weak();
     std::thread::Builder::new()
         .name("signal-presence".into())
         .spawn(move || {
-            if server.is_empty() || room.is_empty() || room == "—" {
-                return;
-            }
-            let mut config = aerodesk_core::signal_presence::PresenceConfig::new(
-                server,
-                room,
-                aerodesk_protocol::signal::Role::Publisher,
-            )
-            .with_auto_accept(false); // #456 由 UI 根据「开启被控」授权决定是否接听
-            if !token.is_empty() {
-                config = config.with_auth_token(token);
-            }
-            let presence = std::sync::Arc::new(std::sync::Mutex::new(
-                aerodesk_core::signal_presence::SignalPresence::new(config)
-                    .with_read_timeout(std::time::Duration::from_millis(500)),
-            ));
             presence.lock().unwrap().start();
             loop {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
                 let st = presence.lock().unwrap().poll();
                 let (text, online) = match st {
                     aerodesk_core::signal_presence::PresenceStatus::Stopped => {
@@ -1526,8 +1563,46 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                 }
                 std::thread::sleep(std::time::Duration::from_millis(300));
             }
+            // 被「断开」停止后兜底复位状态条（stop_signal_presence 已即时复位过一次）。
+            crate::with_ui(&ui_weak, |ui| {
+                ui.set_signal_status("信令未连接".into());
+                ui.set_signal_online(false);
+            });
         })
         .expect("spawn signal presence");
+}
+
+/// 停止当前信令 presence（设置页「断开」按钮，#504）：置停止位、断开 WebSocket、
+/// 即时复位状态条；presence 线程在下一轮循环（≤300ms）退出并清句柄。
+fn stop_signal_presence(ui: &AppWindow) {
+    let handle = PRESENCE.lock().unwrap().take();
+    if let Some(handle) = handle {
+        handle.stop.store(true, Ordering::SeqCst);
+        handle.presence.lock().unwrap().stop();
+    }
+    ui.set_presence_active(false);
+    ui.set_signal_status("信令未连接".into());
+    ui.set_signal_online(false);
+}
+
+/// 「连接 / 登录」按钮（#504）：已连接则断开；未连接则按设置页当前
+/// 服务器地址 + TLS 开关 + 默认凭证重建 presence（旧连接先停掉）。
+fn connect_signal_from_settings(ui: &AppWindow) {
+    if ui.get_presence_active() {
+        stop_signal_presence(ui);
+        ui.set_settings_status("已断开信令".into());
+        return;
+    }
+    let server = ui.get_server_default().to_string();
+    if server.trim().is_empty() {
+        ui.set_settings_status("请先填写信令服务器地址".into());
+        return;
+    }
+    stop_signal_presence(ui); // 防御：清除可能残留的旧连接
+    let room = ui.get_device_id().to_string();
+    let token = ui.get_token_default().to_string();
+    spawn_signal_presence(ui, server, room, token, SERVER_TLS.load(Ordering::SeqCst));
+    ui.set_settings_status("正在连接信令…".into());
 }
 
 pub fn build_tabs_frames(
@@ -2038,6 +2113,9 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_show_remote_cursor(settings.show_remote_cursor);
     ui.set_translate_mode(settings.modifier_translate as i32);
     MODIFIER_TRANSLATE.store(settings.modifier_translate, Ordering::SeqCst);
+    // #504 信令 TLS 开关（默认关=ws://）：镜像原子量供连接时归一化读取。
+    ui.set_server_tls(settings.server_tls);
+    SERVER_TLS.store(settings.server_tls, Ordering::SeqCst);
     ui.set_quality(settings.quality);
     // 服务器地址 UI 上只展示 host:port（协议/路径在连接时由
     // aerodesk_core::signaling::normalize_signal_url 自动补全）。
@@ -2052,6 +2130,7 @@ fn main() -> Result<(), slint::PlatformError> {
         settings.server_default.clone(),
         settings.device_id.clone(),
         settings.token_default.clone(),
+        settings.server_tls,
     );
     if !settings.server_default.is_empty() {
         ui.set_server_input(server_display.into());
@@ -2883,6 +2962,31 @@ fn main() -> Result<(), slint::PlatformError> {
             );
         }
     });
+    // #504 信令 TLS 开关：写回属性 + 镜像原子量（连接时归一化 URL 读）。
+    ui.on_set_server_tls({
+        let ui = ui.as_weak();
+        move |v| {
+            let ui = ui.unwrap();
+            ui.set_server_tls(v);
+            SERVER_TLS.store(v, Ordering::SeqCst);
+            ui.set_settings_status(
+                (if v {
+                    "信令加密：TLS（wss://）"
+                } else {
+                    "信令加密：关闭（ws://，自建明文服务器适用）"
+                })
+                .into(),
+            );
+        }
+    });
+    // #504 设置页「连接 / 登录」按钮：连接/断开信令 presence。
+    ui.on_connect_signal({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            connect_signal_from_settings(&ui);
+        }
+    });
     ui.on_set_quality({
         let ui = ui.as_weak();
         move |q| {
@@ -2908,6 +3012,8 @@ fn main() -> Result<(), slint::PlatformError> {
             let ui = ui.unwrap();
             // 跨端修饰键翻译即时生效（发键点读镜像，不等保存）。
             MODIFIER_TRANSLATE.store(ui.get_translate_mode() as u8, Ordering::SeqCst);
+            // #504 信令 TLS 开关即时生效（下次连接归一化 URL 读镜像）。
+            SERVER_TLS.store(ui.get_server_tls(), Ordering::SeqCst);
             let mut device_pw = ui.get_device_pw().to_string();
             // 设置页安全 tab：本机接入密码非空则更新（清空表示不修改）。
             let pw_edit = ui.get_pw_edit().to_string();
@@ -2930,6 +3036,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 inc_view_only: ui.get_inc_view_only(),
                 show_remote_cursor: ui.get_show_remote_cursor(),
                 modifier_translate: ui.get_translate_mode() as u8,
+                server_tls: ui.get_server_tls(),
             };
             save_settings(&settings);
             // 即时生效：同步主页输入框（无需重启）。
@@ -3782,6 +3889,24 @@ mod tests {
         assert_eq!(display_server("ws://127.0.0.1:3003"), "127.0.0.1:3003");
         assert_eq!(display_server("signal.aerodesk.io"), "signal.aerodesk.io");
     }
+
+    /// #504 旧版本设置文件（无 server_tls 字段）加载后默认 false（非 TLS），
+    /// 保存后字段落盘——保证老用户升级后行为从「裸地址默认 wss」显式化。
+    #[test]
+    fn settings_without_server_tls_defaults_false() {
+        let old = serde_json::json!({
+            "server_default": "129.226.150.174:14703",
+            "quality": 1,
+            "remember_token": false,
+            "token_default": "",
+            "device_id": "dev-1",
+            "device_pw": "pw-1"
+        });
+        let settings: AppSettings = serde_json::from_value(old).unwrap();
+        assert!(!settings.server_tls);
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert_eq!(saved["server_tls"], serde_json::json!(false));
+    }
     // ---- #72 拖放发送（macOS winit 拦截）----
     #[cfg(target_os = "macos")]
     fn drop_handler() -> FileDropHandler {
@@ -3878,6 +4003,10 @@ struct AppSettings {
     /// （#496 G2；默认直通，对齐主流远控软件物理保真惯例）。
     #[serde(default)]
     modifier_translate: u8,
+    /// 信令是否走 TLS（wss://）：默认 false=非 TLS（ws://），自建明文信令
+    /// 服务器场景开箱即用（#504）；显式带 ws:// / wss:// 前缀的地址不受其影响。
+    #[serde(default)]
+    server_tls: bool,
 }
 
 fn default_true() -> bool {

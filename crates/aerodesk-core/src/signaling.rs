@@ -21,6 +21,15 @@ pub struct WsSignalClient {
 /// - 未带路径时补 `/ws`（服务器 WebSocket 端点统一挂在此路径下，连根路径会被回 200 而卡住）。
 /// - 已带协议/路径的输入原样保留。
 pub fn normalize_signal_url(input: &str) -> String {
+    normalize_signal_url_with_tls(input, true)
+}
+
+/// 归一化信令服务器地址，无显式协议时按 `default_tls` 选择 `ws://` / `wss://`（#504）。
+///
+/// 与 [`normalize_signal_url`] 的唯一区别在非回环裸地址的默认协议：
+/// `default_tls=false` 时补 `ws://`（自建明文信令服务器场景）。回环地址始终补
+/// `ws://`（loopback 上 TLS 无意义）；已带 `://` 的显式协议输入不受开关影响。
+pub fn normalize_signal_url_with_tls(input: &str, default_tls: bool) -> String {
     let input = input.trim();
     if input.is_empty() {
         return input.to_string();
@@ -33,10 +42,11 @@ pub fn normalize_signal_url(input: &str) -> String {
         } else {
             input.split(':').next().unwrap_or("")
         };
-        let scheme = if matches!(host, "localhost" | "127.0.0.1" | "::1" | "0:0:0:0:0:0:0:1") {
-            "ws"
-        } else {
+        let loopback = matches!(host, "localhost" | "127.0.0.1" | "::1" | "0:0:0:0:0:0:0:1");
+        let scheme = if !loopback && default_tls {
             "wss"
+        } else {
+            "ws"
         };
         format!("{scheme}://{input}")
     };
@@ -218,7 +228,42 @@ impl WsSignalClient {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_signal_url;
+    use super::{normalize_signal_url, normalize_signal_url_with_tls};
+
+    #[test]
+    fn normalize_with_tls_toggle_picks_default_scheme() {
+        // 裸地址 + TLS 关 → ws://（自建明文服务器场景，#504）
+        assert_eq!(
+            normalize_signal_url_with_tls("129.226.150.174:14703", false),
+            "ws://129.226.150.174:14703/ws"
+        );
+        // 裸地址 + TLS 开 → wss://
+        assert_eq!(
+            normalize_signal_url_with_tls("signal.aerodesk.io", true),
+            "wss://signal.aerodesk.io/ws"
+        );
+        // 回环地址不受开关影响，始终 ws://（loopback 上 TLS 无意义）
+        assert_eq!(
+            normalize_signal_url_with_tls("127.0.0.1:3003", true),
+            "ws://127.0.0.1:3003/ws"
+        );
+        assert_eq!(
+            normalize_signal_url_with_tls("localhost:3003", false),
+            "ws://localhost:3003/ws"
+        );
+        // 显式 scheme 优先于开关（两个方向都保留）
+        assert_eq!(
+            normalize_signal_url_with_tls("wss://h:3003", false),
+            "wss://h:3003/ws"
+        );
+        assert_eq!(
+            normalize_signal_url_with_tls("ws://h:3003/ws", true),
+            "ws://h:3003/ws"
+        );
+        // 空串原样返回
+        assert_eq!(normalize_signal_url_with_tls("", true), "");
+        assert_eq!(normalize_signal_url_with_tls("  ", false), "");
+    }
 
     #[test]
     fn normalize_adds_scheme_and_path() {
