@@ -11,6 +11,7 @@ members = [
     "crates/aerodesk-android",
     "crates/aerodesk-ohos",
     "crates/aerodesk-host",
+    "crates/aerodesk-session",
     "crates/aerodesk-desktop",
     "crates/aerodesk-codec",
     "crates/aerodesk-bridge",

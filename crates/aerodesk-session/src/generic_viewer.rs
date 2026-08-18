@@ -3,12 +3,13 @@
 //!
 //! macOS 增强版（音频/A-V 同步/文件传输）仍在 macos_media；本泛型核心先服务
 //! Windows/Linux（SoftDecoder + SlintRenderer），后续可承载 macOS 全量。
+//!
+//! #508 B1：UI 副作用全部经 [`crate::SessionUi`] 缝回传，本模块不再引用 Slint。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::with_ui;
 use aerodesk_core::access_unit::AccessUnitAssembler;
 use aerodesk_core::connect::connect_live_role;
 use aerodesk_core::endpoint::ClientEvent;
@@ -16,6 +17,8 @@ use aerodesk_core::platform::{Decoder, Renderer};
 use aerodesk_protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult};
 use aerodesk_protocol::signal::Role;
 use str0m::net::Protocol;
+
+use crate::SessionUi;
 
 /// 解析 cursor 通道的 `CursorPos`（#75；返回归一化 0..1 坐标，与 macOS UI 一致）。
 fn cursor_pos(data: &[u8]) -> Option<(f32, f32)> {
@@ -92,16 +95,17 @@ pub(crate) fn format_cmd_response(response: &CmdResponse) -> String {
 
 /// 运行泛型观看会话（阻塞直到断开/代际失效）。
 ///
+/// - `ui`：会话事件缝（desktop 为 Slint 适配器；槽位语义含在实现内，
+///   引擎自身不再消费 session_idx）。
 /// - `decoder_label`：状态栏解码器显示名（如 "OpenH264 软解"）。
 /// - `mk_decoder`：连接成功后惰性创建解码器（可失败）。
 /// - `mk_renderer`：连接成功后创建渲染器。
 #[allow(clippy::too_many_arguments)]
-pub fn run_viewer_generic<D, R, DF, RF>(
+pub fn run_viewer_generic<U, D, R, DF, RF>(
     server: String,
     room: String,
     token: Option<String>,
-    ui_weak: slint::Weak<crate::AppWindow>,
-    session_idx: usize,
+    ui: U,
     input_rx: std::sync::mpsc::Receiver<String>,
     cmd_rx: std::sync::mpsc::Receiver<aerodesk_protocol::cmd::CmdRequest>,
     file_cmd_rx: std::sync::mpsc::Receiver<crate::FileCmd>,
@@ -112,6 +116,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     mut mk_decoder: DF,
     mut mk_renderer: RF,
 ) where
+    U: SessionUi,
     D: Decoder + 'static,
     R: Renderer + 'static,
     DF: FnMut() -> Result<D, String>,
@@ -136,31 +141,25 @@ pub fn run_viewer_generic<D, R, DF, RF>(
             let msg = format!("连接失败：{e}");
             let terminal = msg.clone();
             if !stale() {
-                with_ui(&ui_weak, move |ui| {
-                    ui.set_conn_state(3);
-                    ui.set_status(msg.into());
-                });
+                ui.set_conn_state(3);
+                ui.set_status(msg);
             }
-            crate::session_cleanup_weak(&ui_weak, session_idx, Some(terminal));
+            ui.cleanup(Some(terminal));
             return;
         }
         Err(_) => {
             if !stale() {
-                with_ui(&ui_weak, |ui| {
-                    ui.set_conn_state(3);
-                    ui.set_status("连接超时：请检查服务器 ws://地址:端口 / token / 网络；对方未在线时也会等待媒体流".into());
-                });
+                ui.set_conn_state(3);
+                ui.set_status("连接超时：请检查服务器 ws://地址:端口 / token / 网络；对方未在线时也会等待媒体流".into());
             }
-            crate::session_cleanup_weak(
-                &ui_weak,
-                session_idx,
-                Some("连接超时：请检查服务器 ws://地址:端口 / token / 网络".into()),
-            );
+            ui.cleanup(Some(
+                "连接超时：请检查服务器 ws://地址:端口 / token / 网络".into(),
+            ));
             return;
         }
     };
     if stale() {
-        crate::session_cleanup_weak(&ui_weak, session_idx, None);
+        ui.cleanup(None);
         return;
     }
     let peer = live.peer_id.clone();
@@ -168,26 +167,20 @@ pub fn run_viewer_generic<D, R, DF, RF>(
     let room2 = room.clone();
     let server2 = server.clone();
     let connected_status = format!("已连接：peer={peer} ice={ice}");
-    let main_status = connected_status.clone();
-    with_ui(&ui_weak, move |ui| {
-        ui.set_status(main_status.into());
-        ui.set_log(
-            format!(
-                "设备: {room2}\n服务器: {server2}\nSDP 交换: OK\nICE: {}\n\n{decoder_label}渲染。",
-                if ice {
-                    "connected"
-                } else {
-                    "pending(5s 超时)"
-                }
-            )
-            .into(),
-        );
-        crate::add_recent(ui, &room2, &server2);
-        ui.set_conn_state(2);
-    });
-    crate::session_set_status(&ui_weak, session_idx, connected_status);
+    ui.set_status(connected_status.clone());
+    ui.set_log(format!(
+        "设备: {room2}\n服务器: {server2}\nSDP 交换: OK\nICE: {}\n\n{decoder_label}渲染。",
+        if ice {
+            "connected"
+        } else {
+            "pending(5s 超时)"
+        }
+    ));
+    ui.add_recent(&room2, &server2);
+    ui.set_conn_state(2);
+    ui.session_status(connected_status);
     // #438：连上信令只表示设备已连接/可被找到，不进入观察页；
-    // 收到首个渲染帧后才 session_joined_weak 进入会话视图。
+    // 收到首个渲染帧后才 joined 进入会话视图。
 
     let mut assembler = AccessUnitAssembler::new();
     // #72/#271 文件/剪贴板状态机：观看端不落盘接收，但剪贴板文本/图片接收生效。
@@ -235,10 +228,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                     .endpoint
                     .send_channel_data("cmd", false, json.as_bytes());
                 if !sent {
-                    crate::append_terminal_output(
-                        session_idx,
-                        "[错误] cmd 通道未就绪，命令未送达".to_string(),
-                    );
+                    ui.append_terminal_output("[错误] cmd 通道未就绪，命令未送达".to_string());
                 }
             }
         }
@@ -248,11 +238,11 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                 crate::FileCmd::SendFile(path) => match file_transfer.send_file(&path) {
                     Ok(()) => {
                         let msg = format!("开始发送文件：{}", path.display());
-                        crate::session_set_status(&ui_weak, session_idx, msg);
+                        ui.session_status(msg);
                     }
                     Err(e) => {
                         let msg = format!("发送失败：{e}");
-                        crate::session_set_status(&ui_weak, session_idx, msg);
+                        ui.session_status(msg);
                     }
                 },
                 crate::FileCmd::SendClipboard(text) => {
@@ -263,17 +253,17 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                     } else {
                         "剪贴板：file 通道未就绪".to_string()
                     };
-                    crate::session_set_status(&ui_weak, session_idx, msg);
+                    ui.session_status(msg);
                 }
                 crate::FileCmd::SendClipboardImage(png) => {
                     match file_transfer.send_clipboard_image(png) {
                         Ok(()) => {
                             let msg = "已发送剪贴板图片到被控端".to_string();
-                            crate::session_set_status(&ui_weak, session_idx, msg);
+                            ui.session_status(msg);
                         }
                         Err(e) => {
                             let msg = format!("剪贴板图片发送失败：{e}");
-                            crate::session_set_status(&ui_weak, session_idx, msg);
+                            ui.session_status(msg);
                         }
                     }
                 }
@@ -304,10 +294,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                             .endpoint
                             .send_channel_data("cmd", false, json.as_bytes());
                         if !sent {
-                            crate::set_message_window_status(
-                                session_idx,
-                                "发送失败：cmd 通道未就绪".to_string(),
-                            );
+                            ui.set_message_window_status("发送失败：cmd 通道未就绪".to_string());
                         }
                     }
                 }
@@ -354,9 +341,9 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                 && let Ok(response) = serde_json::from_slice::<CmdResponse>(data)
             {
                 if let CmdResult::Chat { sender, text } = &response.result {
-                    crate::append_chat_message(session_idx, sender.clone(), text.clone(), false);
+                    ui.append_chat_message(sender.clone(), text.clone(), false);
                 } else {
-                    crate::append_terminal_output(session_idx, format_cmd_response(&response));
+                    ui.append_terminal_output(format_cmd_response(&response));
                 }
             }
             // #75 远程光标：被控端经 cursor 通道广播位置 → UI 叠加（与 macOS UI 一致）。
@@ -364,9 +351,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                 && live.endpoint.channel_label(*cid).as_deref() == Some("cursor")
                 && let Some((cx, cy)) = cursor_pos(data)
             {
-                crate::with_session_ui_state(&ui_weak, session_idx, move |s| {
-                    s.cursor = Some((cx, cy));
-                });
+                ui.set_remote_cursor(cx, cy);
             }
             if let ClientEvent::Media(data) = ev {
                 media_evts += 1;
@@ -439,11 +424,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
                                 // 与正常退出路径一致：先清理会话注册表与 UI 槽位，
                                 // 否则会话残留（标签卡住、无法再次连接该槽位）。
                                 eprintln!("decoder init failed: {e}");
-                                crate::session_cleanup_weak(
-                                    &ui_weak,
-                                    session_idx,
-                                    Some(format!("解码器初始化失败：{e}")),
-                                );
+                                ui.cleanup(Some(format!("解码器初始化失败：{e}")));
                                 return;
                             }
                         }
@@ -478,13 +459,13 @@ pub fn run_viewer_generic<D, R, DF, RF>(
         if !no_media_notified && media_evts == 0 && Instant::now() >= no_media_deadline {
             no_media_notified = true;
             let room_msg = format!("对方不在线或未开启被控（设备 {room}），等待对方上线后自动出流");
-            crate::session_set_status(&ui_weak, session_idx, room_msg.clone());
-            with_ui(&ui_weak, move |ui| ui.set_status(room_msg.into()));
+            ui.session_status(room_msg.clone());
+            ui.set_status(room_msg);
         }
         if frames > 0 && !session_ui_joined {
             session_ui_joined = true;
-            crate::session_joined_weak(&ui_weak, session_idx);
-            crate::session_set_status(&ui_weak, session_idx, "会话中 · 媒体流已接通".to_string());
+            ui.joined();
+            ui.session_status("会话中 · 媒体流已接通".to_string());
         }
         if frames > 0 && no_media_notified {
             no_media_notified = false;
@@ -494,7 +475,7 @@ pub fn run_viewer_generic<D, R, DF, RF>(
         if let Some(text) = file_transfer.take_incoming_clipboard() {
             aerodesk_core::clipboard::set_cache(text.clone());
             aerodesk_core::clipboard::write(&text);
-            crate::session_set_status(&ui_weak, session_idx, "已应用远端剪贴板文本".to_string());
+            ui.session_status("已应用远端剪贴板文本".to_string());
         }
         if let Some(png) = file_transfer.take_incoming_clipboard_image() {
             let ok = aerodesk_core::clipboard::write_image(&png);
@@ -505,25 +486,20 @@ pub fn run_viewer_generic<D, R, DF, RF>(
             } else {
                 "远端剪贴板图片写入失败".to_string()
             };
-            crate::session_set_status(&ui_weak, session_idx, msg);
+            ui.session_status(msg);
         }
         // #452 文件传输进度：500ms 节流同步到会话状态和独立文件窗口。
         if last_file_status.elapsed() >= Duration::from_millis(500) {
             last_file_status = Instant::now();
             let st = file_transfer.status();
             if let Some(msg) = st.message {
-                crate::session_set_status(&ui_weak, session_idx, msg.clone());
-                crate::clear_file_window_progress(session_idx, Some(msg));
+                ui.session_status(msg.clone());
+                ui.clear_file_window_progress(Some(msg));
             } else if let Some((name, done, total)) = st.sending {
                 let pct = done as f64 * 100.0 / total.max(1) as f64;
                 let label = format!("发送 {name} {pct:.0}%");
-                crate::session_set_status(
-                    &ui_weak,
-                    session_idx,
-                    format!("发送文件：{name} {done}/{total} ({pct:.0}%)"),
-                );
-                crate::update_file_window_progress(
-                    session_idx,
+                ui.session_status(format!("发送文件：{name} {done}/{total} ({pct:.0}%)"));
+                ui.update_file_window_progress(
                     (pct / 100.0) as f32,
                     label,
                     format!("正在发送：{name}"),
@@ -531,19 +507,14 @@ pub fn run_viewer_generic<D, R, DF, RF>(
             } else if let Some((name, done, total)) = st.receiving {
                 let pct = done as f64 * 100.0 / total.max(1) as f64;
                 let label = format!("接收 {name} {pct:.0}%");
-                crate::session_set_status(
-                    &ui_weak,
-                    session_idx,
-                    format!("接收文件：{name} {done}/{total} ({pct:.0}%)"),
-                );
-                crate::update_file_window_progress(
-                    session_idx,
+                ui.session_status(format!("接收文件：{name} {done}/{total} ({pct:.0}%)"));
+                ui.update_file_window_progress(
                     (pct / 100.0) as f32,
                     label,
                     format!("正在接收：{name}"),
                 );
             } else {
-                crate::clear_file_window_progress(session_idx, None);
+                ui.clear_file_window_progress(None);
             }
         }
         // #271 剪贴板自动同步（1s 节流）：图片优先，否则文本；变化才发，防回声。
@@ -576,9 +547,8 @@ pub fn run_viewer_generic<D, R, DF, RF>(
         std::thread::sleep(Duration::from_millis(1));
     }
     // 会话结束（断开置 stop）：提示后清理注册表与 UI 槽位。
-    let msg = format!("已断开：{room}");
-    with_ui(&ui_weak, move |ui| ui.set_status(msg.into()));
-    crate::session_cleanup_weak(&ui_weak, session_idx, None);
+    ui.set_status(format!("已断开：{room}"));
+    ui.cleanup(None);
 }
 
 /// 剪贴板自动同步决策结果（#271）。

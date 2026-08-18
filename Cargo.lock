@@ -136,6 +136,7 @@ dependencies = [
  "aerodesk-core",
  "aerodesk-platform",
  "aerodesk-protocol",
+ "aerodesk-session",
  "embed-resource",
  "getrandom 0.2.17",
  "i-slint-backend-testing",
@@ -244,6 +245,21 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1 0.10.7",
+]
+
+[[package]]
+name = "aerodesk-session"
+version = "0.1.0"
+dependencies = [
+ "aerodesk-codec",
+ "aerodesk-core",
+ "aerodesk-platform",
+ "aerodesk-protocol",
+ "serde",
+ "serde_json",
+ "str0m",
+ "tracing",
+ "videotoolbox",
 ]
 
 [[package]]

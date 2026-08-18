@@ -1,12 +1,15 @@
 //! 非 macOS 桌面端（Windows/Linux）主控端：真实媒体观看。
 //!
 //! #277：解码/渲染统一走 core `Decoder`/`Renderer` trait（泛型管线
-//! `generic_viewer::run_viewer_generic`），本模块只负责组装解码器 +
-//! SlintRenderer。Linux 优先 VAAPI 硬解（无 /dev/dri 时回退 OpenH264 软解），
+//! `generic_viewer::run_viewer_generic`），本模块只负责组装解码器；
+//! 渲染器工厂由调用方注入（desktop 为 SlintRenderer，#508 B1）。
+//! Linux 优先 VAAPI 硬解（无 /dev/dri 时回退 OpenH264 软解），
 //! Windows 优先 DXVA2 硬解（无 GPU 时回退 OpenH264 软解）。
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+
+use crate::SessionUi;
 
 /// 观看端解码器：VAAPI 硬解（Linux，设备可用时）→ OpenH264 软解回退。
 ///
@@ -101,27 +104,32 @@ fn decoder_label() -> &'static str {
     }
 }
 
-/// 启动非 macOS 主控端观看：连接 → 收流 → 组装 → 解码（VAAPI/软解）→ Slint 渲染。
-pub fn run_generic_viewer(
+/// 启动非 macOS 主控端观看：连接 → 收流 → 组装 → 解码（VAAPI/软解）→ 渲染。
+///
+/// `mk_renderer` 由调用方注入（desktop 传 SlintRenderer 工厂）；槽位语义含在
+/// `ui` 实现内。（参数数与 B1 前一致，too_many_arguments 警告维持基线原样。）
+pub fn run_generic_viewer<U, R, RF>(
     server: String,
     room: String,
     token: Option<String>,
-    ui_weak: slint::Weak<crate::AppWindow>,
-    session_idx: usize,
+    ui: U,
     input_rx: std::sync::mpsc::Receiver<String>,
     cmd_rx: std::sync::mpsc::Receiver<aerodesk_protocol::cmd::CmdRequest>,
     file_cmd_rx: std::sync::mpsc::Receiver<crate::FileCmd>,
     chat_cmd_rx: std::sync::mpsc::Receiver<crate::ChatCmd>,
     stop: Arc<AtomicBool>,
     view_only: Arc<AtomicBool>,
-) {
-    let ui2 = ui_weak.clone();
+    mk_renderer: RF,
+) where
+    U: SessionUi,
+    R: aerodesk_core::platform::Renderer + 'static,
+    RF: FnMut() -> R,
+{
     crate::generic_viewer::run_viewer_generic(
         server,
         room,
         token,
-        ui_weak,
-        session_idx,
+        ui,
         input_rx,
         cmd_rx,
         file_cmd_rx,
@@ -130,6 +138,6 @@ pub fn run_generic_viewer(
         view_only,
         decoder_label(),
         mk_viewer_decoder,
-        move || crate::SlintRenderer::new(ui2.clone(), session_idx),
+        mk_renderer,
     );
 }

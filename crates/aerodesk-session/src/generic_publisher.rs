@@ -5,6 +5,16 @@
 //!
 //! macOS 被控端路径仍在 `macos_media`；Linux 被控端后续接入，本模块当前为
 //! no-op 桩（`RULE_可达性`：调用点与定义点同 cfg 门控，未接入平台不编译平台引用）。
+//!
+//! #508 B1：启动参数收敛为 [`crate::PublisherConfig`] 快照，UI 副作用经
+//! [`crate::PublisherEvent`] 回调回传，本模块不再引用 Slint/UI 类型。
+
+use std::sync::Arc;
+
+use crate::{PublisherConfig, PublisherEvent};
+
+/// 被控端生命周期事件回调（实现方负责线程安全/排队到 UI 线程）。
+pub type PublisherEventSink = Arc<dyn Fn(PublisherEvent) + Send + Sync>;
 
 /// 校验被控端发布房间号：本机 ID 即房间号；空/未初始化返回 None。
 pub(crate) fn valid_publisher_room(device_id: &str) -> Option<String> {
@@ -16,55 +26,51 @@ pub(crate) fn valid_publisher_room(device_id: &str) -> Option<String> {
     }
 }
 
-/// UI「开启被控」开关统一入口：开启时启动发布线程，关闭时置 stop 退出线程。
-pub fn toggle_publisher(ui: &crate::AppWindow) {
-    if ui.get_inc_enabled() {
-        start_publisher(ui);
-    } else {
-        stop_publisher(ui);
-    }
-}
-
 /// 启动被控端（外部仅 windows 目标调用；Linux/其他非 macOS 为 no-op 提示）。
 #[cfg(windows)]
-pub fn start_publisher(ui: &crate::AppWindow) {
-    imp::start_publisher(ui);
+pub fn start_publisher(cfg: PublisherConfig, on_event: PublisherEventSink) {
+    imp::start_publisher(cfg, on_event);
 }
 
 /// 停止被控端（windows 实现）。
 #[cfg(windows)]
-pub fn stop_publisher(ui: &crate::AppWindow) {
-    imp::stop_publisher(ui);
+pub fn stop_publisher(on_event: PublisherEventSink) {
+    imp::stop_publisher(on_event);
 }
 
 /// macOS 被控端：SCK+VT+CGEvent 实现（#487 互控最高优先级）。
 #[cfg(target_os = "macos")]
-pub fn start_publisher(ui: &crate::AppWindow) {
-    crate::macos_publisher::start_publisher(ui);
+pub fn start_publisher(cfg: PublisherConfig, on_event: PublisherEventSink) {
+    crate::macos_publisher::start_publisher(cfg, on_event);
 }
 
 /// macOS 被控端停止。
 #[cfg(target_os = "macos")]
-pub fn stop_publisher(ui: &crate::AppWindow) {
-    crate::macos_publisher::stop_publisher(ui);
+pub fn stop_publisher(on_event: PublisherEventSink) {
+    crate::macos_publisher::stop_publisher(on_event);
 }
 
 /// 其余平台（Linux 等）当前未接入被控端发布：提示但不破坏 UI。
 #[cfg(not(any(windows, target_os = "macos")))]
-pub fn start_publisher(ui: &crate::AppWindow) {
-    ui.set_settings_status("被控端发布当前仅 Windows/macOS 实现".into());
+pub fn start_publisher(_cfg: PublisherConfig, on_event: PublisherEventSink) {
+    on_event(PublisherEvent::StartFailed(
+        "被控端发布当前仅 Windows/macOS 实现".into(),
+    ));
 }
 
 /// 其余平台停止为 no-op（保持调用点对称，见 RULE 可达性）。
 #[cfg(not(any(windows, target_os = "macos")))]
-pub fn stop_publisher(ui: &crate::AppWindow) {
-    ui.set_settings_status("被控端发布当前仅 Windows/macOS 实现".into());
+pub fn stop_publisher(on_event: PublisherEventSink) {
+    on_event(PublisherEvent::StartFailed(
+        "被控端发布当前仅 Windows/macOS 实现".into(),
+    ));
 }
 
 /// Windows 被控端实现。独立 cfg 模块避免在 Linux/macOS 引用 `aerodesk-platform`。
 #[cfg(windows)]
 mod imp {
-    use super::valid_publisher_room;
+    use super::{PublisherEventSink, valid_publisher_room};
+    use crate::{PublisherConfig, PublisherEvent};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
@@ -79,7 +85,6 @@ mod imp {
     use aerodesk_protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult};
     use aerodesk_protocol::input::{InputEvent, InputFrame};
     use aerodesk_protocol::signal::Role;
-    use slint::ComponentHandle;
     use str0m::Output;
     use str0m::media::{Frequency, MediaTime};
     use str0m::net::Protocol;
@@ -92,62 +97,54 @@ mod imp {
     /// 当前发布线程的 stop 句柄（同一时刻只允许一个被控端发布线程）。
     pub(super) static STOP: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
 
-    pub(super) fn start_publisher(ui: &crate::AppWindow) {
+    pub(super) fn start_publisher(cfg: PublisherConfig, on_event: PublisherEventSink) {
         // 同一时刻仅一个发布线程：先停止旧线程再启动新配置。
-        stop_publisher(ui);
+        stop_publisher(on_event.clone());
 
-        let Some(room) = valid_publisher_room(&ui.get_device_id().to_string()) else {
-            ui.set_settings_status("被控端启动失败：本机 ID 无效".into());
+        let PublisherConfig {
+            server,
+            room: raw_room,
+            token,
+            audio,
+            mouse,
+            view_only,
+        } = cfg;
+        let Some(room) = valid_publisher_room(&raw_room) else {
+            on_event(PublisherEvent::StartFailed(
+                "被控端启动失败：本机 ID 无效".into(),
+            ));
             return;
         };
-        let server = ui.get_server_default().to_string();
-        let token = ui.get_token_default().to_string();
-        let audio = ui.get_inc_audio();
-        let mouse = ui.get_inc_mouse();
-        let view_only = ui.get_inc_view_only();
 
         let stop = Arc::new(AtomicBool::new(false));
         *STOP.lock().unwrap() = Some(stop.clone());
-        let weak = ui.as_weak();
-        ui.set_settings_status("正在启动被控端…".into());
-        ui.set_signal_status("正在连接信令…".into());
-        ui.set_signal_online(false);
+        on_event(PublisherEvent::Starting);
         // 数据通道收发链（str0m/SCTP）调用栈深，放大线程栈防溢出（RULE 数据通道大块传输线程栈需放大默认2MB.md）。
+        let sink = on_event.clone();
         if std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)
-            .spawn(move || run_publisher(server, room, token, weak, audio, mouse, view_only, stop))
+            .spawn(move || run_publisher(server, room, token, sink, audio, mouse, view_only, stop))
             .is_err()
         {
             *STOP.lock().unwrap() = None;
-            ui.set_settings_status("被控端启动失败：无法创建线程".into());
+            on_event(PublisherEvent::StartFailed(
+                "被控端启动失败：无法创建线程".into(),
+            ));
         }
     }
 
-    pub(super) fn stop_publisher(ui: &crate::AppWindow) {
+    pub(super) fn stop_publisher(on_event: PublisherEventSink) {
         if let Some(stop) = STOP.lock().unwrap().take() {
             stop.store(true, Ordering::SeqCst);
         }
-        ui.set_settings_status("被控端已停止".into());
-        ui.set_signal_status("信令未连接（未开启被控）".into());
-        ui.set_signal_online(false);
-    }
-
-    fn set_publisher_status(ui_weak: &slint::Weak<crate::AppWindow>, msg: String) {
-        let ui_weak = ui_weak.clone();
-        let online = msg.contains("已在线");
-        crate::with_ui(&ui_weak, move |ui| {
-            ui.set_status(msg.clone().into());
-            ui.set_settings_status(msg.clone().into());
-            ui.set_signal_status(msg.into());
-            ui.set_signal_online(online);
-        });
+        on_event(PublisherEvent::Stopped);
     }
 
     fn run_publisher(
         server: String,
         room: String,
         token: String,
-        ui_weak: slint::Weak<crate::AppWindow>,
+        on_event: PublisherEventSink,
         audio: bool,
         mouse: bool,
         view_only: bool,
@@ -163,12 +160,12 @@ mod imp {
                 Ok(l) => l,
                 Err(e) => {
                     let msg = format!("被控端连接失败：{e}");
-                    set_publisher_status(&ui_weak, msg);
+                    on_event(PublisherEvent::Status(msg));
                     return;
                 }
             };
         let Some(video_mid) = live.video_mid else {
-            set_publisher_status(&ui_weak, "被控端连接失败：无视频 mid".into());
+            on_event(PublisherEvent::Status("被控端连接失败：无视频 mid".into()));
             return;
         };
         let audio_mid = live.audio_mid;
@@ -179,7 +176,7 @@ mod imp {
             Ok(c) => c,
             Err(e) => {
                 let msg = format!("DXGI 采集初始化失败：{e}");
-                set_publisher_status(&ui_weak, msg);
+                on_event(PublisherEvent::Status(msg));
                 return;
             }
         };
@@ -187,11 +184,13 @@ mod imp {
         let display_rect = capture.display_rect();
         let (w, h) = capture.size();
         if w == 0 || h == 0 {
-            set_publisher_status(&ui_weak, "DXGI 采集失败：无可用显示器输出".into());
+            on_event(PublisherEvent::Status(
+                "DXGI 采集失败：无可用显示器输出".into(),
+            ));
             return;
         }
         if let Err(e) = MediaSource::start(&mut capture, FPS, false) {
-            set_publisher_status(&ui_weak, format!("屏幕采集启动失败：{e}"));
+            on_event(PublisherEvent::Status(format!("屏幕采集启动失败：{e}")));
             return;
         }
 
@@ -220,7 +219,7 @@ mod imp {
                     ) {
                         Ok(e) => Box::new(e),
                         Err(e) => {
-                            set_publisher_status(&ui_weak, format!("编码器初始化失败：{e}"));
+                            on_event(PublisherEvent::Status(format!("编码器初始化失败：{e}")));
                             return;
                         }
                     }
@@ -250,10 +249,9 @@ mod imp {
             None
         };
 
-        set_publisher_status(
-            &ui_weak,
-            format!("正在注册被控端：设备 {room} · {w}x{h}@30"),
-        );
+        on_event(PublisherEvent::Status(format!(
+            "正在注册被控端：设备 {room} · {w}x{h}@30"
+        )));
 
         let mut connected = false;
         let mut next_frame = Instant::now();
@@ -282,13 +280,12 @@ mod imp {
                     ClientEvent::IceConnected => {
                         connected = true;
                         next_frame = Instant::now();
-                        set_publisher_status(
-                            &ui_weak,
-                            format!("已在线，可被呼叫：设备 {room} · 屏幕发布中"),
-                        );
+                        on_event(PublisherEvent::Status(format!(
+                            "已在线，可被呼叫：设备 {room} · 屏幕发布中"
+                        )));
                     }
                     ClientEvent::Closed => {
-                        set_publisher_status(&ui_weak, "被控端连接已关闭".into());
+                        on_event(PublisherEvent::Status("被控端连接已关闭".into()));
                         return;
                     }
                     ClientEvent::KeyframeRequest(_) => encoder.request_keyframe(),
@@ -331,7 +328,7 @@ mod imp {
             std::thread::sleep(Duration::from_millis(2));
         }
 
-        set_publisher_status(&ui_weak, "被控端已停止".into());
+        on_event(PublisherEvent::Status("被控端已停止".into()));
     }
 
     /// #211：网络泵排空式读取，最多 `max_packets` 包。
