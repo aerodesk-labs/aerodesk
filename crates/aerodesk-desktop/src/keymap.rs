@@ -5,6 +5,8 @@
 //! 输出与 `aerodesk_platform::macos::inject::keycode_for_code` 对齐；无法映射返回 `None`，
 //! 调用方应 `reject` 让本地 UI 继续处理（例如 F13+、输入法组合键）。
 
+use aerodesk_protocol::input::Modifiers;
+
 /// 把 Slint `KeyEvent.text` 映射为平台无关键码（`"KeyA"`/`"Digit1"`/`"Enter"`/`"F5"`…）。
 pub fn key_code_for_text(text: &str) -> Option<&'static str> {
     if text.len() == 1 {
@@ -105,6 +107,48 @@ pub fn macos_swap_control_meta(code: &'static str) -> &'static str {
     }
 }
 
+/// #496 G2：跨端修饰键翻译（三态开关：0=直通/物理保真，1=翻译到 Windows，
+/// 2=翻译到 macOS）——按目标 OS 的习惯映射修饰键，复制/粘贴/剪切/撤销等
+/// 快捷键跨端可用。
+/// - 目标 Windows：meta（mac Cmd / Win 键）→ ctrl；Meta 键码 → Control 键码；
+/// - 目标 macOS：ctrl → meta（Command）；Control 键码 → Meta 键码。
+///
+/// 键码交换不看 flag（释放事件的 flags 已空，按码位交换才对称）；
+/// 码位非修饰键时仅翻译 flags。两修饰键同按的边角（如 Ctrl+Cmd）不追求完美。
+pub fn translate_cross_end(
+    code: &'static str,
+    modifiers: &Modifiers,
+    target: u8,
+) -> (&'static str, Modifiers) {
+    match target {
+        1 => (
+            match code {
+                "MetaLeft" => "ControlLeft",
+                "MetaRight" => "ControlRight",
+                _ => code,
+            },
+            Modifiers {
+                ctrl: modifiers.ctrl || modifiers.meta,
+                meta: false,
+                ..*modifiers
+            },
+        ),
+        2 => (
+            match code {
+                "ControlLeft" => "MetaLeft",
+                "ControlRight" => "MetaRight",
+                _ => code,
+            },
+            Modifiers {
+                ctrl: false,
+                meta: modifiers.meta || modifiers.ctrl,
+                ..*modifiers
+            },
+        ),
+        _ => (code, *modifiers),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +212,40 @@ mod tests {
         assert_eq!(macos_swap_control_meta("KeyA"), "KeyA");
         assert_eq!(macos_swap_control_meta("ShiftLeft"), "ShiftLeft");
         assert_eq!(macos_swap_control_meta("AltRight"), "AltRight");
+    }
+
+    /// #496 G2：翻译三态——直通、翻译到 Windows、翻译到 macOS。
+    #[test]
+    fn translate_cross_end_maps_modifiers_by_target() {
+        let mods = |ctrl: bool, meta: bool| Modifiers {
+            ctrl,
+            shift: false,
+            alt: false,
+            meta,
+        };
+        // 直通：原样。
+        let (c, m) = translate_cross_end("KeyC", &mods(true, false), 0);
+        assert_eq!((c, m.ctrl, m.meta), ("KeyC", true, false));
+        // mac 主控 Cmd+C → Windows：{KeyC, meta} → {KeyC, ctrl}。
+        let (c, m) = translate_cross_end("KeyC", &mods(false, true), 1);
+        assert_eq!((c, m.ctrl, m.meta), ("KeyC", true, false));
+        // mac 主控 Cmd 裸按 → Windows：{MetaLeft, meta} → {ControlLeft, ctrl}。
+        let (c, m) = translate_cross_end("MetaLeft", &mods(false, true), 1);
+        assert_eq!((c, m.ctrl, m.meta), ("ControlLeft", true, false));
+        // 释放对称：{MetaLeft, 无 flag} → {ControlLeft, 无 flag}（不卡键）。
+        let (c, m) = translate_cross_end("MetaLeft", &mods(false, false), 1);
+        assert_eq!((c, m.ctrl, m.meta), ("ControlLeft", false, false));
+        // Win 主控 Ctrl+C → macOS：{KeyC, ctrl} → {KeyC, meta}。
+        let (c, m) = translate_cross_end("KeyC", &mods(true, false), 2);
+        assert_eq!((c, m.ctrl, m.meta), ("KeyC", false, true));
+        // Win 主控 Ctrl 裸按 → macOS：{ControlLeft, ctrl} → {MetaLeft, meta}。
+        let (c, m) = translate_cross_end("ControlLeft", &mods(true, false), 2);
+        assert_eq!((c, m.ctrl, m.meta), ("MetaLeft", false, true));
+        // 释放对称（target 2）。
+        let (c, m) = translate_cross_end("ControlLeft", &mods(false, false), 2);
+        assert_eq!((c, m.ctrl, m.meta), ("MetaLeft", false, false));
+        // Win 键裸按 → macOS：{MetaLeft, meta} 保持原样（Command）。
+        let (c, m) = translate_cross_end("MetaLeft", &mods(false, true), 2);
+        assert_eq!((c, m.ctrl, m.meta), ("MetaLeft", false, true));
     }
 }
