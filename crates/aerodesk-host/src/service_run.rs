@@ -1,7 +1,7 @@
 //! #470 服务运行体（`--service`，SYSTEM 进程内执行）：
 //!   - M2：机器级配置 + `SignalPresence` 信令常驻（断线退避重连、30s 配置热重载）；
 //!   - M3：WTS 会话让位状态机——`NoSession`（服务在线，登录界面）⇄
-//!   `UserSession`（服务让位断开，spawn 桌面 UI）。
+//!     `UserSession`（服务让位断开，spawn 桌面 UI）。
 //! - #471 M2：登录界面媒体链路（headless 线程，合成源起步，实测矩阵后接
 //!   S0 直抓/helper 抓帧源）。
 //! 设计见 docs/PRELOGIN_WINDOWS_SERVICE.md（D2/D3/D4）与
@@ -396,7 +396,6 @@ fn run_media(
     helper_port: u16,
     stop: Arc<AtomicBool>,
 ) {
-    use aerodesk_core::Endpoint;
     use str0m::net::{Protocol, Receive};
     use str0m::{Input, Output};
     let auth = if token.is_empty() {
@@ -405,7 +404,7 @@ fn run_media(
         Some(token.as_str())
     };
     // host 无 cli 的 connect():走 core 泛型连接(desktop 发布端同款)。
-    let mut live = match aerodesk_core::connect::connect_live_role_codec(
+    let live = match aerodesk_core::connect::connect_live_role_codec(
         &server,
         &room,
         Role::Publisher,
@@ -466,7 +465,6 @@ fn run_media(
         };
     info!("登录界面媒体线程启动（合成源 640x360@30 H264，room={room}）");
     let mut pts: u64 = 0;
-    let mut stat_at = Instant::now();
     let mut stat_at = Instant::now();
     let mut connected = false;
     let mut next_frame = Instant::now();
@@ -672,12 +670,6 @@ impl HelperFrameSource {
             stream,
             buf: Vec::new(),
         })
-    }
-
-    /// 在 `port`(0=临时分配)上等 helper 回连(10s 超时),握手校验 hello 行。
-    fn accept_on(port: u16) -> Result<Self, String> {
-        let (listener, _) = Self::bind(port)?;
-        Self::accept_on_listener(listener)
     }
 }
 

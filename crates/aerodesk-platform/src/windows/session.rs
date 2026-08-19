@@ -154,12 +154,11 @@ fn winlogon_token(session_id: u32) -> Result<HANDLE, String> {
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
             .map_err(|e| format!("OpenProcess(winlogon {pid}): {e}"))?;
         let mut token = HANDLE::default();
-        let opened = OpenProcessToken(process, TOKEN_DUPLICATE, &mut token)
+        OpenProcessToken(process, TOKEN_DUPLICATE, &mut token)
             .map_err(|e| format!("OpenProcessToken(winlogon {pid}): {e}"))?;
         let _ = CloseHandle(process);
-        let _ = opened;
         let mut primary = HANDLE::default();
-        let dup = DuplicateTokenEx(
+        DuplicateTokenEx(
             token,
             TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY,
             None,
@@ -169,7 +168,6 @@ fn winlogon_token(session_id: u32) -> Result<HANDLE, String> {
         )
         .map_err(|e| format!("DuplicateTokenEx(winlogon): {e}"))?;
         let _ = CloseHandle(token);
-        let _ = dup;
         Ok(primary)
     }
 }
