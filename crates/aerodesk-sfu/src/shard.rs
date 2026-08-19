@@ -20,7 +20,7 @@ use str0m::media::{KeyframeRequestKind, MediaKind};
 use str0m::net::Protocol;
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcError, net::Receive};
 
-use aerodesk_protocol::signal::Role;
+use aerodesk_core::protocol::signal::Role;
 
 use crate::bitrate::{BitrateController, Layer};
 use aerodesk_sfu::recorder::Recorder;

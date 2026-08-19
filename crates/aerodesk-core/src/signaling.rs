@@ -1,9 +1,9 @@
-//! WSS 信令客户端（aerodesk-protocol::signal 消息）。
+//! WSS 信令客户端（crate::protocol::signal 消息）。
 
 use std::net::TcpStream;
 use std::time::Duration;
 
-use aerodesk_protocol::signal::{Role, SignalMessage};
+use crate::protocol::signal::{Role, SignalMessage};
 use tracing::info;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket, connect};
@@ -118,7 +118,7 @@ impl WsSignalClient {
         room: &str,
         role: Role,
         auth_token: Option<&str>,
-    ) -> Result<(String, Option<aerodesk_protocol::signal::TurnConfig>), String> {
+    ) -> Result<(String, Option<crate::protocol::signal::TurnConfig>), String> {
         const MAX_REDIRECTS: usize = 3;
         for hop in 0..=MAX_REDIRECTS {
             self.send(SignalMessage::Join {

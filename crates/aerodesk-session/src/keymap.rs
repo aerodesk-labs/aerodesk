@@ -5,7 +5,7 @@
 //! 输出与 `aerodesk_platform::macos::inject::keycode_for_code` 对齐；无法映射返回 `None`，
 //! 调用方应 `reject` 让本地 UI 继续处理（例如 F13+、输入法组合键）。
 
-use aerodesk_protocol::input::Modifiers;
+use aerodesk_core::protocol::input::Modifiers;
 
 /// 把 Slint `KeyEvent.text` 映射为平台无关键码（`"KeyA"`/`"Digit1"`/`"Enter"`/`"F5"`…）。
 pub fn key_code_for_text(text: &str) -> Option<&'static str> {

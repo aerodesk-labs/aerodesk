@@ -24,12 +24,12 @@ use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media::{Vp8Frame, parse_vp8_pcap};
 use aerodesk_core::media_socket::MediaSocket;
 use aerodesk_core::platform::SystemWakeLock;
-use aerodesk_core::turn_client::setup_turn;
-use aerodesk_core::{Endpoint, media_pipeline::Codec, signaling::WsSignalClient};
-use aerodesk_protocol::input::{
+use aerodesk_core::protocol::input::{
     ButtonState, INPUT_PROTOCOL_VERSION, InputEvent, InputFrame, Modifiers, MouseButton,
 };
-use aerodesk_protocol::signal::Role;
+use aerodesk_core::protocol::signal::Role;
+use aerodesk_core::turn_client::setup_turn;
+use aerodesk_core::{Endpoint, media_pipeline::Codec, signaling::WsSignalClient};
 use str0m::media::{Frequency, MediaTime};
 use str0m::net::Protocol;
 use str0m::{Input, Output, net::Receive};
@@ -590,7 +590,7 @@ fn issue_token(args: &[String]) {
         .unwrap_or(3600);
     let max_conns: Option<u32> = arg(args, "--max-conns").and_then(|m| m.parse().ok());
 
-    match aerodesk_protocol::jwt::mint_token(
+    match aerodesk_core::protocol::jwt::mint_token(
         &secret,
         &user,
         device.as_deref(),
@@ -1119,8 +1119,8 @@ fn now_ms() -> u64 {
 }
 
 /// #109 控制端：打印命令/文件/进程结果（e2e/CLI 断言用）。
-fn print_cmd_result(resp: &aerodesk_protocol::cmd::CmdResponse) {
-    use aerodesk_protocol::cmd::CmdResult;
+fn print_cmd_result(resp: &aerodesk_core::protocol::cmd::CmdResponse) {
+    use aerodesk_core::protocol::cmd::CmdResult;
     match &resp.result {
         CmdResult::Run {
             exit_code,
@@ -1145,7 +1145,7 @@ fn print_cmd_result(resp: &aerodesk_protocol::cmd::CmdResponse) {
                 error.is_none()
             );
             if let Some(b64) = data {
-                if let Some(bytes) = aerodesk_protocol::cmd::decode_b64(b64) {
+                if let Some(bytes) = aerodesk_core::protocol::cmd::decode_b64(b64) {
                     info!("CMD_FILE_CONTENT:\n{}", String::from_utf8_lossy(&bytes));
                 }
             }
@@ -1321,7 +1321,7 @@ fn type_text_events(text: &str) -> Vec<InputEvent> {
 
 /// 发送远程光标（#75）。附带发送端墙钟，viewer 据此计算 one-way latency（#8）。
 fn send_cursor(endpoint: &mut Endpoint, x: f64, y: f64) {
-    let pos = aerodesk_protocol::cursor::CursorPos::new(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0))
+    let pos = aerodesk_core::protocol::cursor::CursorPos::new(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0))
         .with_sent_ms(now_ms());
     if let Ok(json) = serde_json::to_string(&pos) {
         endpoint.send_channel_data("cursor", false, json.as_bytes());
@@ -1995,7 +1995,7 @@ fn viewer(
                 ClientEvent::ChannelOpen(label, _) if label == "file" => {
                     // #122：请求被控端发送指定文件（配合 --recv-dir 落盘）。
                     if !file_request_sent && request_file.is_some() {
-                        let req = aerodesk_protocol::file::FileControl::Request {
+                        let req = aerodesk_core::protocol::file::FileControl::Request {
                             path: request_file.unwrap().to_string(),
                         };
                         if let Ok(json) = serde_json::to_string(&req)
@@ -2080,7 +2080,7 @@ fn viewer(
                     if endpoint.channel_label(cid).as_deref() == Some("cursor") =>
                 {
                     if let Ok(pos) =
-                        serde_json::from_slice::<aerodesk_protocol::cursor::CursorPos>(&data)
+                        serde_json::from_slice::<aerodesk_core::protocol::cursor::CursorPos>(&data)
                     {
                         if last_cursor_log.elapsed() >= Duration::from_secs(1) {
                             info!("CURSOR: x={:.3} y={:.3}", pos.x, pos.y);

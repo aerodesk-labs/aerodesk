@@ -1,4 +1,4 @@
-//! aerodesk-protocol — 跨平台共享协议类型。
+//! aerodesk_core::protocol — 跨平台共享协议类型（2026-08-19 自 aerodesk-protocol 并入）。
 //!
 //! 一份定义，服务端（aerodesk-sfu）、客户端核心（aerodesk-core）、Web 端共用：
 //! - [`input`]：观看端 → 被控端的输入事件协议（鼠标/键盘/触控/剪贴板）

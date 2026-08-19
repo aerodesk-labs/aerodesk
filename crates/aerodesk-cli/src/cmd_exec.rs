@@ -11,7 +11,7 @@ use aerodesk_core::cmd_exec::{
     allowlist, kill_process, list_processes, read_file, run_command, write_file,
 };
 use aerodesk_core::endpoint::{ClientEvent, Endpoint};
-use aerodesk_protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult, encode_b64};
+use aerodesk_core::protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult, encode_b64};
 
 static CMD_TX: Mutex<Option<std::sync::mpsc::Sender<CmdResponse>>> = Mutex::new(None);
 static CMD_RX: Mutex<Option<std::sync::mpsc::Receiver<CmdResponse>>> = Mutex::new(None);
@@ -342,7 +342,7 @@ pub fn run_admin(args: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aerodesk_protocol::cmd::CmdAction;
+    use aerodesk_core::protocol::cmd::CmdAction;
 
     /// 取各变体的 error 字段（busy 响应必带）。
     fn busy_err(r: &CmdResult) -> &str {

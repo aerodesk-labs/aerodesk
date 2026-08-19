@@ -8,9 +8,9 @@
 //! #277：统一走 core `MediaSource` / `InputInjector` trait + 真实协议事件。
 
 use aerodesk_core::platform::{InputInjector, MediaSource};
+use aerodesk_core::protocol::input::{ButtonState, InputEvent, Modifiers, MouseButton};
 use aerodesk_platform::windows::capture::DxgiCapturer;
 use aerodesk_platform::windows::inject::SendInputInjector;
-use aerodesk_protocol::input::{ButtonState, InputEvent, Modifiers, MouseButton};
 use std::sync::Mutex;
 
 /// 同一 output 同时只允许一个 duplication（DXGI 限制）：运行级 DXGI 测试

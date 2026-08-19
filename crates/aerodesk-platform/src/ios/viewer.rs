@@ -67,7 +67,7 @@ impl ViewerSession {
         let session = aerodesk_core::connect::connect_live_role_with_camera(
             server,
             room,
-            aerodesk_protocol::signal::Role::Viewer,
+            aerodesk_core::protocol::signal::Role::Viewer,
             None,
             true,
         )?;

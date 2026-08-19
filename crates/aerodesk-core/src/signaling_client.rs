@@ -1,4 +1,4 @@
-//! 信令客户端抽象（WSS + aerodesk-protocol::signal 消息）。
+//! 信令客户端抽象（WSS + crate::protocol::signal 消息）。
 
 /// 信令客户端。
 pub trait SignalClient {
@@ -9,14 +9,14 @@ pub trait SignalClient {
         &mut self,
         url: &str,
         room: &str,
-        role: aerodesk_protocol::signal::Role,
+        role: crate::protocol::signal::Role,
     ) -> Result<(), Self::Error>;
 
     /// 发送一条信令消息。
-    fn send(&mut self, msg: aerodesk_protocol::signal::SignalMessage) -> Result<(), Self::Error>;
+    fn send(&mut self, msg: crate::protocol::signal::SignalMessage) -> Result<(), Self::Error>;
 
     /// 拉取收到的消息（非阻塞）。
-    fn poll(&mut self) -> Option<aerodesk_protocol::signal::SignalMessage>;
+    fn poll(&mut self) -> Option<crate::protocol::signal::SignalMessage>;
 
     fn disconnect(&mut self);
 }

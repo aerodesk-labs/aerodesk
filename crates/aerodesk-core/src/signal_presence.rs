@@ -12,9 +12,9 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use crate::protocol::signal::{Role, SignalMessage};
 use crate::signal_call::{CallDecision, CallState, DEFAULT_CALL_TIMEOUT, IncomingCallInfo};
 use crate::signaling::{WsRecvError, WsSignalClient};
-use aerodesk_protocol::signal::{Role, SignalMessage};
 
 /// 信令 presence 连接状态。
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -11,8 +11,9 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-aerodesk-protocol.workspace = true
 ureq = { version = "2", features = ["tls"] }
+# 协议类型自 aerodesk-protocol 并入 core（2026-08-19），signal 需 jwt/tls/turn。
+aerodesk-core = { path = "../aerodesk-core" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

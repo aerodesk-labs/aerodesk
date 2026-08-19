@@ -12,7 +12,7 @@ use std::time::Duration;
 use aerodesk_core::access_unit::AccessUnitAssembler;
 use aerodesk_core::connect::LiveSession;
 use aerodesk_core::endpoint::ClientEvent;
-use aerodesk_protocol::signal::Role;
+use aerodesk_core::protocol::signal::Role;
 use str0m::net::Protocol;
 
 /// 观看会话（NAPI `connectViewer` 返回的 session id 即指向本结构）。

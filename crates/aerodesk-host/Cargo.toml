@@ -8,7 +8,6 @@ rust-version.workspace = true
 
 [dependencies]
 aerodesk-core = { path = "../aerodesk-core" }
-aerodesk-protocol.workspace = true
 aerodesk-platform = { path = "../aerodesk-platform" }
 serde.workspace = true
 serde_json.workspace = true

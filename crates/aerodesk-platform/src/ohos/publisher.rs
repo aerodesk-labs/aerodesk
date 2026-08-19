@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use aerodesk_core::connect::LiveSession;
 use aerodesk_core::endpoint::ClientEvent;
-use aerodesk_protocol::signal::Role;
+use aerodesk_core::protocol::signal::Role;
 
 /// 发布会话（NAPI `startPublish` 返回的 session id 即指向本结构）。
 pub struct PublisherSession {

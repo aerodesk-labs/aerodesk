@@ -6,7 +6,7 @@
 
 use aerodesk_core::cmd_exec::{CmdOutput, DefaultCommandExecutor};
 use aerodesk_core::platform::CommandExecutor;
-use aerodesk_protocol::cmd::ProcessInfo;
+use aerodesk_core::protocol::cmd::ProcessInfo;
 
 /// Linux 命令执行器（`sh -c`）。
 #[derive(Debug, Clone, Copy, Default)]

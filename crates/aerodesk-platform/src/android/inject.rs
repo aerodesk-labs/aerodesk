@@ -4,7 +4,7 @@
 //! `dispatchGesture`（触控）/ `injectInputEvent`（API 33+）→ 系统输入。
 //! 权限：`BIND_ACCESSIBILITY_SERVICE` + `canPerformGestures`。
 
-use aerodesk_protocol::input::InputEvent;
+use aerodesk_core::protocol::input::InputEvent;
 
 /// TODO(P3): AccessibilityService 实现。
 pub struct AccessibilityInjector;

@@ -32,7 +32,7 @@ mod tcp;
 mod turn_server;
 mod util;
 
-use aerodesk_protocol::signal::{Role, TurnConfig};
+use aerodesk_core::protocol::signal::{Role, TurnConfig};
 use aerodesk_sfu::recorder::Recorder;
 use shard::{Shard, ShardCommand, Shared};
 
@@ -376,9 +376,9 @@ fn bind_public_with_retry(
 
 fn reload_tls(
     public: &mut Option<Server<fn(&Request) -> Response>>,
-    tls: &mut aerodesk_protocol::tls::TlsIdentity,
+    tls: &mut aerodesk_core::protocol::tls::TlsIdentity,
 ) {
-    match aerodesk_protocol::tls::TlsIdentity::load() {
+    match aerodesk_core::protocol::tls::TlsIdentity::load() {
         Ok(new_tls) => {
             if new_tls.cert == tls.cert && new_tls.key == tls.key {
                 info!(
@@ -459,7 +459,7 @@ pub fn main() {
     let shard_count = resolve_shard_count();
     info!("Shards: {shard_count}");
 
-    let tls = aerodesk_protocol::tls::TlsIdentity::load().unwrap_or_else(|e| {
+    let tls = aerodesk_core::protocol::tls::TlsIdentity::load().unwrap_or_else(|e| {
         eprintln!("fatal: TLS identity load failed: {e}");
         std::process::exit(1);
     });
@@ -525,7 +525,7 @@ pub fn main() {
             .expect("system time")
             .as_secs();
         let creds =
-            aerodesk_protocol::turn::generate_turn_credentials(secret, "aerodesk", 3600, now);
+            aerodesk_core::protocol::turn::generate_turn_credentials(secret, "aerodesk", 3600, now);
         Some(TurnConfig {
             urls,
             username: creds.username,

@@ -22,7 +22,6 @@ pipewire = ["dep:lamco-portal", "dep:lamco-pipewire", "dep:tokio"]
 
 [dependencies]
 aerodesk-core = { path = "../aerodesk-core" }
-aerodesk-protocol.workspace = true
 str0m = { workspace = true, features = ["rust-crypto"] }
 tracing.workspace = true
 

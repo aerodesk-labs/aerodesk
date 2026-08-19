@@ -9,9 +9,9 @@
 //! #277：统一走 core `MediaSource` / `InputInjector` trait + 真实协议事件。
 
 use aerodesk_core::platform::{InputInjector, MediaSource};
+use aerodesk_core::protocol::input::{ButtonState, InputEvent, Modifiers, MouseButton};
 use aerodesk_platform::linux::capture::X11Capturer;
 use aerodesk_platform::linux::inject::XTestInjector;
-use aerodesk_protocol::input::{ButtonState, InputEvent, Modifiers, MouseButton};
 
 #[test]
 fn x11_capture_produces_frame() {

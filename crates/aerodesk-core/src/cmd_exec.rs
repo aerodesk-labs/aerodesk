@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use aerodesk_protocol::cmd::{ProcessInfo, decode_b64, encode_b64};
+use crate::protocol::cmd::{ProcessInfo, decode_b64, encode_b64};
 
 use crate::platform::CommandExecutor;
 

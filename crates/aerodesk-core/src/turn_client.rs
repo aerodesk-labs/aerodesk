@@ -13,7 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use aerodesk_protocol::turn::codec::*;
+use crate::protocol::turn::codec::*;
 
 /// Refresh 间隔（allocation 默认 lifetime 600s，按 RFC 建议在到期前刷新）。
 const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
@@ -113,7 +113,7 @@ fn resolve_server(host: &str, port: u16) -> Option<SocketAddr> {
 /// 由信令下发的 TURN 配置建立传输（失败返回 None：直连兜底）。
 /// 按 URL 顺序尝试（SFU 默认 udp,tcp,turns），任一成功即用；`TURN_TLS_CA`（PEM）追加 TLS 根。
 pub fn setup_turn(
-    turn: &aerodesk_protocol::signal::TurnConfig,
+    turn: &crate::protocol::signal::TurnConfig,
     loopback: bool,
 ) -> Option<TurnTransport> {
     let bind_ip: IpAddr = if loopback {

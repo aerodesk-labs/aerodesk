@@ -84,9 +84,9 @@ mod imp {
     use aerodesk_core::platform::{
         CursorSource, Encoder, InputInjector, MediaSource, SystemWakeLock,
     };
-    use aerodesk_protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult};
-    use aerodesk_protocol::input::{InputEvent, InputFrame};
-    use aerodesk_protocol::signal::Role;
+    use aerodesk_core::protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult};
+    use aerodesk_core::protocol::input::{InputEvent, InputFrame};
+    use aerodesk_core::protocol::signal::Role;
     use str0m::Output;
     use str0m::media::{Frequency, MediaTime};
     use str0m::net::Protocol;

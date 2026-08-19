@@ -4,7 +4,7 @@
 //! this module converts to the actual display size in points (DPI-aware) and
 //! posts CGEvents. Wheel and modifier keys are supported (#75).
 
-use aerodesk_protocol::input::{ButtonState, InputEvent, Modifiers, MouseButton};
+use aerodesk_core::protocol::input::{ButtonState, InputEvent, Modifiers, MouseButton};
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, ScrollEventUnit,
@@ -244,7 +244,7 @@ pub fn inject(event: &InputEvent) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aerodesk_protocol::input::InputEvent;
+    use aerodesk_core::protocol::input::InputEvent;
 
     #[test]
     fn normalized_maps_to_display_points() {
@@ -343,7 +343,10 @@ pub struct MacInjector;
 impl aerodesk_core::platform::InputInjector for MacInjector {
     type Error = String;
 
-    fn inject(&mut self, event: &aerodesk_protocol::input::InputEvent) -> Result<(), Self::Error> {
+    fn inject(
+        &mut self,
+        event: &aerodesk_core::protocol::input::InputEvent,
+    ) -> Result<(), Self::Error> {
         crate::macos::inject::inject(event)
     }
 }

@@ -116,7 +116,7 @@ pub enum Msg {
         session: u64,
         payload: String,
     },
-    /// 终端命令通道；`req` schema 为 aerodesk-protocol `CmdRequest`（透传）。
+    /// 终端命令通道；`req` schema 为 aerodesk_core::protocol::CmdRequest（透传）。
     Cmd {
         session: u64,
         req: serde_json::Value,

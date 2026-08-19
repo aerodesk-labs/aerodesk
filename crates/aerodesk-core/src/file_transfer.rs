@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use aerodesk_protocol::file::{
+use crate::protocol::file::{
     self, CHUNK_SIZE, FileCancel, FileControl, FileDone, FileKind, FileMeta, FileNack,
 };
 use sha2::{Digest, Sha256};

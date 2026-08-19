@@ -12,7 +12,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use aerodesk_core::platform::InputInjector;
-use aerodesk_protocol::input::{ButtonState, InputEvent, MouseButton};
+use aerodesk_core::protocol::input::{ButtonState, InputEvent, MouseButton};
 
 /// 注入命令：事件 + 结果回传通道。
 type Command = (InputEvent, mpsc::Sender<Result<(), String>>);

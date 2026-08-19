@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use aerodesk_protocol::turn::codec::*;
+use aerodesk_core::protocol::turn::codec::*;
 use tracing::{debug, info, warn};
 
 /// 默认 realm（可用 TURN_REALM 覆盖；与 docs/TURN.md 一致）。
@@ -344,7 +344,7 @@ fn unix_now() -> u64 {
 
 /// rustls ServerConfig（复用 TlsIdentity PEM）。
 fn build_tls_acceptor() -> Result<Arc<rustls::ServerConfig>, String> {
-    let id = aerodesk_protocol::tls::TlsIdentity::load()?;
+    let id = aerodesk_core::protocol::tls::TlsIdentity::load()?;
     let mut cert_rd = BufReader::new(&id.cert[..]);
     let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
         rustls_pemfile::certs(&mut cert_rd)
@@ -799,11 +799,11 @@ fn check_auth(shared: &Shared, pkt: &[u8]) -> Result<String, u16> {
     if username.is_empty() || username.split_once(':').is_none() {
         return Err(401);
     }
-    let expected = aerodesk_protocol::turn::turn_credential(&shared.secret, &username);
+    let expected = aerodesk_core::protocol::turn::turn_credential(&shared.secret, &username);
     if !verify_message_integrity(pkt, &username, &shared.realm, &expected) {
         return Err(401);
     }
-    if !aerodesk_protocol::turn::verify_turn_credential(
+    if !aerodesk_core::protocol::turn::verify_turn_credential(
         &shared.secret,
         &username,
         &expected,
@@ -1356,8 +1356,12 @@ mod tests {
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let creds =
-            aerodesk_protocol::turn::generate_turn_credentials(secret, "e2e", 3600, unix_now());
+        let creds = aerodesk_core::protocol::turn::generate_turn_credentials(
+            secret,
+            "e2e",
+            3600,
+            unix_now(),
+        );
         let (relayed, realm, nonce) =
             udp_allocate(&client, server_addr, &creds.username, &creds.credential)
                 .expect("allocate");
@@ -1457,8 +1461,12 @@ mod tests {
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
-        let creds =
-            aerodesk_protocol::turn::generate_turn_credentials(secret, "e2e", 3600, unix_now());
+        let creds = aerodesk_core::protocol::turn::generate_turn_credentials(
+            secret,
+            "e2e",
+            3600,
+            unix_now(),
+        );
         let (relayed, realm, nonce) =
             tcp_allocate(stream, &creds.username, &creds.credential).expect("tcp allocate");
 
@@ -1663,7 +1671,12 @@ mod tests {
     }
 
     fn creds(secret: &str) -> (String, String) {
-        let c = aerodesk_protocol::turn::generate_turn_credentials(secret, "e2e", 3600, unix_now());
+        let c = aerodesk_core::protocol::turn::generate_turn_credentials(
+            secret,
+            "e2e",
+            3600,
+            unix_now(),
+        );
         (c.username, c.credential)
     }
 

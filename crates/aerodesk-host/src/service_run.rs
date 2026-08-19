@@ -7,10 +7,10 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use aerodesk_core::protocol::signal::Role;
 use aerodesk_core::signal_presence::{PresenceConfig, SignalPresence};
 use aerodesk_platform::windows::service::{ServiceCtx, ServiceEvent, SessionChangeReason};
 use aerodesk_platform::windows::session;
-use aerodesk_protocol::signal::Role;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 

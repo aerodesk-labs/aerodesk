@@ -2,7 +2,7 @@
 //!
 //! X11：XTestFakeInput（x11rb XTEST 扩展）；Wayland：/dev/uinput（真机阶段）。
 
-use aerodesk_protocol::input::{ButtonState, InputEvent, MouseButton};
+use aerodesk_core::protocol::input::{ButtonState, InputEvent, MouseButton};
 
 /// 平台无关键码（协议）→ X11 keysym。
 pub fn keysym_for_code(code: &str) -> Option<u32> {

@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use aerodesk_core::connect::LiveSession;
 use aerodesk_core::endpoint::ClientEvent;
-use aerodesk_protocol::signal::Role;
+use aerodesk_core::protocol::signal::Role;
 
 /// 发布会话（FFI 句柄 = *mut PublisherSession）。
 pub struct PublisherSession {
