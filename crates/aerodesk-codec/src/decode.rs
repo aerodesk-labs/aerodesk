@@ -19,6 +19,26 @@ fn codec_id(codec: Codec) -> ffmpeg_next::codec::Id {
     }
 }
 
+/// 把 sws 输出的 RGBA 帧（stride 可能带对齐填充）打包成紧凑 w*h*4。
+///
+/// #487 回归：连续拷 `w*h*4` 会无视 stride 填充、逐行错位，累积成斜向剪切。
+/// sws 输出行对齐通常为 32B（如宽 1470 → stride 5888 ≠ 5880）；decode.rs 软解与
+/// hw_decode.rs（Windows 硬解）共用本函数，避免两处逻辑漂移。切片拷贝即 memcpy，
+/// 无需 unsafe。
+pub(crate) fn pack_rgba(src: &[u8], stride: usize, width: usize, height: usize) -> Vec<u8> {
+    let row = width * 4;
+    let mut raw = vec![0u8; row * height];
+    if stride == row {
+        raw.copy_from_slice(&src[..row * height]);
+    } else {
+        for y in 0..height {
+            let s = y * stride;
+            raw[y * row..(y + 1) * row].copy_from_slice(&src[s..s + row]);
+        }
+    }
+    raw
+}
+
 /// FFmpeg video decoder (packet in -> RGBA frame out).
 pub struct FfmpegDecoder {
     decoder: ffmpeg_next::decoder::Video,
@@ -95,11 +115,10 @@ impl FfmpegDecoder {
                     .unwrap()
                     .run(&frame, &mut rgba)
                     .map_err(|e| format!("scale: {e}"))?;
-                let mut raw = vec![0u8; w * h * 4];
-                let src = rgba.data(0);
-                unsafe {
-                    std::ptr::copy_nonoverlapping(src.as_ptr(), raw.as_mut_ptr(), raw.len());
-                }
+                // RGBA 逻辑行宽 = w*4，但 sws 输出帧的 stride 会按对齐补齐（如宽 1470
+                // → stride 5888 ≠ 5880）。按 stride 逐行打包——连续拷 w*h*4 会在宽度
+                // 非对齐时逐行错位、累积成斜向剪切（#487 真屏 1470x956 实测花屏）。
+                let raw = pack_rgba(rgba.data(0), rgba.stride(0) as usize, w, h);
                 self.width = w as u32;
                 self.height = h as u32;
                 Ok(Some(VideoFrame {
@@ -137,6 +156,45 @@ impl std::fmt::Debug for FfmpegDecoder {
 mod tests {
     use super::*;
     use crate::encode::FfmpegEncoder;
+
+    /// #487 回归：sws 输出 stride 带对齐填充时，按行打包不得混入填充字节
+    /// （修复前是整块连续拷贝，填充毒值会错位进像素、逐行累积成斜切）。
+    #[test]
+    fn pack_rgba_padded_stride() {
+        // 宽 3 像素（row=12）、stride 对齐到 16 → 每行 4 字节填充。
+        let (w, h, stride) = (3usize, 4usize, 16usize);
+        let mut src = vec![0xAA; stride * h]; // 填充区毒值。
+        for y in 0..h {
+            for x in 0..w {
+                src[y * stride + x * 4] = (y * 10 + x) as u8; // 像素签名（R 通道）。
+            }
+        }
+        let out = pack_rgba(&src, stride, w, h);
+        assert_eq!(out.len(), w * h * 4);
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(
+                    out[y * w * 4 + x * 4],
+                    (y * 10 + x) as u8,
+                    "row {y} pixel {x} 错位"
+                );
+            }
+        }
+    }
+
+    /// #487 镜像方向（边界另一侧）：stride == 紧凑行宽时退化为整块拷贝，同样正确。
+    #[test]
+    fn pack_rgba_aligned_stride() {
+        let (w, h, stride) = (4usize, 3usize, 16usize); // row == stride。
+        let mut src = vec![0u8; stride * h];
+        for y in 0..h {
+            for x in 0..w {
+                src[y * stride + x * 4] = (y * w + x) as u8;
+            }
+        }
+        let out = pack_rgba(&src, stride, w, h);
+        assert_eq!(out, src);
+    }
 
     fn roundtrip(codec: Codec) {
         crate::encode::init();

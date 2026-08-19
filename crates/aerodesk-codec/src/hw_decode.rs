@@ -254,14 +254,15 @@ impl Inner {
             .unwrap()
             .run(sw, &mut rgba)
             .map_err(|e| format!("hw scale: {e}"))?;
-        // SAFETY: RGBA 为紧凑打包格式，data(0) 长度 = w*h*4（stride=w*4）。
-        let src = rgba.data(0);
-        let mut raw = vec![0u8; (w * h * 4) as usize];
-        // SAFETY: src 由 sws_scale 填充 RGBA，长度与 raw 一致，逐行拷贝等价
-        // 于 memcpy（RGBA 行无 padding）。
-        unsafe {
-            ptr::copy_nonoverlapping(src.as_ptr(), raw.as_mut_ptr(), raw.len());
-        }
+        // RGBA 逻辑行宽 = w*4，但 sws 输出帧的 stride 会按对齐补齐（如宽 1470
+        // → stride 5888 ≠ 5880）——与 decode.rs 同款坑。共用 pack_rgba 按 stride
+        // 逐行打包；连续拷 w*h*4 在宽度非对齐时逐行错位、累积成斜向剪切（#487 实测）。
+        let raw = crate::decode::pack_rgba(
+            rgba.data(0),
+            rgba.stride(0) as usize,
+            w as usize,
+            h as usize,
+        );
         Ok(Some(VideoFrame {
             platform: None,
             handle: None,
