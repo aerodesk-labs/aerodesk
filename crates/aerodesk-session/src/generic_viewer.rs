@@ -20,11 +20,10 @@ use str0m::net::Protocol;
 
 use crate::SessionUi;
 
-/// 解析 cursor 通道的 `CursorPos`（#75；返回归一化 0..1 坐标，与 macOS UI 一致）。
-fn cursor_pos(data: &[u8]) -> Option<(f32, f32)> {
-    serde_json::from_slice::<aerodesk_protocol::cursor::CursorPos>(data)
-        .ok()
-        .map(|p| (p.x as f32, p.y as f32))
+/// 解析 cursor 通道的 `CursorPos`（#75；归一化 0..1 坐标 + 发送端墙钟，
+/// 观看端据此计算端到端单向延时）。
+fn cursor_pos(data: &[u8]) -> Option<aerodesk_protocol::cursor::CursorPos> {
+    serde_json::from_slice::<aerodesk_protocol::cursor::CursorPos>(data).ok()
 }
 
 /// 把终端命令响应格式化为窗口可读文本（stdout/stderr/错误/截断提示）。
@@ -212,6 +211,11 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
     // #425：连接建立后 10s 内无任何 RTP → 提示"对方不在线/未开启被控"（保持等待）。
     let no_media_deadline = Instant::now() + Duration::from_secs(10);
     let mut no_media_notified = false;
+    // 会话延时统计：端到端单向（cursor sent_ms）/ 网络 RTT（RTCP PeerStats）/
+    // 解码帧率，500ms 节流推送给 UI。
+    let mut last_e2e_ms: Option<u64> = None;
+    let mut last_stats_push = Instant::now();
+    let mut last_stats_frames: u64 = 0;
     while !stale() {
         // 输入事件：UI 键鼠 → input data channel → SFU → 被控端。
         // #441 观看模式（仅观看）不发送键鼠输入。
@@ -346,12 +350,16 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
                     ui.append_terminal_output(format_cmd_response(&response));
                 }
             }
-            // #75 远程光标：被控端经 cursor 通道广播位置 → UI 叠加（与 macOS UI 一致）。
+            // #75 远程光标：被控端经 cursor 通道广播位置 → UI 叠加（与 macOS UI 一致）；
+            // sent_ms 墙钟 → 端到端单向延时（#8，节流推送交给下方统计 ticker）。
             if let ClientEvent::ChannelData(cid, _, data) = &ev
                 && live.endpoint.channel_label(*cid).as_deref() == Some("cursor")
-                && let Some((cx, cy)) = cursor_pos(data)
+                && let Some(pos) = cursor_pos(data)
             {
-                ui.set_remote_cursor(cx, cy);
+                ui.set_remote_cursor(pos.x as f32, pos.y as f32);
+                if pos.sent_ms > 0 {
+                    last_e2e_ms = Some(crate::system_time_millis().saturating_sub(pos.sent_ms));
+                }
             }
             if let ClientEvent::Media(data) = ev {
                 media_evts += 1;
@@ -469,6 +477,20 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
         }
         if frames > 0 && no_media_notified {
             no_media_notified = false;
+        }
+        // 会话延时统计推送（500ms 节流；fps 为窗口内解码帧率）。
+        if last_stats_push.elapsed() >= Duration::from_millis(500) {
+            let dt = last_stats_push.elapsed().as_secs_f64().max(0.001);
+            let fps = (frames - last_stats_frames) as f32 / dt as f32;
+            last_stats_frames = frames;
+            last_stats_push = Instant::now();
+            let rtt_ms = live.endpoint.last_rtt().map(|d| d.as_millis() as u64);
+            tracing::debug!(
+                "session stats: e2e={:?}ms rtt={:?}ms fps={fps:.1}",
+                last_e2e_ms,
+                rtt_ms
+            );
+            ui.set_session_stats(last_e2e_ms, rtt_ms, fps);
         }
         // #72 文件传输推进 + 剪贴板接收落地（文本/图片写入系统剪贴板）。
         file_transfer.tick(&mut live.endpoint);
@@ -591,10 +613,14 @@ mod tests {
     #[test]
     fn cursor_pos_parses_normalized() {
         let json = br#"{"x":0.5,"y":0.25,"sent_ms":123}"#;
-        assert_eq!(super::cursor_pos(json), Some((0.5, 0.25)));
+        let pos = super::cursor_pos(json).unwrap();
+        assert_eq!((pos.x, pos.y), (0.5, 0.25));
+        assert_eq!(pos.sent_ms, 123);
         // 旧端无 sent_ms（serde default）也能解析。
         let old = br#"{"x":0.1,"y":0.9}"#;
-        assert_eq!(super::cursor_pos(old), Some((0.1, 0.9)));
+        let pos = super::cursor_pos(old).unwrap();
+        assert_eq!((pos.x, pos.y), (0.1, 0.9));
+        assert_eq!(pos.sent_ms, 0);
         assert_eq!(super::cursor_pos(b"not json"), None);
         assert_eq!(super::cursor_pos(b""), None);
     }

@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::channel::{Channel, ChannelId};
@@ -61,6 +61,8 @@ pub struct Endpoint {
     /// 供 connect 阶段判断建链——不能靠 poll_event 消费 IceConnected 事件，
     /// 会话循环还要靠它启动编码器/文件请求等。
     ice_connected: bool,
+    /// 最近一次 RTCP 测量的 RTT（str0m PeerStats；None = 尚未测量到）。
+    last_rtt: Option<std::time::Duration>,
 }
 
 impl Default for Endpoint {
@@ -76,6 +78,11 @@ impl Endpoint {
         self.ice_connected
     }
 
+    /// 最近一次 RTCP RTT 测量（None = 尚未收到 PeerStats；会话延时显示用）。
+    pub fn last_rtt(&self) -> Option<std::time::Duration> {
+        self.last_rtt
+    }
+
     pub fn new() -> Self {
         let mut config = Rtc::builder();
         {
@@ -85,6 +92,8 @@ impl Endpoint {
             // #73 音频：Opus（48kHz 立体声，PT 111）——发布端可按需选择发送。
             cfg.enable_opus(true);
         }
+        // 周期性 PeerStats（RTCP/ICE RTT 等）——会话延时显示的数据源。
+        config = config.set_stats_interval(Some(Duration::from_secs(1)));
         Self {
             rtc: config.build(Instant::now()),
             events: VecDeque::new(),
@@ -99,6 +108,7 @@ impl Endpoint {
             remote_send_video_mids: Vec::new(),
             local_video_mids: Vec::new(),
             ice_connected: false,
+            last_rtt: None,
         }
     }
 
@@ -119,6 +129,8 @@ impl Endpoint {
             // #73 音频：Opus（48kHz 立体声，PT 111）——发布端可按需选择发送。
             cfg.enable_opus(true);
         }
+        // 周期性 PeerStats（RTCP/ICE RTT 等）——会话延时显示的数据源。
+        config = config.set_stats_interval(Some(Duration::from_secs(1)));
         Self {
             rtc: config.build(Instant::now()),
             events: VecDeque::new(),
@@ -133,6 +145,7 @@ impl Endpoint {
             remote_send_video_mids: Vec::new(),
             local_video_mids: Vec::new(),
             ice_connected: false,
+            last_rtt: None,
         }
     }
 
@@ -164,6 +177,8 @@ impl Endpoint {
             // #73 音频：Opus（48kHz 立体声，PT 111）——发布端可按需选择发送。
             cfg.enable_opus(true);
         }
+        // 周期性 PeerStats（RTCP/ICE RTT 等）——会话延时显示的数据源。
+        config = config.set_stats_interval(Some(Duration::from_secs(1)));
         Self {
             rtc: config.build(Instant::now()),
             events: VecDeque::new(),
@@ -178,6 +193,7 @@ impl Endpoint {
             remote_send_video_mids: Vec::new(),
             local_video_mids: Vec::new(),
             ice_connected: false,
+            last_rtt: None,
         }
     }
 
@@ -594,6 +610,15 @@ impl Endpoint {
             Event::KeyframeRequest(req) => {
                 let _ = KeyframeRequestKind::Fir;
                 self.events.push_back(ClientEvent::KeyframeRequest(req))
+            }
+            // 会话延时显示：RTCP RTT 测量（str0m fork 周期性 PeerStats）。
+            // 纯观看端几乎不发 RTP，TWCC 无反馈 → rtt 恒 None；回退 ICE 提名对
+            // STUN 保活往返（current_round_trip_time，仅收也能量得）。
+            Event::PeerStats(s) => {
+                self.last_rtt = s.rtt.or_else(|| {
+                    s.selected_candidate_pair
+                        .and_then(|p| p.current_round_trip_time)
+                });
             }
             _ => {}
         }
