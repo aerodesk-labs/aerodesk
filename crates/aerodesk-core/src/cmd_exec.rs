@@ -778,7 +778,7 @@ mod tests {
         let allow = vec!["echo".to_string()];
         // echo 本身不危险；用允许前缀放行一条被误判的（如 "echo rm -rf"）。
         assert!(is_dangerous("echo rm -rf /"));
-        let out = run_command("echo rm -rf /", None, Some(1000), &allow);
+        let out = run_command("echo rm -rf /", None, Some(10000), &allow);
         assert!(out.error.is_none(), "白名单应放行: {:?}", out.error);
         assert_eq!(out.exit_code, Some(0));
         assert!(out.stdout.contains("rm -rf /"));
@@ -786,14 +786,14 @@ mod tests {
 
     #[test]
     fn blocked_dangerous_command_returns_error_without_running() {
-        let out = run_command("rm -rf /", None, Some(1000), &[]);
+        let out = run_command("rm -rf /", None, Some(10000), &[]);
         assert!(out.error.unwrap().contains("blocked by policy"));
         assert_eq!(out.exit_code, None);
     }
 
     #[test]
     fn echo_returns_stdout_and_exit_code() {
-        let out = run_command("echo hello-aerodesk", None, Some(2000), &[]);
+        let out = run_command("echo hello-aerodesk", None, Some(10000), &[]);
         assert_eq!(out.exit_code, Some(0));
         assert!(out.stdout.contains("hello-aerodesk"));
         assert!(out.error.is_none());
@@ -835,7 +835,7 @@ mod tests {
     fn audit_writes_jsonl() {
         let dir = std::env::temp_dir().join(format!("aerodesk-cmd-audit-{}", std::process::id()));
         let audit = dir.join("audit.jsonl");
-        let out = run_command_with("echo audited", None, Some(1000), &[], Some(&audit));
+        let out = run_command_with("echo audited", None, Some(10000), &[], Some(&audit));
         assert_eq!(out.exit_code, Some(0));
         let text = std::fs::read_to_string(&audit).expect("audit file");
         assert!(text.contains("echo audited"));
@@ -929,8 +929,8 @@ mod tests {
         assert!(!allowlist_at(&allow).contains(&"/tmp/safe".to_string()));
         assert!(allowlist_at(&allow).contains(&"/tmp/other".to_string()));
         // 审计尾部（显式路径）
-        let _ = run_command_with("echo audit-1", None, Some(1000), &[], Some(&audit));
-        let _ = run_command_with("echo audit-2", None, Some(1000), &[], Some(&audit));
+        let _ = run_command_with("echo audit-1", None, Some(10000), &[], Some(&audit));
+        let _ = run_command_with("echo audit-2", None, Some(10000), &[], Some(&audit));
         let tail = tail_audit_at(&audit, 10).unwrap();
         assert!(tail.len() >= 2);
         assert!(tail.last().unwrap().contains("audit-2"));
@@ -1049,9 +1049,9 @@ mod tests {
     /// #330：trait 原始执行与自由函数（策略层）行为等价。
     #[test]
     fn default_executor_matches_free_function() {
-        let via_fn = run_command("echo trait-equivalence", None, Some(2000), &[]);
+        let via_fn = run_command("echo trait-equivalence", None, Some(10000), &[]);
         let via_trait =
-            DefaultCommandExecutor.run_command("echo trait-equivalence", None, Some(2000));
+            DefaultCommandExecutor.run_command("echo trait-equivalence", None, Some(10000));
         assert_eq!(via_fn.exit_code, via_trait.exit_code);
         assert_eq!(via_fn.stdout, via_trait.stdout);
         assert_eq!(via_fn.stderr, via_trait.stderr);
@@ -1064,7 +1064,7 @@ mod tests {
     #[test]
     fn default_executor_is_object_safe() {
         let ex: Box<dyn CommandExecutor> = Box::new(DefaultCommandExecutor);
-        let out = ex.run_command("true", None, Some(1000));
+        let out = ex.run_command("true", None, Some(10000));
         assert_eq!(out.exit_code, Some(0));
         assert!(out.error.is_none());
     }

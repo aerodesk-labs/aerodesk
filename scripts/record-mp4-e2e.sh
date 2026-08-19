@@ -2,7 +2,7 @@
 # record-mp4-e2e.sh —— SFU 录制转封装 e2e（#266）：
 # ADREC2 → rec2mp4（按访问单元聚合）→ MP4，断言：
 #   1) 帧数 < 视频 NAL 总数（按 NAL 写 sample 会放大帧数）
-#   2) 帧数 ≈ 录制墙钟时长 × 30fps（±40%）
+#   2) 帧数 ≈ 媒体时长（RTP 时间戳跨度，墙钟兜底）× 30fps（±40%）
 # 依赖：ffmpeg/ffprobe（CI 已有）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -43,16 +43,21 @@ check_codec() {
   [ -s "$ADREC" ] || { echo "FAIL: $codec adrec 为空"; FAIL=1; return; }
 
   # 视频包数 + 视频 NAL 总数（聚合后帧数应 < NAL 总数：SPS/PPS/SEI/AUD 不是帧）。
-  local packets nals wall_dur
-  read -r packets nals wall_dur < <(python3 - "$ADREC" <<'PYEOF'
+  # #523：时长跨度改用 RTP 时间戳（媒体层真值，90kHz）——录制端墙钟跨度在
+  # 负载 runner 上被批量冲刷压缩（实测 h265 腿 128 帧被记成 3.018s 跨度），
+  # 墙钟代理结构性 flaky；rtp_ts 缺位（全 0）时回退墙钟口径。
+  local packets nals wall_dur rtp_dur
+  read -r packets nals wall_dur rtp_dur < <(python3 - "$ADREC" <<'PYEOF'
 import struct, sys
 d = open(sys.argv[1],'rb').read()
 assert d[:7] == b"ADREC2\n"
 i, packets, nals = 7, 0, 0
 first_wall = last_wall = None
+first_rtp = last_rtp = None
 while i + 24 <= len(d):
     kind, codec = d[i], d[i+1]
     wall = struct.unpack_from('<Q', d, i+4)[0]
+    rtp = struct.unpack_from('<Q', d, i+12)[0]
     ln = struct.unpack_from('<I', d, i+20)[0]
     payload = d[i+24:i+24+ln]
     i += 24 + ln
@@ -62,6 +67,10 @@ while i + 24 <= len(d):
     if first_wall is None:
         first_wall = wall
     last_wall = wall
+    if rtp != 0:
+        if first_rtp is None:
+            first_rtp = rtp
+        last_rtp = rtp
     j = 0
     while j + 3 <= len(payload):
         if payload[j:j+3] == b'\x00\x00\x01' and (j+3 == len(payload) or payload[j+3] != 0):
@@ -70,10 +79,11 @@ while i + 24 <= len(d):
         else:
             j += 1
 wall_dur = max(0.001, ((last_wall or 0) - (first_wall or 0)) / 1e6)
-print(packets, nals, f"{wall_dur:.3f}")
+rtp_dur = max(0.0, ((last_rtp or 0) - (first_rtp or 0)) / 90000.0)
+print(packets, nals, f"{wall_dur:.3f}", f"{rtp_dur:.3f}")
 PYEOF
 )
-  echo "  video packets=$packets nals=$nals wall_dur=${wall_dur}s"
+  echo "  video packets=$packets nals=$nals wall_dur=${wall_dur}s rtp_dur=${rtp_dur}s"
 
   local OUT="$REC/$ROOM-$codec.mp4"
   ./target/debug/rec2mp4 "$ADREC" "$OUT" 2>/tmp/recmp4-conv.log || { echo "FAIL: rec2mp4 $codec"; tail -3 /tmp/recmp4-conv.log; FAIL=1; return; }
@@ -91,15 +101,17 @@ PYEOF
     FAIL=1; return
   fi
 
-  # 帧数 ≈ 录制墙钟时长×30fps（±40%；合成源稳定 30fps）。
-  local expect lo hi
-  expect=$(python3 -c "print(int(${wall_dur:-0} * 30))")
+  # 帧数 ≈ 媒体时长×30fps（±40%；合成源稳定 30fps）。时长优先取 RTP 时间戳
+  # 跨度（负载免疫），缺位回退录制墙钟跨度（#523）。
+  local dur expect lo hi
+  dur=$(python3 -c "print(${rtp_dur:-0} if ${rtp_dur:-0} > 0.5 else ${wall_dur:-0})")
+  expect=$(python3 -c "print(int(${dur:-0} * 30))")
   lo=$((expect * 60 / 100)); hi=$((expect * 140 / 100 + 1))
   if [ "$frames" -lt "$lo" ] || [ "$frames" -gt "$hi" ]; then
-    echo "FAIL: $codec 帧数 $frames 不在预期 [$lo,$hi]（墙钟 ${wall_dur}s × 30fps）"
+    echo "FAIL: $codec 帧数 $frames 不在预期 [$lo,$hi]（媒体时长 ${dur}s × 30fps，wall=${wall_dur}s rtp=${rtp_dur}s）"
     FAIL=1; return
   fi
-  echo "PASS codec=$codec frames=$frames ≈ ${wall_dur}s×30fps（nals=${nals} packets=${packets}）"
+  echo "PASS codec=$codec frames=$frames ≈ ${dur}s×30fps（nals=${nals} packets=${packets}）"
 }
 
 check_codec h264
