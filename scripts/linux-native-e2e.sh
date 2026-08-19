@@ -61,6 +61,18 @@ for i in range(60):  # 最多 60s
 if not ok:
     print("FAIL: 60s 内未收到帧；viewer 日志尾：")
     print(open('/tmp/linux-native-view.log', errors='replace').read()[-1500:])
+    # 断症辅助（#535 排查）：发布端/SFU 日志一并导出——零视频是发布侧断流
+    # 还是 SFU 转发丢包，必须能看到这两侧，不能只看 viewer。
+    try:
+        print("--- publisher 日志尾 ---")
+        print(open('/tmp/linux-native-pub.log', errors='replace').read()[-1500:])
+    except OSError as e:
+        print(f"（pub.log 不可读: {e}）")
+    try:
+        print("--- sfu 日志尾 ---")
+        print(open('/tmp/linux-native-sfu.log', errors='replace').read()[-800:])
+    except OSError as e:
+        print(f"（sfu.log 不可读: {e}）")
     sys.exit(1)
 PY
 
