@@ -572,7 +572,6 @@ pub fn request_session_stop(slot: usize) {
     }
 }
 
-/// 把会话句柄状态同步到其独立窗口（帧/输入捕获态/文案）。
 /// #34 会话延时统计文案（未测得的口径省略对应段）。
 pub fn format_session_stats(latency_ms: Option<u64>, rtt_ms: Option<u64>, fps: f32) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -586,6 +585,7 @@ pub fn format_session_stats(latency_ms: Option<u64>, rtt_ms: Option<u64>, fps: f
     parts.join(" · ")
 }
 
+/// 把会话句柄状态同步到其独立窗口（帧/输入捕获态/文案）。
 fn sync_session_window(window: &SessionWindow, s: &SessionHandle) {
     if let Some(frame) = &s.frame {
         window.set_frame(frame);
