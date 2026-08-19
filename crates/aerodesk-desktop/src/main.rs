@@ -2096,10 +2096,15 @@ fn publisher_event_sink(
 }
 
 /// #508 B1：从 UI 属性快照构建被控端配置（引擎不再回读 UI）。
-/// server 保持 UI 原样输入（协议归一化在 core 连接层，与被控路径原行为一致）。
 fn publisher_config_from_ui(ui: &AppWindow) -> aerodesk_session::PublisherConfig {
     aerodesk_session::PublisherConfig {
-        server: ui.get_server_default().to_string(),
+        // #513 B1：connect 连接层内部 normalize_signal_url 对非回环裸地址默认补
+        // wss://（#504），在此按 TLS 开关先归一化（与观看端/presence 同款，1436 行）——
+        // 显式协议原样保留，裸地址才不会被错误升级成 TLS。
+        server: aerodesk_core::signaling::normalize_signal_url_with_tls(
+            &ui.get_server_default(),
+            SERVER_TLS.load(Ordering::SeqCst),
+        ),
         room: ui.get_device_id().to_string(),
         token: ui.get_token_default().to_string(),
         audio: ui.get_inc_audio(),

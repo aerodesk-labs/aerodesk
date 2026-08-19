@@ -253,7 +253,10 @@ mod imp {
             "正在注册被控端：设备 {room} · {w}x{h}@30"
         )));
 
-        let mut connected = false;
+        // #477：connect 建链阶段的 ICE 泵会消费掉首个 IceConnected 事件——必须
+        // 用状态标志初始化（cli 同款），否则经公网/TURN 建链后事件已被消费、
+        // connected 永远为 false，一帧不发（本地直连靠重协商二次事件掩盖）。
+        let mut connected = live.ice_connected;
         let mut next_frame = Instant::now();
         let mut pts: i64 = 0;
 

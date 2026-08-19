@@ -119,8 +119,7 @@ pub trait SessionUi: Send {
 /// 被控端启动配置快照（UI 属性在调用点读取，引擎不再回读 UI）。
 #[derive(Debug, Clone)]
 pub struct PublisherConfig {
-    /// 信令服务器地址（与 UI 输入原样一致；协议归一化由 core 连接层负责，
-    /// 与 B1 前被控路径行为相同）。
+    /// 信令服务器地址（调用点已按 TLS 开关归一化，#513 B1；显式协议输入原样透传）。
     pub server: String,
     /// 发布房间（本机设备 ID；引擎侧经 `valid_publisher_room` 校验）。
     pub room: String,
