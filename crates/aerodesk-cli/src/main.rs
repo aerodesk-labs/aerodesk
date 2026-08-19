@@ -1645,6 +1645,20 @@ fn publisher(
 
 #[allow(clippy::too_many_arguments)] // #75 e2e 输入脚本开关；与既有 publisher 系列函数同风格。
 /// 返回 Err=会话结束需重连（#173）；Ok=正常完成（一次性模式）。
+/// viewer 诊断：RGBA 原始像素 → PNG 字节（供 AERODESK_DUMP_FRAME 落盘；
+/// 镜像 core clipboard::rgba_to_png，此处为 CLI 本地副本，避免为它改 core API）。
+fn rgba_to_png(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut buf, width, height);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut wtr = enc.write_header().ok()?;
+        wtr.write_image_data(rgba).ok()?;
+    }
+    Some(buf)
+}
+
 fn viewer(
     signal_url: &str,
     room: &str,
@@ -1727,6 +1741,14 @@ fn viewer(
     let mut last_kf_rid: Option<str0m::media::Rid> = None;
     let mut seen_video = false;
     let mut decoded_frames: u64 = 0;
+    // viewer 诊断（#487 端到端可视验证）：AERODESK_DUMP_FRAME=<path> 时，把解码出的
+    // 第 AERODESK_DUMP_AFTER（默认 30）帧屏幕帧落盘成 PNG——证明「采集→编码→SFU→解码」
+    // 全链路真的出了图，而不只是统计计数。与 AERODESK_BGRA 等同为诊断开关。
+    let dump_frame: Option<String> = std::env::var("AERODESK_DUMP_FRAME").ok();
+    let dump_after: u64 = std::env::var("AERODESK_DUMP_AFTER")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
     // #73 Opus 音频：libopus 解码（惰性创建；不可用时降级为仅统计）。
     let mut opus_decoder: Option<aerodesk_codec::audio::OpusDecoder> = None;
     // #173 媒体静默检测：收到过包后连续无包超过阈值视为会话死亡（str0m is_alive
@@ -1944,6 +1966,25 @@ fn viewer(
                                         && frame.raw.is_some()
                                     {
                                         decoded_frames += 1;
+                                        // AERODESK_DUMP_FRAME：命中第 dump_after 帧就把 RGBA 落盘成 PNG。
+                                        if let (Some(path), Some(raw)) = (&dump_frame, &frame.raw)
+                                            && decoded_frames == dump_after
+                                        {
+                                            match rgba_to_png(raw, frame.width, frame.height) {
+                                                Some(png) => match std::fs::write(path, &png) {
+                                                    Ok(()) => info!(
+                                                        "dump-frame: 第 {decoded_frames} 帧已落盘 → {path} ({}x{} RGBA)",
+                                                        frame.width, frame.height
+                                                    ),
+                                                    Err(e) => {
+                                                        tracing::warn!(
+                                                            "dump-frame 写盘失败 {path}: {e}"
+                                                        )
+                                                    }
+                                                },
+                                                None => tracing::warn!("dump-frame: PNG 编码失败"),
+                                            }
+                                        }
                                     }
                                 }
                             }

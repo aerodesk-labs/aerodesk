@@ -20,6 +20,8 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 pcap-file = "2.0.0"
+# viewer 诊断：AERODESK_DUMP_FRAME 把解码出的屏幕帧落盘成 PNG（端到端可视验证）。
+png = "0.17"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS 专属：VideoToolbox 硬编 + SCK 采集/音频/CGEvent 注入（Windows/Linux 不编译）。

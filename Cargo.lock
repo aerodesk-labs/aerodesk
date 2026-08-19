@@ -72,6 +72,7 @@ dependencies = [
  "aerodesk-platform",
  "aerodesk-protocol",
  "pcap-file",
+ "png 0.17.16",
  "serde",
  "serde_json",
  "sha2",
