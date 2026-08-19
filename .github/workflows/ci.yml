@@ -571,6 +571,34 @@ jobs:
       - name: Run Linux native controlled-side e2e
         run: bash scripts/linux-native-e2e.sh
 
+  # macOS 主控端运行态自测（#487 矩阵缺口①）：macOS runner 真 WindowServer 直接跑
+  # Slint UI → 本地 SFU → Web 被控端发布 → ICE Completed 断言；同时是 #497/#498
+  # mac 主控键码路径的回归护栏。mac 被控端运行态需 TCC 授权，CI 不可自测（真机项）。
+  macos-ui-e2e:
+    needs: changes
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.docs_only == 'false')
+    name: macOS UI e2e (viewer)
+    runs-on: macos-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout str0m (netem dev-dep)
+        shell: bash
+        run: |
+          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
+            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: System deps (macOS)
+        run: brew install x264 ffmpeg
+
+      - name: Run macOS UI e2e
+        run: bash scripts/macos-ui-e2e.sh
+
   # Android APK 构建回归：#2 软件侧（Rust .so + Gradle APK）每次 push/PR 都验证。
   # ubuntu-latest 镜像预装 Android SDK（platform 34 / build-tools / NDK r2x），
   # 动态挑选最新 NDK，避免镜像版本漂移导致脚本 fallback 路径失效。
