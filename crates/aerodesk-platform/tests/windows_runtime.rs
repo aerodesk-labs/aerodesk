@@ -244,3 +244,19 @@ fn mf_camera_lists_and_captures() {
         Err(e) => eprintln!("SKIP: camera next_frame: {e}"),
     }
 }
+
+#[test]
+fn windows_cursor_normalized_in_range() {
+    // #487 光标列缺口：真实被控端 CursorPos 上报的光标源。GetCursorPos 在
+    // 交互会话恒可用（headless/服务会话也返回合法坐标），归一化应落 [0,1]。
+    use aerodesk_core::platform::CursorSource;
+    let mut cur = aerodesk_platform::windows::cursor::WindowsCursor::default();
+    match cur.position_normalized() {
+        Some((x, y)) => {
+            eprintln!("cursor OK: ({x:.3}, {y:.3})");
+            assert!((0.0..=1.0).contains(&x), "x 应在 [0,1]: {x}");
+            assert!((0.0..=1.0).contains(&y), "y 应在 [0,1]: {y}");
+        }
+        None => eprintln!("SKIP: GetCursorPos 不可用"),
+    }
+}
