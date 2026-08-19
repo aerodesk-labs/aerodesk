@@ -61,7 +61,7 @@ INEOF
 
 export AERODESK_SIGNAL="ws://127.0.0.1:3003"
 export AERODESK_ROOM="$ROOM"
-export AERODESK_CLI_BIN="$PWD/target/debug/aerodesk-agent"
+export AERODESK_AGENT_BIN="$PWD/target/debug/aerodesk-agent"
 python3 - <<'PYEOF'
 import subprocess, os, sys
 try:

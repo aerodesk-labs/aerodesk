@@ -31,7 +31,7 @@ aerodesk/
 │   │                        #   FilePicker/AppShell/VirtualDisplay/Notifier/CommandExecutor（#330）/SystemWakeLock（#334）
 │   ├── aerodesk-platform/   # 平台实现收敛层：macos/windows/linux/ios/android/ohos 各平台 trait 实现 ✅
 │   ├── aerodesk-desktop/    # 桌面端侧 UI/UX（Slint，Win/macOS/Linux）✅
-│   ├── aerodesk-cli/        # CLI：publisher（pcap/x264/VT/screen 四种源）+ viewer ✅
+│   ├── aerodesk-agent/        # agent：publisher（pcap/x264/VT/screen 四种源）+ viewer ✅
 │   ├── aerodesk-ios/        # iOS/iPad FFI 薄壳 + Slint 宿主（平台实现已迁 aerodesk-platform）✅
 │   ├── aerodesk-android/    # Android JNI 薄壳 + Slint 宿主（平台实现已迁 aerodesk-platform）🔨 P3
 │   ├── aerodesk-ohos/       # HarmonyOS NAPI 薄壳（平台实现已迁 aerodesk-platform）🔨 P4
@@ -49,15 +49,15 @@ TURN_SECRET=<coturn static-auth-secret> cargo run -p aerodesk-sfu
 cargo run -p aerodesk-signal
 
 # 发布端（macOS 真实屏幕采集，需屏幕录制 + 辅助功能权限）
-cargo run -p aerodesk-cli -- --role publisher --encoder screen
+cargo run -p aerodesk-agent -- --role publisher --encoder screen
 
 # 发布端 simulcast（q/h/f 三层，SFU 选层真实生效；--noisy 用高熵合成源验证码率档位）
-cargo run -p aerodesk-cli -- --role publisher --encoder x264 --simulcast --noisy
+cargo run -p aerodesk-agent -- --role publisher --encoder x264 --simulcast --noisy
 
 # 观看端（--layer q|h|f 显式选层；--audio 接收音频，--mute-audio 静音）
-cargo run -p aerodesk-cli -- --role viewer --layer f --audio
+cargo run -p aerodesk-agent -- --role viewer --layer f --audio
 # #173 自动重连（中途断线/服务重启后指数退避重连，--reconnect-max 默认 5 次）
-cargo run -p aerodesk-cli -- --role viewer --reconnect
+cargo run -p aerodesk-agent -- --role viewer --reconnect
 # #175 Web 端自动重连：WS/ICE 断开后浏览器自动退避重连（≤5 次，成功重置；手动断开不重连）
 
 # 音频：publisher --audio 发送合成 PCMU（G.711 8kHz）；--audio-opus 用 Opus（48kHz，libopus）
@@ -74,8 +74,8 @@ cargo run -p aerodesk-cli -- --role viewer --reconnect
 #       权限/审计管理（本地）：--cmd-allowlist list|add <prefix>|remove <prefix> / --cmd-audit [n]
 #       （桌面 UI 设置页「AI 远控」也可管理白名单与审计）
 # MCP 工具面：#109 提供 aerodesk-mcp（stdio JSON-RPC）——tools: connect/run_command/
-#       read_file/write_file/list_processes/kill_process，经 aerodesk-cli 桥接操作被控端
-#       （AERODESK_SIGNAL/AERODESK_ROOM/AERODESK_CLI_BIN 环境变量配置）
+#       read_file/write_file/list_processes/kill_process，经 aerodesk-agent 桥接操作被控端
+#       （AERODESK_SIGNAL/AERODESK_ROOM/AERODESK_AGENT_BIN 环境变量配置）
 #       键鼠工具：mouse_move / mouse_click / type_text（经 --send-input / --type-text）
 #       大文件：#122 MCP download_file/upload_file（file 通道；viewer --request-file 下载，
 #       --send-file 上传；被控端 --recv-dir 落盘；CLI 主线程 32MB 栈规避 sctp 深调用溢出）
