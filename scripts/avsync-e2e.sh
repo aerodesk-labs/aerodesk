@@ -46,6 +46,10 @@ done
 sample_drift() {
     grep -oE 'drift=[-0-9.]+ms' /tmp/av-view.log 2>/dev/null | sed 's/drift=//; s/ms//' | tail -3
 }
+# 音频到达计数采样（AUDIO: N frames 的末次值）
+sample_audio_frames() {
+    grep -oE 'AUDIO: [0-9]+ frames' /tmp/av-view.log 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1
+}
 # 漂移判定：有界（±3000ms）且相邻变化 ≤500ms。0=稳定，1=超差/样本不足
 drift_stable() {
     local drifts last prev
@@ -55,13 +59,34 @@ drift_stable() {
     [ -n "$last" ] && [ -n "$prev" ] && \
         awk -v a="$last" -v b="$prev" 'BEGIN { exit !(a >= -3000 && a <= 3000 && (a-b) >= -500 && (a-b) <= 500) }'
 }
-sleep "$OBS"
-# #523：漂移断言给二次观察窗——共享 runner 负载瞬态会让音频接收饥饿整窗行进
-# （重跑即过）；真失同步（时钟映射错）每个窗口都超差，第二窗依然抓住。
-if ! drift_stable; then
-    echo "== drift 首窗超差（$(sample_drift | tr '\n' ' '))，加时 ${OBS}s 复测（#523 负载瞬态容忍）"
+# #523 v3：按「音频到达速率」区分断症——drift 用的是接收侧 RTP 时间戳，
+# 共享 runner 负载下音频到达被持续饥饿时 audio_time 停摆、drift 单调恶化
+# （buffered 近空/played 低于实时速率），判漂移必然误杀；映射类真 bug 则
+# 到达健康（≈50fps，20ms 帧）而漂移照样行进。判据：到达 <40fps = 饥饿环境，
+# 容忍再加窗（封顶 3 窗）；到达健康而漂移超差 = 真失同步，立即 FAIL。
+audio_prev=$(sample_audio_frames)
+audio_prev=${audio_prev:-0}
+window=0
+max_windows=3
+while true; do
     sleep "$OBS"
-fi
+    window=$((window + 1))
+    if drift_stable; then break; fi
+    audio_now=$(sample_audio_frames)
+    audio_now=${audio_now:-0}
+    rate=$(( (audio_now - audio_prev) / OBS ))
+    audio_prev=$audio_now
+    if [ "$window" -ge "$max_windows" ]; then
+        echo "== drift 第 ${window} 窗仍超差（$(sample_drift | tr '\n' ' ')），到达 ${rate}fps，窗口用尽"
+        break
+    fi
+    if [ "$rate" -lt 40 ]; then
+        echo "== drift 第 ${window} 窗超差（$(sample_drift | tr '\n' ' ')），音频到达 ${rate}fps <40 = 负载饥饿，加时 ${OBS}s 复测"
+    else
+        echo "== drift 第 ${window} 窗超差（$(sample_drift | tr '\n' ' ')），音频到达 ${rate}fps 健康 = 真失同步嫌疑，不再加窗"
+        break
+    fi
+done
 kill "$PUB_PID" "$VIEW_PID" "$SFU_PID" "$SIG_PID" 2>/dev/null || true
 wait 2>/dev/null || true
 
