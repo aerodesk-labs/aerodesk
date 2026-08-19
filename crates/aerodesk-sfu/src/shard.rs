@@ -1879,6 +1879,37 @@ pub(crate) fn offer_sends_media(sdp: &str) -> bool {
     in_media && !seen_direction
 }
 
+/// 判断 offer 的全部 ICE 候选是否都是回环地址（127.0.0.0/8、::1）。
+///
+/// #216/#513：SFU 只在此时才往 answer 附带回环候选。同机客户端（桥、本机 CLI
+/// 经 127.0.0.1 信令接入）的 offer 候选只有回环——socket 绑在 loopback，够不到
+/// 公网通告地址；而远端客户端一旦在 answer 里看到回环候选，str0m 会把发送目的地
+/// 漂移到它自己的回环，发布端媒体黑洞。无候选的 offer（纯 trickle）或含不可解析
+/// 地址（mDNS .local）一律视为非回环：正常客户端 offer 都内联候选，缺省不附带
+/// 是更安全的一侧。
+pub(crate) fn offer_is_loopback_only(sdp: &str) -> bool {
+    let mut seen = false;
+    for line in sdp.lines() {
+        let line = line.trim();
+        if !line.starts_with("a=candidate:") {
+            continue;
+        }
+        // a=candidate:<foundation> <component> <proto> <prio> <ip> <port> typ <type> ...
+        let Some(ip_str) = line.split_whitespace().nth(4) else {
+            continue;
+        };
+        seen = true;
+        let loopback = ip_str
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false);
+        if !loopback {
+            return false;
+        }
+    }
+    seen
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2165,6 +2196,61 @@ mod tests {
     #[test]
     fn empty_sdp_not_detected() {
         assert!(!offer_sends_media(""));
+    }
+
+    // ---------- #513 回环候选按 offer 判定 ----------
+
+    fn sdp_with_candidates(candidate_lines: &str) -> String {
+        sdp(&format!(
+            "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=recvonly\r\n{candidate_lines}"
+        ))
+    }
+
+    #[test]
+    fn loopback_only_offer_detected() {
+        // 同机桥/本机 CLI：经 127.0.0.1 信令接入时 offer 候选只有回环。
+        let s = sdp_with_candidates("a=candidate:1 1 udp 2130706431 127.0.0.1 54321 typ host\r\n");
+        assert!(offer_is_loopback_only(&s));
+    }
+
+    #[test]
+    fn loopback_only_offer_detected_v6() {
+        let s = sdp_with_candidates("a=candidate:1 1 udp 2130706431 ::1 54321 typ host\r\n");
+        assert!(offer_is_loopback_only(&s));
+    }
+
+    #[test]
+    fn mixed_candidates_not_loopback_only() {
+        // #513 黑洞场景：远端客户端即便附带 127.0.0.1，只要有非回环候选就不发回环候选。
+        let s = sdp_with_candidates(
+            "a=candidate:1 1 udp 2130706431 127.0.0.1 54321 typ host\r\n\
+             a=candidate:2 1 udp 2130706431 192.168.1.5 54321 typ host\r\n",
+        );
+        assert!(!offer_is_loopback_only(&s));
+    }
+
+    #[test]
+    fn lan_and_srflx_offer_not_loopback_only() {
+        let s = sdp_with_candidates(
+            "a=candidate:1 1 udp 2130706431 192.168.1.5 54321 typ host\r\n\
+             a=candidate:2 1 udp 16909060 203.0.113.9 60000 typ srflx raddr 192.168.1.5 rport 54321\r\n",
+        );
+        assert!(!offer_is_loopback_only(&s));
+    }
+
+    #[test]
+    fn mdns_offer_not_loopback_only() {
+        // 浏览器 mDNS 候选不可解析为 IP：按非回环处理，不附带回环候选。
+        let s = sdp_with_candidates(
+            "a=candidate:1 1 udp 2130706431 9f3b2c1a-7d4e-4c5b-8a6f-0e1d2c3b4a59.local 54321 typ host\r\n",
+        );
+        assert!(!offer_is_loopback_only(&s));
+    }
+
+    #[test]
+    fn no_candidate_offer_not_loopback_only() {
+        assert!(!offer_is_loopback_only(&sdp_with_candidates("")));
+        assert!(!offer_is_loopback_only(""));
     }
 
     #[test]
