@@ -43,8 +43,8 @@ bash scripts/package-linux.sh      # dist/aerodesk_<版本>_amd64.deb + tar.gz +
 - **Linux**：`cargo build --release -p aerodesk-desktop` → `scripts/package-linux.sh`
   → `cargo-deb` `.deb`（`depends=$auto` 自动探测）+ 便携 `tar.gz` + `rpmbuild` `.rpm` + `linuxdeploy` AppImage
   → 上传 Release（无签名，GPG 签名仓库可选）
-- **Windows**：`cargo build --release -p aerodesk-desktop -p aerodesk-cli` → `scripts/package-windows.sh`
-  → 便携 ZIP（aerodesk-desktop.exe + aerodesk-cli.exe + FFmpeg 共享 DLL + 图标 + README）+ **WiX v4+ MSI**
+- **Windows**：`cargo build --release -p aerodesk-desktop -p aerodesk-agent` → `scripts/package-windows.sh`
+  → 便携 ZIP（aerodesk-desktop.exe + aerodesk-agent.exe + FFmpeg 共享 DLL + 图标 + README）+ **WiX v4+ MSI**
   （`packaging/windows/AeroDesk.wxs`，dotnet tool wix，Program Files + 开始菜单/桌面快捷方式）
   → 上传 Release（无签名；代码签名证书待补）
 - **所需 secrets**：`APPLE_CERT_P12`（Developer ID Application 证书 base64）、`APPLE_CERT_PASSWORD`、

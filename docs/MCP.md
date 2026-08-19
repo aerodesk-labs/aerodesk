@@ -7,12 +7,12 @@
 
 ```sh
 # 先构建（或直接用 release）
-cargo build -q --release -p aerodesk-mcp -p aerodesk-cli
+cargo build -q --release -p aerodesk-mcp -p aerodesk-agent
 
 # 环境变量
 export AERODESK_SIGNAL="ws://<signal-host>:3003"   # 信令地址，默认 ws://127.0.0.1:3003
 export AERODESK_ROOM="demo"                        # 房间名（被控端 publisher 所在房间）
-export AERODESK_CLI_BIN="$PWD/target/release/aerodesk-cli"
+export AERODESK_AGENT_BIN="$PWD/target/release/aerodesk-agent"
 
 # 启动 MCP server（stdio transport）
 ./target/release/aerodesk-mcp
@@ -21,7 +21,7 @@ export AERODESK_CLI_BIN="$PWD/target/release/aerodesk-cli"
 被控端侧需运行 publisher 并加入同一房间：
 
 ```sh
-./target/release/aerodesk-cli --role publisher --encoder x264 \
+./target/release/aerodesk-agent --role publisher --encoder x264 \
   --signal ws://127.0.0.1:3003 --room demo
 ```
 
@@ -46,7 +46,7 @@ export AERODESK_CLI_BIN="$PWD/target/release/aerodesk-cli"
 ### Codex / Cursor（任何支持 stdio MCP 的客户端）
 在客户端 MCP 配置中注册命令型 server：
 ```json
-{ "mcpServers": { "aerodesk": { "command": "/abs/path/aerodesk-mcp", "env": { "AERODESK_SIGNAL": "ws://...", "AERODESK_ROOM": "demo", "AERODESK_CLI_BIN": "/abs/path/aerodesk-cli" } } } }
+{ "mcpServers": { "aerodesk": { "command": "/abs/path/aerodesk-mcp", "env": { "AERODESK_SIGNAL": "ws://...", "AERODESK_ROOM": "demo", "AERODESK_AGENT_BIN": "/abs/path/aerodesk-agent" } } } }
 ```
 
 ### 手动验证（协议合规性）
@@ -75,6 +75,6 @@ cmd response #139067393: Run { exit_code: Some(0), stdout: "hello-from-claude\n"
 ## 权限与审计
 
 - 危险命令/敏感路径写/pid 0-1 默认拦截；白名单 `~/AeroDesk/cmd-allowlist.txt`
-  每行一个前缀，`aerodesk-cli --cmd-allowlist add|remove|list` 管理
-- 全量审计 `~/AeroDesk/cmd-audit.jsonl`（JSONL），`aerodesk-cli --cmd-audit [n]` 查询
+  每行一个前缀，`aerodesk-agent --cmd-allowlist add|remove|list` 管理
+- 全量审计 `~/AeroDesk/cmd-audit.jsonl`（JSONL），`aerodesk-agent --cmd-audit [n]` 查询
 - 端到端回归：`scripts/cmd-e2e.sh`、`scripts/mcp-e2e.sh`（CI macOS）

@@ -41,7 +41,7 @@ JS
 
 cd "$ROOT"
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 echo "== 启动服务"
 # 前置 e2e 可能残留 SFU/signal 占用 3002/3003 → 先清理，并等端口释放。
 pkill -f "aerodesk-sfu|aerodesk-signal" 2>/dev/null || true
@@ -63,7 +63,7 @@ RECV="$E2E_DIR/recv"
 rm -rf "$RECV"
 mkdir -p "$RECV"
 # CLI publisher 作为被控端：--recv-dir 接收文件落盘
-"$ROOT/target/debug/aerodesk-cli" --role publisher --signal ws://127.0.0.1:3003 --room "$ROOM" --encoder pcap --recv-dir "$RECV" >/tmp/webfile-pub.log 2>&1 &
+"$ROOT/target/debug/aerodesk-agent" --role publisher --signal ws://127.0.0.1:3003 --room "$ROOM" --encoder pcap --recv-dir "$RECV" >/tmp/webfile-pub.log 2>&1 &
 PUB=$!
 sleep 2
 

@@ -18,7 +18,7 @@ SIG_B=14700; INT_B=14702; PLAIN_B=14703; MEDIA_B=14778
 fail() { echo "FAIL: $*"; exit 1; }
 cleanup() {
   pkill -f 'aerodesk-bridge' 2>/dev/null || true
-  pkill -f 'aerodesk-cli' 2>/dev/null || true
+  pkill -f 'aerodesk-agent' 2>/dev/null || true
   [ -n "${SFU_A:-}" ] && kill "$SFU_A" 2>/dev/null || true
   [ -n "${SFU_B:-}" ] && kill "$SFU_B" 2>/dev/null || true
   [ -n "${SIG_A_PID:-}" ] && kill "$SIG_A_PID" 2>/dev/null || true
@@ -27,7 +27,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 REC_A="$(mktemp -d)"; REC_B="$(mktemp -d)"
 
 echo "== 启动 PoP-A（14600 系）+ PoP-B（14700 系）"
@@ -50,7 +50,7 @@ done
 sleep 0.3
 
 echo "== PoP-A：启动 publisher（room=${ROOM}）"
-"$TARGET_DIR/aerodesk-cli" --role publisher --signal "ws://127.0.0.1:${PLAIN_A}" --room "$ROOM" \
+"$TARGET_DIR/aerodesk-agent" --role publisher --signal "ws://127.0.0.1:${PLAIN_A}" --room "$ROOM" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/bridge-pub-a.log 2>&1 &
 PUB_A=$!
@@ -74,7 +74,7 @@ done
 [ "$ok" = "1" ] || fail "bridge 未连上双腿"; echo "  bridge 双腿已连"
 
 echo "== PoP-B：启动 viewer（加入同 room，期望不经 Redirect 看到 PoP-A 媒体）"
-"$TARGET_DIR/aerodesk-cli" --role viewer --signal "ws://127.0.0.1:${PLAIN_B}" --room "$ROOM" \
+"$TARGET_DIR/aerodesk-agent" --role viewer --signal "ws://127.0.0.1:${PLAIN_B}" --room "$ROOM" \
   >/tmp/bridge-view-b.log 2>&1 &
 VIEW_B=$!
 ok=0
@@ -136,12 +136,12 @@ OUT_DIR="$(mktemp -d)/out"; mkdir -p "$OUT_DIR"
 dd if=/dev/urandom of="$SRC_FILE" bs=1024 count="$FILESIZE_KB" 2>/dev/null
 SRC_HASH=$(shasum -a 256 "$SRC_FILE" | awk '{print $1}')
 # PoP-A publisher 收（--recv-dir），PoP-B viewer 发（--send-file）
-"$TARGET_DIR/aerodesk-cli" --role publisher --recv-dir "$OUT_DIR" \
+"$TARGET_DIR/aerodesk-agent" --role publisher --recv-dir "$OUT_DIR" \
   --signal "ws://127.0.0.1:${PLAIN_A}" --room "$ROOM" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/bridge-pub-a.log 2>&1 &
 PUB_A=$!
-"$TARGET_DIR/aerodesk-cli" --role viewer --send-file "$SRC_FILE" \
+"$TARGET_DIR/aerodesk-agent" --role viewer --send-file "$SRC_FILE" \
   --signal "ws://127.0.0.1:${PLAIN_B}" --room "$ROOM" \
   >/tmp/bridge-view-b.log 2>&1 &
 VIEW_B=$!

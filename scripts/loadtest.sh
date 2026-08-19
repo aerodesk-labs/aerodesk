@@ -14,7 +14,7 @@ W="${4:-1920}"
 H="${5:-1080}"
 FPS="${6:-30}"
 SIGNAL="${SIGNAL:-ws://127.0.0.1:3003}"
-BIN="${BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/debug/aerodesk-cli}"
+BIN="${BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/debug/aerodesk-agent}"
 BITRATE="${BITRATE:-8000000}"
 # #8 高熵合成源（NOISY=1）：码率贴近目标档位，避免彩条源过度可压缩导致
 # 吞吐失真（实测彩条 4K 只有 ~0.3Mbps）。

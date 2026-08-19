@@ -39,7 +39,7 @@ JS
 
 cd "$ROOT"
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 echo "== 启动服务"
 REC="$(mktemp -d)"
 RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu" >/tmp/webe2e-sfu.log 2>&1 &
@@ -47,7 +47,7 @@ SFU=$!
 "$ROOT/target/debug/aerodesk-signal" >/tmp/webe2e-sig.log 2>&1 &
 SIG=$!
 sleep 1.5
-"$ROOT/target/debug/aerodesk-cli" --role publisher --signal ws://127.0.0.1:3003 --room "$ROOM" --encoder x264 >/tmp/webe2e-pub.log 2>&1 &
+"$ROOT/target/debug/aerodesk-agent" --role publisher --signal ws://127.0.0.1:3003 --room "$ROOM" --encoder x264 >/tmp/webe2e-pub.log 2>&1 &
 PUB=$!
 sleep 2
 

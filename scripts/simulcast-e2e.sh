@@ -15,7 +15,7 @@ OBS="${2:-12}"
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建（release）"
-cargo build --release -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build --release -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 REC="$(mktemp -d)"
 echo "== 启动 sfu/signal"
@@ -36,10 +36,10 @@ sleep 0.3
 # 让 viewer 赶上 publisher 的首个关键帧（#0），避免“迟到 viewer 等下一
 # 个关键帧”造成 f 层偶发 0 帧（#66 排查结论）。
 echo "== 启动 viewer f/q（先加入并登记选层）"
-./target/release/aerodesk-cli --role viewer --layer f \
+./target/release/aerodesk-agent --role viewer --layer f \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/sim-view-f.log 2>&1 &
 F_PID=$!
-./target/release/aerodesk-cli --role viewer --layer q \
+./target/release/aerodesk-agent --role viewer --layer q \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/sim-view-q.log 2>&1 &
 Q_PID=$!
 ready=0
@@ -60,7 +60,7 @@ if [ "$ready" != "1" ]; then
 fi
 
 echo "== 启动 publisher（x264 --simulcast --noisy: q/h/f）"
-./target/release/aerodesk-cli --role publisher --encoder x264 --simulcast --noisy \
+./target/release/aerodesk-agent --role publisher --encoder x264 --simulcast --noisy \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/sim-pub.log 2>&1 &
 PUB_PID=$!
 echo "== 观察 f/q 层 ${OBS}s"

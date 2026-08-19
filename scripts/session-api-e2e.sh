@@ -16,7 +16,7 @@ fail() { echo "FAIL: $*"; exit 1; }
 jget() { python3 -c "import sys,json; v=json.load(sys.stdin); print(eval(sys.argv[1]))" "$1" 2>/dev/null || echo ""; }
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 # 前置 e2e 可能残留 sfu/signal 占 14000-14003（无 INTERNAL_TOKEN）→ 先清理，
 # 否则无 token 403 断言会打到旧实例返回 200（CI 测试隔离）。
@@ -51,11 +51,11 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:14002/se
 [ "$CODE" = "403" ] && echo "PASS kick unauthenticated 403" || fail "expected 403 got $CODE"
 
 echo "== 加入 publisher + viewer"
-./target/debug/aerodesk-cli --role publisher --encoder x264 --noisy \
+./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
     --signal ws://127.0.0.1:14003 --room "$ROOM" >/tmp/sess-pub.log 2>&1 &
 PUB=$!
 sleep 2
-./target/debug/aerodesk-cli --role viewer \
+./target/debug/aerodesk-agent --role viewer \
     --signal ws://127.0.0.1:14003 --room "$ROOM" >/tmp/sess-view.log 2>&1 &
 VIEW=$!
 sleep 5

@@ -4391,7 +4391,7 @@ mod multi_session_e2e {
 
         // 2) 两个被控端（发布端）
         for room in [ROOM_A, ROOM_B] {
-            let mut cmd = Command::new(format!("{bin}/aerodesk-cli"));
+            let mut cmd = Command::new(format!("{bin}/aerodesk-agent"));
             cmd.args([
                 "--role",
                 "publisher",

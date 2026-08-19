@@ -9,7 +9,7 @@ ROOM="brf-$(date +%s)"
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 echo "== 启动 sfu + signal（独立端口）"
 SFU_MEDIA_PORT=1478 SFU_SIGNAL_PORT=14000 SFU_INTERNAL_PORT=14002 \
@@ -28,12 +28,12 @@ done
 sleep 0.3
 
 echo "== 合成发布端（vt，无 TCC）"
-./target/debug/aerodesk-cli --role publisher --encoder vt --signal ws://127.0.0.1:14003 \
+./target/debug/aerodesk-agent --role publisher --encoder vt --signal ws://127.0.0.1:14003 \
   --room "$ROOM" >/tmp/brf-pub.log 2>&1 &
 PUB=$!
 
 echo "== viewer 经 control 下发码率反馈"
-./target/debug/aerodesk-cli --role viewer --signal ws://127.0.0.1:14003 --room "$ROOM" \
+./target/debug/aerodesk-agent --role viewer --signal ws://127.0.0.1:14003 --room "$ROOM" \
   --send-control '{"bitrate": 2000000}' >/tmp/brf-view.log 2>&1 &
 VIEW=$!
 sleep 6

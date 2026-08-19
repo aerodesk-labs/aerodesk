@@ -1,6 +1,6 @@
 //! aerodesk-host —— AeroDesk 宿主二进制（#492）：
 //! 被控系统服务（SYSTEM 常驻，#470）与登录界面 helper（#471）的唯一承载。
-//! 从 aerodesk-cli 拆出——服务/helper 是宿主级角色，CLI 回归纯命令行工具。
+//! 从 aerodesk-agent 拆出——服务/helper 是宿主级角色，CLI 回归纯命令行工具。
 //! 与 ToDesk 同型：单二进制双角色（ToDesk.exe --runservice 对应 --service）。
 
 use tracing::info;
@@ -39,7 +39,7 @@ fn main() {
         {
             let exe = std::env::current_exe()
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| "aerodesk-cli.exe".into());
+                .unwrap_or_else(|_| "aerodesk-agent.exe".into());
             match aerodesk_platform::windows::service::install(&exe) {
                 Ok(()) => {
                     println!(

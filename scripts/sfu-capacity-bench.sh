@@ -17,7 +17,7 @@ TURN_PORT="${TURN_PORT:-14789}"
 TURN_SECRET="${TURN_SECRET:-testsecret}"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 REC="$(mktemp -d)"
 # #218：TURN relay 变体——SFU 内嵌 TURN server + 信令下发 TURN_URLS +
 # 客户端 force-relay（只通告 relayed 候选）。直连模式保持 #215 行为（无 TURN）。
@@ -72,7 +72,7 @@ SAMPLER=$!
 echo "== 施压: ${ROOMS} 房间 × ${PAIRS} 对 @ ${W}x${H}/${FPS}fps ${BITRATE}bps，时长 ${RUN_SECONDS}s"
 # 清理旧压测日志
 rm -f /tmp/load-pub-*.log /tmp/load-view-*.log 2>/dev/null || true
-SIGNAL=ws://127.0.0.1:14503 BIN="$TARGET_DIR/aerodesk-cli" BITRATE="$BITRATE" NOISY=1 \
+SIGNAL=ws://127.0.0.1:14503 BIN="$TARGET_DIR/aerodesk-agent" BITRATE="$BITRATE" NOISY=1 \
   ./scripts/loadtest.sh "$ROOMS" "$PAIRS" "$RUN_SECONDS" "$W" "$H" "$FPS" || true
 kill "$SAMPLER" 2>/dev/null || true
 

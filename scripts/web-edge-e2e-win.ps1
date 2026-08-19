@@ -29,7 +29,7 @@ try {
     Stop-AeroDesk
     Start-Sleep -Milliseconds 500
     Write-Host "== build"
-    cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+    cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
     Write-Host "== start sfu/signal"
     # 本机/CI Windows runner 自动选网卡可能 bind 失败（AddrNotAvailable），强制回环。
     $env:SFU_BIND_ADDRESS = "127.0.0.1"
@@ -40,7 +40,7 @@ try {
         -RedirectStandardOutput "$logDir\sig.log" -RedirectStandardError "$logDir\sig.err" -PassThru
     Start-Sleep -Seconds 3
     # 合成源发布端（静态桌面不影响出帧；Windows 无 x264 用 ffmpeg/h264）
-    $pub = Start-Process -FilePath ".\target\debug\aerodesk-cli.exe" -WindowStyle Hidden `
+    $pub = Start-Process -FilePath ".\target\debug\aerodesk-agent.exe" -WindowStyle Hidden `
         -ArgumentList @('--role','publisher','--encoder','ffmpeg','--codec','h264','--signal','ws://127.0.0.1:3003','--room',$Room) `
         -RedirectStandardOutput "$logDir\pub.log" -RedirectStandardError "$logDir\pub.err" -PassThru
     Start-Sleep -Seconds 4

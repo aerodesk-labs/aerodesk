@@ -4,7 +4,7 @@ members = [
     "crates/aerodesk-sfu",
     "crates/aerodesk-core",
     "crates/aerodesk-signal",
-    "crates/aerodesk-cli",
+    "crates/aerodesk-agent",
 
     "crates/aerodesk-ios",
     "crates/aerodesk-android",

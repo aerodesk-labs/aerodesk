@@ -13,7 +13,7 @@ CODECS=("$@"); [ ${#CODECS[@]} -eq 0 ] && CODECS=(h264 h265 vp9 av1)
 fail() { echo "FAIL: $*"; exit 1; }
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 echo "codec    encoder   result   frames   decoded   errors"
 for C in "${CODECS[@]}"; do
@@ -35,10 +35,10 @@ for C in "${CODECS[@]}"; do
   ENC=ffmpeg
   EXTRA=()
   if [ "$C" = "h264" ]; then ENC=vt; fi
-  "$TARGET_DIR/aerodesk-cli" --role publisher --signal ws://127.0.0.1:14503 --room "codec-${C}" \
+  "$TARGET_DIR/aerodesk-agent" --role publisher --signal ws://127.0.0.1:14503 --room "codec-${C}" \
     --encoder "$ENC" --codec "$C" --noisy >/tmp/codec-pub.log 2>&1 &
   PUB=$!
-  "$TARGET_DIR/aerodesk-cli" --role viewer --signal ws://127.0.0.1:14503 --room "codec-${C}" \
+  "$TARGET_DIR/aerodesk-agent" --role viewer --signal ws://127.0.0.1:14503 --room "codec-${C}" \
     >/tmp/codec-view.log 2>&1 &
   VIEW=$!
 

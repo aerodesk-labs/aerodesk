@@ -36,7 +36,7 @@ JS
 
 cd "$ROOT"
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 start_sfu() {
     RECORD_DIR="$REC" \
@@ -67,7 +67,7 @@ wait_ports() {
 echo "== 启动服务 + publisher"
 start_sfu; start_signal
 wait_ports || { echo "FAIL: 服务未就绪"; exit 1; }
-./target/debug/aerodesk-cli --role publisher --encoder x264 --noisy \
+./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
     --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/webrec-pub.log 2>&1 &
 echo $! > /tmp/webrec-pub.pid
 
@@ -96,7 +96,7 @@ sleep 3
 start_sfu; start_signal
 wait_ports || echo "WARN: 重启后服务未就绪"
 kill "$(cat /tmp/webrec-pub.pid)" 2>/dev/null || true
-./target/debug/aerodesk-cli --role publisher --encoder x264 --noisy \
+./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
     --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/webrec-pub2.log 2>&1 &
 echo $! > /tmp/webrec-pub.pid
 

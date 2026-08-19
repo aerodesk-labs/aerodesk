@@ -10,7 +10,7 @@ OBS="${2:-10}"
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 fail=0
 for codec in h264 h265 vp9 av1; do
@@ -29,10 +29,10 @@ for codec in h264 h265 vp9 av1; do
   done
   sleep 0.3
 
-  ./target/debug/aerodesk-cli --role publisher --encoder ffmpeg --codec "$codec" \
+  ./target/debug/aerodesk-agent --role publisher --encoder ffmpeg --codec "$codec" \
       --signal ws://127.0.0.1:3003 --room "$ROOM" >"/tmp/codec-$codec-pub.log" 2>&1 &
   PUB_PID=$!
-  ./target/debug/aerodesk-cli --role viewer \
+  ./target/debug/aerodesk-agent --role viewer \
       --signal ws://127.0.0.1:3003 --room "$ROOM" >"/tmp/codec-$codec-view.log" 2>&1 &
   VIEW_PID=$!
   sleep "$OBS"

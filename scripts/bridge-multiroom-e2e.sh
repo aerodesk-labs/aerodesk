@@ -24,7 +24,7 @@ BRIDGE_CMD="$TARGET_DIR/aerodesk-bridge --remote-signal ${SIG_A_URL} --local-sig
 fail() { echo "FAIL: $*"; exit 1; }
 cleanup() {
   pkill -f 'aerodesk-bridge' 2>/dev/null || true
-  pkill -f 'aerodesk-cli' 2>/dev/null || true
+  pkill -f 'aerodesk-agent' 2>/dev/null || true
   [ -n "${SFU_A:-}" ] && { kill "$SFU_A" 2>/dev/null || true; wait "$SFU_A" 2>/dev/null || true; }
   [ -n "${SFU_B:-}" ] && { kill "$SFU_B" 2>/dev/null || true; wait "$SFU_B" 2>/dev/null || true; }
   [ -n "${SIG_A_PID:-}" ] && { kill "$SIG_A_PID" 2>/dev/null || true; wait "$SIG_A_PID" 2>/dev/null || true; }
@@ -52,7 +52,7 @@ clients_of() { # $1=内部端口 -> 总客户端数
 }
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli || fail "构建失败"
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent || fail "构建失败"
 REC_A="$(mktemp -d)"; REC_B="$(mktemp -d)"
 
 echo "== 启动 PoP-A（141xx）+ PoP-B（142xx，BRIDGE_CMD 桥优先）"
@@ -78,13 +78,13 @@ sleep 0.3
 grep -q "bridge orchestration enabled" /tmp/bmr-sig-b.log || fail "PoP-B 未启用桥编排（BRIDGE_CMD 未生效）"
 
 start_pub() { # $1=room $2=log
-  "$TARGET_DIR/aerodesk-cli" --role publisher --signal "$SIG_A_URL" --room "$1" --token "$AUTH" \
+  "$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$1" --token "$AUTH" \
     --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
     >"$2" 2>&1 &
   echo $!
 }
 start_view() { # $1=room $2=log
-  "$TARGET_DIR/aerodesk-cli" --role viewer --signal "$SIG_B_URL" --room "$1" --token "$AUTH" \
+  "$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_B_URL" --room "$1" --token "$AUTH" \
     >"$2" 2>&1 &
   echo $!
 }

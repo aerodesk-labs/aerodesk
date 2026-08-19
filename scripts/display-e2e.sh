@@ -10,7 +10,7 @@ ROOM="${1:-disp-$(date +%s)}"
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 REC="$(mktemp -d)"
 echo "== 启动 sfu/signal"
@@ -28,13 +28,13 @@ done
 sleep 0.3
 
 echo "== 启动 publisher（x264 合成，验证控制转发）"
-./target/debug/aerodesk-cli --role publisher --encoder x264 \
+./target/debug/aerodesk-agent --role publisher --encoder x264 \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/disp-pub.log 2>&1 &
 PUB_PID=$!
 sleep 2
 
 echo "== viewer（--display 1 下发切换指令）"
-./target/debug/aerodesk-cli --role viewer --display 1 \
+./target/debug/aerodesk-agent --role viewer --display 1 \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/disp-view.log 2>&1 &
 V_PID=$!
 sleep 5

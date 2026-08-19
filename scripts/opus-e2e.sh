@@ -13,7 +13,7 @@ OBS="${2:-6}"
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 REC="$(mktemp -d)"
 echo "== 启动 sfu/signal"
@@ -31,13 +31,13 @@ done
 sleep 0.3
 
 echo "== 启动 publisher（pcap 视频 + --audio --audio-opus）"
-./target/debug/aerodesk-cli --role publisher --audio --audio-opus \
+./target/debug/aerodesk-agent --role publisher --audio --audio-opus \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/opus-pub.log 2>&1 &
 PUB_PID=$!
 sleep 2
 
 echo "== viewer A（--audio，正常接收 Opus）"
-./target/debug/aerodesk-cli --role viewer --audio \
+./target/debug/aerodesk-agent --role viewer --audio \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/opus-a.log 2>&1 &
 A_PID=$!
 # 轮询等待 Opus 音频到达（CI 慢启动时固定 sleep 会误判；最多 ~40s）
@@ -51,7 +51,7 @@ kill "$A_PID" 2>/dev/null || true
 wait "$A_PID" 2>/dev/null || true
 
 echo "== viewer B（--audio --mute-audio，静音丢弃）"
-./target/debug/aerodesk-cli --role viewer --audio --mute-audio \
+./target/debug/aerodesk-agent --role viewer --audio --mute-audio \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/opus-b.log 2>&1 &
 B_PID=$!
 MUTE_OK=0

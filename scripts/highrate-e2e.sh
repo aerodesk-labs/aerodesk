@@ -17,7 +17,7 @@ OBS="${2:-8}"
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建（release）"
-cargo build -q --release -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q --release -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 REC="$(mktemp -d)"
 echo "== 启动 sfu/signal"
@@ -35,11 +35,11 @@ done
 sleep 0.3
 
 echo "== 启动 publisher（VT H264 1080p60 --noisy，高熵大帧）+ viewer"
-./target/release/aerodesk-cli --role publisher --encoder vt --noisy \
+./target/release/aerodesk-agent --role publisher --encoder vt --noisy \
     --width 1920 --height 1080 --fps 60 --bitrate 10000000 \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/highrate-pub.log 2>&1 &
 PUB_PID=$!
-./target/release/aerodesk-cli --role viewer \
+./target/release/aerodesk-agent --role viewer \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/highrate-view.log 2>&1 &
 VIEW_PID=$!
 

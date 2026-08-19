@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Windows 打包：便携 ZIP（aerodesk-desktop.exe + aerodesk-cli.exe + FFmpeg DLL + 图标 + README）。
+# Windows 打包：便携 ZIP（aerodesk-desktop.exe + aerodesk-agent.exe + FFmpeg DLL + 图标 + README）。
 # release workflow windows job 使用（#7 PACKAGING.md「Windows 待接入」）。
 # 依赖：windows-latest runner 已装 Git Bash；FFMPEG_DIR 指向 BtbN FFmpeg 共享构建根目录
 #（release.yml 的 System deps 步骤设置，与 test job 同款）。
@@ -13,8 +13,8 @@ VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 [ -n "${FFMPEG_DIR:-}" ] || { echo "FFMPEG_DIR 未设置（需指向 FFmpeg 共享构建根目录）"; exit 1; }
 
 echo "== [1/3] 校验产物"
-for b in target/release/aerodesk-desktop.exe target/release/aerodesk-cli.exe; do
-  [ -f "$b" ] || { echo "缺少 $b（先 cargo build --release -p aerodesk-desktop -p aerodesk-cli）"; exit 1; }
+for b in target/release/aerodesk-desktop.exe target/release/aerodesk-agent.exe; do
+  [ -f "$b" ] || { echo "缺少 $b（先 cargo build --release -p aerodesk-desktop -p aerodesk-agent）"; exit 1; }
 done
 [ -d "$FFMPEG_DIR/bin" ] || { echo "FFMPEG_DIR/bin 不存在: $FFMPEG_DIR"; exit 1; }
 
@@ -23,15 +23,15 @@ STAGE="dist/aerodesk-$VERSION-win64"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 cp target/release/aerodesk-desktop.exe "$STAGE/"
-cp target/release/aerodesk-cli.exe "$STAGE/"
+cp target/release/aerodesk-agent.exe "$STAGE/"
 # FFmpeg 共享 DLL（avcodec/avformat/avutil/avfilter/avdevice/swscale/swresample）。
 cp "$FFMPEG_DIR"/bin/*.dll "$STAGE/"
 cp app-assets/icon-1024.png "$STAGE/aerodesk.png"
 cat > "$STAGE/README.txt" <<EOF
 AeroDesk Windows 便携包（$VERSION）
 - 观看/主控端：双击 aerodesk-desktop.exe（连接服务器/房间，支持 Windows 被控端双角色）
-- 命令行：aerodesk-cli.exe --role publisher|viewer --signal ws://<host>:3003 --room <room>
-- 被控端示例：aerodesk-cli.exe --role publisher --encoder screen --signal ws://<host>:3003 --room demo
+- 命令行：aerodesk-agent.exe --role publisher|viewer --signal ws://<host>:3003 --room <room>
+- 被控端示例：aerodesk-agent.exe --role publisher --encoder screen --signal ws://<host>:3003 --room demo
 - 依赖：本目录内 FFmpeg 共享 DLL（avcodec/avformat/avutil/avfilter/avdevice/swscale/swresample），
   请保持 exe 与 DLL 同目录；Windows 10/11 x64。
 EOF

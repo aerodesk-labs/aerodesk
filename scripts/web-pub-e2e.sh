@@ -42,7 +42,7 @@ JS
 
 cd "$ROOT"
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 echo "== 启动服务"
 # 前置 e2e 可能残留 SFU/signal 占用 3002/3003 → 先清理，避免 bind 失败。
 pkill -f "aerodesk-sfu|aerodesk-signal" 2>/dev/null || true
@@ -62,7 +62,7 @@ if [ "$OK" != "1" ]; then
   echo "FAIL: SFU/signal 未就绪；sfu log:"; tail -20 /tmp/webpub-sfu.log; exit 1
 fi
 # CLI viewer 作为观看端：断言能收到 Web 被控端发布的媒体帧。
-"$ROOT/target/debug/aerodesk-cli" --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/webpub-view.log 2>&1 &
+"$ROOT/target/debug/aerodesk-agent" --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/webpub-view.log 2>&1 &
 VIEW=$!
 sleep 2
 

@@ -2,11 +2,11 @@
 //!
 //! 通过 stdio（newline-delimited JSON-RPC 2.0）暴露 MCP 协议：
 //! `initialize` / `tools/list` / `tools/call` / `ping`。
-//! 工具经本地 `aerodesk-cli` 桥接（`--cmd-json`）操作远程被控设备：
+//! 工具经本地 `aerodesk-agent` 桥接（`--cmd-json`）操作远程被控设备：
 //! connect / run_command / read_file / write_file / list_processes / kill_process。
 //!
 //! 配置环境变量：AERODESK_SIGNAL（默认 ws://127.0.0.1:3003）、AERODESK_ROOM（默认 demo）、
-//! AERODESK_CLI_BIN（默认 aerodesk-cli，需在 PATH 或指向 target/debug/aerodesk-cli）。
+//! AERODESK_AGENT_BIN（默认 aerodesk-agent，需在 PATH 或指向 target/debug/aerodesk-agent）。
 
 use std::io::{BufRead, Write};
 use std::process::Command;
@@ -26,7 +26,7 @@ fn main() {
     let state = State {
         signal: std::env::var("AERODESK_SIGNAL").unwrap_or_else(|_| "ws://127.0.0.1:3003".into()),
         room: std::env::var("AERODESK_ROOM").unwrap_or_else(|_| "demo".into()),
-        cli_bin: std::env::var("AERODESK_CLI_BIN").unwrap_or_else(|_| "aerodesk-cli".into()),
+        cli_bin: std::env::var("AERODESK_AGENT_BIN").unwrap_or_else(|_| "aerodesk-agent".into()),
     };
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -199,7 +199,7 @@ fn tool_definitions() -> Vec<Value> {
     ]
 }
 
-/// 构造 aerodesk-cli 控制端参数（单元测试覆盖）。
+/// 构造 aerodesk-agent 控制端参数（单元测试覆盖）。
 fn build_args(state: &State, name: &str, args: &Value) -> Result<Vec<String>, String> {
     let mut cmd = vec![
         "--role".into(),
@@ -309,7 +309,7 @@ fn call_tool(params: &Value, state: &State) -> Value {
     let output = match Command::new(&state.cli_bin).args(&cmd_args).output() {
         Ok(o) => o,
         Err(e) => {
-            return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":format!("启动 aerodesk-cli 失败: {e}（AERODESK_CLI_BIN={}）", state.cli_bin)}],"isError":true}});
+            return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":format!("启动 aerodesk-agent 失败: {e}（AERODESK_AGENT_BIN={}）", state.cli_bin)}],"isError":true}});
         }
     };
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -425,7 +425,7 @@ fn sha256_hex(data: &[u8]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// 运行 aerodesk-cli 并等待退出（超时 kill，返回 None = 超时）。
+/// 运行 aerodesk-agent 并等待退出（超时 kill，返回 None = 超时）。
 fn run_cli_timeout(
     args: &[&str],
     timeout: std::time::Duration,
@@ -585,7 +585,7 @@ mod tests {
         State {
             signal: "ws://127.0.0.1:3003".into(),
             room: "demo".into(),
-            cli_bin: "aerodesk-cli".into(),
+            cli_bin: "aerodesk-agent".into(),
         }
     }
 

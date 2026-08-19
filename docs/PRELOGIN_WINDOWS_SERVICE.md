@@ -30,7 +30,7 @@
 | 配置:用户级 JSON | `aerodesk-desktop/src/main.rs:3852` `~/.aerodesk-settings.json` | SYSTEM 服务无用户 HOME,**必须新增机器级配置** |
 | 无任何系统级常驻 | — | 本方案补齐 |
 
-依赖现状:`aerodesk-cli` 已依赖 `aerodesk-core` + `aerodesk-platform` ✓;workspace 已有 `windows` crate 0.54;`windows-service` 需新增(社区标准、MIT,SCM 样板成熟)。
+依赖现状:`aerodesk-agent` 已依赖 `aerodesk-core` + `aerodesk-platform` ✓;workspace 已有 `windows` crate 0.54;`windows-service` 需新增(社区标准、MIT,SCM 样板成熟)。
 
 ## 3. 架构设计
 
@@ -57,7 +57,7 @@
 
 | # | 决策 | 选择 | 理由 |
 |---|---|---|---|
-| D1 | 服务入口形态 | **`aerodesk-cli` 新增 `--service` 运行模式** + `--install-service` 等子命令（#492 后拆分至 `aerodesk-host` 宿主二进制） | cli 已依赖 core+platform、已有 autostart 子命令形态;**不进 aerodesk-desktop**(会把 slint 拖进 SYSTEM 进程) |
+| D1 | 服务入口形态 | **`aerodesk-agent` 新增 `--service` 运行模式** + `--install-service` 等子命令（#492 后拆分至 `aerodesk-host` 宿主二进制） | cli 已依赖 core+platform、已有 autostart 子命令形态;**不进 aerodesk-desktop**(会把 slint 拖进 SYSTEM 进程) |
 | D2 | 服务配置归属 | **`%ProgramData%\AeroDesk\service-settings.json`(机器级)**,UI/CLI 安装与修改设置时同步写入 | SYSTEM 无用户 HOME;禁止依赖 `USERPROFILE`(服务态未定义)。字段:`server_default` / `device_id` / `token_default` / `inc_*` |
 | D3 | 信令让位策略 | 状态机两态:**NoSession(服务在线)** ⇄ **UserSession(服务离线,会话进程在线)**,WTS_LOGON/LOGOFF 驱动 | 避免同 device-id 双 join 造成 SFU/会话管理双客户端;切换窗口数秒离线可接受(P1 媒体直发时再细化) |
 | D4 | spawn 会话进程 | `CreateProcessAsUser` + `CreateEnvironmentBlock`(不 LoadUserProfile,desktop exe 自行处理),exe 取服务自身同目录 | 最小权限/最小依赖;后续加 `--minimized` 参数避免登录后弹窗打断 |
@@ -97,7 +97,7 @@
 - **单元**:service/session 状态机纯逻辑可测;WTS/SCM 包装在非服务上下文用「检测条件 → 不满足则 stderr 打印并 return」(RULE_可达性第 3 条,禁 skip 凑绿);
 - **CI**:GitHub Windows runner 具管理员权限,新增 job step 跑 `--install-service → --service-status → --remove-service` 冒烟 + `--service` 短跑(信令连测试容器,若 CI 无信令则断言启动/心跳);
 - **手测**(VM/物理机,脚本无法覆盖的):真实登录界面在线性、Logon/Logoff 让位切换、重启后全程;
-- 本地门禁:`cargo test -p aerodesk-platform -p aerodesk-cli`、clippy、rustfmt(worktree 内,提交前必过)。
+- 本地门禁:`cargo test -p aerodesk-platform -p aerodesk-agent`、clippy、rustfmt(worktree 内,提交前必过)。
 
 ## 6. 风险与缓解
 

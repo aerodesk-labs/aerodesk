@@ -54,4 +54,4 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "FAIL: vdd_smoke 退出码 $LASTEXITCODE" -ForegroundColor Red
     exit $LASTEXITCODE
 }
-Write-Host "PASS: 虚拟屏 add/remove 冒烟完成（可再用 aerodesk-cli 会话验证采集）" -ForegroundColor Green
+Write-Host "PASS: 虚拟屏 add/remove 冒烟完成（可再用 aerodesk-agent 会话验证采集）" -ForegroundColor Green

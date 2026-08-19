@@ -1,15 +1,17 @@
 [package]
-name = "aerodesk-cli"
-description = "AeroDesk CLI client: publisher (VP8 test stream) / viewer (stats)"
+name = "aerodesk-agent"
+description = "AeroDesk 客户端引擎（被控端发布/观看/控制），headless 可被桌面端 spawn、可开机自启"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# crate 收敛（2026-08-19）：bridge（#216 跨 PoP 媒体桥）与 mcp（#109 MCP 工具面）
-# 由独立 crate 并入 cli 为多 bin 目标——两者运行时本就经 CLI 子进程/同机构建，
-# 且 multipop-deploy 一直在同一台机器上构建 cli 与 bridge。
+# 2026-08-19 更名 cli→agent：本 crate 是被控端引擎而非「命令行工具」——
+# 桌面端 spawn 它、自启安装它、mcp 桥它；host(ADR-0009) 是服务宿主，agent 是引擎。
+# crate 收敛：bridge（#216 跨 PoP 媒体桥）与 mcp（#109 MCP 工具面）并入为多 bin
+# 目标——两者运行时本就经 agent 子进程/同机构建，multipop-deploy 一直在同一台
+# 机器上构建 agent 与 bridge。
 [[bin]]
-name = "aerodesk-cli"
+name = "aerodesk-agent"
 path = "src/main.rs"
 
 [[bin]]
@@ -26,7 +28,7 @@ aerodesk-codec = { path = "../aerodesk-codec" }
 str0m = { workspace = true, features = ["rust-crypto"] }
 aerodesk-core = { path = "../aerodesk-core" }
 
-# CLI 端侧只依赖平台实现层，平台差异由 cfg 模块收敛。
+# 端侧只依赖平台实现层，平台差异由 cfg 模块收敛。
 aerodesk-platform = { path = "../aerodesk-platform" }
 tungstenite = "0.30"
 serde.workspace = true
@@ -42,6 +44,6 @@ png = "0.17"
 videotoolbox = "0.18"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# Linux 被控端需要 PipeWire 采集/注入；CLI 无 slint/system-tray，无 zbus/tokio
+# Linux 被控端需要 PipeWire 采集/注入；agent 无 slint/system-tray，无 zbus/tokio
 # 主线程冲突。通用依赖在 Linux 下与下方 feature 合并。
 aerodesk-platform = { path = "../aerodesk-platform", features = ["pipewire"] }

@@ -41,18 +41,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "aerodesk-android"
-version = "0.1.0"
-dependencies = [
- "aerodesk-core",
- "aerodesk-platform",
- "jni 0.21.1",
- "slint",
- "slint-build",
-]
-
-[[package]]
-name = "aerodesk-cli"
+name = "aerodesk-agent"
 version = "0.1.0"
 dependencies = [
  "aerodesk-codec",
@@ -68,6 +57,17 @@ dependencies = [
  "tracing-subscriber",
  "tungstenite",
  "videotoolbox",
+]
+
+[[package]]
+name = "aerodesk-android"
+version = "0.1.0"
+dependencies = [
+ "aerodesk-core",
+ "aerodesk-platform",
+ "jni 0.21.1",
+ "slint",
+ "slint-build",
 ]
 
 [[package]]

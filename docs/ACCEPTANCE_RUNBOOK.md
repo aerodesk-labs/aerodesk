@@ -12,7 +12,7 @@
 | 观看端 | Windows/macOS/Linux 任意（CLI 或 UI）；推荐与服务器异地网络 |
 | 服务器 | SFU + signal 已部署（含 TURN），端口/认证见部署实例 |
 | 网络 | 本机关闭代理/TUN（Clash 等）或加 DIRECT 规则；安全组放行 signal/媒体端口 |
-| 构建 | `cargo build --release -p aerodesk-cli -p aerodesk-desktop`（依赖见 CI System deps），或用 pre-release 包 |
+| 构建 | `cargo build --release -p aerodesk-agent -p aerodesk-desktop`（依赖见 CI System deps），或用 pre-release 包 |
 
 常用连接参数（实测示例，按部署替换）：
 
@@ -33,13 +33,13 @@ RECORD_DIR=/tmp/rec ./target/release/aerodesk-sfu &
 ./target/release/aerodesk-signal &
 
 # 2) 被控端（X11 桌面会话；DISPLAY 必须指向真实桌面）
-DISPLAY=:0 ./target/release/aerodesk-cli \
+DISPLAY=:0 ./target/release/aerodesk-agent \
   --role publisher --encoder screen \
   --signal "$SIGNAL" --room "$ROOM" --token "$TOKEN" --audio \
   [--camera --camera-device /dev/video0]
 
 # 3) 观看端（另一台机器或本机第二个进程）
-./target/release/aerodesk-cli \
+./target/release/aerodesk-agent \
   --role viewer --signal "$SIGNAL" --room "$ROOM" --token "$TOKEN" --audio
 ```
 
@@ -60,7 +60,7 @@ DISPLAY=:0 ./target/release/aerodesk-cli \
 
 ```bash
 # 无 DISPLAY 时 --encoder screen 走 xdg-desktop-portal ScreenCast
-./target/release/aerodesk-cli --role publisher --encoder screen \
+./target/release/aerodesk-agent --role publisher --encoder screen \
   --signal "$SIGNAL" --room "$ROOM" --token "$TOKEN"
 ```
 - 首次会弹 portal 授权（屏幕/输入）→ 允许

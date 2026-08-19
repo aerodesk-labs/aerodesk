@@ -26,7 +26,7 @@ try {
     Stop-AeroDesk
     Start-Sleep -Milliseconds 500
     Write-Host "== build"
-    cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+    cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
     Write-Host "== start sfu/signal"
     $env:SFU_BIND_ADDRESS = "127.0.0.1"
     $env:SFU_HOST_ADDRESS = "127.0.0.1"
@@ -37,7 +37,7 @@ try {
     Start-Sleep -Seconds 3
 
     Write-Host "== publisher (screen capture, display 0)"
-    $pub = Start-Process -FilePath ".\target\debug\aerodesk-cli.exe" -WindowStyle Hidden `
+    $pub = Start-Process -FilePath ".\target\debug\aerodesk-agent.exe" -WindowStyle Hidden `
         -ArgumentList @('--role','publisher','--encoder','screen','--signal','ws://127.0.0.1:3003','--room',$Room,'--display','0') `
         -RedirectStandardOutput "$logDir\pub.log" -RedirectStandardError "$logDir\pub.err" -PassThru
     Start-Sleep -Seconds 6
@@ -49,7 +49,7 @@ try {
     }
 
     Write-Host "== viewer --display 0 (control channel)"
-    $view = Start-Process -FilePath ".\target\debug\aerodesk-cli.exe" -WindowStyle Hidden `
+    $view = Start-Process -FilePath ".\target\debug\aerodesk-agent.exe" -WindowStyle Hidden `
         -ArgumentList @('--role','viewer','--signal','ws://127.0.0.1:3003','--room',$Room,'--display','0') `
         -RedirectStandardOutput "$logDir\view.log" -RedirectStandardError "$logDir\view.err" -PassThru
     Start-Sleep -Seconds 18

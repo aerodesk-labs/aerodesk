@@ -62,7 +62,7 @@
 
 ### 0. 宿主机（被控端所在机器）起服务
 ```sh
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 RECORD_DIR=/tmp/aerodesk-acceptance ./target/debug/aerodesk-sfu   # 分片服务，:3002/metrics
 ./target/debug/aerodesk-signal                                     # WS :3003（明文，开发）/ WSS :3001（TLS）
 ```
@@ -72,8 +72,8 @@ RECORD_DIR=/tmp/aerodesk-acceptance ./target/debug/aerodesk-sfu   # 分片服务
 
 ### 1. macOS × macOS（已 ✅，PR #49，无需外部硬件）
 ```sh
-./target/debug/aerodesk-cli --role publisher --encoder screen --signal ws://127.0.0.1:3003 --room accept
-./target/debug/aerodesk-cli --role viewer    --signal ws://127.0.0.1:3003 --room accept
+./target/debug/aerodesk-agent --role publisher --encoder screen --signal ws://127.0.0.1:3003 --room accept
+./target/debug/aerodesk-agent --role viewer    --signal ws://127.0.0.1:3003 --room accept
 ```
 或桌面 UI：`cargo run -p aerodesk-desktop`（连接页填 `127.0.0.1:3003`）。
 
@@ -93,14 +93,14 @@ RECORD_DIR=/tmp/aerodesk-acceptance ./target/debug/aerodesk-sfu   # 分片服务
 6. 证据：截图 + logcat 无 crash → 关 #2
 
 ### 4. Windows 真机（#3，Win10/11）
-1. 构建：`cargo build -p aerodesk-cli --release`（Windows 工具链；OpenH264 软编/软解已接入）
-2. 被控：`aerodesk-cli.exe --role publisher --signal ws://<host>:3003 --room accept`（DXGI 采集 + SendInput 注入）
-3. 观看：`aerodesk-cli.exe --role viewer --signal ws://<host>:3003 --room accept`（DXVA2 硬解优先 #405，OpenH264 软解回退）
+1. 构建：`cargo build -p aerodesk-agent --release`（Windows 工具链；OpenH264 软编/软解已接入）
+2. 被控：`aerodesk-agent.exe --role publisher --signal ws://<host>:3003 --room accept`（DXGI 采集 + SendInput 注入）
+3. 观看：`aerodesk-agent.exe --role viewer --signal ws://<host>:3003 --room accept`（DXVA2 硬解优先 #405，OpenH264 软解回退）
 4. 验收：双向画面 + 输入回传；记录编码/解码器与帧率
 5. 证据：截图 + 日志 → 关 #3
 
 ### 5. Linux 真机（#4）
-1. 构建：`cargo build -p aerodesk-cli --release`（依赖 libx11/xkbcommon/x264-dev，见 CI 系统依赖）
+1. 构建：`cargo build -p aerodesk-agent --release`（依赖 libx11/xkbcommon/x264-dev，见 CI 系统依赖）
 2. 被控：publisher（X11/Wayland-PipeWire 采集 + XTest/uinput/portal 注入 + VAAPI 硬编/硬解 + V4L2 摄像头 `--camera`/`--list-cameras`）/ 观看：viewer（VAAPI 硬解优先，OpenH264 回退；远程光标 CURSOR 断言）
 3. Wayland 会话：PipeWire 采集 + portal 注入已实现（需 xdg-desktop-portal 授权）；uinput 注入需 root/udev 规则（XTest 免权限）
 4. 证据：截图 + 日志 → 关 #4

@@ -13,7 +13,7 @@ WORK="$(mktemp -d)"
 trap 'pkill -f "aerodesk-(sfu|signal|cli)" 2>/dev/null || true; xcrun simctl terminate booted io.aerodesk.viewer 2>/dev/null || true' EXIT
 
 echo "== [1/7] 构建 Rust lib + Xcode 工程"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 bash scripts/build-ios-lib.sh all >/dev/null
 cd ios && xcodegen generate >/dev/null && cd ..
 
@@ -75,7 +75,7 @@ elif [ "$PUBLISHER_ENCODER" = "screen" ]; then
 else
     ENC="$PUBLISHER_ENCODER"
 fi
-./target/debug/aerodesk-cli --role publisher --signal "ws://127.0.0.1:${SIGNAL_PLAIN_PORT:-3003}" --room "$ROOM" --encoder "$ENC" $CODEC_ARGS $CAMERA_ARGS >/tmp/iossim-pub.log 2>&1 &
+./target/debug/aerodesk-agent --role publisher --signal "ws://127.0.0.1:${SIGNAL_PLAIN_PORT:-3003}" --room "$ROOM" --encoder "$ENC" $CODEC_ARGS $CAMERA_ARGS >/tmp/iossim-pub.log 2>&1 &
 PUB=$!
 sleep 2
 

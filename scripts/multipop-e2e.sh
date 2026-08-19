@@ -14,7 +14,7 @@ ROOM="eu-room-$(date +%s)"
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 REC="$(mktemp -d)"
 echo "== 启动 PoP A + PoP B"
@@ -37,10 +37,10 @@ done
 sleep 0.3
 
 echo "== publisher + viewer 连 signal-a（应被重定向到 pop-b）"
-./target/debug/aerodesk-cli --role publisher --encoder x264 --noisy \
+./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/mpop-pub.log 2>&1 &
 PUB=$!
-./target/debug/aerodesk-cli --role viewer \
+./target/debug/aerodesk-agent --role viewer \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/mpop-view.log 2>&1 &
 VIEW=$!
 sleep 10

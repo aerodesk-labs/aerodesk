@@ -10,7 +10,7 @@ ROOM="${1:-rec-$(date +%s)}"
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 REC="$(mktemp -d)"
 echo "== 启动 sfu/signal"
@@ -28,7 +28,7 @@ done
 sleep 0.3
 
 echo "== 连接 A（join + SDP 交换后保持在线）"
-./target/debug/aerodesk-cli --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/rec-a.log 2>&1 &
+./target/debug/aerodesk-agent --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/rec-a.log 2>&1 &
 A_PID=$!
 # 等待 A 完成 join + SDP 交换（进入阻塞读状态），最多 10s
 ok=0
@@ -46,7 +46,7 @@ wait "$A_PID" 2>/dev/null || true
 sleep 1
 
 echo "== 连接 B（必须能 Join）"
-./target/debug/aerodesk-cli --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/rec-b.log 2>&1 &
+./target/debug/aerodesk-agent --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/rec-b.log 2>&1 &
 B_PID=$!
 joined=0
 for _ in $(seq 1 50); do

@@ -21,7 +21,7 @@ REPORT_DIR="${REPORT_DIR:-/tmp/aerodesk-bench}"
 mkdir -p "$REPORT_DIR"
 
 echo "== 构建"
-cargo build -q --release -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q --release -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 REC="$(mktemp -d /tmp/bench-rec.XXXX)"
 echo "== 启动 sfu/signal"
@@ -74,7 +74,7 @@ sampler &
 SAMPLER_PID=$!
 
 echo "== 压测: ${ROOMS} 房间 × ${PAIRS} 对 @ ${W}x${H}/${FPS}fps ${BITRATE}bps，${DURATION}s"
-BIN="$ROOT/target/release/aerodesk-cli" SIGNAL="ws://127.0.0.1:3003" \
+BIN="$ROOT/target/release/aerodesk-agent" SIGNAL="ws://127.0.0.1:3003" \
   bash "$ROOT/scripts/loadtest.sh" "$ROOMS" "$PAIRS" "$DURATION" "$W" "$H" "$FPS" \
   > "$REPORT_DIR/loadtest.log" 2>&1 || true
 

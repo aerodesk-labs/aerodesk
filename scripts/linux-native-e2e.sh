@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Linux 原生被控端端到端（#4/#306）：Xvfb 上跑 aerodesk-cli --encoder screen
+# Linux 原生被控端端到端（#4/#306）：Xvfb 上跑 aerodesk-agent --encoder screen
 # （X11 采集 → VAAPI/x264 编码 → SFU）→ CLI viewer 收帧断言。
 # 输入注入（XTest/uinput）由 x11_runtime/uinput_runtime 测试覆盖。
 # 依赖：xvfb、x11-apps（与 linux-ui-e2e 同款 CI 系统依赖）。
@@ -10,7 +10,7 @@ cd "$ROOT"
 ROOM="${1:-linux-native-$(date +%s)}"
 
 echo "== [1/5] 构建 CLI + SFU + signal"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 echo "== [2/5] 启动 Xvfb :98"
 Xvfb :98 -screen 0 1024x768x24 >/tmp/linux-native-xvfb.log 2>&1 &
@@ -31,14 +31,14 @@ done
 if [ "$OK" != "1" ]; then echo "FAIL: SFU/signal 未就绪"; tail -10 /tmp/linux-native-sfu.log; exit 1; fi
 
 echo "== [4/5] 原生 Linux 被控端发布（X11 采集 → 编码 → SFU）"
-DISPLAY=:98 RUST_LOG=info "$ROOT/target/debug/aerodesk-cli" \
+DISPLAY=:98 RUST_LOG=info "$ROOT/target/debug/aerodesk-agent" \
   --role publisher --encoder screen --signal ws://127.0.0.1:3003 --room "$ROOM" \
   >/tmp/linux-native-pub.log 2>&1 &
 PUB=$!
 sleep 3
 
 echo "== [5/5] CLI viewer 收流断言"
-"$ROOT/target/debug/aerodesk-cli" --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" \
+"$ROOT/target/debug/aerodesk-agent" --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" \
   >/tmp/linux-native-view.log 2>&1 &
 VIEW=$!
 python3 - <<'PY'

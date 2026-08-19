@@ -12,7 +12,7 @@ REG="/tmp/popreg-e2e-$(date +%s).json"
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 REC="$(mktemp -d)"
 echo "== 启动 PoP A + PoP B，共享注册表 = $REG"
@@ -35,12 +35,12 @@ done
 sleep 0.3
 
 echo "== publisher 经 signal-a 首个加入（登记 pop-a）"
-./target/debug/aerodesk-cli --role publisher --encoder x264 --noisy \
+./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/popreg-pub.log 2>&1 &
 PUB=$!
 sleep 2
 echo "== viewer 经 signal-b 加入同房间（应动态重定向到 pop-a）"
-./target/debug/aerodesk-cli --role viewer \
+./target/debug/aerodesk-agent --role viewer \
     --signal ws://127.0.0.1:3006 --room "$ROOM" >/tmp/popreg-view.log 2>&1 &
 VIEW=$!
 sleep 10

@@ -10,7 +10,7 @@ ROOM="${1:-clip-$(date +%s)}"
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 REC="$(mktemp -d)"
 echo "== 启动 sfu/signal"
@@ -29,10 +29,10 @@ sleep 0.3
 
 echo "== 预置剪贴板 AAA，启动 viewer + publisher"
 printf 'AAA' | pbcopy
-./target/debug/aerodesk-cli --role viewer \
+./target/debug/aerodesk-agent --role viewer \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/clip-view.log 2>&1 &
 VIEW_PID=$!
-./target/debug/aerodesk-cli --role publisher \
+./target/debug/aerodesk-agent --role publisher \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/clip-pub.log 2>&1 &
 PUB_PID=$!
 

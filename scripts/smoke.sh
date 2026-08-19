@@ -10,7 +10,7 @@ SECONDS="${2:-6}"
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 REC="$(mktemp -d)"
 echo "== 启动 sfu/signal"
@@ -29,9 +29,9 @@ done
 sleep 0.3
 
 echo "== 启动 publisher + viewer"
-./target/debug/aerodesk-cli --role publisher --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/smoke-pub.log 2>&1 &
+./target/debug/aerodesk-agent --role publisher --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/smoke-pub.log 2>&1 &
 PUB_PID=$!
-./target/debug/aerodesk-cli --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/smoke-view.log 2>&1 &
+./target/debug/aerodesk-agent --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/smoke-view.log 2>&1 &
 VIEW_PID=$!
 
 sleep "$SECONDS"

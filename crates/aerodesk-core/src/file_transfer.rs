@@ -1,6 +1,6 @@
 //! #72 文件传输 + 剪贴板状态机（data channel label "file"）。
 //!
-//! 从 aerodesk-cli 提升到 core，供 CLI 与桌面 UI 共用：
+//! 从 aerodesk-agent 提升到 core，供 CLI 与桌面 UI 共用：
 //! - 发送：读文件 → SHA-256 → Meta(JSON) → Chunk(binary) → Done
 //! - 接收：聚合分片 → 校验大小/hash → 落盘 → 回 ack
 //! - 补包：接收端 Nack → 发送端重传（SFU 转发在出站缓冲满时会丢包）

@@ -30,7 +30,7 @@ SFU_BIND_ADDRESS=0.0.0.0 .\target\debug\aerodesk-sfu.exe
 netsh advfirewall firewall add rule name="AeroDesk" dir=in action=allow protocol=TCP localport=3001,3002,3003
 netsh advfirewall firewall add rule name="AeroDesk-media" dir=in action=allow protocol=UDP localport=3478
 # 4. 主控:桌面 UI 或 CLI:
-.\target\debug\aerodesk-cli.exe --role viewer --signal ws://<本机IP>:3003 --room <Mac端ID>
+.\target\debug\aerodesk-agent.exe --role viewer --signal ws://<本机IP>:3003 --room <Mac端ID>
 # 4' 一键脚本(推荐,自带服务复用+60s 收帧轮询断言):
 powershell -ExecutionPolicy Bypass -File scripts\winmac-interop-smoke.ps1 -MacId <Mac端ID>
 ```
@@ -39,7 +39,7 @@ powershell -ExecutionPolicy Bypass -File scripts\winmac-interop-smoke.ps1 -MacId
 
 ```powershell
 # Win 被控:自选一个房间 ID(如 9 位数字),发布本机屏幕:
-.\target\debug\aerodesk-cli.exe --role publisher --encoder screen --signal ws://127.0.0.1:3003 --room <自选ID>
+.\target\debug\aerodesk-agent.exe --role publisher --encoder screen --signal ws://127.0.0.1:3003 --room <自选ID>
 # Mac 主控:AeroDesk.app 主控页输入该 <自选ID> 连接即可。
 ```
 

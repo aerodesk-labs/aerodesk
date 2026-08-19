@@ -1,11 +1,13 @@
-//! AeroDesk CLI 客户端。
+//! AeroDesk agent —— 客户端引擎（被控端发布/观看/控制，headless）。
+//! 桌面端 spawn 本二进制、自启安装本二进制、mcp 经本二进制桥接；与
+//! aerodesk-host（ADR-0009 服务宿主）配套：host 是服务壳，agent 是引擎。
 //!
 //! publisher：连接 SFU，用真实 VP8 抓包流作为媒体源发送视频。
 //! viewer：连接 SFU，接收媒体并打印统计。
 //!
 //! 用法：
-//!   aerodesk-cli --role publisher --signal ws://127.0.0.1:3003 --room demo
-//!   aerodesk-cli --role viewer    --signal ws://127.0.0.1:3003 --room demo
+//!   aerodesk-agent --role publisher --signal ws://127.0.0.1:3003 --room demo
+//!   aerodesk-agent --role viewer    --signal ws://127.0.0.1:3003 --room demo
 
 #[macro_use]
 extern crate tracing;
@@ -132,7 +134,7 @@ fn run() {
         {
             let exe = std::env::current_exe()
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| "aerodesk-cli.exe".into());
+                .unwrap_or_else(|_| "aerodesk-agent.exe".into());
             let signal = arg(&args, "--signal").unwrap_or_else(|| "ws://127.0.0.1:3003/ws".into());
             let room = arg(&args, "--room").unwrap_or_else(|| "default".into());
             let cmd =
@@ -560,8 +562,8 @@ fn run() {
 /// 签发信令 JWT（供运维/测试使用）。
 ///
 /// 用法：
-///   JWT_SECRET=<secret> aerodesk-cli --issue-token --user u1 --device mac-1 --room demo --role publisher --ttl 3600
-///   JWT_SECRET=<secret> aerodesk-cli --issue-token --user u1 --room demo --role "*" --ttl 86400 [--max-conns 4]
+///   JWT_SECRET=<secret> aerodesk-agent --issue-token --user u1 --device mac-1 --room demo --role publisher --ttl 3600
+///   JWT_SECRET=<secret> aerodesk-agent --issue-token --user u1 --room demo --role "*" --ttl 86400 [--max-conns 4]
 fn issue_token(args: &[String]) {
     let secret = match std::env::var("JWT_SECRET") {
         Ok(s) if !s.is_empty() => s,

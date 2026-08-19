@@ -10,7 +10,7 @@ OBS="${2:-6}"
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 REC="$(mktemp -d)"
 echo "== 启动 sfu/signal"
@@ -29,10 +29,10 @@ sleep 0.3
 
 echo "== 启动 publisher（视频 + --audio）+ viewer（--audio）"
 # 连续视频源（x264 合成，避免 pcap 48 帧发完导致漂移统计假象）
-./target/debug/aerodesk-cli --role publisher --encoder x264 --audio \
+./target/debug/aerodesk-agent --role publisher --encoder x264 --audio \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/av-pub.log 2>&1 &
 PUB_PID=$!
-./target/debug/aerodesk-cli --role viewer --audio \
+./target/debug/aerodesk-agent --role viewer --audio \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/av-view.log 2>&1 &
 VIEW_PID=$!
 # 先等媒体到达（CI 慢启动时固定 sleep 会误判 0 帧；最多 ~30s）

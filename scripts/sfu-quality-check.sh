@@ -12,7 +12,7 @@ MODES=("$@"); [ ${#MODES[@]} -eq 0 ] && MODES=(direct turn)
 fail() { echo "FAIL: $*"; exit 1; }
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 echo "mode     qos_clients   rtt_us   egress_loss   ingress_loss   bwe_tx_bps   errors"
 for MODE in "${MODES[@]}"; do
@@ -43,7 +43,7 @@ for MODE in "${MODES[@]}"; do
     sleep 0.2
   done
   sleep 0.3
-  SIGNAL=ws://127.0.0.1:14503 BIN="$TARGET_DIR/aerodesk-cli" BITRATE=2000000 NOISY=1 \
+  SIGNAL=ws://127.0.0.1:14503 BIN="$TARGET_DIR/aerodesk-agent" BITRATE=2000000 NOISY=1 \
     ./scripts/loadtest.sh 1 1 18 1280 720 30 >/tmp/q-load.log 2>&1 &
   LOAD=$!
   # 等连接 + 心跳聚合（PeerStats 1s × 心跳 5s）
