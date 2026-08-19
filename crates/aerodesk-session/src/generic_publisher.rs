@@ -81,7 +81,9 @@ mod imp {
     use aerodesk_core::endpoint::ClientEvent;
     use aerodesk_core::media_pipeline::Codec;
     use aerodesk_core::media_socket::MediaSocket;
-    use aerodesk_core::platform::{Encoder, InputInjector, MediaSource, SystemWakeLock};
+    use aerodesk_core::platform::{
+        CursorSource, Encoder, InputInjector, MediaSource, SystemWakeLock,
+    };
     use aerodesk_protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult};
     use aerodesk_protocol::input::{InputEvent, InputFrame};
     use aerodesk_protocol::signal::Role;
@@ -90,6 +92,14 @@ mod imp {
     use str0m::net::Protocol;
 
     const FPS: u32 = 30;
+
+    /// 发送侧墙钟（毫秒）：光标/延迟测量的 sent_ms 字段，与 cli 同口径。
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
     const DEFAULT_BITRATE_KBPS: u32 = 8_000;
     const DEFAULT_TARGET_W: u32 = 1920;
     const DEFAULT_TARGET_H: u32 = 1080;
@@ -198,6 +208,11 @@ mod imp {
         let mut injector = aerodesk_platform::windows::inject::SendInputInjector::new();
         injector.set_active_display(Some(display_rect));
 
+        // #487 光标列缺口：真实被控端 30Hz 上报本机光标（观看端 overlay 已就绪）。
+        // 归一化基准与被捕显示器一致（单显示器时 display_rect 即虚拟屏幕）。
+        use aerodesk_platform::windows::cursor::WindowsCursor;
+        let mut cursor_source = WindowsCursor::new(Some(display_rect));
+
         // #506：与 cli screen 路径同款 FFmpeg 编码（h264_mf 硬编优先、一帧探测
         // 回退 libx264）——1440p/4K 源头不再受 OpenH264 软编瓶颈；FFmpeg 不可用
         // （DLL 缺失等）兜底 OpenH264 软编。输入统一 BGRA。
@@ -259,6 +274,7 @@ mod imp {
         // connected 永远为 false，一帧不发（本地直连靠重协商二次事件掩盖）。
         let mut connected = live.ice_connected;
         let mut next_frame = Instant::now();
+        let mut next_cursor = Instant::now();
         let mut pts: i64 = 0;
 
         while !stale() {
@@ -301,6 +317,23 @@ mod imp {
                 && let Some(sender) = &mut audio_sender
             {
                 sender.tick(&mut live.endpoint, amid, Instant::now());
+            }
+
+            // #487 光标列缺口：真实光标 30Hz 上报（静屏无视频帧时通道仍常活）。
+            // 与 cli 同款线格式（CursorPos JSON + sent_ms），观看端 overlay 零改动。
+            if connected && Instant::now() >= next_cursor {
+                next_cursor += Duration::from_millis(33);
+                if let Some((x, y)) = cursor_source.position_normalized() {
+                    let pos = aerodesk_protocol::cursor::CursorPos::new(
+                        x.clamp(0.0, 1.0),
+                        y.clamp(0.0, 1.0),
+                    )
+                    .with_sent_ms(now_ms());
+                    if let Ok(json) = serde_json::to_string(&pos) {
+                        live.endpoint
+                            .send_channel_data("cursor", false, json.as_bytes());
+                    }
+                }
             }
 
             if connected && Instant::now() >= next_frame {
