@@ -261,12 +261,6 @@ mod imp {
         let mut next_frame = Instant::now();
         let mut pts: i64 = 0;
 
-        // #75 被控端光标上报（30Hz，带发送墙钟）：观看端 overlay 显示 + 端到端延时测量。
-        use aerodesk_core::platform::CursorSource;
-        use aerodesk_platform::windows::cursor::WindowsCursor;
-        let mut cursor_src = WindowsCursor::new(Some(display_rect));
-        let mut last_cursor = Instant::now();
-
         while !stale() {
             // #211：排空式读取 UDP，保证 SCTP ACK 及时消费，远端输入送达率不塌陷。
             let wait = Duration::from_millis(5);
@@ -307,20 +301,6 @@ mod imp {
                 && let Some(sender) = &mut audio_sender
             {
                 sender.tick(&mut live.endpoint, amid, Instant::now());
-            }
-
-            // #8/#75 光标 30Hz 上报（归一化坐标 + 发送墙钟，供观看端延时统计）。
-            if last_cursor.elapsed() >= Duration::from_millis(33) {
-                last_cursor = Instant::now();
-                if let Some((x, y)) = cursor_src.position_normalized() {
-                    let pos = aerodesk_protocol::cursor::CursorPos::new(x, y)
-                        .with_sent_ms(crate::system_time_millis());
-                    if let Ok(json) = serde_json::to_string(&pos) {
-                        let _ = live
-                            .endpoint
-                            .send_channel_data("cursor", false, json.as_bytes());
-                    }
-                }
             }
 
             if connected && Instant::now() >= next_frame {
