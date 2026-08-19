@@ -314,7 +314,8 @@ fn call_tool(params: &Value, state: &State) -> Value {
     };
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let trimmed = stdout.trim();
-    let Ok(resp) = serde_json::from_str::<aerodesk_protocol::cmd::CmdResponse>(trimmed) else {
+    let Ok(resp) = serde_json::from_str::<aerodesk_core::protocol::cmd::CmdResponse>(trimmed)
+    else {
         let tail: String = stdout.chars().take(500).collect();
         return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":format!("CLI 输出非 JSON（可能连接失败）: {tail}")}],"isError":true}});
     };
@@ -512,8 +513,8 @@ fn call_mouse_tool(id: Option<Value>, name: &str, args: &Value, state: &State) -
 }
 
 /// 把 CmdResponse 格式化为文本（MCP 返回给 agent）。
-fn format_result(resp: &aerodesk_protocol::cmd::CmdResponse) -> (String, bool) {
-    use aerodesk_protocol::cmd::CmdResult;
+fn format_result(resp: &aerodesk_core::protocol::cmd::CmdResponse) -> (String, bool) {
+    use aerodesk_core::protocol::cmd::CmdResult;
     match &resp.result {
         CmdResult::Run {
             exit_code,
@@ -541,7 +542,7 @@ fn format_result(resp: &aerodesk_protocol::cmd::CmdResponse) -> (String, bool) {
             if let Some(e) = error {
                 (format!("error: {e}"), false)
             } else if let Some(b64) = data {
-                match aerodesk_protocol::cmd::decode_b64(b64) {
+                match aerodesk_core::protocol::cmd::decode_b64(b64) {
                     Some(bytes) => (
                         format!("size={size}\n{}", String::from_utf8_lossy(&bytes)),
                         true,
@@ -578,7 +579,7 @@ fn format_result(resp: &aerodesk_protocol::cmd::CmdResponse) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aerodesk_protocol::cmd::{CmdResponse, CmdResult, ProcessInfo};
+    use aerodesk_core::protocol::cmd::{CmdResponse, CmdResult, ProcessInfo};
 
     fn state() -> State {
         State {
@@ -639,7 +640,7 @@ mod tests {
         let f = CmdResponse {
             id: 1,
             result: CmdResult::File {
-                data: Some(aerodesk_protocol::cmd::encode_b64(b"hello")),
+                data: Some(aerodesk_core::protocol::cmd::encode_b64(b"hello")),
                 size: 5,
                 error: None,
             },

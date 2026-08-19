@@ -17,7 +17,7 @@ export AERODESK_CMD_ALLOWLIST="/tmp/aerodesk-mcp-allow-$ROOM.txt"
 export AERODESK_CMD_AUDIT="/tmp/aerodesk-mcp-audit-$ROOM.jsonl"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli -p aerodesk-mcp
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
 
 REC="$(mktemp -d)"
 echo "== 启动 sfu/signal + publisher（含 --recv-dir 供大文件上传落盘）"

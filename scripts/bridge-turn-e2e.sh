@@ -71,7 +71,7 @@ wait_decoded() {
 }
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli -p aerodesk-bridge || fail "构建失败"
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli || fail "构建失败"
 REC_A="$(mktemp -d)"; REC_B="$(mktemp -d)"
 
 # 所有客户端 + signal（桥子进程继承）都强制 TURN relay。

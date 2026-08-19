@@ -52,7 +52,7 @@ clients_of() { # $1=内部端口 -> 总客户端数
 }
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli -p aerodesk-bridge || fail "构建失败"
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli || fail "构建失败"
 REC_A="$(mktemp -d)"; REC_B="$(mktemp -d)"
 
 echo "== 启动 PoP-A（141xx）+ PoP-B（142xx，BRIDGE_CMD 桥优先）"

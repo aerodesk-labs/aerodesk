@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use aerodesk_core::connect::{LiveSession, connect_live_role_codec};
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media_pipeline::Codec;
-use aerodesk_protocol::signal::Role;
+use aerodesk_core::protocol::signal::Role;
 use str0m::media::{KeyframeRequestKind, MediaData};
 use str0m::net::{Protocol, Receive};
 use str0m::{Input, Output};

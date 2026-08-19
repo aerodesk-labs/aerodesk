@@ -27,7 +27,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli -p aerodesk-bridge
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
 REC_A="$(mktemp -d)"; REC_B="$(mktemp -d)"
 
 echo "== 启动 PoP-A（14600 系）+ PoP-B（14700 系）"

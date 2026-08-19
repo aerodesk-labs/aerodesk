@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/aerodesk-sfu",
-    "crates/aerodesk-protocol",
     "crates/aerodesk-core",
     "crates/aerodesk-signal",
     "crates/aerodesk-cli",
@@ -15,8 +14,6 @@ members = [
     "crates/aerodesk-session",
     "crates/aerodesk-desktop",
     "crates/aerodesk-codec",
-    "crates/aerodesk-bridge",
-    "crates/aerodesk-mcp",
     "crates/aerodesk-dashboard",
     "crates/aerodesk-platform",
 ]
@@ -41,7 +38,6 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "std"] }
 systemstat = "0.2.2"
-aerodesk-protocol = { path = "crates/aerodesk-protocol" }
 
 [profile.release]
 lto = "thin"

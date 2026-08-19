@@ -5,12 +5,26 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# crate 收敛（2026-08-19）：bridge（#216 跨 PoP 媒体桥）与 mcp（#109 MCP 工具面）
+# 由独立 crate 并入 cli 为多 bin 目标——两者运行时本就经 CLI 子进程/同机构建，
+# 且 multipop-deploy 一直在同一台机器上构建 cli 与 bridge。
+[[bin]]
+name = "aerodesk-cli"
+path = "src/main.rs"
+
+[[bin]]
+name = "aerodesk-bridge"
+path = "src/bin/aerodesk-bridge.rs"
+
+[[bin]]
+name = "aerodesk-mcp"
+path = "src/bin/aerodesk-mcp.rs"
+
 [dependencies]
 sha2 = "0.10"
 aerodesk-codec = { path = "../aerodesk-codec" }
 str0m = { workspace = true, features = ["rust-crypto"] }
 aerodesk-core = { path = "../aerodesk-core" }
-aerodesk-protocol.workspace = true
 
 # CLI 端侧只依赖平台实现层，平台差异由 cfg 模块收敛。
 aerodesk-platform = { path = "../aerodesk-platform" }

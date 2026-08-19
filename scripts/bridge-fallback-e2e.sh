@@ -109,7 +109,7 @@ echo "== 构建"
 if [ "$REMOTE" = "1" ] && [ "${REMOTE_LOOPBACK:-}" != "1" ]; then
   cargo build -q -p aerodesk-cli   # 远程验收只需 CLI；SFU/signal/bridge 在 PoP 上
 else
-  cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli -p aerodesk-bridge
+  cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
 fi
 REC_A="$(mktemp -d)"; REC_B="$(mktemp -d)"
 
