@@ -170,12 +170,13 @@ mod imp {
         };
         let audio_mid = live.audio_mid;
 
-        // DXGI Desktop Duplication 采集（4K 软编性能不足，默认缩放到 1080p）。
-        use aerodesk_platform::windows::capture::DxgiCapturer;
-        let mut capture = match DxgiCapturer::new_with_scale(DEFAULT_TARGET_W, DEFAULT_TARGET_H) {
+        // 屏幕采集链（#514）：WGC 主 → DXGI 备，首帧 GDI 引导内置（#477）。
+        // （4K 软编性能不足，默认缩放到 1080p。）
+        use aerodesk_platform::windows::capture::ScreenCapturer;
+        let mut capture = match ScreenCapturer::new_with_scale(DEFAULT_TARGET_W, DEFAULT_TARGET_H) {
             Ok(c) => c,
             Err(e) => {
-                let msg = format!("DXGI 采集初始化失败：{e}");
+                let msg = format!("屏幕采集初始化失败：{e}");
                 on_event(PublisherEvent::Status(msg));
                 return;
             }
@@ -185,7 +186,7 @@ mod imp {
         let (w, h) = capture.size();
         if w == 0 || h == 0 {
             on_event(PublisherEvent::Status(
-                "DXGI 采集失败：无可用显示器输出".into(),
+                "屏幕采集失败：无可用显示器输出".into(),
             ));
             return;
         }

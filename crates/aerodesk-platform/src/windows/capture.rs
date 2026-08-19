@@ -190,89 +190,9 @@ impl DxgiCapturer {
     }
 
     /// #477 机制 B：GDI BitBlt 主动截取当前桌面作为首帧引导。
-    /// DXGI duplication 纯变化驱动，桌面完全静止（无窗口/光标/时钟跳动触发
-    /// 合成器呈现）时 AcquireNextFrame 永远超时——首帧缺失会级联成：发布循环
-    /// 末帧缓存为空 → 心跳无从重发 → viewer 永远等不到首帧。仅引导一次；
-    /// 失败返回 None（保持旧行为，首帧仍由首个真实变化帧提供）。
+    /// 仅引导一次；失败返回 None（保持旧行为，首帧仍由首个真实变化帧提供）。
     fn gdi_bootstrap_frame(&mut self) -> Option<CapturedFrame> {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::Graphics::Gdi::{
-            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap,
-            CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits,
-            ReleaseDC, SRCCOPY, SelectObject,
-        };
-        let (dx, dy, w, h) = self.display_rect;
-        unsafe {
-            let hdc_screen = GetDC(HWND::default());
-            if hdc_screen.is_invalid() {
-                return None;
-            }
-            let hdc_mem = CreateCompatibleDC(hdc_screen);
-            let hbmp = CreateCompatibleBitmap(hdc_screen, w as i32, h as i32);
-            if hbmp.is_invalid() || hdc_mem.is_invalid() {
-                ReleaseDC(HWND::default(), hdc_screen);
-                return None;
-            }
-            let old = SelectObject(hdc_mem, windows::Win32::Graphics::Gdi::HGDIOBJ(hbmp.0));
-            let blit = BitBlt(
-                hdc_mem, 0, 0, w as i32, h as i32, hdc_screen, dx, dy, SRCCOPY,
-            );
-            let mut bgra: Option<Vec<u8>> = None;
-            if blit.is_ok() {
-                // biHeight 取负 = top-down（DXGI 路径同为 top-down，消费方一致）。
-                let mut bi = BITMAPINFO {
-                    bmiHeader: BITMAPINFOHEADER {
-                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                        biWidth: w as i32,
-                        biHeight: -(h as i32),
-                        biPlanes: 1,
-                        biBitCount: 32,
-                        biCompression: BI_RGB.0,
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                };
-                let mut buf = vec![0u8; w as usize * h as usize * 4];
-                let got = GetDIBits(
-                    hdc_mem,
-                    hbmp,
-                    0,
-                    h,
-                    Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
-                    &mut bi,
-                    DIB_RGB_COLORS,
-                );
-                if got == h as i32 {
-                    bgra = Some(buf);
-                } else {
-                    tracing::warn!("#477 GDI 引导 GetDIBits 失败：got={got} h={h}");
-                }
-            } else {
-                let e = blit.err();
-                tracing::warn!("#477 GDI 引导 BitBlt 失败：{e:?}");
-            }
-            SelectObject(hdc_mem, old);
-            let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(hbmp.0));
-            let _ = DeleteDC(hdc_mem);
-            ReleaseDC(HWND::default(), hdc_screen);
-
-            let mut bgra = bgra?;
-            // 32bpp DIB 为 BGRA（alpha 未定义，编码走 RGB 三分量不受影响）。
-            if self.out_width != w || self.out_height != h {
-                bgra = scale_bgra(&bgra, w, h, self.out_width, self.out_height);
-            }
-            let pts_us = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_micros() as i64)
-                .unwrap_or(0);
-            Some(CapturedFrame {
-                bgra,
-                width: self.out_width,
-                height: self.out_height,
-                pts_us,
-            })
-        }
+        gdi_bootstrap_frame(self.display_rect, self.out_width, self.out_height)
     }
 
     /// 取下一帧（阻塞最多 16ms）。无新帧/错误返回 None。
@@ -466,8 +386,243 @@ impl aerodesk_core::platform::MediaSource for DxgiCapturer {
     fn stop(&mut self) {}
 }
 
+/// 被控端屏幕采集器（#514）：WGC 主路径 → DXGI duplication 回退。
+///
+/// 为什么 WGC 上位：DWM 合成器直接出帧，不经显卡适配器/输出枚举——旧 DXGI 路径
+/// 硬编码 EnumAdapters1(0)，曾被虚拟显示驱动顶掉输出序导致采集失效；WGC 的
+/// Monitor 枚举（EnumDisplayMonitors）天然覆盖全部适配器的输出。首帧 GDI 引导
+/// 两条路径均内置（#477，两者同为变化驱动）。显示器索引语义：0 起；WGC 按
+/// EnumDisplayMonitors 序，DXGI 按适配器 0 的 EnumOutputs 序——同一台机器只走
+/// 一条路径，不会发生跨路径索引混用。
+#[cfg(windows)]
+pub enum ScreenCapturer {
+    Wgc(super::capture_wgc::WgcCapturer),
+    Dxgi(DxgiCapturer),
+}
+
+#[cfg(windows)]
+impl ScreenCapturer {
+    /// 按显示器索引 + 目标分辨率构造（0/0 = 原生）。先试 WGC 主路径，
+    /// 不可用（旧系统版本/无交互会话）回退 DXGI duplication。
+    pub fn new_with_display(display: u32, target_w: u32, target_h: u32) -> Result<Self, String> {
+        match super::capture_wgc::WgcCapturer::new_with_display(display, target_w, target_h) {
+            Ok(c) => {
+                // tracing 宏会把名为 display 的标识符错绑到 tracing::field::display，换名规避
+                let idx = display;
+                tracing::info!("屏幕采集走 WGC 主路径(display={idx})");
+                Ok(Self::Wgc(c))
+            }
+            Err(e) => {
+                tracing::warn!("WGC 采集不可用（{e}），回退 DXGI duplication");
+                DxgiCapturer::new_with_display(display, target_w, target_h).map(Self::Dxgi)
+            }
+        }
+    }
+
+    /// 主显示器 + 目标分辨率。
+    pub fn new_with_scale(target_w: u32, target_h: u32) -> Result<Self, String> {
+        Self::new_with_display(0, target_w, target_h)
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        match self {
+            Self::Wgc(c) => c.size(),
+            Self::Dxgi(c) => c.size(),
+        }
+    }
+
+    /// 被控显示器在虚拟屏幕中的区域（#75 注入坐标映射用）。
+    pub fn display_rect(&self) -> (i32, i32, u32, u32) {
+        match self {
+            Self::Wgc(c) => c.display_rect(),
+            Self::Dxgi(c) => c.display_rect(),
+        }
+    }
+
+    /// 运行中切换采集显示器（#58）：沿当前路径重建，失败保持原采集不变。
+    pub fn switch_display(&mut self, display: u32) -> Result<(), String> {
+        match self {
+            Self::Wgc(c) => c.switch_display(display),
+            Self::Dxgi(c) => c.switch_display(display),
+        }
+    }
+
+    /// 取下一帧（阻塞最多 16ms）。无新帧/错误返回 None。
+    pub fn capture_frame(&mut self) -> Option<CapturedFrame> {
+        match self {
+            Self::Wgc(c) => c.capture_frame(),
+            Self::Dxgi(c) => c.capture_frame(),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl aerodesk_core::platform::MediaSource for ScreenCapturer {
+    type Error = String;
+
+    fn start(&mut self, fps: u32, with_cursor: bool) -> Result<(), Self::Error> {
+        match self {
+            Self::Wgc(c) => aerodesk_core::platform::MediaSource::start(c, fps, with_cursor),
+            Self::Dxgi(c) => aerodesk_core::platform::MediaSource::start(c, fps, with_cursor),
+        }
+    }
+
+    fn next_frame(&mut self) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        match self {
+            Self::Wgc(c) => aerodesk_core::platform::MediaSource::next_frame(c),
+            Self::Dxgi(c) => aerodesk_core::platform::MediaSource::next_frame(c),
+        }
+    }
+
+    fn stop(&mut self) {
+        match self {
+            Self::Wgc(c) => aerodesk_core::platform::MediaSource::stop(c),
+            Self::Dxgi(c) => aerodesk_core::platform::MediaSource::stop(c),
+        }
+    }
+
+    fn display_id(&self) -> Option<u32> {
+        match self {
+            Self::Wgc(c) => aerodesk_core::platform::MediaSource::display_id(c),
+            Self::Dxgi(c) => aerodesk_core::platform::MediaSource::display_id(c),
+        }
+    }
+
+    fn switch_display(&mut self, display: u32) -> Result<(), String> {
+        ScreenCapturer::switch_display(self, display)
+    }
+
+    fn display_rect(&self) -> Option<(i32, i32, u32, u32)> {
+        Some(ScreenCapturer::display_rect(self))
+    }
+}
+
+/// 非 Windows 主机上的编译期骨架（保证 workspace 全平台可编译）。
+#[cfg(not(windows))]
+pub struct ScreenCapturer;
+
+#[cfg(not(windows))]
+impl ScreenCapturer {
+    pub fn new_with_scale(_target_w: u32, _target_h: u32) -> Result<Self, String> {
+        Err("windows: screen capture only available on Windows".into())
+    }
+
+    pub fn new_with_display(_display: u32, _target_w: u32, _target_h: u32) -> Result<Self, String> {
+        Err("windows: screen capture only available on Windows".into())
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (0, 0)
+    }
+}
+
+#[cfg(not(windows))]
+impl aerodesk_core::platform::MediaSource for ScreenCapturer {
+    type Error = String;
+
+    fn start(&mut self, _fps: u32, _with_cursor: bool) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn next_frame(&mut self) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
+        Ok(None)
+    }
+
+    fn stop(&mut self) {}
+}
+
+/// #477 机制 B（自由函数版，DxgiCapturer 与 WgcCapturer 共用）：GDI BitBlt 主动
+/// 截取当前桌面作为首帧引导。DXGI/WGC 均为变化驱动，桌面完全静止（无窗口/光标/
+/// 时钟跳动触发合成器呈现）时首帧永不到来——首帧缺失会级联成：发布循环末帧缓存
+/// 为空 → 心跳无从重发 → viewer 永远等不到首帧。仅引导一次；失败返回 None
+/// （保持旧行为，首帧仍由首个真实变化帧提供）。
+#[cfg(windows)]
+pub(crate) fn gdi_bootstrap_frame(
+    display_rect: (i32, i32, u32, u32),
+    out_width: u32,
+    out_height: u32,
+) -> Option<CapturedFrame> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC,
+        DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SRCCOPY, SelectObject,
+    };
+    let (dx, dy, w, h) = display_rect;
+    unsafe {
+        let hdc_screen = GetDC(HWND::default());
+        if hdc_screen.is_invalid() {
+            return None;
+        }
+        let hdc_mem = CreateCompatibleDC(hdc_screen);
+        let hbmp = CreateCompatibleBitmap(hdc_screen, w as i32, h as i32);
+        if hbmp.is_invalid() || hdc_mem.is_invalid() {
+            ReleaseDC(HWND::default(), hdc_screen);
+            return None;
+        }
+        let old = SelectObject(hdc_mem, windows::Win32::Graphics::Gdi::HGDIOBJ(hbmp.0));
+        let blit = BitBlt(
+            hdc_mem, 0, 0, w as i32, h as i32, hdc_screen, dx, dy, SRCCOPY,
+        );
+        let mut bgra: Option<Vec<u8>> = None;
+        if blit.is_ok() {
+            // biHeight 取负 = top-down（DXGI/WGC 路径同为 top-down，消费方一致）。
+            let mut bi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: w as i32,
+                    biHeight: -(h as i32),
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut buf = vec![0u8; w as usize * h as usize * 4];
+            let got = GetDIBits(
+                hdc_mem,
+                hbmp,
+                0,
+                h,
+                Some(buf.as_mut_ptr() as *mut core::ffi::c_void),
+                &mut bi,
+                DIB_RGB_COLORS,
+            );
+            if got == h as i32 {
+                bgra = Some(buf);
+            } else {
+                tracing::warn!("#477 GDI 引导 GetDIBits 失败：got={got} h={h}");
+            }
+        } else {
+            let e = blit.err();
+            tracing::warn!("#477 GDI 引导 BitBlt 失败：{e:?}");
+        }
+        SelectObject(hdc_mem, old);
+        let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(hbmp.0));
+        let _ = DeleteDC(hdc_mem);
+        ReleaseDC(HWND::default(), hdc_screen);
+
+        let mut bgra = bgra?;
+        // 32bpp DIB 为 BGRA（alpha 未定义，编码走 RGB 三分量不受影响）。
+        if out_width != w || out_height != h {
+            bgra = scale_bgra(&bgra, w, h, out_width, out_height);
+        }
+        let pts_us = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_micros() as i64)
+            .unwrap_or(0);
+        Some(CapturedFrame {
+            bgra,
+            width: out_width,
+            height: out_height,
+            pts_us,
+        })
+    }
+}
+
 /// CPU 双线性缩放 BGRA32（DXGI 原生 → 目标分辨率，适配 OpenH264 软编；#3）。
-fn scale_bgra(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+pub(crate) fn scale_bgra(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
     let mut out = vec![0u8; dw * dh * 4];
     for y in 0..dh {

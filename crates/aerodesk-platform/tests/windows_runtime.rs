@@ -137,6 +137,59 @@ fn dxgi_switch_display_invalid_keeps_capture() {
 }
 
 #[test]
+fn wgc_capture_produces_frame() {
+    // #514：WGC 主采集路径冒烟。runner 无交互会话/WinRT 受限 → SKIP（真机验证）。
+    // 不与 DXGI_LOCK 串行：WGC 会话与 DXGI duplication 互不排斥。
+    use aerodesk_platform::windows::capture_wgc::WgcCapturer;
+    let mut cap = match WgcCapturer::new_with_scale(640, 360) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("SKIP: WGC init failed: {e}");
+            return;
+        }
+    };
+    let (w, h) = cap.size();
+    assert_eq!((w, h), (640, 360), "缩放目标应生效");
+    match <WgcCapturer as MediaSource>::next_frame(&mut cap) {
+        Ok(Some(f)) => {
+            assert_eq!(
+                f.raw.as_ref().unwrap().len() as u32,
+                w * h * 4,
+                "BGRA32 帧大小应匹配"
+            );
+            eprintln!("wgc capture OK: {w}x{h}");
+        }
+        Ok(None) => eprintln!("SKIP: WGC 首帧未就绪（静态桌面+引导失败时）"),
+        Err(e) => eprintln!("SKIP: WGC next_frame: {e}"),
+    }
+}
+
+#[test]
+fn screen_capturer_chain_produces_frame() {
+    // #514：生产回退链（WGC 主 → DXGI 备）端到端——链构造成功且输出尺寸正确。
+    // 两路均不可用的受限环境 → SKIP。
+    let _guard = DXGI_LOCK.lock().unwrap();
+    let mut cap =
+        match aerodesk_platform::windows::capture::ScreenCapturer::new_with_scale(640, 360) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("SKIP: 采集链初始化失败: {e}");
+                return;
+            }
+        };
+    let (w, h) = cap.size();
+    assert_eq!((w, h), (640, 360));
+    match aerodesk_core::platform::MediaSource::next_frame(&mut cap) {
+        Ok(Some(f)) => {
+            assert_eq!(f.raw.as_ref().unwrap().len() as u32, w * h * 4);
+            eprintln!("screen capturer chain OK: {w}x{h}");
+        }
+        Ok(None) => eprintln!("SKIP: 采集链首帧未就绪"),
+        Err(e) => eprintln!("SKIP: 采集链 next_frame: {e}"),
+    }
+}
+
+#[test]
 fn clipboard_text_inject_roundtrip() {
     // #72/#271：SendInputInjector 的 ClipboardText 注入写入系统剪贴板（Win32）。
     // 非交互会话 OpenClipboard 可能失败 → 跳过；成功则必须读回一致。

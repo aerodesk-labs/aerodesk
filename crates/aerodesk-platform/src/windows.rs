@@ -1,7 +1,8 @@
 //! AeroDesk Windows 适配器（被控端 + 观看端）。
 //!
 //! 角色：被控端 + 观看端。
-//! - 采集：Windows Graphics Capture（Win11）/ DXGI Desktop Duplication（Win10 回退）
+//! - 采集：Windows Graphics Capture（Win10 1903+ 主路径，#514）→ DXGI Desktop
+//!   Duplication（回退）→ GDI BitBlt（#477 首帧引导，内置兜底）
 //! - 编码：Media Foundation H.264/HEVC（或 NVENC/QSV/AMF）
 //! - 注入：SendInput / mouse_event + keybd_event
 //! - 虚拟显示器：Parsec VDD（ADR-0001，vdd 模块）
@@ -15,6 +16,8 @@ pub mod audio_capture;
 pub mod autostart;
 pub mod camera;
 pub mod capture;
+#[cfg(windows)]
+pub mod capture_wgc;
 pub mod cursor;
 pub mod decode;
 pub mod encode;

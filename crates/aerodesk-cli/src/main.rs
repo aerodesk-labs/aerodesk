@@ -2948,7 +2948,7 @@ fn publisher_ffmpeg(
 /// 屏幕采集 + FFmpeg 多 codec（#74）：ScreenCaptureKit → IOSurface → BGRA →
 /// FfmpegEncoder（H265/VP9/AV1）。H.264 走原 VtEncoder 零拷贝路径。
 /// 需要屏幕录制权限（TCC）。
-/// Windows 屏幕采集发布端（被控端）：DXGI Desktop Duplication → OpenH264 软编 → SFU。
+/// Windows 屏幕采集发布端（被控端）：WGC（主，#514）/DXGI（备）→ FFmpeg 编码 → SFU。
 /// 输入注入走 SendInput（aerodesk-platform）；系统音频走 WASAPI loopback
 /// （采集系统正在播放的声音，失败回退合成音）；需要交互桌面会话（DXGI 输出可用）。
 #[cfg(target_os = "windows")]
@@ -2968,14 +2968,15 @@ fn publisher_capture_windows(
     camera_device: Option<String>,
 ) {
     use aerodesk_core::platform::MediaSource;
-    use aerodesk_platform::windows::capture::DxgiCapturer;
+    use aerodesk_platform::windows::capture::ScreenCapturer;
 
     const FPS: u32 = 30;
 
-    let mut capture = match DxgiCapturer::new_with_display(display, target_w, target_h) {
+    // #514 采集链：WGC 主（DWM 出帧，不受适配器/输出枚举序影响）→ DXGI 备。
+    let mut capture = match ScreenCapturer::new_with_display(display, target_w, target_h) {
         Ok(c) => c,
         Err(e) => {
-            error!("DXGI capture init failed: {e}");
+            error!("screen capture init failed: {e}");
             info!("Windows 屏幕采集需要交互桌面会话（非 headless/服务会话）");
             return;
         }
@@ -2986,7 +2987,7 @@ fn publisher_capture_windows(
     }
     let (w, h) = capture.size();
     if w == 0 || h == 0 {
-        error!("DXGI capture: 无可用显示器输出");
+        error!("screen capture: 无可用显示器输出");
         return;
     }
     // #75 远程光标：真实光标按被控显示器区域归一化（在 capture 移入 publisher 前取值）。
