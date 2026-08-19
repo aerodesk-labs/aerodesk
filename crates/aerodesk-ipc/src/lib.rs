@@ -9,6 +9,8 @@
 
 pub mod frame;
 pub mod proto;
+pub mod transport;
 
 pub use frame::{MAX_FRAME, read_frame, write_frame};
 pub use proto::{Envelope, Msg, PROTOCOL_VERSION};
+pub use transport::{Conn, ConnWriter, HandshakeError, Listener, RecvError};
