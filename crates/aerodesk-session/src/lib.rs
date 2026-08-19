@@ -94,6 +94,9 @@ pub trait SessionUi: Send {
     fn cleanup(&self, terminal: Option<String>);
     /// 远端光标位置（归一化 0..1）。
     fn set_remote_cursor(&self, x: f32, y: f32);
+    /// 会话延时统计（端到端单向延时 ms / 网络 RTT ms / 接收帧率；
+    /// 各值 None 表示该口径尚未测得，调用方节流推送）。
+    fn set_session_stats(&self, _latency_ms: Option<u64>, _rtt_ms: Option<u64>, _fps: f32) {}
     /// 插入最近会话记录。
     fn add_recent(&self, room: &str, server: &str);
     /// 终端独立窗口追加输出。

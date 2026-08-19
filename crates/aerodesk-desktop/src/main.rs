@@ -136,6 +136,14 @@ impl SessionWindow {
         }
     }
 
+    /// #34 会话延时统计文案（仅 View 观看窗带 stats 属性）。
+    pub fn set_stats(&self, text: String) {
+        let text = slint::SharedString::from(text);
+        if let Self::View(w) = self {
+            let _ = w.upgrade_in_event_loop(move |win| win.set_stats(text.clone()));
+        }
+    }
+
     pub fn set_frame(&self, frame: &SessionFrame) {
         let frame = frame.clone();
         match self {
@@ -251,6 +259,12 @@ pub struct SessionHandle {
     pub frame: Option<SessionFrame>,
     /// 远端光标最新位置（None = 尚未收到光标事件）。
     pub cursor: Option<(f32, f32)>,
+    /// #34 会话延时统计：端到端单向延时 ms（None = 尚未测得）。
+    pub latency_ms: Option<u64>,
+    /// #34 网络 RTT ms（str0m RTCP 测量；None = 尚未测得）。
+    pub rtt_ms: Option<u64>,
+    /// #34 接收帧率（500ms 窗口内解码帧数换算）。
+    pub fps: f32,
     /// 文件传输进度（-1 = 无传输；0..=1）。
     pub file_progress: f32,
     /// 文件传输标签（如“发送 x.zip 42%”）。
@@ -558,11 +572,25 @@ pub fn request_session_stop(slot: usize) {
     }
 }
 
+/// #34 会话延时统计文案（未测得的口径省略对应段）。
+pub fn format_session_stats(latency_ms: Option<u64>, rtt_ms: Option<u64>, fps: f32) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(ms) = latency_ms {
+        parts.push(format!("延迟 {ms}ms"));
+    }
+    if let Some(ms) = rtt_ms {
+        parts.push(format!("RTT {ms}ms"));
+    }
+    parts.push(format!("{fps:.0}fps"));
+    parts.join(" · ")
+}
+
 /// 把会话句柄状态同步到其独立窗口（帧/输入捕获态/文案）。
 fn sync_session_window(window: &SessionWindow, s: &SessionHandle) {
     if let Some(frame) = &s.frame {
         window.set_frame(frame);
     }
+    window.set_stats(format_session_stats(s.latency_ms, s.rtt_ms, s.fps));
 }
 
 /// 在所有会话注册表变更后，刷新仍存活的独立窗口。
@@ -854,6 +882,13 @@ impl aerodesk_session::SessionUi for SlintSessionUi {
     }
     fn set_remote_cursor(&self, x: f32, y: f32) {
         with_session_ui_state(&self.ui, self.slot, move |s| s.cursor = Some((x, y)));
+    }
+    fn set_session_stats(&self, latency_ms: Option<u64>, rtt_ms: Option<u64>, fps: f32) {
+        with_session_ui_state(&self.ui, self.slot, move |s| {
+            s.latency_ms = latency_ms;
+            s.rtt_ms = rtt_ms;
+            s.fps = fps;
+        });
     }
     fn add_recent(&self, room: &str, server: &str) {
         let (room, server) = (room.to_string(), server.to_string());
@@ -1426,6 +1461,9 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
             window: Some(window.clone()),
             frame: None,
             cursor: None,
+            latency_ms: None,
+            rtt_ms: None,
+            fps: 0.0,
             file_progress: -1.0,
             file_label: String::new(),
         });
@@ -3612,6 +3650,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn session_stats_text_omits_unmeasured_segments() {
+        assert_eq!(
+            format_session_stats(Some(43), Some(31), 12.4),
+            "延迟 43ms · RTT 31ms · 12fps"
+        );
+        assert_eq!(format_session_stats(None, Some(31), 0.0), "RTT 31ms · 0fps");
+        assert_eq!(format_session_stats(None, None, 0.0), "0fps");
+        assert_eq!(format_session_stats(Some(7), None, 2.9), "延迟 7ms · 3fps");
+    }
+
+    #[test]
     fn demo_frame_rgba() {
         let px = demo_frame(0);
         assert_eq!(px.len(), (DEMO_W * DEMO_H * 4) as usize);
@@ -3726,6 +3775,9 @@ mod tests {
             window: None,
             frame: None,
             cursor: None,
+            latency_ms: None,
+            rtt_ms: None,
+            fps: 0.0,
             file_progress: -1.0,
             file_label: String::new(),
         }
@@ -4396,6 +4448,9 @@ mod multi_session_e2e {
                 window: None,
                 frame: None,
                 cursor: None,
+                latency_ms: None,
+                rtt_ms: None,
+                fps: 0.0,
                 file_progress: -1.0,
                 file_label: String::new(),
             });

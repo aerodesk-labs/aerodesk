@@ -1409,6 +1409,7 @@ export component ViewWindow inherits Window {
     in-out property <float> frame-w: 0;
     in-out property <float> frame-h: 0;
     in-out property <string> status: "连接中…";
+    in-out property <string> stats: "";
 
     title: "AeroDesk 观看";
     width: 1000px;
@@ -1447,11 +1448,19 @@ export component ViewWindow inherits Window {
             background: #ffffff;
             HorizontalLayout {
                 padding-left: 14px;
+                padding-right: 14px;
                 Text {
                     text: root.status;
                     color: #7d7d84;
                     font-size: 14px;
                     vertical-alignment: center;
+                }
+                Text {
+                    text: root.stats;
+                    color: #7d7d84;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
                 }
             }
         }
