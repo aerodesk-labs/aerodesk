@@ -81,7 +81,9 @@ mod imp {
     use aerodesk_core::endpoint::ClientEvent;
     use aerodesk_core::media_pipeline::Codec;
     use aerodesk_core::media_socket::MediaSocket;
-    use aerodesk_core::platform::{CursorSource, Encoder, InputInjector, MediaSource, SystemWakeLock};
+    use aerodesk_core::platform::{
+        CursorSource, Encoder, InputInjector, MediaSource, SystemWakeLock,
+    };
     use aerodesk_protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult};
     use aerodesk_protocol::input::{InputEvent, InputFrame};
     use aerodesk_protocol::signal::Role;
@@ -328,7 +330,8 @@ mod imp {
                     )
                     .with_sent_ms(now_ms());
                     if let Ok(json) = serde_json::to_string(&pos) {
-                        live.endpoint.send_channel_data("cursor", false, json.as_bytes());
+                        live.endpoint
+                            .send_channel_data("cursor", false, json.as_bytes());
                     }
                 }
             }
