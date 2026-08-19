@@ -60,14 +60,24 @@ try {
     $env:NODE_PATH = $oldNodePath
     Pop-Location
 
-    Start-Sleep -Seconds 1
-    $pubTxt = Get-Content "$logDir\pub.err" -Raw -ErrorAction SilentlyContinue
-    $inputHits = ([regex]::Matches($pubTxt, "input: seq=")).Count
+    # #523：输入回传计数改轮询（≤15s）——DataChannel 在视频就绪后可能仍在协商，
+    # 固定 sleep 后单次数是竞态；真断链（#75 回归）事件永远不到，轮询不会掩盖。
+    $inputHits = 0
+    foreach ($i in 1..30) {
+        $pubTxt = Get-Content "$logDir\pub.err" -Raw -ErrorAction SilentlyContinue
+        if ($pubTxt) { $inputHits = ([regex]::Matches($pubTxt, "input: seq=")).Count }
+        if ($inputHits -ge 1) { break }
+        Start-Sleep -Milliseconds 500
+    }
 
     Write-Host "== 断言"
     $fail = 0
     if ($nodeRc -eq 0) { Write-Host "PASS Edge video playing" } else { Write-Host "FAIL Edge video"; $fail = 1 }
-    if ($inputHits -ge 1) { Write-Host "PASS Edge input events -> publisher ($inputHits)" } else { Write-Host "FAIL no input events"; $fail = 1 }
+    if ($inputHits -ge 1) { Write-Host "PASS Edge input events -> publisher ($inputHits)" } else {
+        Write-Host "FAIL no input events"
+        Get-Content "$logDir\pub.err" -Tail 5 -ErrorAction SilentlyContinue
+        $fail = 1
+    }
     if (Select-String -Path "$logDir\sfu.log","$logDir\sfu.err","$logDir\pub.err" -Pattern "panic" -Quiet) { Write-Host "FAIL panic in logs"; $fail = 1 }
     exit $fail
 }
