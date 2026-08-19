@@ -15,8 +15,13 @@ $logDir = Join-Path $env:TEMP ("web-edge-e2e-" + [DateTime]::Now.ToString('HHmms
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
 function Stop-AeroDesk {
-    Get-Process | Where-Object { $_.ProcessName -like 'aerodesk-*' -or $_.ProcessName -eq 'msedge' } |
+    Get-Process | Where-Object { $_.ProcessName -like 'aerodesk-*' } |
         Stop-Process -Force -ErrorAction SilentlyContinue
+    # 只清理由本脚本/历史崩溃遗留的 headless e2e Edge；用户正在用的窗口实例
+    # 命令行不含 --headless，绝不被误杀（本机运行安全前提）。
+    Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -like '*--headless*' } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
 $sfu = $null; $sig = $null; $pub = $null
