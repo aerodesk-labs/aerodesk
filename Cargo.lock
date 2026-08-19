@@ -239,6 +239,7 @@ dependencies = [
  "videotoolbox",
  "windows 0.58.0",
  "windows 0.62.2",
+ "windows-capture",
  "windows-service",
  "x11rb",
  "x264",
@@ -8223,6 +8224,19 @@ dependencies = [
  "windows-core 0.62.2",
  "windows-future",
  "windows-numerics",
+]
+
+[[package]]
+name = "windows-capture"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09046acbe9b6d039cde50e8c8178d95bb0f9b33ed7feccc4465dadc5404b31b4"
+dependencies = [
+ "parking_lot",
+ "rayon",
+ "thiserror 2.0.19",
+ "windows 0.62.2",
+ "windows-future",
 ]
 
 [[package]]

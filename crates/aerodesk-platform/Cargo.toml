@@ -48,6 +48,9 @@ aerodesk-codec = { path = "../aerodesk-codec" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 aerodesk-codec = { path = "../aerodesk-codec" }
+# #514：WGC 主采集路径（Win10 1903+）。传递依赖 windows 0.62 与 parsec-vdd-rust
+# 同源共存（见下 windows062 注释）；Win10 可用配方见 windows/capture_wgc.rs。
+windows-capture = "2.0.1"
 # #470 SCM 服务生命周期与控制处理器（事件日志走 windows crate feature）。
 windows-service = "0.7"
 # ADR-0001：虚拟显示器（Parsec VDD）。其传递依赖 windows 0.62 与下方 0.58 并存，
