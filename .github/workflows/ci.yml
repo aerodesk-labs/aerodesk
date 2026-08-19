@@ -401,8 +401,9 @@ jobs:
         shell: pwsh
         run: ./scripts/web-edge-e2e-win.ps1
       # #58/#408 显示器切换 CLI 接线回归：viewer --display N → control → publisher 重建。
-      # DXGI 不可用的 runner 自动 SKIP（与 windows_runtime 容错一致）。
-      - name: e2e display switch (Windows)
+      # #487 同脚本断言 screen 发布端真出帧（RECEIVED>0）——静屏走 #477 心跳。
+      # 采集不可用的 runner 自动 SKIP（与 windows_runtime 容错一致）。
+      - name: e2e display switch + screen frames (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/display-switch-e2e-win.ps1
