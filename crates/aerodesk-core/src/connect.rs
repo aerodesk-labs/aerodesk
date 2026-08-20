@@ -6,7 +6,7 @@ use std::net::UdpSocket;
 use std::time::Duration;
 
 use crate::media_socket::MediaSocket;
-use crate::protocol::signal::Role;
+use crate::protocol::signal::{Role, SignalMessage};
 use crate::signaling::WsSignalClient;
 use crate::turn_client::setup_turn;
 use str0m::net::Protocol;
@@ -283,6 +283,18 @@ fn connect_live_role_impl(
     let (peer_id, turn) = signal
         .join(room, role, auth)
         .map_err(|e| format!("join: {e}"))?;
+
+    // #539/#456 呼叫发起：主控（viewer）连接时通知房间内被叫端（Publisher）
+    // 弹窗确认——被叫端接受后才出流采集。Call 是通知性质（不阻塞媒体协商）：
+    // 被叫端拒绝/超时则主控看到黑屏（错误码经 call_rejected 返回）。
+    if role == Role::Viewer {
+        let _ = signal.send_signal(SignalMessage::Call {
+            from: peer_id.clone(),
+            target: room.to_string(),
+            call_id: format!("call-{peer_id}"),
+            timeout_ms: Some(30_000),
+        });
+    }
 
     // #1：iOS（含模拟器）下通配符绑定 + 0.0.0.0 candidate 会被 str0m 拒绝，且
     // 模拟器 UDP 收不到发往 LAN IP/0.0.0.0 绑定 socket 的包。当信令地址是
