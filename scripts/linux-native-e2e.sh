@@ -20,7 +20,7 @@ sleep 1
 echo "== [3/5] 启动 SFU/signal"
 REC="$(mktemp -d)"
 # #535 排查：SFU debug 级日志（通道开/轨道增删/键帧请求转发路径）。
-RECORD_DIR="$REC" RUST_LOG=debug "$ROOT/target/debug/aerodesk-sfu" >/tmp/linux-native-sfu.log 2>&1 &
+RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu" >/tmp/linux-native-sfu.log 2>&1 &
 SFU=$!
 "$ROOT/target/debug/aerodesk-signal" >/tmp/linux-native-sig.log 2>&1 &
 SIG=$!
@@ -33,7 +33,7 @@ if [ "$OK" != "1" ]; then echo "FAIL: SFU/signal 未就绪"; tail -10 /tmp/linux
 
 echo "== [4/5] 原生 Linux 被控端发布（X11 采集 → 编码 → SFU）"
 # #535 排查：publisher 亦开 debug——键帧请求（FIR）接收与编码器响应路径可见。
-DISPLAY=:98 RUST_LOG=debug "$ROOT/target/debug/aerodesk-agent" \
+DISPLAY=:98 RUST_LOG=info "$ROOT/target/debug/aerodesk-agent" \
   --role publisher --encoder screen --signal ws://127.0.0.1:3003 --room "$ROOM" \
   >/tmp/linux-native-pub.log 2>&1 &
 PUB=$!
@@ -41,7 +41,7 @@ sleep 3
 
 echo "== [5/5] CLI viewer 收流断言"
 # #535 排查：viewer debug 级日志（ICE/DTLS/SCTP/DCEP 通道开、FIR 发送、组装器）。
-RUST_LOG=debug "$ROOT/target/debug/aerodesk-agent" --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" \
+"$ROOT/target/debug/aerodesk-agent" --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" \
   >/tmp/linux-native-view.log 2>&1 &
 VIEW=$!
 python3 - <<'PY' || RC=$?
