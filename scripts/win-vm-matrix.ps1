@@ -87,4 +87,4 @@ Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
 }
 Write-Host '== 宿主侧断言：signal 日志应见 vm-prelogin 设备 join（P0 在线）——请核对'
 Write-Host '== 宿主侧 viewer 收帧断言（矩阵 A/B 画面结论）：'
-Write-Host "   $BinDir\aerodesk-cli.exe --role viewer --signal ws://${hostIp}:3003/ws --room vm-prelogin"
+Write-Host "   $BinDir\aerodesk-agent.exe --role viewer --signal ws://${hostIp}:3003/ws --room vm-prelogin"

@@ -173,7 +173,7 @@ fn winlogon_token(session_id: u32) -> Result<HANDLE, String> {
 }
 
 /// 在 console 会话的 winlogon desktop 内拉起登录界面 helper(#471 M1)。
-/// exe 通常为服务同目录 `aerodesk-cli.exe`,args 携带回连端口/令牌。
+/// exe 通常为服务同目录 `aerodesk-host.exe`,args 携带回连端口/令牌。
 pub fn spawn_logon_helper(exe: &str, args: &[&str]) -> Result<(), String> {
     let session = console_session_id();
     let token = winlogon_token(session)?;

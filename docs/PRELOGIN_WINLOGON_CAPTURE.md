@@ -62,10 +62,10 @@ UserSession
 | 模块 | 位置 |
 |---|---|
 | winlogon token 获取 + helper spawn | `platform/windows/session.rs` 扩展(复用 `spawn_with_token` 思路,token 来源换成 winlogon.exe) |
-| helper 进程(采集+注入+pipe 客户端) | `aerodesk-cli` 新子命令 `--logon-helper`(单二进制多角色,与服务同产物) |
+| helper 进程(采集+注入+pipe 客户端) | `aerodesk-host` 新子命令 `--logon-helper`(单二进制多角色,与服务同产物) |
 | pipe IPC | `platform/windows/` 新 `helper_pipe.rs`(帧/输入/控制帧,长度前缀 + bincode 或手动,先简单) |
-| 服务侧路由 | `cli/src/service_run.rs` Supervisor 扩展:接听呼叫 → helper 管道;Lock 事件 → 半切换 |
-| device_state | `aerodesk-protocol/signal.rs` + signal/SFU 透传(#467 dc_ready 同款 `#[serde(default)]` 兼容模式) |
+| 服务侧路由 | `host/src/service_run.rs` Supervisor 扩展:接听呼叫 → helper 管道;Lock 事件 → 半切换 |
+| device_state | `aerodesk_core/src/protocol/signal.rs` + signal/SFU 透传(#467 dc_ready 同款 `#[serde(default)]` 兼容模式) |
 
 ## 6. 里程碑
 
