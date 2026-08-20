@@ -2266,6 +2266,10 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_token_default(settings.token_default.clone().into());
 
     // #450 启动即自动连信令（设备常在线可被呼叫）。
+    // 注意：启动**只连信令不发布**——被呼叫且 UI 授权（inc_enabled，#456）时才
+    // 出流采集（IncomingCall 分支 accept_call + start_publisher_ui）。曾被 #487
+    // 误修为「inc_enabled=true 启动即自动发布」——开关语义是「允许被呼叫时
+    // 接听」而非「启动即采集」，已撤销。
     spawn_signal_presence(
         &ui,
         settings.server_default.clone(),
@@ -2273,11 +2277,6 @@ fn main() -> Result<(), slint::PlatformError> {
         settings.token_default.clone(),
         settings.server_tls,
     );
-    // #487 修复：开关状态恢复不能只回填 UI——inc_enabled=true 时启动即自动开始发布。
-    // 否则开关显示「开」而实际未发布，用户每次重启 App 都得手动把开关关了再开才生效。
-    if settings.inc_enabled {
-        start_publisher_ui(&ui);
-    }
     if !settings.server_default.is_empty() {
         ui.set_server_input(server_display.into());
     }
