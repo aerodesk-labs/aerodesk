@@ -325,6 +325,11 @@ struct PresenceHandle {
     presence: Arc<std::sync::Mutex<aerodesk_core::signal_presence::SignalPresence>>,
 }
 static PRESENCE: std::sync::Mutex<Option<PresenceHandle>> = std::sync::Mutex::new(None);
+/// #539 呼叫确认：未静默授权时弹窗待用户确认，30s 超时由 presence 循环自动拒绝。
+static PENDING_CALL: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+/// #539 呼叫确认独立窗口（不依赖主窗口——App 最小化/托盘时也可弹出）。
+static INCOMING_WINDOW: std::sync::Mutex<Option<slint::Weak<IncomingCallWindow>>> =
+    std::sync::Mutex::new(None);
 /// 会话相关测试共享锁：多会话 e2e 与无头 UI 状态测试都操作全局 SESSIONS，
 /// 必须串行执行避免互相污染。
 #[cfg(test)]
@@ -1606,16 +1611,76 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                             from,
                             ..
                         } => {
+                            tracing::info!("presence: incoming call from {from}");
                             let p = presence.clone();
                             let uiw = ui_weak.clone();
+                            let accept_ui = ui_weak.clone();
                             crate::with_ui(&uiw, move |ui| {
-                                if ui.get_inc_enabled() {
+                                let inc = ui.get_inc_enabled();
+                                tracing::info!("incoming call from {from}: inc_enabled={inc}");
+                                if inc {
+                                    // 静默授权：直接接听出流。
+                                    *PENDING_CALL.lock().unwrap_or_else(|e| e.into_inner()) = None;
                                     let _ = p.lock().unwrap().accept_call();
                                     start_publisher_ui(ui);
                                     ui.set_status(format!("接听来自 {from} 的呼叫").into());
                                 } else {
-                                    let _ = p.lock().unwrap().reject_call(Some("未开启被控"));
-                                    ui.set_status("已拒绝呼叫：未开启被控".into());
+                                    // #539：未静默授权时弹独立授权窗口确认（30s
+                                    // 超时自动拒绝；不依赖主窗口——最小化/托盘也可弹）。
+                                    *PENDING_CALL.lock().unwrap_or_else(|e| e.into_inner()) =
+                                        Some(std::time::Instant::now());
+                                    match IncomingCallWindow::new() {
+                                        Ok(win) => {
+                                            win.set_from(from.clone().into());
+                                            let w = win.as_weak();
+                                            win.on_accept(move || {
+                                                *PENDING_CALL
+                                                    .lock()
+                                                    .unwrap_or_else(|e| e.into_inner()) = None;
+                                                if let Some(h) =
+                                                    PRESENCE.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+                                                {
+                                                    let _ = h.presence.lock().unwrap().accept_call();
+                                                }
+                                                // 经事件循环拿主窗口（MAIN_WINDOW 是
+                                                // macOS 门控的，跨平台用 accept_ui）。
+                                                crate::with_ui(&accept_ui, |ui| {
+                                                    start_publisher_ui(ui);
+                                                    ui.set_status("已接受远控请求".into());
+                                                });
+                                                let _ = w.upgrade_in_event_loop(|ui| { ui.hide(); });
+                                            });
+                                            let w2 = win.as_weak();
+                                            win.on_reject(move || {
+                                                *PENDING_CALL
+                                                    .lock()
+                                                    .unwrap_or_else(|e| e.into_inner()) = None;
+                                                if let Some(h) =
+                                                    PRESENCE.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+                                                {
+                                                    let _ = h.presence.lock().unwrap().reject_call(
+                                                        Some("用户拒绝"),
+                                                        Some("user_rejected"),
+                                                    );
+                                                }
+                                                let _ = w2.upgrade_in_event_loop(|ui| { ui.hide(); });
+                                            });
+                                            *INCOMING_WINDOW.lock().unwrap_or_else(|e| e.into_inner()) =
+                                                Some(win.as_weak());
+                                            let _ = win.show();
+                                            ui.set_status(
+                                                format!("收到 {from} 的远控请求，等待确认").into(),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            ui.set_status(
+                                                format!(
+                                                    "收到 {from} 的远控请求，但确认窗口创建失败：{e}"
+                                                )
+                                                .into(),
+                                            );
+                                        }
+                                    }
                                 }
                             });
                         }
@@ -1627,6 +1692,35 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                             });
                         }
                     }
+                }
+                // #539 呼叫确认超时：30s 未响应自动拒绝（弹窗提示 30 秒时限）。
+                // 注意：先释放 PENDING_CALL 锁再进处理块（块内会再次加锁，重入死锁）。
+                let pending_call = PENDING_CALL.lock().unwrap_or_else(|e| e.into_inner());
+                let timed_out = pending_call
+                    .as_ref()
+                    .is_some_and(|p| p.elapsed() >= std::time::Duration::from_secs(30));
+                drop(pending_call);
+                if timed_out {
+                    *PENDING_CALL.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    tracing::info!("呼叫确认超时：关闭授权窗口");
+                    // #539：超时先主动关闭授权窗口（事件循环投递），再向对端
+                    // 返回结构化错误码（写超时兜底，reject 失败不阻塞循环）。
+                    if let Some(w) =
+                        INCOMING_WINDOW.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+                    {
+                        let _ = w.upgrade_in_event_loop(|ui| { ui.hide(); });
+                    }
+                    tracing::info!("呼叫确认超时：发送 reject");
+                    let _ = presence
+                        .lock()
+                        .unwrap()
+                        .reject_call(Some("呼叫确认超时"), Some("timeout"))
+                        .map_err(|e| tracing::warn!("timeout reject send failed: {e}"));
+                    tracing::info!("呼叫确认超时：reject 完成");
+                    let uiw = ui_weak.clone();
+                    crate::with_ui(&uiw, |ui| {
+                        ui.set_status("已拒绝呼叫：确认超时".into());
+                    });
                 }
                 std::thread::sleep(std::time::Duration::from_millis(300));
             }

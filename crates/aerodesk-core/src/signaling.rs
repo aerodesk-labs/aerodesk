@@ -96,6 +96,17 @@ impl WsSignalClient {
     /// 连接信令服务器（ws:// 或 wss://），地址会自动归一化（补协议/路径）。
     pub fn connect(url: &str) -> Result<Self, tungstenite::Error> {
         let (ws, _) = connect(&normalize_signal_url(url))?;
+        // #539：写超时 5s 兜底——对端读循环阻塞（等消息/已断开）时 ws.send
+        // 会无限阻塞，卡死 presence 循环（超时拒绝、心跳全停，形成互等死锁）。
+        match ws.get_ref() {
+            MaybeTlsStream::Plain(stream) => {
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+            }
+            MaybeTlsStream::Rustls(stream) => {
+                let _ = stream.sock.set_write_timeout(Some(Duration::from_secs(5)));
+            }
+            _ => {}
+        }
         Ok(Self { ws, peer_id: None })
     }
 
@@ -107,6 +118,14 @@ impl WsSignalClient {
     /// 发送任意信令消息（呼叫/响铃/挂断等扩展消息）。
     pub fn send_signal(&mut self, msg: SignalMessage) -> Result<(), String> {
         self.send(msg)
+    }
+
+    /// #539：发送信令心跳（`SignalMessage::Ping`）——连接保活 + 驱动服务端
+    /// 读循环的发送队列 drain。服务端 session_loop 的阻塞 next() 收到任一消息
+    /// 即返回，得以执行发送队列的 drain（呼叫等可靠消息经队列投递后送达）。
+    /// 注：ws 层 Ping 帧会被 rouille 自动回 Pong 且不返回消息，无法驱动 drain。
+    pub fn send_ping(&mut self) -> Result<(), String> {
+        self.send_signal(crate::protocol::signal::SignalMessage::Ping)
     }
 
     /// 加入房间，返回服务器分配的 peer_id 与 TURN 配置。
