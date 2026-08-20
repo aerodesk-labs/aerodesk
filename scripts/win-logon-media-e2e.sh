@@ -2,14 +2,14 @@
 # #471 M2 端到端:登录界面媒体链路(合成源)——服务体(--service-fg --force-media)
 # 发布 H264 → SFU → viewer 收帧断言。真机采集源(S0/helper)按实测矩阵 A/B
 # 另行人工联调(docs/PRELOGIN_WINLOGON_CAPTURE.md §4)。
-# 前置:cargo build -p aerodesk-host -p aerodesk-signal -p aerodesk-sfu -p aerodesk-cli
+# 前置:cargo build -p aerodesk-host -p aerodesk-signal -p aerodesk-sfu -p aerodesk-agent
 # (FFmpeg DLL 需在 PATH,见 ci.yml Windows 步骤)。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 BIN="${AERODESK_HOST:-target/debug/aerodesk-host.exe}"
-# #522 审查：viewer 断言必须用 aerodesk-cli（host 无 --role viewer 入口，旧
+# #522 审查：viewer 断言必须用 aerodesk-agent（host 无 --role viewer 入口，旧
 # 脚本用 $BIN 当 viewer 必失败）。
-CLI_BIN="${AERODESK_CLI:-target/debug/aerodesk-cli.exe}"
+CLI_BIN="${AERODESK_AGENT:-target/debug/aerodesk-agent.exe}"
 ROOM="logon-e2e-$$"
 CONF="$PROGRAMDATA/AeroDesk/service-settings.json"
 [ -f "$BIN" ] || { echo "未找到 $BIN" >&2; exit 1; }
