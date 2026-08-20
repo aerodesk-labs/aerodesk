@@ -639,10 +639,23 @@ impl HelperFrameSource {
     fn accept_on_listener(listener: std::net::TcpListener) -> Result<Self, String> {
         let real = listener.local_addr().map_err(|e| e.to_string())?.port();
         info!("helper 帧源：等待 helper 回连 127.0.0.1:{real}（10s 超时）");
-        listener.set_nonblocking(false).map_err(|e| e.to_string())?;
-        let (mut stream, peer) = listener
-            .accept()
-            .map_err(|e| format!("等待 helper 回连超时/失败：{e}"))?;
+        // #522 审查：旧实现 `accept()` 无限阻塞（注释声称 10s 超时但未实现）——
+        // helper 未拉起/崩溃时 run_media 线程卡死、stop 标志不可见、服务挂死。
+        // 非阻塞 + 10s 轮询超时，等待期间可观察 stop/expires。
+        listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (mut stream, peer) = loop {
+            if Instant::now() >= deadline {
+                return Err("等待 helper 回连超时（10s）".into());
+            }
+            match listener.accept() {
+                Ok(conn) => break conn,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => return Err(format!("等待 helper 回连失败：{e}")),
+            }
+        };
         stream.set_nodelay(true).ok();
         // 握手：helper 先发 "hello <token>" 行（token 联调场景不校验内容）。
         // 逐字节读——BufReader 会把紧跟首行的帧字节吞进内部缓冲随 drop 丢失
