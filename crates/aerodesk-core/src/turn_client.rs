@@ -21,8 +21,6 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 /// 快速请求（refresh）预算：失败下轮重试，不阻塞媒体泵。
 const FAST_REQUEST_BUDGET: Duration = Duration::from_millis(30);
-/// TCP/TLS 连接读超时（泵粒度）。
-const TCP_READ_TIMEOUT: Duration = Duration::from_millis(10);
 /// 响应匹配时最多跳过的无关包（Data indication 等）。
 const MAX_RESPONSE_SKIP: usize = 8;
 
@@ -40,12 +38,12 @@ enum TurnIo {
 }
 
 impl TurnIo {
-    fn set_read_timeout(&self, t: Option<Duration>) -> io::Result<()> {
-        match self {
-            TurnIo::Udp(s) => s.set_read_timeout(t),
-            // TCP/TLS 在 connect 时已固定 10ms（泵粒度），动态调整无意义。
-            TurnIo::Tcp { .. } => Ok(()),
-        }
+    fn set_read_timeout(&self, _t: Option<Duration>) -> io::Result<()> {
+        // 泵超时恒定非阻塞（构造期已 set_nonblocking）：媒体泵先探测 TURN 再等
+        // 直连 UDP，若 TURN 跟随 direct 的 5ms 读超时，高码率媒体被串行化到
+        // ~200 帧/s 丢帧（#487 生产 TURN 路径 0 帧解码的根因）。事务轮询
+        // （request_impl / recv_matching）自管 deadline + 2ms sleep，不依赖本超时。
+        Ok(())
     }
 
     fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -197,17 +195,19 @@ pub struct TurnTransport {
 
 impl TurnTransport {
     /// 发起 TURN Allocate（UDP），成功返回持久化的传输（realm/nonce 已保留）。
+    /// `_timeout` 仅保留签名兼容（#487：泵超时恒定非阻塞，事务轮询自管 deadline）。
     pub fn connect(
         server: SocketAddr,
         username: &str,
         password: &str,
         bind_ip: IpAddr,
-        timeout: Duration,
+        _timeout: Duration,
     ) -> Result<Self, String> {
         let socket = UdpSocket::bind((bind_ip, 0)).map_err(|e| format!("turn bind: {e}"))?;
+        // 泵超时恒定非阻塞：见 TurnIo::set_read_timeout（#487 节流根因）。
         socket
-            .set_read_timeout(Some(timeout))
-            .map_err(|e| format!("turn set_read_timeout: {e}"))?;
+            .set_nonblocking(true)
+            .map_err(|e| format!("turn set_nonblocking: {e}"))?;
         let mut t = TurnTransport {
             io: TurnIo::Udp(socket),
             server,
@@ -242,7 +242,8 @@ impl TurnTransport {
         let stream = TcpStream::connect_timeout(&server, timeout)
             .map_err(|e| format!("turn tcp connect: {e}"))?;
         stream.set_nodelay(true).ok();
-        // 握手/allocate 用长超时；allocate 成功后切 10ms 泵超时。
+        // 握手/allocate 用长超时；allocate 成功后切非阻塞泵（#487：TURN 跟随
+        // 直连 UDP 的 5ms 读超时会串行化高码率媒体到 ~200 帧/s 丢帧）。
         stream
             .set_read_timeout(Some(timeout))
             .map_err(|e| format!("turn tcp set_read_timeout: {e}"))?;
@@ -286,7 +287,10 @@ impl TurnTransport {
         };
         t.allocate_flow()?;
         if let Some(h) = pump_handle {
-            let _ = h.set_read_timeout(Some(TCP_READ_TIMEOUT));
+            // 泵超时恒定非阻塞（#487：TURN 跟随直连 UDP 的 5ms 读超时会串行化
+            // 高码率媒体到 ~200 帧/s 丢帧）。共享 fd：对 clone 生效即对原 stream
+            // 生效；TLS 握手（complete_io 需阻塞）已完成，非阻塞安全。
+            let _ = h.set_nonblocking(true);
         }
         Ok(t)
     }
@@ -1011,7 +1015,9 @@ mod tests {
         tt.send_to(peer, b"hello-turn").expect("send");
         assert_eq!(binds.load(Ordering::SeqCst), 1, "first send binds channel");
         let mut buf = [0u8; 4096];
-        let got = tt.recv_packet(&mut buf).expect("recv").expect("packet");
+        // #487：泵超时非阻塞化后单次探测可能早于 mock 转发返回 None——与生产
+        // 泵的连续 recv_from 等价地轮询等待（修复前依赖阻塞读兜住时序）。
+        let got = recv_packet_wait(&mut tt, &mut buf);
         assert_eq!(got.0, peer);
         assert_eq!(&buf[..got.1], b"hello-turn");
     }
@@ -1072,15 +1078,29 @@ mod tests {
         let peer: SocketAddr = "192.0.2.10:4000".parse().unwrap();
         tt.send_to(peer, b"hello-tcp-turn").expect("send");
         let mut buf = [0u8; 4096];
-        let got = tt.recv_packet(&mut buf).expect("recv").expect("packet");
+        // #487：泵超时非阻塞化后单次探测可能早于 mock 转发返回 None（同上）。
+        let got = recv_packet_wait(&mut tt, &mut buf);
         assert_eq!(got.0, peer);
         assert_eq!(&buf[..got.1], b"hello-tcp-turn");
 
         // 半包路径：再发一次，验证帧缓冲累积正常
         tt.send_to(peer, b"second").expect("send2");
-        let got2 = tt.recv_packet(&mut buf).expect("recv2").expect("packet2");
+        let got2 = recv_packet_wait(&mut tt, &mut buf);
         assert_eq!(got2.0, peer);
         assert_eq!(&buf[..got2.1], b"second");
+    }
+
+    /// 非阻塞泵语义下等待一帧（与生产泵的连续 recv_from 等价；#487 后
+    /// recv_packet 立即返回 None 而非阻塞等待，测试须轮询）。
+    fn recv_packet_wait(tt: &mut TurnTransport, buf: &mut [u8]) -> (SocketAddr, usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            assert!(Instant::now() < deadline, "recv_packet timeout");
+            if let Ok(Some(got)) = tt.recv_packet(buf) {
+                return got;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
