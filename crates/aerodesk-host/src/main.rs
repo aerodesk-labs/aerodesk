@@ -205,8 +205,16 @@ fn main() {
 /// 不可用时回退 stderr（便于手动 `--service` 调试）。
 #[cfg(windows)]
 fn arg(args: &[String], key: &str) -> Option<String> {
+    // 兼容 `--key value`（服务侧 spawn 用空格分隔，见 service_run.rs）与
+    // `--key=value`（手动/测试传参）两种格式——旧实现只认 `=value`，
+    // helper 的 --port/--token 被服务拉起时回落默认值（#522 审查发现）。
     args.iter()
-        .find_map(|a| a.strip_prefix(&format!("{key}=")).map(|v| v.to_string()))
+        .position(|a| a == key)
+        .and_then(|i| args.get(i + 1).cloned())
+        .or_else(|| {
+            args.iter()
+                .find_map(|a| a.strip_prefix(&format!("{key}=")).map(|v| v.to_string()))
+        })
 }
 
 /// 调试模式(stderr)日志——service-fg/logon-helper 用;服务态走 init_service_log。
@@ -220,6 +228,7 @@ fn init_log() {
         .init();
 }
 
+#[cfg(windows)]
 fn init_service_log() {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
