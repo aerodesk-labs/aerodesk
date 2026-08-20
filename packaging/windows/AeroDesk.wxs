@@ -17,7 +17,7 @@
       <Directory Id="INSTALLFOLDER" Name="AeroDesk">
         <Component Id="C_AppFiles" Guid="7a1c0e5d-9f42-4b81-a6c3-2e8d0f5a7b94">
           <File Id="F_Ui" Source="$(var.BuildDir)\aerodesk-desktop.exe" KeyPath="yes"/>
-          <File Id="F_Cli" Source="$(var.BuildDir)\aerodesk-cli.exe"/>
+          <File Id="F_Cli" Source="$(var.BuildDir)\aerodesk-agent.exe"/>
           <File Id="F_Avcodec" Source="$(var.BuildDir)\avcodec-62.dll"/>
           <File Id="F_Avdevice" Source="$(var.BuildDir)\avdevice-62.dll"/>
           <File Id="F_Avfilter" Source="$(var.BuildDir)\avfilter-11.dll"/>
