@@ -19,7 +19,8 @@ sleep 1
 
 echo "== [3/5] 启动 SFU/signal"
 REC="$(mktemp -d)"
-RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu" >/tmp/linux-native-sfu.log 2>&1 &
+# #535 排查：SFU debug 级日志（通道开/轨道增删/键帧请求转发路径）。
+RECORD_DIR="$REC" RUST_LOG=debug "$ROOT/target/debug/aerodesk-sfu" >/tmp/linux-native-sfu.log 2>&1 &
 SFU=$!
 "$ROOT/target/debug/aerodesk-signal" >/tmp/linux-native-sig.log 2>&1 &
 SIG=$!
@@ -31,17 +32,19 @@ done
 if [ "$OK" != "1" ]; then echo "FAIL: SFU/signal 未就绪"; tail -10 /tmp/linux-native-sfu.log; exit 1; fi
 
 echo "== [4/5] 原生 Linux 被控端发布（X11 采集 → 编码 → SFU）"
-DISPLAY=:98 RUST_LOG=info "$ROOT/target/debug/aerodesk-agent" \
+# #535 排查：publisher 亦开 debug——键帧请求（FIR）接收与编码器响应路径可见。
+DISPLAY=:98 RUST_LOG=debug "$ROOT/target/debug/aerodesk-agent" \
   --role publisher --encoder screen --signal ws://127.0.0.1:3003 --room "$ROOM" \
   >/tmp/linux-native-pub.log 2>&1 &
 PUB=$!
 sleep 3
 
 echo "== [5/5] CLI viewer 收流断言"
-"$ROOT/target/debug/aerodesk-agent" --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" \
+# #535 排查：viewer debug 级日志（ICE/DTLS/SCTP/DCEP 通道开、FIR 发送、组装器）。
+RUST_LOG=debug "$ROOT/target/debug/aerodesk-agent" --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" \
   >/tmp/linux-native-view.log 2>&1 &
 VIEW=$!
-python3 - <<'PY'
+python3 - <<'PY' || RC=$?
 import time, sys
 ok = False
 for i in range(60):  # 最多 60s
@@ -59,22 +62,27 @@ for i in range(60):  # 最多 60s
         break
     time.sleep(1)
 if not ok:
-    print("FAIL: 60s 内未收到帧；viewer 日志尾：")
-    print(open('/tmp/linux-native-view.log', errors='replace').read()[-1500:])
-    # 断症辅助（#535 排查）：发布端/SFU 日志一并导出——零视频是发布侧断流
-    # 还是 SFU 转发丢包，必须能看到这两侧，不能只看 viewer。
-    try:
-        print("--- publisher 日志尾 ---")
-        print(open('/tmp/linux-native-pub.log', errors='replace').read()[-1500:])
-    except OSError as e:
-        print(f"（pub.log 不可读: {e}）")
-    try:
-        print("--- sfu 日志尾 ---")
-        print(open('/tmp/linux-native-sfu.log', errors='replace').read()[-800:])
-    except OSError as e:
-        print(f"（sfu.log 不可读: {e}）")
+    print("E2E-FAIL: 60s 内未收到帧")
     sys.exit(1)
 PY
+if [ "${RC:-0}" != "0" ]; then
+  set +e  # dump 块内 grep 无匹配（exit 1）不应中断
+  echo "=== [dump/viewer] 启动段（ICE/DTLS/SCTP/DCEP） ==="
+  head -80 /tmp/linux-native-view.log
+  echo "=== [dump/viewer] 关键事件（去 PPS 噪声） ==="
+  grep -avE 'non-existing PPS|decode_slice_header error|no frame' /tmp/linux-native-view.log | tail -200
+  echo "=== [dump/viewer] PPS 噪声行数 ==="
+  grep -ac 'non-existing PPS' /tmp/linux-native-view.log
+  echo "=== [dump/pub] 启动段（编码器初始化） ==="
+  head -60 /tmp/linux-native-pub.log
+  echo "=== [dump/pub] 键帧/通道事件（去输入噪声） ==="
+  grep -aE 'Keyframe|keyframe|ChannelOpen|channel|encode|frame' /tmp/linux-native-pub.log | grep -avE 'input: seq|inject: seq' | tail -120
+  echo "=== [dump/sfu] 通道/轨道/键帧/背压事件 ==="
+  grep -aE 'Client|channel|Channel|track|Track|negotiat|Keyframe|keyframe|signal_ready|背压' /tmp/linux-native-sfu.log | tail -150
+  echo "=== [dump/signal] 日志尾 ==="
+  tail -30 /tmp/linux-native-sig.log
+  exit 1
+fi
 
 # #75 Linux 被控端真实光标（X11 QueryPointer → cursor 通道）：viewer 应打印 CURSOR。
 echo "== [5b/5] 断言远程光标到达（CURSOR 日志）"
