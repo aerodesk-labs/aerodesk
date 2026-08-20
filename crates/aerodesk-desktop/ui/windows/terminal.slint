@@ -1,0 +1,73 @@
+// AeroDesk 桌面 UI —— 视觉对齐 RustDesk 官方 Flutter 客户端（浅色 Material 主题）。
+// 配色取自 rustdesk/flutter/lib/common.dart：
+//   grayBg #EFEFF2 / accent #0071FF / 主区白底，正文 black87 #212121
+// 2026-08 拆分：本文件仅聚合入口，组件见 structs/common/tray/app_window/windows/*。
+import { ProgressIndicator, ScrollView } from "std-widgets.slint";
+import { RdButton, RdInput } from "../common.slint";
+export component TerminalWindow inherits Window {
+    in-out property <string> status: "未连接会话";
+    in-out property <string> command: "";
+    in-out property <string> output: "";
+
+    callback send-command(string);
+    callback clear-output();
+
+    title: "AeroDesk 终端";
+    width: 720px;
+    height: 520px;
+    Rectangle {
+        background: #1e1e1e;
+        VerticalLayout {
+            padding-left: 14px;
+            padding-right: 14px;
+            padding-top: 12px;
+            padding-bottom: 12px;
+            spacing: 8px;
+
+            Rectangle {
+                vertical-stretch: 1;
+                background: #111111;
+                border-radius: 8px;
+                ScrollView {
+                    vertical-stretch: 1;
+                    Text {
+                        text: root.output;
+                        color: #e6e6e6;
+                        font-size: 13px;
+                        horizontal-stretch: 1;
+                        vertical-stretch: 1;
+                    }
+                }
+            }
+
+            Text {
+                text: root.status;
+                color: #9a9aa0;
+                font-size: 13px;
+                vertical-stretch: 0;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                RdInput {
+                    text <=> root.command;
+                    placeholder: "输入命令后回车";
+                    font-size: 14px;
+                    horizontal-stretch: 1;
+                    accepted => { root.send-command(root.command); }
+                }
+                RdButton {
+                    text: "发送";
+                    primary: true;
+                    width: 72px;
+                    clicked => { root.send-command(root.command); }
+                }
+                RdButton {
+                    text: "清空";
+                    width: 72px;
+                    clicked => { root.clear-output(); }
+                }
+            }
+        }
+    }
+}

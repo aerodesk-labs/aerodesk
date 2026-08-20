@@ -1,0 +1,69 @@
+// AeroDesk 桌面 UI —— 视觉对齐 RustDesk 官方 Flutter 客户端（浅色 Material 主题）。
+// 配色取自 rustdesk/flutter/lib/common.dart：
+//   grayBg #EFEFF2 / accent #0071FF / 主区白底，正文 black87 #212121
+// 2026-08 拆分：本文件仅聚合入口，组件见 structs/common/tray/app_window/windows/*。
+import { ProgressIndicator, ScrollView } from "std-widgets.slint";
+import { RdButton } from "../common.slint";
+export component ViewWindow inherits Window {
+    in-out property <image> video-frame: @image-url("");
+    in-out property <float> frame-w: 0;
+    in-out property <float> frame-h: 0;
+    in-out property <string> status: "连接中…";
+    in-out property <string> stats: "";
+
+    title: "AeroDesk 观看";
+    width: 1000px;
+    height: 680px;
+
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            background: #000000;
+            vertical-stretch: 1;
+            Image {
+                source: root.video-frame;
+                width: 100%;
+                height: 100%;
+                image-fit: contain;
+            }
+            if root.video-frame.width == 0: Text {
+                text: "等待媒体流…（对方上线/接通后自动播放）";
+                color: #888888;
+                font-size: 14px;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+                width: 100%;
+                height: 100%;
+            }
+            Text {
+                x: 12px;
+                y: 12px;
+                text: root.status;
+                color: #34a853;
+                font-size: 14px;
+            }
+        }
+        Rectangle {
+            height: 28px;
+            background: #ffffff;
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                Text {
+                    text: root.status;
+                    color: #7d7d84;
+                    font-size: 14px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.stats;
+                    color: #7d7d84;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                }
+            }
+        }
+    }
+}
+
