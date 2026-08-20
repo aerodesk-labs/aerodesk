@@ -90,10 +90,10 @@ pub trait Renderer {
     fn render(&mut self, frame: &VideoFrame) -> Result<(), Self::Error>;
 }
 
-/// 输入注入器（被控端；观看端捕获事件则相反，见 aerodesk-protocol::input）。
+/// 输入注入器（被控端；观看端捕获事件则相反，见 crate::protocol::input）。
 pub trait InputInjector {
     type Error: std::fmt::Display + std::fmt::Debug;
-    fn inject(&mut self, event: &aerodesk_protocol::input::InputEvent) -> Result<(), Self::Error>;
+    fn inject(&mut self, event: &crate::protocol::input::InputEvent) -> Result<(), Self::Error>;
     /// 设置输入注入的坐标基准显示器（多显示器切换时由宿主调用）。
     fn set_active_display(&mut self, _display_id: Option<u32>) {}
 }
@@ -212,7 +212,7 @@ pub trait CommandExecutor {
     /// 写文件（`data` 为原始字节）。
     fn write_file(&self, path: &str, data: &[u8]) -> Result<(), String>;
     /// 列出进程（平台格式差异收敛于此）。
-    fn list_processes(&self) -> Result<Vec<aerodesk_protocol::cmd::ProcessInfo>, String>;
+    fn list_processes(&self) -> Result<Vec<crate::protocol::cmd::ProcessInfo>, String>;
     /// 结束进程。
     fn kill_process(&self, pid: u32) -> Result<(), String>;
 }
@@ -248,7 +248,7 @@ impl SystemWakeLock for NoopSystemWakeLock {
 struct NoopWakeGuard;
 impl WakeGuard for NoopWakeGuard {}
 
-/// 便捷 re-export：`use aerodesk_core::platform::*` 同时拿到 Codec/EncodedUnit。
+/// 便捷 re-export：`use crate::platform::*` 同时拿到 Codec/EncodedUnit。
 pub use crate::media_pipeline::{Codec, EncodedUnit};
 
 #[cfg(test)]
@@ -272,7 +272,7 @@ mod tests {
         type Error = String;
         fn inject(
             &mut self,
-            _event: &aerodesk_protocol::input::InputEvent,
+            _event: &crate::protocol::input::InputEvent,
         ) -> Result<(), Self::Error> {
             Ok(())
         }

@@ -6,9 +6,9 @@ use std::net::UdpSocket;
 use std::time::Duration;
 
 use crate::media_socket::MediaSocket;
+use crate::protocol::signal::Role;
 use crate::signaling::WsSignalClient;
 use crate::turn_client::setup_turn;
-use aerodesk_protocol::signal::Role;
 use str0m::net::Protocol;
 
 use crate::media_pipeline::Codec;

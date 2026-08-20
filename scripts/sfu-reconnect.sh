@@ -21,7 +21,7 @@ EXPECTED_CLIENTS=$((ROOMS * PAIRS * 2))
 fail() { echo "FAIL: $*"; exit 1; }
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 REC="$(mktemp -d)"
 
 if [ "$TURN_RELAY" = "1" ]; then
@@ -69,11 +69,11 @@ for c in $(seq 1 "$CYCLES"); do
   for r in $(seq 1 "$ROOMS"); do
     for p in $(seq 1 "$PAIRS"); do
       room="rc-r${r}"
-      "$TARGET_DIR/aerodesk-cli" --role publisher --signal ws://127.0.0.1:14503 --room "$room" \
+      "$TARGET_DIR/aerodesk-agent" --role publisher --signal ws://127.0.0.1:14503 --room "$room" \
         --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
         >"/tmp/load-pub-${r}-${p}.log" 2>&1 &
       pids+=($!)
-      "$TARGET_DIR/aerodesk-cli" --role viewer --signal ws://127.0.0.1:14503 --room "$room" \
+      "$TARGET_DIR/aerodesk-agent" --role viewer --signal ws://127.0.0.1:14503 --room "$room" \
         >"/tmp/load-view-${r}-${p}.log" 2>&1 &
       pids+=($!)
     done

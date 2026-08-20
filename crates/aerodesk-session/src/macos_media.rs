@@ -15,9 +15,9 @@ use aerodesk_core::access_unit::AccessUnitAssembler;
 use aerodesk_core::connect::connect_live_role_with_camera;
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media_pipeline::Codec;
+use aerodesk_core::protocol::cmd::CmdRequest;
+use aerodesk_core::protocol::signal::Role;
 use aerodesk_platform::macos::decode::{H264Decoder, HevcDecoder, to_rgba};
-use aerodesk_protocol::cmd::CmdRequest;
-use aerodesk_protocol::signal::Role;
 use str0m::net::Protocol;
 
 use crate::{FileCmd, SessionUi};
@@ -439,7 +439,7 @@ pub fn run_viewer<U, PF>(
             if let ClientEvent::ChannelData(cid, _, data) = &ev
                 && live.endpoint.channel_label(*cid).as_deref() == Some("cmd")
                 && let Ok(response) =
-                    serde_json::from_slice::<aerodesk_protocol::cmd::CmdResponse>(data)
+                    serde_json::from_slice::<aerodesk_core::protocol::cmd::CmdResponse>(data)
             {
                 ui.append_terminal_output(crate::generic_viewer::format_cmd_response(&response));
             }
@@ -637,7 +637,7 @@ pub fn run_viewer<U, PF>(
                     if live.endpoint.channel_label(cid).as_deref() == Some("cursor") =>
                 {
                     if let Ok(pos) =
-                        serde_json::from_slice::<aerodesk_protocol::cursor::CursorPos>(&data)
+                        serde_json::from_slice::<aerodesk_core::protocol::cursor::CursorPos>(&data)
                     {
                         // 光标按会话保存；仅活动会话同步到 UI（切换会话后恢复各自光标）。
                         ui.set_remote_cursor(pos.x as f32, pos.y as f32);

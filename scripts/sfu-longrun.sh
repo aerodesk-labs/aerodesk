@@ -27,7 +27,7 @@ if [ "$TURN_RELAY" = "1" ] && [ "$RUN_SECONDS" -lt 660 ]; then
 fi
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 REC="$(mktemp -d)"
 
 # 直连/TURN 环境与启动（与 sfu-capacity-bench.sh 一致；#218 已修 TURN_URLS 只给 signal）
@@ -122,7 +122,7 @@ WATCH=$!
 
 echo "== 施压: ${ROOMS} 房间 × ${PAIRS} 对 @ ${W}x${H}/${FPS}fps ${BITRATE}bps，时长 ${RUN_SECONDS}s"
 rm -f /tmp/load-pub-*.log /tmp/load-view-*.log /tmp/longrun-watchdog.log 2>/dev/null || true
-SIGNAL=ws://127.0.0.1:14503 BIN="$TARGET_DIR/aerodesk-cli" BITRATE="$BITRATE" NOISY=1 \
+SIGNAL=ws://127.0.0.1:14503 BIN="$TARGET_DIR/aerodesk-agent" BITRATE="$BITRATE" NOISY=1 \
   ./scripts/loadtest.sh "$ROOMS" "$PAIRS" "$RUN_SECONDS" "$W" "$H" "$FPS" || true
 
 # 看门狗结果

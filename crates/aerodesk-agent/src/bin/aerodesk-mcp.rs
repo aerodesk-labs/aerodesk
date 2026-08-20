@@ -2,11 +2,11 @@
 //!
 //! 通过 stdio（newline-delimited JSON-RPC 2.0）暴露 MCP 协议：
 //! `initialize` / `tools/list` / `tools/call` / `ping`。
-//! 工具经本地 `aerodesk-cli` 桥接（`--cmd-json`）操作远程被控设备：
+//! 工具经本地 `aerodesk-agent` 桥接（`--cmd-json`）操作远程被控设备：
 //! connect / run_command / read_file / write_file / list_processes / kill_process。
 //!
 //! 配置环境变量：AERODESK_SIGNAL（默认 ws://127.0.0.1:3003）、AERODESK_ROOM（默认 demo）、
-//! AERODESK_CLI_BIN（默认 aerodesk-cli，需在 PATH 或指向 target/debug/aerodesk-cli）。
+//! AERODESK_AGENT_BIN（默认 aerodesk-agent，需在 PATH 或指向 target/debug/aerodesk-agent）。
 
 use std::io::{BufRead, Write};
 use std::process::Command;
@@ -26,7 +26,7 @@ fn main() {
     let state = State {
         signal: std::env::var("AERODESK_SIGNAL").unwrap_or_else(|_| "ws://127.0.0.1:3003".into()),
         room: std::env::var("AERODESK_ROOM").unwrap_or_else(|_| "demo".into()),
-        cli_bin: std::env::var("AERODESK_CLI_BIN").unwrap_or_else(|_| "aerodesk-cli".into()),
+        cli_bin: std::env::var("AERODESK_AGENT_BIN").unwrap_or_else(|_| "aerodesk-agent".into()),
     };
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -199,7 +199,7 @@ fn tool_definitions() -> Vec<Value> {
     ]
 }
 
-/// 构造 aerodesk-cli 控制端参数（单元测试覆盖）。
+/// 构造 aerodesk-agent 控制端参数（单元测试覆盖）。
 fn build_args(state: &State, name: &str, args: &Value) -> Result<Vec<String>, String> {
     let mut cmd = vec![
         "--role".into(),
@@ -309,12 +309,13 @@ fn call_tool(params: &Value, state: &State) -> Value {
     let output = match Command::new(&state.cli_bin).args(&cmd_args).output() {
         Ok(o) => o,
         Err(e) => {
-            return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":format!("启动 aerodesk-cli 失败: {e}（AERODESK_CLI_BIN={}）", state.cli_bin)}],"isError":true}});
+            return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":format!("启动 aerodesk-agent 失败: {e}（AERODESK_AGENT_BIN={}）", state.cli_bin)}],"isError":true}});
         }
     };
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let trimmed = stdout.trim();
-    let Ok(resp) = serde_json::from_str::<aerodesk_protocol::cmd::CmdResponse>(trimmed) else {
+    let Ok(resp) = serde_json::from_str::<aerodesk_core::protocol::cmd::CmdResponse>(trimmed)
+    else {
         let tail: String = stdout.chars().take(500).collect();
         return json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":format!("CLI 输出非 JSON（可能连接失败）: {tail}")}],"isError":true}});
     };
@@ -424,7 +425,7 @@ fn sha256_hex(data: &[u8]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// 运行 aerodesk-cli 并等待退出（超时 kill，返回 None = 超时）。
+/// 运行 aerodesk-agent 并等待退出（超时 kill，返回 None = 超时）。
 fn run_cli_timeout(
     args: &[&str],
     timeout: std::time::Duration,
@@ -512,8 +513,8 @@ fn call_mouse_tool(id: Option<Value>, name: &str, args: &Value, state: &State) -
 }
 
 /// 把 CmdResponse 格式化为文本（MCP 返回给 agent）。
-fn format_result(resp: &aerodesk_protocol::cmd::CmdResponse) -> (String, bool) {
-    use aerodesk_protocol::cmd::CmdResult;
+fn format_result(resp: &aerodesk_core::protocol::cmd::CmdResponse) -> (String, bool) {
+    use aerodesk_core::protocol::cmd::CmdResult;
     match &resp.result {
         CmdResult::Run {
             exit_code,
@@ -541,7 +542,7 @@ fn format_result(resp: &aerodesk_protocol::cmd::CmdResponse) -> (String, bool) {
             if let Some(e) = error {
                 (format!("error: {e}"), false)
             } else if let Some(b64) = data {
-                match aerodesk_protocol::cmd::decode_b64(b64) {
+                match aerodesk_core::protocol::cmd::decode_b64(b64) {
                     Some(bytes) => (
                         format!("size={size}\n{}", String::from_utf8_lossy(&bytes)),
                         true,
@@ -578,13 +579,13 @@ fn format_result(resp: &aerodesk_protocol::cmd::CmdResponse) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aerodesk_protocol::cmd::{CmdResponse, CmdResult, ProcessInfo};
+    use aerodesk_core::protocol::cmd::{CmdResponse, CmdResult, ProcessInfo};
 
     fn state() -> State {
         State {
             signal: "ws://127.0.0.1:3003".into(),
             room: "demo".into(),
-            cli_bin: "aerodesk-cli".into(),
+            cli_bin: "aerodesk-agent".into(),
         }
     }
 
@@ -639,7 +640,7 @@ mod tests {
         let f = CmdResponse {
             id: 1,
             result: CmdResult::File {
-                data: Some(aerodesk_protocol::cmd::encode_b64(b"hello")),
+                data: Some(aerodesk_core::protocol::cmd::encode_b64(b"hello")),
                 size: 5,
                 error: None,
             },

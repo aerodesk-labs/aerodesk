@@ -5,7 +5,7 @@
 param(
   [Parameter(Mandatory=$true)][string]$MacId,      # Mac 端左栏 ID（房间名）
   [string]$Token = "",                             # 信令 JWT（开启鉴权时必填）
-  [string]$Bin = "target\debug\aerodesk-cli.exe",  # cli 路径
+  [string]$Bin = "target\debug\aerodesk-agent.exe",  # cli 路径
   [string]$Sfu  = "target\debug\aerodesk-sfu.exe",
   [string]$Sig  = "target\debug\aerodesk-signal.exe",
   [int]$TimeoutSec = 60                            # 收帧等待窗口

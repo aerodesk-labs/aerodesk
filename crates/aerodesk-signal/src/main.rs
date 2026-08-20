@@ -54,8 +54,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use aerodesk_protocol::jwt::Claims;
-use aerodesk_protocol::signal::{PeerInfo, Role, SignalMessage, TurnConfig};
+use aerodesk_core::protocol::jwt::Claims;
+use aerodesk_core::protocol::signal::{PeerInfo, Role, SignalMessage, TurnConfig};
 use bridge::{BridgeManager, BridgeOutcome};
 use pop_registry::PopRegistry;
 use rouille::websocket::{self, Message, Websocket};
@@ -468,9 +468,9 @@ fn bind_wss_with_retry(
 /// SIGHUP：重读 TLS 身份并重建 WSS server（旧连接不受影响；同证书 no-op）。
 fn reload_tls(
     server: &mut Option<rouille::Server<fn(&Request) -> Response>>,
-    tls: &mut aerodesk_protocol::tls::TlsIdentity,
+    tls: &mut aerodesk_core::protocol::tls::TlsIdentity,
 ) {
-    match aerodesk_protocol::tls::TlsIdentity::load() {
+    match aerodesk_core::protocol::tls::TlsIdentity::load() {
         Ok(new_tls) => {
             if new_tls.cert == tls.cert && new_tls.key == tls.key {
                 info!(
@@ -545,8 +545,12 @@ fn sfu_for_room(pool: &[String], room: &str) -> usize {
 fn fresh_turn(config: &Config) -> Option<TurnConfig> {
     let urls = config.turn.as_ref()?.urls.clone();
     let secret = config.turn_secret.as_deref()?;
-    let creds =
-        aerodesk_protocol::turn::generate_turn_credentials(secret, "aerodesk", 3600, unix_secs());
+    let creds = aerodesk_core::protocol::turn::generate_turn_credentials(
+        secret,
+        "aerodesk",
+        3600,
+        unix_secs(),
+    );
     Some(TurnConfig {
         urls,
         username: creds.username,
@@ -596,7 +600,7 @@ fn main() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3001);
-    let tls = aerodesk_protocol::tls::TlsIdentity::load().unwrap_or_else(|e| {
+    let tls = aerodesk_core::protocol::tls::TlsIdentity::load().unwrap_or_else(|e| {
         eprintln!("fatal: TLS identity load failed: {e}");
         std::process::exit(1);
     });
@@ -814,8 +818,9 @@ fn load_config() -> Config {
             .duration_since(UNIX_EPOCH)
             .expect("system time")
             .as_secs();
-        let creds =
-            aerodesk_protocol::turn::generate_turn_credentials(&secret, "aerodesk", 3600, now);
+        let creds = aerodesk_core::protocol::turn::generate_turn_credentials(
+            &secret, "aerodesk", 3600, now,
+        );
         TurnConfig {
             urls,
             username: creds.username,
@@ -985,7 +990,7 @@ fn auth_result(config: &Config, token: Option<&str>, room: &str, role: Role) -> 
     let token = token.unwrap_or_default();
     if let Some(secret) = &config.jwt_secret {
         // JWT 认证：校验签名/过期/房间/角色。
-        match aerodesk_protocol::jwt::validate_token(secret, token, room, role) {
+        match aerodesk_core::protocol::jwt::validate_token(secret, token, room, role) {
             Ok(claims) => {
                 info!(
                     "jwt auth ok: user={} dev={:?} room={} role={:?}",
@@ -995,7 +1000,7 @@ fn auth_result(config: &Config, token: Option<&str>, room: &str, role: Role) -> 
             }
             Err(new_err) => {
                 if let Some(old) = &config.jwt_secret_old {
-                    match aerodesk_protocol::jwt::validate_token(old, token, room, role) {
+                    match aerodesk_core::protocol::jwt::validate_token(old, token, room, role) {
                         Ok(claims) => {
                             info!(
                                 "jwt auth ok (legacy secret): user={} dev={:?} room={} role={:?}",
@@ -1825,7 +1830,7 @@ fn fastrand_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aerodesk_protocol::jwt::mint_token;
+    use aerodesk_core::protocol::jwt::mint_token;
 
     fn cfg(new: &str, old: Option<&str>) -> Config {
         Config {

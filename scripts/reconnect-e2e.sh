@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 REC="$(mktemp -d)"
 SFU_TOK="rec-token"
@@ -46,10 +46,10 @@ echo "== Phase A：中途断线自动重连"
 start_sfu; start_signal
 wait_port 14502 && wait_port 14503 || { echo "FAIL A: 服务未就绪"; exit 1; }
 ROOM="rec-$(date +%s)"
-./target/debug/aerodesk-cli --role publisher --encoder x264 --noisy \
+./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
     --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/rec-pub.log 2>&1 &
 PUB=$!
-./target/debug/aerodesk-cli --role viewer --reconnect --reconnect-max 5 \
+./target/debug/aerodesk-agent --role viewer --reconnect --reconnect-max 5 \
     --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/rec-view.log 2>&1 &
 VIEW=$!
 FRAMES=0
@@ -69,7 +69,7 @@ sleep 3
 start_sfu; start_signal
 wait_port 14502 && wait_port 14503 || { echo "FAIL A: 重启后服务未就绪"; fail=1; }
 # 重启 publisher（SFU 重启后旧发布端已失效）
-./target/debug/aerodesk-cli --role publisher --encoder x264 --noisy \
+./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
     --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/rec-pub2.log 2>&1 &
 PUB2=$!
 RECON=0
@@ -97,13 +97,13 @@ echo "== Phase B：启动重试（signal 后起）"
 start_sfu
 wait_port 14502
 ROOM2="rec-b-$(date +%s)"
-./target/debug/aerodesk-cli --role viewer --reconnect --reconnect-max 8 \
+./target/debug/aerodesk-agent --role viewer --reconnect --reconnect-max 8 \
     --signal ws://127.0.0.1:14503 --room "$ROOM2" >/tmp/recb-view.log 2>&1 &
 VIEWB=$!
 sleep 2
 start_signal
 wait_port 14503
-./target/debug/aerodesk-cli --role publisher --encoder x264 --noisy \
+./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
     --signal ws://127.0.0.1:14503 --room "$ROOM2" >/tmp/recb-pub.log 2>&1 &
 PUBB=$!
 OK=0

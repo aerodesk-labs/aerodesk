@@ -2,7 +2,7 @@
 //!
 //! 发布端：屏幕帧 → 编码 → str0m writer → RTP
 //! 观看端：RTP → str0m 解包 → 解码 → 渲染
-//! 输入：aerodesk-protocol::input 帧经数据通道收发。
+//! 输入：aerodesk_core::protocol::input 帧经数据通道收发。
 //!
 //! P2 填充 str0m `Rtc` 事件循环封装（Sans-I/O：由平台适配层驱动 I/O）。
 

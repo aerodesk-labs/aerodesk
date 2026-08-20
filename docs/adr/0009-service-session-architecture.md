@@ -11,7 +11,7 @@
 
 1. **aerodesk-desktop 承载 UI 与全部会话引擎**：主控 viewer（`generic_media`/`macos_media`）与被控 publisher（`generic_publisher`）都以线程跑在 UI 进程内，UI 直接持有 str0m endpoint 与媒体 socket。
 2. **aerodesk-host 只有被控服务面**（#470 M2/M3）：SYSTEM 常驻 presence + WTS 会话仲裁 + 登录后拉起 desktop 让位；登录界面/安全桌面出流由 #471 在建。
-3. **aerodesk-cli 独立复用 aerodesk-core 引擎**跑通全媒体链路——证明引擎层可脱离 UI 进程复用。
+3. **aerodesk-agent 独立复用 aerodesk-core 引擎**跑通全媒体链路——证明引擎层可脱离 UI 进程复用。
 
 痛点：
 

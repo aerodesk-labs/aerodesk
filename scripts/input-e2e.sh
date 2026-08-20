@@ -9,7 +9,7 @@ ROOM="${1:-input-$(date +%s)}"
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 REC="$(mktemp -d)"
 echo "== 启动 sfu/signal"
@@ -27,11 +27,11 @@ done
 sleep 0.3
 
 echo "== 启动 publisher + viewer"
-./target/debug/aerodesk-cli --role publisher --encoder x264 \
+./target/debug/aerodesk-agent --role publisher --encoder x264 \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/input-pub.log 2>&1 &
 PUB_PID=$!
 # --input-script：#75 脚本化轮换发送全部事件类型（MouseMove/Button/Wheel/Key+修饰键）。
-./target/debug/aerodesk-cli --role viewer --input-script \
+./target/debug/aerodesk-agent --role viewer --input-script \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/input-view.log 2>&1 &
 VIEW_PID=$!
 # 等待输入链路完成首轮事件轮换（Key 出现即 Move/Button/Wheel 均已发出，

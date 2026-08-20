@@ -321,9 +321,9 @@ impl Endpoint {
         let _ = change.add_channel("input".into());
         // #29 画质/显示切换：观看端 → SFU 的控制通道（选层请求等）。
         let _ = change.add_channel("control".into());
-        // #72 文件传输：双向 data channel（FileMeta/Chunk/Done，见 aerodesk-protocol::file）。
+        // #72 文件传输：双向 data channel（FileMeta/Chunk/Done，见 aerodesk_core::protocol::file）。
         let _ = change.add_channel("file".into());
-        // #75 远程光标：被控端 → 观看端（CursorPos JSON，见 aerodesk-protocol::cursor）。
+        // #75 远程光标：被控端 → 观看端（CursorPos JSON，见 aerodesk_core::protocol::cursor）。
         let _ = change.add_channel("cursor".into());
         // #109 远程命令：控制端 → 被控端（CmdRequest/CmdResponse，见 cmd.rs）。
         let _ = change.add_channel("cmd".into());

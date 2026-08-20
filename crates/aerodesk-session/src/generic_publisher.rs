@@ -84,9 +84,9 @@ mod imp {
     use aerodesk_core::platform::{
         CursorSource, Encoder, InputInjector, MediaSource, SystemWakeLock,
     };
-    use aerodesk_protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult};
-    use aerodesk_protocol::input::{InputEvent, InputFrame};
-    use aerodesk_protocol::signal::Role;
+    use aerodesk_core::protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult};
+    use aerodesk_core::protocol::input::{InputEvent, InputFrame};
+    use aerodesk_core::protocol::signal::Role;
     use str0m::Output;
     use str0m::media::{Frequency, MediaTime};
     use str0m::net::Protocol;
@@ -324,7 +324,7 @@ mod imp {
             if connected && Instant::now() >= next_cursor {
                 next_cursor += Duration::from_millis(33);
                 if let Some((x, y)) = cursor_source.position_normalized() {
-                    let pos = aerodesk_protocol::cursor::CursorPos::new(
+                    let pos = aerodesk_core::protocol::cursor::CursorPos::new(
                         x.clamp(0.0, 1.0),
                         y.clamp(0.0, 1.0),
                     )

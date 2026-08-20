@@ -24,7 +24,7 @@ DRIFT_LIMIT=300
 fail() { echo "FAIL: $*"; exit 1; }
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 echo "mode     audio   result   video_decoded   audio_frames   played   drift_ms   errors"
 for MODE in "${MODES[@]}"; do
@@ -61,10 +61,10 @@ for AUDIO in "${AUDIOS[@]}"; do
   done
   sleep 0.3
 
-  "$TARGET_DIR/aerodesk-cli" --role publisher --signal ws://127.0.0.1:14503 --room "audio-${MODE}-${AUDIO}" \
+  "$TARGET_DIR/aerodesk-agent" --role publisher --signal ws://127.0.0.1:14503 --room "audio-${MODE}-${AUDIO}" \
     --encoder ffmpeg --codec h264 --noisy --audio $AUDIO_EXTRA >/tmp/audio-pub.log 2>&1 &
   PUB=$!
-  "$TARGET_DIR/aerodesk-cli" --role viewer --signal ws://127.0.0.1:14503 --room "audio-${MODE}-${AUDIO}" \
+  "$TARGET_DIR/aerodesk-agent" --role viewer --signal ws://127.0.0.1:14503 --room "audio-${MODE}-${AUDIO}" \
     >/tmp/audio-view.log 2>&1 &
   VIEW=$!
 

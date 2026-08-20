@@ -13,7 +13,7 @@ TOKEN="test-token"
 REC="$(mktemp -d)"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 echo "== 启动 sfu（按需录制，独立端口 1478/14000/14002）+ signal（14001/14003）"
 # 独立端口避免与本机其它 agent 的 sfu/signal 冲突（#146 SFU 端口可配）
@@ -49,7 +49,7 @@ echo "$BODY" | grep -q '^aerodesk_sfu_recordings_active 1$' \
   && echo "PASS recordings_active=1" || { echo "FAIL recordings_active"; exit 1; }
 
 echo "== publisher 推流 4s"
-./target/debug/aerodesk-cli --role publisher --encoder x264 --noisy \
+./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
     --signal ws://127.0.0.1:14003 --room "$ROOM" >/tmp/recapi-pub.log 2>&1 &
 PUB=$!
 sleep 4

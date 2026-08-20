@@ -19,10 +19,10 @@ export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建（${PROFILE}）"
 if [ "$PROFILE" = "release" ]; then
-    cargo build -q --release -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+    cargo build -q --release -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
     BIN=./target/release
 else
-    cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+    cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
     BIN=./target/debug
 fi
 
@@ -42,10 +42,10 @@ done
 sleep 0.3
 
 echo "== 启动 publisher（x264 + --audio）+ viewer（--audio），观察 ${SECS}s"
-"$BIN/aerodesk-cli" --role publisher --encoder x264 --audio \
+"$BIN/aerodesk-agent" --role publisher --encoder x264 --audio \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/av10-pub.log 2>&1 &
 PUB_PID=$!
-"$BIN/aerodesk-cli" --role viewer --audio \
+"$BIN/aerodesk-agent" --role viewer --audio \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/av10-view.log 2>&1 &
 VIEW_PID=$!
 sleep "$SECS"

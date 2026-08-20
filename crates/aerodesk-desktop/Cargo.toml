@@ -13,7 +13,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 str0m = { workspace = true, features = ["rust-crypto"] }
 aerodesk-core = { path = "../aerodesk-core" }
-aerodesk-protocol = { path = "../aerodesk-protocol" }
 # 桌面端侧只依赖平台实现层，不再直接引用分散的 aerodesk-{macos,windows,linux}。
 aerodesk-platform = { path = "../aerodesk-platform" }
 # #508 B1：会话编排层（viewer/publisher 引擎），UI 经 SessionUi 缝接线。

@@ -20,7 +20,7 @@ TURN_SECRET="${TURN_SECRET:-testsecret}"
 ROOM="turn-$(date +%s)"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli -p aerodesk-core
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent -p aerodesk-core
 TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}/debug"
 
 TURN_PID=""
@@ -160,7 +160,7 @@ if [ -z "${TURN_TLS_CA:-}" ]; then
     export TURN_TLS_CA="$PWD/certs/cer.pem"
 fi
 echo "== 3a) 发布端（TURN_PROTO=${TURN_PROTO}）：allocate + relayed 候选 + ICE"
-"$TARGET_DIR"/aerodesk-cli --role publisher --encoder x264 --noisy \
+"$TARGET_DIR"/aerodesk-agent --role publisher --encoder x264 --noisy \
   --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/turn-e2e-pub.log 2>&1 &
 PUB_PID=$!
 ok=1
@@ -182,7 +182,7 @@ else
 fi
 
 echo "== 3b) 观看端（TURN_PROTO=${TURN_PROTO}）：allocate + relayed 候选 + ICE"
-"$TARGET_DIR"/aerodesk-cli --role viewer --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/turn-e2e-view.log 2>&1 &
+"$TARGET_DIR"/aerodesk-agent --role viewer --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/turn-e2e-view.log 2>&1 &
 VIEW_PID=$!
 ok=1
 for _ in $(seq 1 60); do
@@ -199,7 +199,7 @@ else
 fi
 
 echo "== 3c) force-relay 观看端：只走 relayed 候选 + 媒体到达（#201）"
-AERODESK_FORCE_RELAY=1 "$TARGET_DIR"/aerodesk-cli --role viewer \
+AERODESK_FORCE_RELAY=1 "$TARGET_DIR"/aerodesk-agent --role viewer \
   --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/turn-e2e-view-fr.log 2>&1 &
 VIEW_FR_PID=$!
 ok=1

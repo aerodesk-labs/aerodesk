@@ -11,10 +11,10 @@ ROOM="${1:-cam-$(date +%s)}"
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 # 摄像头不可用/未授权 → SKIP（CI 机器无摄像头）。
-CAM_ID="$(./target/debug/aerodesk-cli --list-cameras 2>/dev/null | head -1 | awk '{print $1}')"
+CAM_ID="$(./target/debug/aerodesk-agent --list-cameras 2>/dev/null | head -1 | awk '{print $1}')"
 if [ -z "$CAM_ID" ]; then
     echo "SKIP: 无可用摄像头（CI 或未授权），跳过 camera-e2e"
     exit 0
@@ -36,7 +36,7 @@ done
 sleep 0.3
 
 echo "== 启动 publisher（screen + camera，h265）+ viewer"
-./target/debug/aerodesk-cli --role publisher --encoder screen --codec h265 --camera \
+./target/debug/aerodesk-agent --role publisher --encoder screen --codec h265 --camera \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/camera-pub.log 2>&1 &
 PUB_PID=$!
 sleep 4
@@ -45,7 +45,7 @@ if ! kill -0 "$PUB_PID" 2>/dev/null; then
     echo "SKIP: publisher 启动失败（可能无屏幕录制权限）"; tail -5 /tmp/camera-pub.log
     kill "$SFU_PID" "$SIG_PID" 2>/dev/null || true; wait 2>/dev/null || true; exit 0
 fi
-./target/debug/aerodesk-cli --role viewer --camera \
+./target/debug/aerodesk-agent --role viewer --camera \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/camera-view.log 2>&1 &
 VIEW_PID=$!
 sleep 18

@@ -10,7 +10,6 @@ rust-version.workspace = true
 aerodesk-core = { path = "../aerodesk-core" }
 aerodesk-codec = { path = "../aerodesk-codec" }
 aerodesk-platform = { path = "../aerodesk-platform" }
-aerodesk-protocol = { path = "../aerodesk-protocol" }
 str0m = { workspace = true, features = ["rust-crypto"] }
 serde.workspace = true
 serde_json.workspace = true

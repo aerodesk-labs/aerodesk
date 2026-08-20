@@ -41,36 +41,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "aerodesk-android"
-version = "0.1.0"
-dependencies = [
- "aerodesk-core",
- "aerodesk-platform",
- "jni 0.21.1",
- "slint",
- "slint-build",
-]
-
-[[package]]
-name = "aerodesk-bridge"
-version = "0.1.0"
-dependencies = [
- "aerodesk-core",
- "aerodesk-protocol",
- "serde_json",
- "str0m",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "aerodesk-cli"
+name = "aerodesk-agent"
 version = "0.1.0"
 dependencies = [
  "aerodesk-codec",
  "aerodesk-core",
  "aerodesk-platform",
- "aerodesk-protocol",
  "pcap-file",
  "png 0.17.16",
  "serde",
@@ -81,6 +57,17 @@ dependencies = [
  "tracing-subscriber",
  "tungstenite",
  "videotoolbox",
+]
+
+[[package]]
+name = "aerodesk-android"
+version = "0.1.0"
+dependencies = [
+ "aerodesk-core",
+ "aerodesk-platform",
+ "jni 0.21.1",
+ "slint",
+ "slint-build",
 ]
 
 [[package]]
@@ -99,10 +86,11 @@ dependencies = [
 name = "aerodesk-core"
 version = "0.1.0"
 dependencies = [
- "aerodesk-protocol",
  "arboard",
  "base64ct",
  "cpal",
+ "hmac",
+ "jsonwebtoken",
  "libc",
  "md-5",
  "pcap-file",
@@ -136,7 +124,6 @@ dependencies = [
  "aerodesk-codec",
  "aerodesk-core",
  "aerodesk-platform",
- "aerodesk-protocol",
  "aerodesk-session",
  "embed-resource",
  "getrandom 0.2.17",
@@ -160,7 +147,6 @@ version = "0.1.0"
 dependencies = [
  "aerodesk-core",
  "aerodesk-platform",
- "aerodesk-protocol",
  "serde",
  "serde_json",
  "tracing",
@@ -188,16 +174,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aerodesk-mcp"
-version = "0.1.0"
-dependencies = [
- "aerodesk-protocol",
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
 name = "aerodesk-ohos"
 version = "0.1.0"
 dependencies = [
@@ -210,7 +186,6 @@ version = "0.1.0"
 dependencies = [
  "aerodesk-codec",
  "aerodesk-core",
- "aerodesk-protocol",
  "apple-cf",
  "block2 0.6.2",
  "core-foundation 0.10.1",
@@ -247,26 +222,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "aerodesk-protocol"
-version = "0.1.0"
-dependencies = [
- "base64ct",
- "hmac",
- "jsonwebtoken",
- "md-5",
- "serde",
- "serde_json",
- "sha1 0.10.7",
-]
-
-[[package]]
 name = "aerodesk-session"
 version = "0.1.0"
 dependencies = [
  "aerodesk-codec",
  "aerodesk-core",
  "aerodesk-platform",
- "aerodesk-protocol",
  "serde",
  "serde_json",
  "str0m",
@@ -279,7 +240,6 @@ name = "aerodesk-sfu"
 version = "0.1.0"
 dependencies = [
  "aerodesk-core",
- "aerodesk-protocol",
  "ctrlc",
  "ipnet",
  "libc",
@@ -300,7 +260,7 @@ dependencies = [
 name = "aerodesk-signal"
 version = "0.1.0"
 dependencies = [
- "aerodesk-protocol",
+ "aerodesk-core",
  "libc",
  "rouille",
  "serde",

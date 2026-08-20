@@ -14,16 +14,16 @@ use aerodesk_core::access_unit::AccessUnitAssembler;
 use aerodesk_core::connect::connect_live_role;
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::platform::{Decoder, Renderer};
-use aerodesk_protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult};
-use aerodesk_protocol::signal::Role;
+use aerodesk_core::protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult};
+use aerodesk_core::protocol::signal::Role;
 use str0m::net::Protocol;
 
 use crate::SessionUi;
 
 /// 解析 cursor 通道的 `CursorPos`（#75；归一化 0..1 坐标 + 发送端墙钟，
 /// 观看端据此计算端到端单向延时）。
-fn cursor_pos(data: &[u8]) -> Option<aerodesk_protocol::cursor::CursorPos> {
-    serde_json::from_slice::<aerodesk_protocol::cursor::CursorPos>(data).ok()
+fn cursor_pos(data: &[u8]) -> Option<aerodesk_core::protocol::cursor::CursorPos> {
+    serde_json::from_slice::<aerodesk_core::protocol::cursor::CursorPos>(data).ok()
 }
 
 /// 把终端命令响应格式化为窗口可读文本（stdout/stderr/错误/截断提示）。
@@ -106,7 +106,7 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
     token: Option<String>,
     ui: U,
     input_rx: std::sync::mpsc::Receiver<String>,
-    cmd_rx: std::sync::mpsc::Receiver<aerodesk_protocol::cmd::CmdRequest>,
+    cmd_rx: std::sync::mpsc::Receiver<aerodesk_core::protocol::cmd::CmdRequest>,
     file_cmd_rx: std::sync::mpsc::Receiver<crate::FileCmd>,
     chat_cmd_rx: std::sync::mpsc::Receiver<crate::ChatCmd>,
     stop: Arc<AtomicBool>,

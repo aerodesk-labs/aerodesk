@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 # 独立 SFU：让已加入客户端保持连接（无 SFU 时 SDP 失败会立即断开释放名额，导致第 3 个被误接受）
 SFU_TOKEN="quota-token"
@@ -45,13 +45,13 @@ SIGNAL_PORT=14301 SIGNAL_PLAIN_PORT=14303 MAX_ROOM_CLIENTS=2 SFU_URL=http://127.
 SIGA=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 14303 2>/dev/null && break; sleep 0.2; done
 ROOM_A="quota-a-$(date +%s)"
-./target/debug/aerodesk-cli --role publisher --encoder x264 --noisy --signal ws://127.0.0.1:14303 --room "$ROOM_A" >/tmp/quota-a-pub.log 2>&1 &
+./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy --signal ws://127.0.0.1:14303 --room "$ROOM_A" >/tmp/quota-a-pub.log 2>&1 &
 PUB_A=$!
 wait_joined /tmp/quota-a-pub.log "$ROOM_A" || { echo "FAIL A: publisher 未加入"; tail -3 /tmp/quota-a-pub.log; fail=1; }
-./target/debug/aerodesk-cli --role viewer --signal ws://127.0.0.1:14303 --room "$ROOM_A" >/tmp/quota-a-v1.log 2>&1 &
+./target/debug/aerodesk-agent --role viewer --signal ws://127.0.0.1:14303 --room "$ROOM_A" >/tmp/quota-a-v1.log 2>&1 &
 V1=$!
 wait_joined /tmp/quota-a-v1.log "$ROOM_A" || { echo "FAIL A: viewer1 未加入"; tail -3 /tmp/quota-a-v1.log; fail=1; }
-./target/debug/aerodesk-cli --role viewer --signal ws://127.0.0.1:14303 --room "$ROOM_A" >/tmp/quota-a-v2.log 2>&1 || true
+./target/debug/aerodesk-agent --role viewer --signal ws://127.0.0.1:14303 --room "$ROOM_A" >/tmp/quota-a-v2.log 2>&1 || true
 V2=$!
 wait_rejected /tmp/quota-a-v2.log "room full" || { echo "FAIL A: 第 3 个未被拒"; tail -5 /tmp/quota-a-v2.log; fail=1; }
 kill $PUB_A $V1 $V2 2>/dev/null || true
@@ -72,13 +72,13 @@ SIGNAL_PORT=14401 SIGNAL_PLAIN_PORT=14403 MAX_TOTAL_CLIENTS=2 SFU_URL=http://127
 SIGB=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 14403 2>/dev/null && break; sleep 0.2; done
 RB1="quota-b1-$(date +%s)"; RB2="quota-b2-$(date +%s)"; RB3="quota-b3-$(date +%s)"
-./target/debug/aerodesk-cli --role publisher --encoder x264 --noisy --signal ws://127.0.0.1:14403 --room "$RB1" >/tmp/quota-b-p1.log 2>&1 &
+./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy --signal ws://127.0.0.1:14403 --room "$RB1" >/tmp/quota-b-p1.log 2>&1 &
 P1=$!
 wait_joined /tmp/quota-b-p1.log "$RB1" || { echo "FAIL B: p1 未加入"; tail -3 /tmp/quota-b-p1.log; fail=1; }
-./target/debug/aerodesk-cli --role viewer --signal ws://127.0.0.1:14403 --room "$RB2" >/tmp/quota-b-v.log 2>&1 &
+./target/debug/aerodesk-agent --role viewer --signal ws://127.0.0.1:14403 --room "$RB2" >/tmp/quota-b-v.log 2>&1 &
 V=$!
 wait_joined /tmp/quota-b-v.log "$RB2" || { echo "FAIL B: viewer 未加入"; tail -3 /tmp/quota-b-v.log; fail=1; }
-./target/debug/aerodesk-cli --role publisher --encoder x264 --noisy --signal ws://127.0.0.1:14403 --room "$RB3" >/tmp/quota-b-p2.log 2>&1 || true
+./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy --signal ws://127.0.0.1:14403 --room "$RB3" >/tmp/quota-b-p2.log 2>&1 || true
 P2=$!
 wait_rejected /tmp/quota-b-p2.log "server full" || { echo "FAIL B: 第 3 个未被拒"; tail -5 /tmp/quota-b-p2.log; fail=1; }
 kill $P1 $V $P2 2>/dev/null || true
@@ -99,11 +99,11 @@ SIGNAL_PORT=14701 SIGNAL_PLAIN_PORT=14703 JWT_SECRET=uq-secret \
 SIGC=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 14703 2>/dev/null && break; sleep 0.2; done
 RC="uc-$(date +%s)"
-TOK=$(JWT_SECRET=uq-secret ./target/debug/aerodesk-cli --issue-token --user u1 --room '*' --role '*' --ttl 600 --max-conns 1)
-./target/debug/aerodesk-cli --role viewer --token "$TOK" --signal ws://127.0.0.1:14703 --room "$RC" >/tmp/quota-c-v1.log 2>&1 &
+TOK=$(JWT_SECRET=uq-secret ./target/debug/aerodesk-agent --issue-token --user u1 --room '*' --role '*' --ttl 600 --max-conns 1)
+./target/debug/aerodesk-agent --role viewer --token "$TOK" --signal ws://127.0.0.1:14703 --room "$RC" >/tmp/quota-c-v1.log 2>&1 &
 C1=$!
 wait_joined /tmp/quota-c-v1.log "$RC" || { echo "FAIL C: client1 未加入"; tail -3 /tmp/quota-c-v1.log; fail=1; }
-./target/debug/aerodesk-cli --role viewer --token "$TOK" --signal ws://127.0.0.1:14703 --room "$RC" >/tmp/quota-c-v2.log 2>&1 || true
+./target/debug/aerodesk-agent --role viewer --token "$TOK" --signal ws://127.0.0.1:14703 --room "$RC" >/tmp/quota-c-v2.log 2>&1 || true
 C2=$!
 wait_rejected /tmp/quota-c-v2.log "user quota exceeded" || { echo "FAIL C: 同用户第 2 连接未被拒"; tail -5 /tmp/quota-c-v2.log; fail=1; }
 kill $C1 $C2 $SIGC 2>/dev/null || true

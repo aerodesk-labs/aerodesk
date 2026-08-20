@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::signal::Role;
+use super::signal::Role;
 
 /// 任意房间/角色通配符。
 pub const WILDCARD: &str = "*";

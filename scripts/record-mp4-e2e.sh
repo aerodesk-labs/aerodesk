@@ -12,7 +12,7 @@ REC="$(mktemp -d)"
 FAIL=0
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 echo "== 启动 sfu（录制）+ signal（独立端口）"
 RECORD_DIR="$REC" SFU_MEDIA_PORT=1478 SFU_SIGNAL_PORT=14000 SFU_INTERNAL_PORT=14002 \
@@ -33,7 +33,7 @@ check_codec() {
   # 每 codec 独立房间，避免包追加进同一 .adrec（混合 codec 干扰断言）。
   local room="rec-mp4-$codec-$(date +%s)"
   echo "=== codec=$codec room=$room"
-  ./target/debug/aerodesk-cli --role publisher --encoder ffmpeg --codec "$codec" \
+  ./target/debug/aerodesk-agent --role publisher --encoder ffmpeg --codec "$codec" \
     --signal ws://127.0.0.1:14003 --room "$room" >/tmp/recmp4-pub.log 2>&1 &
   local PUB=$!
   sleep 5

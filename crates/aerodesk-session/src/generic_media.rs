@@ -114,7 +114,7 @@ pub fn run_generic_viewer<U, R, RF>(
     token: Option<String>,
     ui: U,
     input_rx: std::sync::mpsc::Receiver<String>,
-    cmd_rx: std::sync::mpsc::Receiver<aerodesk_protocol::cmd::CmdRequest>,
+    cmd_rx: std::sync::mpsc::Receiver<aerodesk_core::protocol::cmd::CmdRequest>,
     file_cmd_rx: std::sync::mpsc::Receiver<crate::FileCmd>,
     chat_cmd_rx: std::sync::mpsc::Receiver<crate::ChatCmd>,
     stop: Arc<AtomicBool>,

@@ -16,7 +16,7 @@ export AERODESK_CMD_ALLOWLIST="/tmp/aerodesk-cmd-allow-$ROOM.txt"
 export AERODESK_CMD_AUDIT="/tmp/aerodesk-cmd-audit-$ROOM.jsonl"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 REC="$(mktemp -d)"
 echo "== 启动 sfu/signal"
@@ -34,7 +34,7 @@ done
 sleep 0.3
 
 echo "== 启动 publisher（被控端，x264）"
-./target/debug/aerodesk-cli --role publisher --encoder x264 \
+./target/debug/aerodesk-agent --role publisher --encoder x264 \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/cmd-pub.log 2>&1 &
 PUB_PID=$!
 sleep 2
@@ -45,7 +45,7 @@ fail=0
 run_case() {
   local name="$1" cmd="$2" log="$3"
   echo "== case: $name"
-  ./target/debug/aerodesk-cli --role viewer --run-command "$cmd" \
+  ./target/debug/aerodesk-agent --role viewer --run-command "$cmd" \
       --signal ws://127.0.0.1:3003 --room "$ROOM" >"$log" 2>&1 &
   local vpid=$!
   for _ in $(seq 1 60); do
@@ -84,7 +84,7 @@ DIR="/tmp/aerodesk-cmd-e2e-$ROOM"
 rm -rf "$DIR"; mkdir -p "$DIR"
 # 4) 写文件 + 读回
 echo "== case: write-file"
-./target/debug/aerodesk-cli --role viewer --write-file "$DIR/hello.txt" "hello-aerodesk-file" \
+./target/debug/aerodesk-agent --role viewer --write-file "$DIR/hello.txt" "hello-aerodesk-file" \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/cmd-view4.log 2>&1 &
 VPID=$!
 for _ in $(seq 1 60); do ! kill -0 "$VPID" 2>/dev/null && break; sleep 0.5; done
@@ -95,7 +95,7 @@ else
     echo "FAIL write-file"; tail -5 /tmp/cmd-view4.log; fail=1
 fi
 echo "== case: read-file"
-./target/debug/aerodesk-cli --role viewer --read-file "$DIR/hello.txt" \
+./target/debug/aerodesk-agent --role viewer --read-file "$DIR/hello.txt" \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/cmd-view5.log 2>&1 &
 VPID=$!
 for _ in $(seq 1 60); do ! kill -0 "$VPID" 2>/dev/null && break; sleep 0.5; done
@@ -107,7 +107,7 @@ else
 fi
 # 5) 进程列表
 echo "== case: list-processes"
-./target/debug/aerodesk-cli --role viewer --list-processes \
+./target/debug/aerodesk-agent --role viewer --list-processes \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/cmd-view6.log 2>&1 &
 VPID=$!
 for _ in $(seq 1 60); do ! kill -0 "$VPID" 2>/dev/null && break; sleep 0.5; done
@@ -127,7 +127,7 @@ PID=$(cat "$DIR/pid" 2>/dev/null || true)
 if [ -z "$PID" ]; then echo "FAIL kill-spawn: 未拿到 pid"; fail=1; fi
 if [ -n "$PID" ]; then
     # 用 --kill-pid 走协议层结束后台 sleep
-    ./target/debug/aerodesk-cli --role viewer --kill-pid "$PID" \
+    ./target/debug/aerodesk-agent --role viewer --kill-pid "$PID" \
         --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/cmd-view9.log 2>&1 &
     VPID=$!
     for _ in $(seq 1 60); do ! kill -0 "$VPID" 2>/dev/null && break; sleep 0.5; done
@@ -147,7 +147,7 @@ fi
 
 # 7) 审计查询：此前已执行多条命令，--cmd-audit 应能查到。
 echo "== case: audit"
-./target/debug/aerodesk-cli --cmd-audit 50 >/tmp/cmd-audit.log 2>&1 || true
+./target/debug/aerodesk-agent --cmd-audit 50 >/tmp/cmd-audit.log 2>&1 || true
 if grep -q "echo hello-aerodesk-cmd" /tmp/cmd-audit.log && grep -q "rm -rf /" /tmp/cmd-audit.log; then
     echo "PASS audit tail 含命令记录"
 else
@@ -155,15 +155,15 @@ else
 fi
 # 8) 白名单管理：add → list 可见 → remove → list 消失。
 echo "== case: allowlist"
-AERODESK_CMD_ALLOWLIST="$AERODESK_CMD_ALLOWLIST" ./target/debug/aerodesk-cli --cmd-allowlist add "/tmp/aerodesk-cmd-e2e-$ROOM" >/tmp/cmd-allow1.log 2>&1
-AERODESK_CMD_ALLOWLIST="$AERODESK_CMD_ALLOWLIST" ./target/debug/aerodesk-cli --cmd-allowlist list >/tmp/cmd-allow2.log 2>&1
+AERODESK_CMD_ALLOWLIST="$AERODESK_CMD_ALLOWLIST" ./target/debug/aerodesk-agent --cmd-allowlist add "/tmp/aerodesk-cmd-e2e-$ROOM" >/tmp/cmd-allow1.log 2>&1
+AERODESK_CMD_ALLOWLIST="$AERODESK_CMD_ALLOWLIST" ./target/debug/aerodesk-agent --cmd-allowlist list >/tmp/cmd-allow2.log 2>&1
 if grep -q "/tmp/aerodesk-cmd-e2e-$ROOM" /tmp/cmd-allow2.log; then
     echo "PASS allowlist add+list"
 else
     echo "FAIL allowlist add"; tail -3 /tmp/cmd-allow2.log; fail=1
 fi
-AERODESK_CMD_ALLOWLIST="$AERODESK_CMD_ALLOWLIST" ./target/debug/aerodesk-cli --cmd-allowlist remove "/tmp/aerodesk-cmd-e2e-$ROOM" >/tmp/cmd-allow3.log 2>&1
-AERODESK_CMD_ALLOWLIST="$AERODESK_CMD_ALLOWLIST" ./target/debug/aerodesk-cli --cmd-allowlist list >/tmp/cmd-allow4.log 2>&1
+AERODESK_CMD_ALLOWLIST="$AERODESK_CMD_ALLOWLIST" ./target/debug/aerodesk-agent --cmd-allowlist remove "/tmp/aerodesk-cmd-e2e-$ROOM" >/tmp/cmd-allow3.log 2>&1
+AERODESK_CMD_ALLOWLIST="$AERODESK_CMD_ALLOWLIST" ./target/debug/aerodesk-agent --cmd-allowlist list >/tmp/cmd-allow4.log 2>&1
 if ! grep -q "/tmp/aerodesk-cmd-e2e-$ROOM" /tmp/cmd-allow4.log; then
     echo "PASS allowlist remove"
 else

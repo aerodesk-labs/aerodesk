@@ -2,10 +2,10 @@
 //!
 //! 发送经 `"chat"` label 的 JSON 文本数据通道；接收方在拿到
 //! [`crate::ClientEvent::ChannelData`] 后，先按 [`crate::Endpoint::channel_label`]
-//! 判断 label 为 [`aerodesk_protocol::chat::CHAT_CHANNEL`]，再调用 [`parse_chat_data`] 解析。
+//! 判断 label 为 [`crate::protocol::chat::CHAT_CHANNEL`]，再调用 [`parse_chat_data`] 解析。
 
+use crate::protocol::chat::{CHAT_CHANNEL, ChatMessage};
 use crate::{ClientEvent, Endpoint};
-use aerodesk_protocol::chat::{CHAT_CHANNEL, ChatMessage};
 
 /// 发送一条文本聊天消息；返回 data channel 是否成功接收写入。
 pub fn send_text(

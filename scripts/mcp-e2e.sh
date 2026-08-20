@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# #109 MCP 工具面端到端：stdio JSON-RPC 会话 → aerodesk-mcp → aerodesk-cli 桥 →
+# #109 MCP 工具面端到端：stdio JSON-RPC 会话 → aerodesk-mcp → aerodesk-agent 桥 →
 # SFU → publisher（被控端）执行。
 # 断言：
 #   1. initialize 返回 serverInfo/protocolVersion
@@ -17,7 +17,7 @@ export AERODESK_CMD_ALLOWLIST="/tmp/aerodesk-mcp-allow-$ROOM.txt"
 export AERODESK_CMD_AUDIT="/tmp/aerodesk-mcp-audit-$ROOM.jsonl"
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli -p aerodesk-mcp
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 REC="$(mktemp -d)"
 echo "== 启动 sfu/signal + publisher（含 --recv-dir 供大文件上传落盘）"
@@ -33,7 +33,7 @@ sleep 0.3
 DIR="/tmp/aerodesk-mcp-file-$ROOM"
 mkdir -p "$DIR/recv"
 # 用 pcap 发布端（48 帧后停止）：避免连续视频解码与文件传输争 CPU（CI 慢 runner）
-./target/debug/aerodesk-cli --role publisher \
+./target/debug/aerodesk-agent --role publisher \
     --signal ws://127.0.0.1:3003 --room "$ROOM" --recv-dir "$DIR/recv" >/tmp/mcp-pub.log 2>&1 &
 PUB_PID=$!
 sleep 2
@@ -61,7 +61,7 @@ INEOF
 
 export AERODESK_SIGNAL="ws://127.0.0.1:3003"
 export AERODESK_ROOM="$ROOM"
-export AERODESK_CLI_BIN="$PWD/target/debug/aerodesk-cli"
+export AERODESK_AGENT_BIN="$PWD/target/debug/aerodesk-agent"
 python3 - <<'PYEOF'
 import subprocess, os, sys
 try:

@@ -63,7 +63,7 @@ fi
 
 cleanup() {
   pkill -f 'aerodesk-bridge' 2>/dev/null || true
-  pkill -f 'aerodesk-cli' 2>/dev/null || true
+  pkill -f 'aerodesk-agent' 2>/dev/null || true
   # #257 review：kill 后 wait，确保端口释放再退出（CI 同 step 双跑防 bind 竞争）。
   [ -n "${SFU_A:-}" ] && { kill "$SFU_A" 2>/dev/null || true; wait "$SFU_A" 2>/dev/null || true; }
   [ -n "${SFU_B:-}" ] && { kill "$SFU_B" 2>/dev/null || true; wait "$SFU_B" 2>/dev/null || true; }
@@ -107,9 +107,9 @@ wait_log() {
 
 echo "== 构建"
 if [ "$REMOTE" = "1" ] && [ "${REMOTE_LOOPBACK:-}" != "1" ]; then
-  cargo build -q -p aerodesk-cli   # 远程验收只需 CLI；SFU/signal/bridge 在 PoP 上
+  cargo build -q -p aerodesk-agent   # 远程验收只需 CLI；SFU/signal/bridge 在 PoP 上
 else
-  cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli -p aerodesk-bridge
+  cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 fi
 REC_A="$(mktemp -d)"; REC_B="$(mktemp -d)"
 
@@ -128,14 +128,14 @@ elif [ "${REMOTE_LOOPBACK:-}" != "1" ]; then
 fi
 
 echo "== 场景 0：直连延迟基线（同 PoP-A publisher+viewer）"
-"$TARGET_DIR/aerodesk-cli" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
+"$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/bfb-direct-pub.log 2>&1 &
 PUB0=$!
 ok=0
 for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-direct-pub.log 2>/dev/null && ok=1 && break; sleep 0.5; done
 [ "$ok" = "1" ] || fail "场景0：publisher 未连上"
-"$TARGET_DIR/aerodesk-cli" --role viewer --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
+"$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   >/tmp/bfb-direct-view.log 2>&1 &
 VIEW0=$!
 wait_decoded /tmp/bfb-direct-view.log || fail "场景0：直连 viewer 未解码"
@@ -176,7 +176,7 @@ fi
 
 echo "== 场景 1：PoP-A publisher + PoP-B viewer（桥优先，不 Redirect）"
 # --audio（PCMU）：验证 #260 音频跨 PoP 桥转发。
-"$TARGET_DIR/aerodesk-cli" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
+"$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy --audio \
   >/tmp/bfb-pub-a.log 2>&1 &
 PUB_A=$!
@@ -189,7 +189,7 @@ for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-pub-a.log 2>/dev/null
 RECONNECT_FLAG=""
 [ "$REMOTE" = "1" ] && RECONNECT_FLAG="--reconnect"
 # --display 1：验证 #260 显示器切换经 control 通道跨 PoP（到主 PoP publisher）。
-"$TARGET_DIR/aerodesk-cli" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" $RECONNECT_FLAG --display 1 \
+"$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" $RECONNECT_FLAG --display 1 \
   >/tmp/bfb-view-b.log 2>&1 &
 VIEW_B=$!
 wait_decoded /tmp/bfb-view-b.log || fail "场景1：PoP-B viewer 未解码跨 PoP 媒体（见 /tmp/bfb-view-b.log）"
@@ -289,7 +289,7 @@ sleep 1
 pkill -f 'aerodesk-bridge' 2>/dev/null || true
 sleep 2
 # --reconnect：场景 4 需要连接中 viewer 在 kick 后自动重连。
-"$TARGET_DIR/aerodesk-cli" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" --reconnect \
+"$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" --reconnect \
   >/tmp/bfb-view-b3.log 2>&1 &
 VIEW_B=$!
 wait_decoded /tmp/bfb-view-b3.log || fail "场景3：桥死亡后 viewer 未恢复解码（见 /tmp/bfb-view-b3.log）"
@@ -346,7 +346,7 @@ POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=${
 SIG_B_PID=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break; sleep 0.2; done
 # PoP-A publisher 仍在 room（重新起）
-"$TARGET_DIR/aerodesk-cli" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
+"$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/bfb-pub-a2.log 2>&1 &
 PUB_A=$!
@@ -354,7 +354,7 @@ ok=0
 for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-pub-a2.log 2>/dev/null && ok=1 && break; sleep 0.5; done
 [ "$ok" = "1" ] || fail "场景2：PoP-A publisher 未连上"
 
-"$TARGET_DIR/aerodesk-cli" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" \
+"$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" \
   >/tmp/bfb-view-b2.log 2>&1 &
 VIEW_B=$!
 wait_log /tmp/bfb-view-b2.log "signal redirect" 240 || fail "场景2：viewer 未收到 Redirect（桥失败应回退 v1）"

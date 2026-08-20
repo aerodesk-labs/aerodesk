@@ -7,7 +7,7 @@ export RUST_LOG="${RUST_LOG:-info}"
 
 SIZES=("${@:-2048 102400 262144}")
 echo "== 构建 release"
-PROFILE=release cargo build -q --release -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+PROFILE=release cargo build -q --release -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 echo "== 基准矩阵"
 printf "%-12s %-10s %-10s %-10s %s\n" "size" "elapsed" "MB/s" "sha256" "result"

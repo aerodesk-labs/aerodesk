@@ -27,7 +27,7 @@ BRIDGE_CMD="$TARGET_DIR/aerodesk-bridge --remote-signal ${SIG_A_URL} --local-sig
 fail() { echo "FAIL: $*"; exit 1; }
 cleanup() {
   pkill -f 'aerodesk-bridge' 2>/dev/null || true
-  pkill -f 'aerodesk-cli' 2>/dev/null || true
+  pkill -f 'aerodesk-agent' 2>/dev/null || true
   [ -n "${SFU_A:-}" ] && { kill "$SFU_A" 2>/dev/null || true; wait "$SFU_A" 2>/dev/null || true; }
   [ -n "${SFU_B:-}" ] && { kill "$SFU_B" 2>/dev/null || true; wait "$SFU_B" 2>/dev/null || true; }
   [ -n "${SIG_A_PID:-}" ] && { kill "$SIG_A_PID" 2>/dev/null || true; wait "$SIG_A_PID" 2>/dev/null || true; }
@@ -71,7 +71,7 @@ wait_decoded() {
 }
 
 echo "== 构建"
-cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli -p aerodesk-bridge || fail "构建失败"
+cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent || fail "构建失败"
 REC_A="$(mktemp -d)"; REC_B="$(mktemp -d)"
 
 # 所有客户端 + signal（桥子进程继承）都强制 TURN relay。
@@ -91,7 +91,7 @@ wait_turn_ready "$INT_A" "PoP-A" /tmp/btr-sfu-a.log || fail "PoP-A 内嵌 TURN �
 sleep 0.3
 
 echo "== 场景 0：PoP-A 直连基线（TURN relay）延迟"
-"$TARGET_DIR/aerodesk-cli" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
+"$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/btr-direct-pub.log 2>&1 &
 PUB0=$!
@@ -102,7 +102,7 @@ if [ "$ok" != "1" ]; then
   echo "--- SFU-A 日志尾 ---"; tail -20 /tmp/btr-sfu-a.log
   fail "场景0：publisher 未连上（TURN relay）"
 fi
-"$TARGET_DIR/aerodesk-cli" --role viewer --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
+"$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   >/tmp/btr-direct-view.log 2>&1 &
 VIEW0=$!
 wait_decoded /tmp/btr-direct-view.log || fail "场景0：直连 viewer 未解码（TURN relay）"
@@ -135,7 +135,7 @@ sleep 0.3
 grep -q "bridge orchestration enabled" /tmp/btr-sig-b.log || fail "PoP-B 未启用桥编排"
 
 echo "== 场景 1：PoP-A publisher(--audio) + bridge（双腿 TURN relay）→ PoP-B viewer"
-"$TARGET_DIR/aerodesk-cli" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
+"$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy --audio \
   >/tmp/btr-pub-a.log 2>&1 &
 PUB_A=$!
@@ -147,7 +147,7 @@ if [ "$ok" != "1" ]; then
   fail "场景1：PoP-A publisher 未连上（TURN relay）"
 fi
 
-"$TARGET_DIR/aerodesk-cli" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" \
+"$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" \
   >/tmp/btr-view-b.log 2>&1 &
 VIEW_B=$!
 wait_decoded /tmp/btr-view-b.log || fail "场景1：PoP-B viewer 未解码跨 PoP 媒体（TURN relay，见 /tmp/btr-view-b.log）"

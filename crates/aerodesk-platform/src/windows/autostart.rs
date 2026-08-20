@@ -178,12 +178,12 @@ mod tests {
     #[test]
     fn autostart_command_quotes_exe() {
         let cmd = autostart_command(
-            r"C:\Program Files\AeroDesk\aerodesk-cli.exe",
+            r"C:\Program Files\AeroDesk\aerodesk-agent.exe",
             "ws://127.0.0.1:3003/ws",
             "demo",
         );
         assert!(cmd.starts_with(
-            r#""C:\Program Files\AeroDesk\aerodesk-cli.exe" --role publisher --encoder screen"#
+            r#""C:\Program Files\AeroDesk\aerodesk-agent.exe" --role publisher --encoder screen"#
         ));
         assert!(cmd.contains("--signal ws://127.0.0.1:3003/ws"));
         assert!(cmd.contains("--room demo"));

@@ -166,7 +166,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # aerodesk-desktop/aerodesk-cli(Windows) 依赖 aerodesk-codec(ffmpeg-next)：与
+      # aerodesk-desktop/aerodesk-agent(Windows) 依赖 aerodesk-codec(ffmpeg-next)：与
       # test job 同款 BtbN 8.1 预编译共享构建（FFMPEG_DIR + PATH）。
       - name: System deps (Windows FFmpeg dev libs)
         shell: pwsh
@@ -183,7 +183,7 @@ jobs:
 
       - name: Build release (win64)
         shell: bash
-        run: cargo build --release -p aerodesk-desktop -p aerodesk-cli
+        run: cargo build --release -p aerodesk-desktop -p aerodesk-agent
 
       - name: Package Windows (portable ZIP)
         shell: bash

@@ -231,11 +231,11 @@ server {
   2. 观察宽限期（按旧 token TTL）内认证无异常后，移除 `JWT_SECRET_OLD` 并重启（或滚动）
 - **按用户连接配额（#171）**：JWT claims 支持可选 `max_conns`（该用户最大并发连接数，
   0/缺省=不限）；信令按 `sub` 计数，超限返回 `Error("user quota exceeded")`。
-  签发示例：`JWT_SECRET=... aerodesk-cli --issue-token --user u1 --room demo --role viewer --max-conns 4`
+  签发示例：`JWT_SECRET=... aerodesk-agent --issue-token --user u1 --room demo --role viewer --max-conns 4`
 - 签发 token（运维/测试）：
 
 ```sh
-JWT_SECRET=<secret> cargo run -p aerodesk-cli -- --issue-token \
+JWT_SECRET=<secret> cargo run -p aerodesk-agent -- --issue-token \
   --user u1 --device mac-1 --room demo --role publisher --ttl 3600
 ```
 
@@ -262,9 +262,9 @@ cargo run -p aerodesk-signal &     # WSS 3001 / 明文 3003（开发）
 
 ```sh
 # 签发并连接
-JWT_SECRET=$JWT_SECRET cargo run -p aerodesk-cli -- --issue-token \
+JWT_SECRET=$JWT_SECRET cargo run -p aerodesk-agent -- --issue-token \
   --user u1 --room demo --role publisher --ttl 600 | xargs -I{} \
-  cargo run -p aerodesk-cli -- --role publisher --signal ws://127.0.0.1:3003 \
+  cargo run -p aerodesk-agent -- --role publisher --signal ws://127.0.0.1:3003 \
   --room demo --token {}
 ```
 
@@ -288,7 +288,7 @@ JWT_SECRET=$JWT_SECRET cargo run -p aerodesk-cli -- --issue-token \
 # 信令地址：ws://129.226.150.174:14703
 # token：从服务器 AUTH_TOKENS 获取
 
-cargo run -p aerodesk-cli -- --role publisher --signal ws://129.226.150.174:14703 \
+cargo run -p aerodesk-agent -- --role publisher --signal ws://129.226.150.174:14703 \
   --room accept --token <AUTH_TOKENS 值>
 ```
 

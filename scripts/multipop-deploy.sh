@@ -181,7 +181,7 @@ fi
 # ---- 1) 构建（release）----
 if [ "$SKIP_BUILD" = "0" ]; then
   say "构建 $PROFILE 产物（sfu/signal/bridge/cli）"
-  run cargo build --"$PROFILE" -p aerodesk-sfu -p aerodesk-signal -p aerodesk-bridge -p aerodesk-cli || { echo "构建失败" >&2; exit 1; }
+  run cargo build --"$PROFILE" -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent || { echo "构建失败" >&2; exit 1; }
 fi
 for b in aerodesk-sfu aerodesk-signal aerodesk-bridge; do
   [ -x "$TARGET_DIR/$b" ] || { echo "缺少 $TARGET_DIR/${b}（--skip-build 时需已构建）" >&2; exit 1; }

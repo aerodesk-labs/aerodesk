@@ -13,10 +13,10 @@ export RUST_LOG="${RUST_LOG:-info}"
 PROFILE="${PROFILE:-debug}"
 echo "== 构建（${PROFILE}）"
 if [ "$PROFILE" = "release" ]; then
-    cargo build -q --release -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+    cargo build -q --release -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
     BIN=./target/release
 else
-    cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-cli
+    cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
     BIN=./target/debug
 fi
 
@@ -44,10 +44,10 @@ done
 sleep 0.3
 
 echo "== 启动 publisher（--send-file）+ viewer（--recv-dir）"
-"$BIN/aerodesk-cli" --role publisher --send-file "$SRC" \
+"$BIN/aerodesk-agent" --role publisher --send-file "$SRC" \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/ftx-pub.log 2>&1 &
 PUB_PID=$!
-"$BIN/aerodesk-cli" --role viewer --recv-dir "$OUT" \
+"$BIN/aerodesk-agent" --role viewer --recv-dir "$OUT" \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/ftx-view.log 2>&1 &
 VIEW_PID=$!
 

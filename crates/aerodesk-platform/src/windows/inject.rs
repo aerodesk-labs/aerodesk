@@ -1,6 +1,6 @@
 //! 输入注入：SendInput（鼠标绝对坐标/按键/滚轮）。
 
-use aerodesk_protocol::input::{ButtonState, InputEvent, Modifiers, MouseButton};
+use aerodesk_core::protocol::input::{ButtonState, InputEvent, Modifiers, MouseButton};
 
 /// 平台无关键码（协议）→ Windows Virtual-Key（VK_*）。
 pub fn vk_for_code(code: &str) -> Option<u16> {

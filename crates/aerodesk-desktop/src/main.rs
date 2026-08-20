@@ -13,7 +13,7 @@ use aerodesk_session::keymap;
 use slint::Model;
 
 use aerodesk_core::platform::{AppShell, FilePicker, Permissions, Renderer};
-use aerodesk_protocol::cmd::CmdRequest;
+use aerodesk_core::protocol::cmd::CmdRequest;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -626,30 +626,30 @@ fn send_input_to_slot(
     }
     let (x, y) = viewer_to_remote_norm(mx, my, area_w, area_h, fw, fh);
     let button = match button {
-        1 => aerodesk_protocol::input::MouseButton::Middle,
-        2 => aerodesk_protocol::input::MouseButton::Right,
-        _ => aerodesk_protocol::input::MouseButton::Left,
+        1 => aerodesk_core::protocol::input::MouseButton::Middle,
+        2 => aerodesk_core::protocol::input::MouseButton::Right,
+        _ => aerodesk_core::protocol::input::MouseButton::Left,
     };
     let event = match kind {
-        1 => aerodesk_protocol::input::InputEvent::MouseButton {
+        1 => aerodesk_core::protocol::input::InputEvent::MouseButton {
             button,
-            state: aerodesk_protocol::input::ButtonState::Pressed,
+            state: aerodesk_core::protocol::input::ButtonState::Pressed,
             x: x as f64,
             y: y as f64,
         },
-        2 => aerodesk_protocol::input::InputEvent::MouseButton {
+        2 => aerodesk_core::protocol::input::InputEvent::MouseButton {
             button,
-            state: aerodesk_protocol::input::ButtonState::Released,
+            state: aerodesk_core::protocol::input::ButtonState::Released,
             x: x as f64,
             y: y as f64,
         },
-        _ => aerodesk_protocol::input::InputEvent::MouseMove {
+        _ => aerodesk_core::protocol::input::InputEvent::MouseMove {
             x: x as f64,
             y: y as f64,
         },
     };
     let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-    let frame = aerodesk_protocol::input::InputFrame::new(seq, event);
+    let frame = aerodesk_core::protocol::input::InputFrame::new(seq, event);
     if let Ok(json) = serde_json::to_string(&frame) {
         let sessions = SESSIONS.lock().unwrap();
         if let Some(s) = sessions.iter().find(|s| s.slot == slot) {
@@ -683,19 +683,19 @@ fn send_key_to_slot(
     #[cfg(target_os = "macos")]
     let code = keymap::macos_swap_control_meta(code);
     let state = if state == 0 {
-        aerodesk_protocol::input::ButtonState::Pressed
+        aerodesk_core::protocol::input::ButtonState::Pressed
     } else {
-        aerodesk_protocol::input::ButtonState::Released
+        aerodesk_core::protocol::input::ButtonState::Released
     };
     #[cfg(target_os = "macos")]
-    let modifiers = aerodesk_protocol::input::Modifiers {
+    let modifiers = aerodesk_core::protocol::input::Modifiers {
         ctrl: meta,
         shift,
         alt,
         meta: ctrl,
     };
     #[cfg(not(target_os = "macos"))]
-    let modifiers = aerodesk_protocol::input::Modifiers {
+    let modifiers = aerodesk_core::protocol::input::Modifiers {
         ctrl,
         shift,
         alt,
@@ -704,13 +704,13 @@ fn send_key_to_slot(
     // #496 G2：跨端修饰键翻译（设置页三态开关；直通时原样返回）。
     let (code, modifiers) =
         keymap::translate_cross_end(code, &modifiers, MODIFIER_TRANSLATE.load(Ordering::SeqCst));
-    let event = aerodesk_protocol::input::InputEvent::Key {
+    let event = aerodesk_core::protocol::input::InputEvent::Key {
         code: code.to_string(),
         state,
         modifiers,
     };
     let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-    let frame = aerodesk_protocol::input::InputFrame::new(seq, event);
+    let frame = aerodesk_core::protocol::input::InputFrame::new(seq, event);
     if let Ok(json) = serde_json::to_string(&frame) {
         let sessions = SESSIONS.lock().unwrap();
         if let Some(s) = sessions.iter().find(|s| s.slot == slot) {
@@ -736,14 +736,14 @@ fn send_wheel_to_slot(
         return;
     }
     let (x, y) = viewer_to_remote_norm(mx, my, area_w, area_h, fw, fh);
-    let event = aerodesk_protocol::input::InputEvent::Wheel {
+    let event = aerodesk_core::protocol::input::InputEvent::Wheel {
         x: x as f64,
         y: y as f64,
         delta_x: dx as f64,
         delta_y: dy as f64,
     };
     let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-    let frame = aerodesk_protocol::input::InputFrame::new(seq, event);
+    let frame = aerodesk_core::protocol::input::InputFrame::new(seq, event);
     if let Ok(json) = serde_json::to_string(&frame) {
         let sessions = SESSIONS.lock().unwrap();
         if let Some(s) = sessions.iter().find(|s| s.slot == slot) {
@@ -1546,7 +1546,7 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
     let mut config = aerodesk_core::signal_presence::PresenceConfig::new(
         server,
         room,
-        aerodesk_protocol::signal::Role::Publisher,
+        aerodesk_core::protocol::signal::Role::Publisher,
     )
     .with_auto_accept(false); // #456 由 UI 根据「开启被控」授权决定是否接听
     if !token.is_empty() {
@@ -2430,30 +2430,30 @@ fn main() -> Result<(), slint::PlatformError> {
             let (x, y) = viewer_to_remote_norm(mx, my, area_w, area_h, fw, fh);
             // 按键：0=左键（默认，含 Move）1=中键 2=右键。
             let button = match button {
-                1 => aerodesk_protocol::input::MouseButton::Middle,
-                2 => aerodesk_protocol::input::MouseButton::Right,
-                _ => aerodesk_protocol::input::MouseButton::Left,
+                1 => aerodesk_core::protocol::input::MouseButton::Middle,
+                2 => aerodesk_core::protocol::input::MouseButton::Right,
+                _ => aerodesk_core::protocol::input::MouseButton::Left,
             };
             let event = match kind {
-                1 => aerodesk_protocol::input::InputEvent::MouseButton {
+                1 => aerodesk_core::protocol::input::InputEvent::MouseButton {
                     button,
-                    state: aerodesk_protocol::input::ButtonState::Pressed,
+                    state: aerodesk_core::protocol::input::ButtonState::Pressed,
                     x: x as f64,
                     y: y as f64,
                 },
-                2 => aerodesk_protocol::input::InputEvent::MouseButton {
+                2 => aerodesk_core::protocol::input::InputEvent::MouseButton {
                     button,
-                    state: aerodesk_protocol::input::ButtonState::Released,
+                    state: aerodesk_core::protocol::input::ButtonState::Released,
                     x: x as f64,
                     y: y as f64,
                 },
-                _ => aerodesk_protocol::input::InputEvent::MouseMove {
+                _ => aerodesk_core::protocol::input::InputEvent::MouseMove {
                     x: x as f64,
                     y: y as f64,
                 },
             };
             let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-            let frame = aerodesk_protocol::input::InputFrame::new(seq, event);
+            let frame = aerodesk_core::protocol::input::InputFrame::new(seq, event);
             if let Ok(json) = serde_json::to_string(&frame) {
                 let ui = weak.unwrap();
                 let sessions = SESSIONS.lock().unwrap();
@@ -2494,19 +2494,19 @@ fn main() -> Result<(), slint::PlatformError> {
             #[cfg(target_os = "macos")]
             let code = keymap::macos_swap_control_meta(code);
             let state = if state == 0 {
-                aerodesk_protocol::input::ButtonState::Pressed
+                aerodesk_core::protocol::input::ButtonState::Pressed
             } else {
-                aerodesk_protocol::input::ButtonState::Released
+                aerodesk_core::protocol::input::ButtonState::Released
             };
             #[cfg(target_os = "macos")]
-            let modifiers = aerodesk_protocol::input::Modifiers {
+            let modifiers = aerodesk_core::protocol::input::Modifiers {
                 ctrl: meta,
                 shift,
                 alt,
                 meta: ctrl,
             };
             #[cfg(not(target_os = "macos"))]
-            let modifiers = aerodesk_protocol::input::Modifiers {
+            let modifiers = aerodesk_core::protocol::input::Modifiers {
                 ctrl,
                 shift,
                 alt,
@@ -2518,13 +2518,13 @@ fn main() -> Result<(), slint::PlatformError> {
                 &modifiers,
                 MODIFIER_TRANSLATE.load(Ordering::SeqCst),
             );
-            let event = aerodesk_protocol::input::InputEvent::Key {
+            let event = aerodesk_core::protocol::input::InputEvent::Key {
                 code: code.to_string(),
                 state,
                 modifiers,
             };
             let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-            let frame = aerodesk_protocol::input::InputFrame::new(seq, event);
+            let frame = aerodesk_core::protocol::input::InputFrame::new(seq, event);
             if let Ok(json) = serde_json::to_string(&frame) {
                 let ui = weak.unwrap();
                 let sessions = SESSIONS.lock().unwrap();
@@ -2545,14 +2545,14 @@ fn main() -> Result<(), slint::PlatformError> {
                 return; // 键鼠已释放：滚轮不注入被控端
             }
             let (x, y) = viewer_to_remote_norm(mx, my, area_w, area_h, fw, fh);
-            let event = aerodesk_protocol::input::InputEvent::Wheel {
+            let event = aerodesk_core::protocol::input::InputEvent::Wheel {
                 x: x as f64,
                 y: y as f64,
                 delta_x: dx as f64,
                 delta_y: dy as f64,
             };
             let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-            let frame = aerodesk_protocol::input::InputFrame::new(seq, event);
+            let frame = aerodesk_core::protocol::input::InputFrame::new(seq, event);
             if let Ok(json) = serde_json::to_string(&frame) {
                 let ui = weak.unwrap();
                 let sessions = SESSIONS.lock().unwrap();
@@ -4334,9 +4334,9 @@ mod multi_session_e2e {
 
     fn send_input_to_session(slot: usize, x: f64, y: f64) {
         let seq = INPUT_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-        let frame = aerodesk_protocol::input::InputFrame::new(
+        let frame = aerodesk_core::protocol::input::InputFrame::new(
             seq,
-            aerodesk_protocol::input::InputEvent::MouseMove { x, y },
+            aerodesk_core::protocol::input::InputEvent::MouseMove { x, y },
         );
         let json = serde_json::to_string(&frame).unwrap();
         let sessions = SESSIONS.lock().unwrap();
@@ -4390,7 +4390,7 @@ mod multi_session_e2e {
 
         // 2) 两个被控端（发布端）
         for room in [ROOM_A, ROOM_B] {
-            let mut cmd = Command::new(format!("{bin}/aerodesk-cli"));
+            let mut cmd = Command::new(format!("{bin}/aerodesk-agent"));
             cmd.args([
                 "--role",
                 "publisher",
@@ -4421,7 +4421,7 @@ mod multi_session_e2e {
             let live = match aerodesk_core::connect::connect_live_role(
                 &server,
                 room,
-                aerodesk_protocol::signal::Role::Viewer,
+                aerodesk_core::protocol::signal::Role::Viewer,
                 None,
             ) {
                 Ok(l) => l,

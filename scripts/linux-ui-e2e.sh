@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 ROOM="${1:-linuxui-$(date +%s)}"
 
-echo "== [1/7] 构建（Linux 编不了 aerodesk-cli——CI 排除，故 publisher 用 Web）"
+echo "== [1/7] 构建（Linux 编不了 aerodesk-agent——CI 排除，故 publisher 用 Web）"
 cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-desktop
 
 E2E_DIR="${WEB_E2E_DIR:-/tmp/linux-ui-e2e}"
