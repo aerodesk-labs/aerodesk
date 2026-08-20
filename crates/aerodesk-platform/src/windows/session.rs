@@ -5,8 +5,9 @@
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::RemoteDesktop::{
-    WTS_CONNECTSTATE_CLASS, WTS_CURRENT_SERVER_HANDLE, WTS_SESSION_INFOW, WTSActive, WTSConnected,
-    WTSDisconnected, WTSDown, WTSEnumerateSessionsW, WTSFreeMemory, WTSIdle, WTSQueryUserToken,
+    WTS_CONNECTSTATE_CLASS, WTS_CURRENT_SERVER_HANDLE, WTS_PROCESS_INFOW, WTS_SESSION_INFOW,
+    WTSActive, WTSConnected, WTSDisconnected, WTSEnumerateProcessesW, WTSEnumerateSessionsW,
+    WTSFreeMemory, WTSGetActiveConsoleSessionId, WTSQueryUserToken,
 };
 use windows::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, PROCESS_INFORMATION, STARTUPINFOW,
@@ -98,14 +99,141 @@ pub fn spawn_in_session(exe: &str, session_id: u32) -> Result<(), String> {
     }
 }
 
+// ---------- #471 M1：winlogon token + 登录界面 helper 拉起 ----------
+
+/// 当前 console 会话 id（WTSGetActiveConsoleSessionId;无 console(如纯 RDP 服务)为 0xFFFFFFFF）。
+pub fn console_session_id() -> u32 {
+    unsafe { WTSGetActiveConsoleSessionId() }
+}
+
+/// 枚举进程找 `session_id` 内的 winlogon.exe pid。
+/// 登录界面阶段 console 会话恒有 winlogon.exe(SYSTEM,winlogon desktop 可达)——
+/// #471 借其 token 拉起登录界面 helper。WTS 枚举自带 SessionId(PROCESSENTRY32 无此字段)。
+pub fn winlogon_pid(session_id: u32) -> Result<Option<u32>, String> {
+    unsafe {
+        let mut ptr: *mut WTS_PROCESS_INFOW = std::ptr::null_mut();
+        let mut count: u32 = 0;
+        WTSEnumerateProcessesW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &mut ptr, &mut count)
+            .map_err(|e| format!("WTSEnumerateProcessesW: {e}"))?;
+        let mut found = None;
+        if !ptr.is_null() {
+            for i in 0..count as usize {
+                let p = *ptr.add(i);
+                if p.SessionId == session_id && !p.pProcessName.is_null() {
+                    let mut len = 0usize;
+                    while *p.pProcessName.0.add(len) != 0 {
+                        len += 1;
+                    }
+                    let name =
+                        String::from_utf16_lossy(std::slice::from_raw_parts(p.pProcessName.0, len));
+                    if name.eq_ignore_ascii_case("winlogon.exe") {
+                        found = Some(p.ProcessId);
+                        break;
+                    }
+                }
+            }
+            WTSFreeMemory(ptr.cast());
+        }
+        Ok(found)
+    }
+}
+
+/// 复制 console 会话 winlogon.exe 的主令牌(登录界面阶段唯一可用的
+/// console 会话令牌来源;无用户 token)。
+fn winlogon_token(session_id: u32) -> Result<HANDLE, String> {
+    use windows::Win32::Security::{
+        DuplicateTokenEx, SecurityImpersonation, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
+        TOKEN_QUERY, TokenPrimary,
+    };
+    use windows::Win32::System::Threading::{
+        OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    let pid = winlogon_pid(session_id)?
+        .ok_or_else(|| format!("session {session_id} 无 winlogon.exe(不在登录界面阶段?)"))?;
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+            .map_err(|e| format!("OpenProcess(winlogon {pid}): {e}"))?;
+        let mut token = HANDLE::default();
+        OpenProcessToken(process, TOKEN_DUPLICATE, &mut token)
+            .map_err(|e| format!("OpenProcessToken(winlogon {pid}): {e}"))?;
+        let _ = CloseHandle(process);
+        let mut primary = HANDLE::default();
+        DuplicateTokenEx(
+            token,
+            TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY,
+            None,
+            SecurityImpersonation,
+            TokenPrimary,
+            &mut primary,
+        )
+        .map_err(|e| format!("DuplicateTokenEx(winlogon): {e}"))?;
+        let _ = CloseHandle(token);
+        Ok(primary)
+    }
+}
+
+/// 在 console 会话的 winlogon desktop 内拉起登录界面 helper(#471 M1)。
+/// exe 通常为服务同目录 `aerodesk-cli.exe`,args 携带回连端口/令牌。
+pub fn spawn_logon_helper(exe: &str, args: &[&str]) -> Result<(), String> {
+    let session = console_session_id();
+    let token = winlogon_token(session)?;
+    unsafe {
+        let mut cmdline = format!("\"{exe}\"");
+        for a in args {
+            cmdline.push(' ');
+            cmdline.push_str(a);
+        }
+        let mut cmd_w: Vec<u16> = cmdline.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut env: *mut core::ffi::c_void = std::ptr::null_mut();
+        let env_ok = CreateEnvironmentBlock(&mut env, token, false).is_ok();
+        let result = (|| {
+            let mut desktop: Vec<u16> = "winsta0\\winlogon"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let mut si = STARTUPINFOW {
+                cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+                lpDesktop: PWSTR(desktop.as_mut_ptr()),
+                ..Default::default()
+            };
+            let mut pi = PROCESS_INFORMATION::default();
+            let spawned = CreateProcessAsUserW(
+                token,
+                PCWSTR::null(),
+                PWSTR(cmd_w.as_mut_ptr()),
+                None,
+                None,
+                false,
+                CREATE_UNICODE_ENVIRONMENT,
+                if env_ok { Some(env.cast_const()) } else { None },
+                None,
+                &raw mut si,
+                &raw mut pi,
+            );
+            spawned.map_err(|e| format!("CreateProcessAsUserW({exe}): {e}"))?;
+            let _ = CloseHandle(pi.hProcess);
+            let _ = CloseHandle(pi.hThread);
+            Ok(())
+        })();
+        if env_ok {
+            let _ = DestroyEnvironmentBlock(env);
+        }
+        let _ = CloseHandle(token);
+        result
+    }
+}
+
 fn spawn_with_token(exe: &str, token: HANDLE) -> Result<(), String> {
+    spawn_with_token_on_desktop(exe, token, "winsta0\\default")
+}
+
+/// 同 [`spawn_with_token`] 但指定目标 desktop——#471 登录界面 helper 用
+/// `winsta0\winlogon`(默认桌面在登录阶段不可达)。
+fn spawn_with_token_on_desktop(exe: &str, token: HANDLE, desktop: &str) -> Result<(), String> {
     unsafe {
         let mut env: *mut core::ffi::c_void = std::ptr::null_mut();
         let env_ok = CreateEnvironmentBlock(&mut env, token, false).is_ok();
-        let mut desktop: Vec<u16> = "winsta0\\default"
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
+        let mut desktop: Vec<u16> = desktop.encode_utf16().chain(std::iter::once(0)).collect();
         let exe_w: Vec<u16> = exe.encode_utf16().chain(std::iter::once(0)).collect();
         let mut si = STARTUPINFOW {
             cb: std::mem::size_of::<STARTUPINFOW>() as u32,
@@ -139,6 +267,7 @@ fn spawn_with_token(exe: &str, token: HANDLE) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::System::RemoteDesktop::{WTSDown, WTSIdle};
 
     /// 让位判据:Active/Connected/Disconnected 均算"有已登录会话";
     /// 登录界面阶段(Idle/Down 等)不算。锁屏误判会导致双 presence。
@@ -168,5 +297,18 @@ mod tests {
         let err = spawn_in_session(r"C:\nonexistent\aerodesk-desktop.exe", 0xFFFF_BADA)
             .expect_err("无 SE_TCB 上下文应失败");
         assert!(err.contains("SE_TCB"), "错误应含上下文提示：{err}");
+    }
+
+    /// winlogon.exe 枚举在任意上下文可查(登录界面阶段必存在);
+    /// 本测试环境无 console winlogon 时 detect-and-return。
+    #[test]
+    fn winlogon_pid_enum_or_detect_return() {
+        match winlogon_pid(console_session_id()) {
+            Ok(Some(_)) => eprintln!("winlogon_pid: 找到 console winlogon.exe"),
+            Ok(None) => {
+                eprintln!("winlogon_pid: 本环境无 console winlogon(服务态/无界面),跳过执行")
+            }
+            Err(e) => panic!("进程枚举本身不应失败：{e}"),
+        }
     }
 }

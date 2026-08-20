@@ -145,10 +145,12 @@ dependencies = [
 name = "aerodesk-host"
 version = "0.1.0"
 dependencies = [
+ "aerodesk-codec",
  "aerodesk-core",
  "aerodesk-platform",
  "serde",
  "serde_json",
+ "str0m",
  "tracing",
  "tracing-subscriber",
 ]
