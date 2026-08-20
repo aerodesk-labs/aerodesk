@@ -1377,8 +1377,14 @@ fn web_request(
     let dc_ready = param("dc_ready").as_deref() == Some("1");
 
     let mut data = request.data().expect("body to be available");
-    let offer: str0m::change::SdpOffer =
-        serde_json::from_reader(&mut data).expect("serialized offer");
+    // 畸形 offer 直接 400——expect 会让 /start 线程 panic（远程可 DoS 打挂进程）。
+    let offer: str0m::change::SdpOffer = match serde_json::from_reader(&mut data) {
+        Ok(o) => o,
+        Err(e) => {
+            warn!("start: 非法 SDP offer（room={room}）：{e}");
+            return Response::text("invalid SDP offer").with_status_code(400);
+        }
+    };
     let offer_sdp = offer.to_sdp_string();
     if role == Role::Viewer && shard::offer_sends_media(&offer_sdp) {
         warn!("拒绝 viewer 发布媒体：room={room}（#12）");
