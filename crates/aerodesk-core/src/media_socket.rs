@@ -40,6 +40,9 @@ impl MediaSocket {
 
     pub fn set_read_timeout(&self, t: Option<Duration>) -> io::Result<()> {
         self.direct.set_read_timeout(t)?;
+        // TURN 泵超时恒定非阻塞（TurnIo::set_read_timeout，#487 节流根因）——
+        // 跟随 direct 的 5ms 会把 TURN 吞吐串行化到 ~200 帧/s（2.4Mbps），
+        // 高码率视频（8Mbps≈660 包/s）丢帧。
         if let Some(turn) = &self.turn {
             turn.set_read_timeout(t)?;
         }
@@ -55,8 +58,22 @@ impl MediaSocket {
         self.turn.as_ref()
     }
 
-    /// 收一帧：先直连、再 TURN；都没有则返回 WouldBlock。
+    /// 收一帧：先 TURN 非阻塞探测（有积压立即返回），再直连 UDP 阻塞等待。
+    ///
+    /// #487 根因修复：旧实现「先等直连 UDP 5ms 超时再读 TURN 一帧」，泵循环把
+    /// TURN 吞吐钳在 1 帧/5ms ≈ 200 帧/s ≈ 2.4Mbps——8Mbps 视频（~660 包/s）
+    /// 3.3× 超限 → TURN 服务器 relay socket 溢出丢包 → 视频大包群整帧丢失、
+    /// 音频（低码率）幸存（生产真屏会话 0 帧解码的根因）。TURN 优先探测 +
+    /// 非阻塞超时后，泵循环排空式读取吞吐不再受限；TURN 无数据时照旧落到
+    /// 直连 UDP，两条路径互不饿死。
     pub fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        if let Some(turn) = &mut self.turn {
+            // 非阻塞探测：TURN 有积压立即返回（不阻塞在直连 UDP 超时上）。
+            if let Ok(Some((peer, n))) = turn.recv_packet(buf) {
+                self.note_packet(Path::Turn, &buf[..n]);
+                return Ok((n, peer));
+            }
+        }
         match self.direct.recv_from(buf) {
             Ok((n, src)) => {
                 self.note_packet(Path::Direct, &buf[..n]);
@@ -67,6 +84,7 @@ impl MediaSocket {
             }
             Err(e) => return Err(e),
         }
+        // 兜底：直连 UDP 无数据时再试一次 TURN（维持 refresh、累积半包帧缓冲）。
         if let Some(turn) = &mut self.turn {
             let _ = turn.refresh_if_due(Instant::now());
             if let Ok(Some((peer, n))) = turn.recv_packet(buf) {
