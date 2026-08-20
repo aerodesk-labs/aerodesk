@@ -775,6 +775,17 @@ fn connect_inner(
     let (peer_id, turn) = signal.join(room, role, auth)?;
     info!("joined room {room} as {peer_id}");
 
+    // #539/#456 呼叫发起：主控（viewer）连接时通知房间内被叫端（Publisher）
+    // 弹窗确认——被叫端接受后才出流采集。与 core connect_live_role 同款。
+    if role == Role::Viewer {
+        let _ = signal.send_signal(aerodesk_core::protocol::signal::SignalMessage::Call {
+            from: peer_id.clone(),
+            target: room.to_string(),
+            call_id: format!("call-{peer_id}"),
+            timeout_ms: Some(30_000),
+        });
+    }
+
     // #216 外部 NAT 场景：非回环信令绑 0.0.0.0（否则 127.0.0.1 源地址发不出外部
     // UDP，TURN UDP 中继不可用，只能退 TCP TURN）；与 aerodesk-core connect 对齐。
     let loopback_signal = signal_url.contains("127.0.0.1")

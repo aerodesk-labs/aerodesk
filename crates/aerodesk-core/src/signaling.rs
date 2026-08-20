@@ -175,10 +175,16 @@ impl WsSignalClient {
             to: "sfu".into(),
             description: sdp.into(),
         })?;
-        match self.recv()? {
-            SignalMessage::Description { description, .. } => Ok(description),
-            SignalMessage::Error { message } => Err(message),
-            other => Err(format!("unexpected description response: {other:?}")),
+        // #539：viewer 发起的 Call 响应（CallRejected/CallRinging 等）与 SDP
+        // answer 交织到达（e2e 无被叫端时 CallRejected 先回）——跳过继续等。
+        loop {
+            match self.recv()? {
+                SignalMessage::Description { description, .. } => return Ok(description),
+                SignalMessage::Error { message } => return Err(message),
+                other => {
+                    tracing::debug!("skip during description exchange: {other:?}");
+                }
+            }
         }
     }
 
