@@ -2273,6 +2273,11 @@ fn main() -> Result<(), slint::PlatformError> {
         settings.token_default.clone(),
         settings.server_tls,
     );
+    // #487 修复：开关状态恢复不能只回填 UI——inc_enabled=true 时启动即自动开始发布。
+    // 否则开关显示「开」而实际未发布，用户每次重启 App 都得手动把开关关了再开才生效。
+    if settings.inc_enabled {
+        start_publisher_ui(&ui);
+    }
     if !settings.server_default.is_empty() {
         ui.set_server_input(server_display.into());
     }

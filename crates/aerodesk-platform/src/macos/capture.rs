@@ -30,6 +30,10 @@ pub struct ScreenCapture {
     display_id: u32,
     /// 连续无帧计数（达到阈值重建采集会话）。
     stale: u32,
+    /// 已重建次数（#503：会话重建同样退避+封顶，防重建本身成为 SCStream churn 源）。
+    rebuilds: u32,
+    /// 采集已降级（连续重建/重试仍无有效帧）：停止一切重建与重试，视频静默下线。
+    degraded: bool,
 }
 
 /// 显示器原生像素尺寸按上限等比缩放（默认高 ≤1080、宽 ≤1920）。
@@ -107,25 +111,48 @@ fn spawn_capture_thread(
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(move || {
+            // #503 修复（系统重启事故直接死因）：采集失败必须退避重试 + 次数上限。
+            // 每次 capture_sample_buffer 内部都会建/销一个 SCStream；原先失败只睡
+            // 16ms 紧重试（~60 次/秒），会把 WindowServer 的 sharing context 刷爆
+            // （86GB），16GB 机器被 Jetsam + watchdog 强制重启。改为：连续失败按
+            // 指数退避（40ms→…→1s 封顶），达到上限后发送终态错误并退出线程（降级）。
+            const MAX_ERR_STREAK: u32 = 15;
+            let mut err_streak: u32 = 0;
             loop {
-                match SCScreenshotManager::capture_sample_buffer(&filter, &config) {
+                let res = match SCScreenshotManager::capture_sample_buffer(&filter, &config) {
                     Ok(sample) => match sample.image_buffer().and_then(|pb| pb.io_surface()) {
-                        Some(surface) => {
-                            if tx.send(Ok(surface)).is_err() {
-                                return;
-                            }
-                            // 节流：无间隔狂轮询会压垮 replayd 导致 SCK 挂起
-                            // （macOS 26 实测），按 ~30fps 节奏采集。
-                            std::thread::sleep(Duration::from_millis(33));
-                        }
-                        None => {
-                            let _ = tx.send(Err("sample without surface".into()));
-                            std::thread::sleep(Duration::from_millis(33));
-                        }
+                        Some(surface) => Ok(surface),
+                        None => Err("sample without surface".to_string()),
                     },
-                    Err(e) => {
-                        let _ = tx.send(Err(format!("SCK error: {e:?}")));
-                        std::thread::sleep(Duration::from_millis(16));
+                    Err(e) => Err(format!("SCK error: {e:?}")),
+                };
+                match res {
+                    Ok(surface) => {
+                        err_streak = 0;
+                        if tx.send(Ok(surface)).is_err() {
+                            return;
+                        }
+                        // 节流：无间隔狂轮询会压垮 replayd 导致 SCK 挂起
+                        // （macOS 26 实测），按 ~30fps 节奏采集。
+                        std::thread::sleep(Duration::from_millis(33));
+                    }
+                    Err(msg) => {
+                        err_streak += 1;
+                        if err_streak >= MAX_ERR_STREAK {
+                            // 终态：通知主线程后退出，不再 churn（capture_frame 据此降级）。
+                            let _ = tx.send(Err(format!(
+                                "SCK 采集连续失败 {err_streak} 次，降级停止视频采集（最后错误: {msg}）"
+                            )));
+                            return;
+                        }
+                        if tx.send(Err(msg)).is_err() {
+                            return;
+                        }
+                        // 指数退避：40ms << min(streak,5)，封顶 1s。
+                        let backoff = Duration::from_millis(40)
+                            .saturating_mul(1u32 << err_streak.min(5))
+                            .min(Duration::from_secs(1));
+                        std::thread::sleep(backoff);
                     }
                 }
             }
@@ -148,6 +175,8 @@ impl ScreenCapture {
             seq: 0,
             display_id,
             stale: 0,
+            rebuilds: 0,
+            degraded: false,
         })
     }
 
@@ -161,6 +190,12 @@ impl ScreenCapture {
     /// 达阈值自动重建会话（#274 自愈，对超时与错误路径同等生效）。
     /// 命名为 capture_frame 以区别于 core `MediaSource::next_frame`（#277）。
     pub fn capture_frame(&mut self, timeout: Duration) -> Option<IOSurface> {
+        // #503：已降级 → 不再重试/重建。排空并丢弃 channel，防止采集线程退出前
+        // 残留的帧/错误无人消费而堆积（IOSurface 是大对象）。
+        if self.degraded {
+            while self.rx.try_recv().is_ok() {}
+            return None;
+        }
         match self.rx.recv_timeout(timeout) {
             Ok(Ok(surface)) => {
                 self.seq += 1;
@@ -169,7 +204,12 @@ impl ScreenCapture {
             }
             // 错误与超时同样计入 stale：持续报错（无权限/设备移除）若不计数，
             // 永远到不了重建阈值，错误还会被静默吞掉。
-            Ok(Err(_)) => {
+            Ok(Err(msg)) => {
+                // 采集线程连续失败达上限后的终态信号 → 直接降级（不再等重建阈值）。
+                if msg.contains("降级停止视频采集") {
+                    self.degraded = true;
+                    tracing::error!("{msg}");
+                }
                 self.stale += 1;
                 self.rebuild_if_stale();
                 None
@@ -186,11 +226,25 @@ impl ScreenCapture {
     /// 重建采集会话（换新线程 + 新 filter/config）。重建失败记日志，
     /// stale 已清零，下一轮窗口后自动重试。
     fn rebuild_if_stale(&mut self) {
-        if self.stale < 60 {
+        if self.stale < 60 || self.degraded {
             return;
         }
         self.stale = 0;
-        tracing::warn!("SCK capture stalled, recreating session");
+        self.rebuilds += 1;
+        // #503：重建次数封顶——连续重建仍无有效帧说明采集在本机当前不可用，
+        // 降级停止（不再重建/重试），避免会话重建本身成为 SCStream churn 源。
+        const MAX_REBUILDS: u32 = 3;
+        if self.rebuilds > MAX_REBUILDS {
+            self.degraded = true;
+            tracing::error!(
+                "SCK 采集重建 {MAX_REBUILDS} 次仍无有效帧，降级停止视频采集（音频/连接不受影响）"
+            );
+            return;
+        }
+        tracing::warn!(
+            "SCK capture stalled, recreating session ({}/{MAX_REBUILDS})",
+            self.rebuilds
+        );
         match build_capture(self.display_idx, self.fps, self.width, self.height) {
             Ok((f, c, id, w, h)) => {
                 self.display_id = id;
