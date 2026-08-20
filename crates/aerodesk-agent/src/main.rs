@@ -620,7 +620,7 @@ fn arg(args: &[String], key: &str) -> Option<String> {
 fn init_log() {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("aerodesk_cli=info"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("aerodesk_agent=info"));
     tracing_subscriber::registry()
         // 日志写 stderr：`--cmd-json` 需要 stdout 只有 JSON（#109 MCP 桥接）。
         .with(fmt::layer().with_writer(std::io::stderr))

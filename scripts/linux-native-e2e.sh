@@ -40,7 +40,6 @@ PUB=$!
 sleep 3
 
 echo "== [5/5] CLI viewer 收流断言"
-# #535 排查：viewer debug 级日志（ICE/DTLS/SCTP/DCEP 通道开、FIR 发送、组装器）。
 "$ROOT/target/debug/aerodesk-agent" --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" \
   >/tmp/linux-native-view.log 2>&1 &
 VIEW=$!
