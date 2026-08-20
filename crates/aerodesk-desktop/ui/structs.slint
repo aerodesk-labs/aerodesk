@@ -1,0 +1,14 @@
+// AeroDesk 桌面 UI —— 视觉对齐 RustDesk 官方 Flutter 客户端（浅色 Material 主题）。
+// 配色取自 rustdesk/flutter/lib/common.dart：
+//   grayBg #EFEFF2 / accent #0071FF / 主区白底，正文 black87 #212121
+// 2026-08 拆分：本文件仅聚合入口，组件见 structs/common/tray/app_window/windows/*。
+export struct DeviceGroupEntry {
+    is-header: bool,
+    text: string,
+    entry: string,
+}
+export struct ChatEntry {
+    sender: string,
+    text: string,
+    own: bool,
+}

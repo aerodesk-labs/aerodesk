@@ -1,0 +1,331 @@
+// AeroDesk 桌面 UI —— 视觉对齐 RustDesk 官方 Flutter 客户端（浅色 Material 主题）。
+// 配色取自 rustdesk/flutter/lib/common.dart：
+//   grayBg #EFEFF2 / accent #0071FF / 主区白底，正文 black87 #212121
+// 2026-08 拆分：本文件仅聚合入口，组件见 structs/common/tray/app_window/windows/*。
+import { CheckBox, ProgressIndicator, ScrollView, Slider, Switch } from "std-widgets.slint";
+import "fonts/MaterialIcons-Regular.ttf";
+
+export component MIcon {
+    in property <string> icon;
+    in property <length> size: 20px;
+    in property <brush> color: #4d4d52;
+    in property <length> y-offset: 2px;
+    width: 100%;
+    height: 100%;
+    Text {
+        text: root.icon;
+        font-family: "Material Icons";
+        font-size: root.size;
+        color: root.color;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: 100%;
+        height: 100%;
+        y: root.y-offset;
+    }
+}
+export component RdButton {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    in property <bool> checked: false;
+    callback clicked;
+    height: 30px;
+    min-width: 64px;
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 8px;
+        background: root.enabled
+            ? (root.primary
+                ? (ta.has-hover ? #0063d9 : #0071ff)
+                : (ta.has-hover ? #e4e4e8 : #efeff2))
+            : #f5f5f7;
+        border-width: root.primary ? 0px : 1px;
+        border-color: root.checked ? #0071ff : #dedee2;
+        ta := TouchArea {
+            width: 100%;
+            height: 100%;
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            clicked => { root.clicked(); }
+        }
+        Text {
+            width: 100%;
+            height: 100%;
+            text: root.text;
+            color: root.primary ? #ffffff : (root.checked ? #0071ff : #212121);
+            font-size: 14px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+export component IconBtn {
+    in property <string> icon;
+    in property <string> tooltip: "";
+    in property <bool> active: false;
+    in property <bool> danger: false;
+    in property <bool> enabled: true;
+    callback clicked;
+    width: 36px;
+    height: 32px;
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 6px;
+        background: root.enabled && ta.has-hover ? (root.danger ? #ffecec : #e8e8ec) : transparent;
+        border-width: 1px;
+        border-color: root.active ? #0071ff : transparent;
+        ta := TouchArea {
+            width: 100%;
+            height: 100%;
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            clicked => { root.clicked(); }
+        }
+        MIcon {
+            icon: root.icon;
+            size: 18px;
+            color: root.enabled ? (root.danger ? #d93025 : (root.active ? #0071ff : #5f6368)) : #bdbdc4;
+        }
+        if root.tooltip != "": Tooltip {
+            Rectangle {
+                background: #3c4043;
+                border-radius: 4px;
+                padding-left: 8px;
+                padding-right: 8px;
+                padding-top: 4px;
+                padding-bottom: 4px;
+                Text { text: root.tooltip; font-size: 12px; color: #ffffff; }
+            }
+        }
+    }
+}
+export component NavItem {
+    in property <string> icon;
+    in property <string> text;
+    in property <bool> selected: false;
+    callback clicked;
+    width: 100%;
+    height: 36px;
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 6px;
+        background: root.selected ? #e3ecfb : (ta.has-hover ? #e4e4e8 : transparent);
+        HorizontalLayout {
+            cross-axis-alignment: center;
+            padding-left: 12px;
+            spacing: 10px;
+            Rectangle {
+                width: 22px;
+                height: 22px;
+                MIcon {
+                    icon: root.icon;
+                    size: 18px;
+                    color: root.selected ? #0071ff : #6d6d73;
+                }
+            }
+            Text {
+                text: root.text;
+                font-size: 14px;
+                color: root.selected ? #0071ff : #3c3c40;
+                vertical-alignment: center;
+            }
+        }
+        ta := TouchArea {
+            width: 100%;
+            height: 100%;
+            mouse-cursor: pointer;
+            clicked => { root.clicked(); }
+        }
+        Tooltip {
+            Rectangle {
+                background: #3c4043;
+                border-radius: 4px;
+                padding-left: 8px;
+                padding-right: 8px;
+                padding-top: 4px;
+                padding-bottom: 4px;
+                Text { text: root.text; font-size: 12px; color: #ffffff; }
+            }
+        }
+    }
+}
+export component PeerTab {
+    in property <string> icon;
+    in property <string> tooltip: "";
+    in property <bool> selected: false;
+    in property <bool> enabled: true;
+    callback clicked;
+    width: 44px;
+    height: 32px;
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: root.enabled && root.selected ? transparent : (ta.has-hover && root.enabled ? #eef0f4 : transparent);
+        Rectangle {
+            width: 100%;
+            height: 2px;
+            y: parent.height - 2px;
+            background: root.enabled && root.selected ? #0071ff : transparent;
+        }
+        MIcon {
+            icon: root.icon;
+            size: 21px;
+            color: !root.enabled ? #c4c4ca : (root.selected ? #0071ff : #8a8a90);
+        }
+        ta := TouchArea {
+            width: 100%;
+            height: 100%;
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            clicked => { root.clicked(); }
+        }
+        if root.enabled && root.tooltip != "": Tooltip {
+            Rectangle {
+                background: #3c4043;
+                border-radius: 4px;
+                padding-left: 8px;
+                padding-right: 8px;
+                padding-top: 4px;
+                padding-bottom: 4px;
+                Text { text: root.tooltip; font-size: 12px; color: #ffffff; }
+            }
+        }
+    }
+}
+export component IdentityRow {
+    in property <string> label;
+    in property <string> value;
+    in property <length> value-size: 22px;
+    callback copy;
+    height: 62px;
+    HorizontalLayout {
+        Rectangle {
+            width: 2px;
+            height: 100%;
+            background: #0071ff;
+        }
+        VerticalLayout {
+            padding-left: 7px;
+            spacing: 2px;
+            Text {
+                text: root.label;
+                font-size: 14px;
+                color: #7d7d84;
+            }
+            Text {
+                text: root.value;
+                font-size: root.value-size;
+                color: #212121;
+            }
+        }
+    }
+}
+export component RdInput {
+    in property <string> placeholder: "";
+    in property <length> font-size: 16px;
+    in-out property <string> text: "";
+    callback edited;
+    // 回车确认（TextInput.accepted，Enter 触发一次）：供“输入完成才提交”场景，
+    // 避免用 edited（每次按键都触发）导致输入被 Rust 侧清空、无法输入多字符前缀。
+    callback accepted;
+    height: 48px;
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 8px;
+        background: #efeff2;
+        border-width: 1px;
+        border-color: ti.has-focus ? #0071ff : transparent;
+        ti := TextInput {
+            x: 15px;
+            y: 0px;
+            width: parent.width - 30px;
+            height: 100%;
+            text <=> root.text;
+            color: #212121;
+            font-size: root.font-size;
+            vertical-alignment: center;
+            single-line: true;
+            edited => { root.edited(); }
+            accepted => { root.accepted(); }
+        }
+        // 手动 placeholder（TextInput 内建不支持 placeholder-text）
+        Text {
+            x: 15px;
+            y: 0px;
+            width: parent.width - 30px;
+            height: 100%;
+            text: root.placeholder;
+            color: #9a9aa0;
+            font-size: root.font-size;
+            vertical-alignment: center;
+            visible: root.text == "";
+        }
+    }
+}
+export component PermissionCard {
+    in property <string> perm-screen;
+    in property <string> perm-a11y;
+    callback refresh;
+    callback open-screen;
+    callback open-a11y;
+    Rectangle {
+        vertical-stretch: 0;
+        width: 100%;
+        border-radius: 13px;
+        border-width: 1px;
+        border-color: #efeff2;
+        background: #ffffff;
+        VerticalLayout {
+            padding-left: 24px;
+            padding-right: 24px;
+            padding-top: 24px;
+            padding-bottom: 22px;
+            spacing: 14px;
+            Text { text: "被控端授权"; font-size: 19px; color: #212121; height: 26px; vertical-stretch: 0; }
+            Text {
+                text: "被控端需要以下 macOS 权限（其他平台后续接入）：";
+                font-size: 14px; color: #6d6d73; height: 20px; vertical-stretch: 0;
+            }
+            HorizontalLayout {
+                alignment: space-between;
+                cross-axis-alignment: center;
+                HorizontalLayout {
+                    cross-axis-alignment: center;
+                    spacing: 10px;
+                    Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.perm-screen == "已授权" ? #34a853 : #efeff2; }
+                    Text { text: "屏幕录制："; width: 90px; font-size: 14px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
+                    Text { text: root.perm-screen; font-size: 14px; color: root.perm-screen == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
+                }
+                HorizontalLayout {
+                    cross-axis-alignment: center;
+                    spacing: 4px;
+                    IconBtn { icon: "\u{e5d5}"; tooltip: "检查权限"; clicked => { root.refresh(); } }
+                    IconBtn { icon: "\u{e8b8}"; tooltip: "打开屏幕录制设置"; clicked => { root.open-screen(); } }
+                }
+            }
+            HorizontalLayout {
+                alignment: space-between;
+                cross-axis-alignment: center;
+                HorizontalLayout {
+                    cross-axis-alignment: center;
+                    spacing: 10px;
+                    Rectangle { width: 8px; height: 8px; border-radius: 4px; background: root.perm-a11y == "已授权" ? #34a853 : #efeff2; }
+                    Text { text: "辅助功能："; width: 90px; font-size: 14px; color: #212121; vertical-alignment: center; vertical-stretch: 0; }
+                    Text { text: root.perm-a11y; font-size: 14px; color: root.perm-a11y == "已授权" ? #34a853 : #d93025; vertical-alignment: center; vertical-stretch: 0; }
+                }
+                HorizontalLayout {
+                    cross-axis-alignment: center;
+                    spacing: 4px;
+                    IconBtn { icon: "\u{e5d5}"; tooltip: "检查权限"; clicked => { root.refresh(); } }
+                    IconBtn { icon: "\u{e8b8}"; tooltip: "打开辅助功能设置"; clicked => { root.open-a11y(); } }
+                }
+            }
+            Text { text: "授权后重启应用生效（屏幕录制）"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+        }
+    }
+}

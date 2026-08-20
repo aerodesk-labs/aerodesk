@@ -1,0 +1,74 @@
+// AeroDesk 桌面 UI —— 视觉对齐 RustDesk 官方 Flutter 客户端（浅色 Material 主题）。
+// 配色取自 rustdesk/flutter/lib/common.dart：
+//   grayBg #EFEFF2 / accent #0071FF / 主区白底，正文 black87 #212121
+// 2026-08 拆分：本文件仅聚合入口，组件见 structs/common/tray/app_window/windows/*。
+import { ProgressIndicator, ScrollView } from "std-widgets.slint";
+import { RdButton, RdInput } from "../common.slint";
+import { ChatEntry } from "../structs.slint";
+export component MessageWindow inherits Window {
+    in-out property <[ChatEntry]> messages: [];
+    in-out property <string> draft: "";
+    in-out property <string> status: "未连接会话";
+
+    callback send-message(string);
+
+    title: "AeroDesk 发消息";
+    width: 640px;
+    height: 480px;
+    Rectangle {
+        background: #f5f5f7;
+        VerticalLayout {
+            padding-left: 14px;
+            padding-right: 14px;
+            padding-top: 12px;
+            padding-bottom: 12px;
+            spacing: 8px;
+
+            Rectangle {
+                vertical-stretch: 1;
+                background: #ffffff;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: #e5e5ea;
+                ScrollView {
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 6px;
+                        for entry in root.messages: Text {
+                            text: entry.own ? ("我: " + entry.text) : (entry.sender + ": " + entry.text);
+                            color: entry.own ? #0071ff : #212121;
+                            font-size: 14px;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                }
+            }
+
+            Text {
+                text: root.status;
+                color: #9a9aa0;
+                font-size: 13px;
+                vertical-stretch: 0;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                RdInput {
+                    text <=> root.draft;
+                    placeholder: "输入消息后回车";
+                    font-size: 14px;
+                    horizontal-stretch: 1;
+                    accepted => { root.send-message(root.draft); }
+                }
+                RdButton {
+                    text: "发送";
+                    primary: true;
+                    width: 72px;
+                    clicked => { root.send-message(root.draft); }
+                }
+            }
+        }
+    }
+}
+

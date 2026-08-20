@@ -1,0 +1,98 @@
+// AeroDesk 桌面 UI —— 视觉对齐 RustDesk 官方 Flutter 客户端（浅色 Material 主题）。
+// 配色取自 rustdesk/flutter/lib/common.dart：
+//   grayBg #EFEFF2 / accent #0071FF / 主区白底，正文 black87 #212121
+// 2026-08 拆分：本文件仅聚合入口，组件见 structs/common/tray/app_window/windows/*。
+import { ProgressIndicator, ScrollView } from "std-widgets.slint";
+import { RdButton, RdInput } from "../common.slint";
+import { ChatEntry } from "../structs.slint";
+export component FileTransferWindow inherits Window {
+    in-out property <string> status: "未选择文件";
+    in-out property <string> selected-file: "";
+    in-out property <float> progress: -1;
+    in-out property <string> progress-label: "";
+
+    callback choose-file();
+    callback send-file();
+    callback cancel-file();
+
+    title: "AeroDesk 文件传输";
+    width: 640px;
+    height: 480px;
+    Rectangle {
+        background: #f5f5f7;
+        VerticalLayout {
+            padding-left: 24px;
+            padding-right: 24px;
+            padding-top: 20px;
+            padding-bottom: 20px;
+            spacing: 14px;
+
+            Text {
+                text: root.status;
+                color: #212121;
+                font-size: 14px;
+                vertical-stretch: 0;
+            }
+
+            Rectangle {
+                height: 48px;
+                border-radius: 8px;
+                background: #ffffff;
+                border-width: 1px;
+                border-color: #dedee2;
+                HorizontalLayout {
+                    cross-axis-alignment: center;
+                    padding-left: 14px;
+                    padding-right: 8px;
+                    spacing: 8px;
+                    Text {
+                        text: root.selected-file == "" ? "未选择文件" : root.selected-file;
+                        color: root.selected-file == "" ? #9a9aa0 : #212121;
+                        font-size: 14px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    RdButton {
+                        text: "选择文件";
+                        width: 96px;
+                        clicked => { root.choose-file(); }
+                    }
+                }
+            }
+
+            if root.progress >= 0: VerticalLayout {
+                spacing: 6px;
+                ProgressIndicator {
+                    progress: root.progress < 0 ? 0.0 : (root.progress > 1.0 ? 1.0 : root.progress);
+                }
+                Text {
+                    text: root.progress-label;
+                    color: #7d7d84;
+                    font-size: 13px;
+                    vertical-stretch: 0;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle { width: 0px; horizontal-stretch: 1; }
+                RdButton {
+                    text: "发送";
+                    primary: true;
+                    width: 88px;
+                    enabled: root.selected-file != "" && root.progress < 0;
+                    clicked => { root.send-file(); }
+                }
+                RdButton {
+                    text: "取消";
+                    width: 88px;
+                    enabled: root.progress >= 0;
+                    clicked => { root.cancel-file(); }
+                }
+            }
+        }
+    }
+}
+
+

@@ -1,0 +1,85 @@
+// AeroDesk 桌面 UI —— 视觉对齐 RustDesk 官方 Flutter 客户端（浅色 Material 主题）。
+// 配色取自 rustdesk/flutter/lib/common.dart：
+//   grayBg #EFEFF2 / accent #0071FF / 主区白底，正文 black87 #212121
+// 2026-08 拆分：本文件仅聚合入口，组件见 structs/common/tray/app_window/windows/*。
+import { ProgressIndicator, ScrollView } from "std-widgets.slint";
+import { RdButton } from "../common.slint";
+import { ChatEntry } from "../structs.slint";
+export component CameraWindow inherits Window {
+    in-out property <image> video-frame: @image-url("");
+    in-out property <float> frame-w: 0;
+    in-out property <float> frame-h: 0;
+    in-out property <string> status: "连接中…";
+    in-out property <bool> camera-active: true;
+
+    callback toggle-camera();
+
+    title: "AeroDesk 摄像头";
+    width: 1000px;
+    height: 680px;
+
+    VerticalLayout {
+        spacing: 0px;
+        Rectangle {
+            background: #000000;
+            vertical-stretch: 1;
+            Image {
+                source: root.video-frame;
+                width: 100%;
+                height: 100%;
+                image-fit: contain;
+            }
+            if root.video-frame.width == 0: Text {
+                text: "等待摄像头画面…（若对端未发布摄像头轨，则回退屏幕画面）";
+                color: #888888;
+                font-size: 14px;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+                width: 100%;
+                height: 100%;
+            }
+            Rectangle {
+                x: 12px;
+                y: 12px;
+                height: 44px;
+                border-radius: 6px;
+                background: #ffffff;
+                border-width: 1px;
+                border-color: #d9d9de;
+                HorizontalLayout {
+                    cross-axis-alignment: center;
+                    padding-left: 4px;
+                    padding-right: 4px;
+                    spacing: 2px;
+                    RdButton {
+                        text: root.camera-active ? "切回屏幕" : "显示摄像头";
+                        width: 96px;
+                        clicked => { root.toggle-camera(); }
+                    }
+                    Rectangle { width: 6px; }
+                    Text {
+                        text: root.status;
+                        color: #34a853;
+                        font-size: 14px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+        Rectangle {
+            height: 28px;
+            background: #ffffff;
+            HorizontalLayout {
+                padding-left: 14px;
+                Text {
+                    text: root.status;
+                    color: #7d7d84;
+                    font-size: 14px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+
