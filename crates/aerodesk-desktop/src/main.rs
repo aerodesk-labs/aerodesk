@@ -3453,6 +3453,10 @@ fn main() -> Result<(), slint::PlatformError> {
     let tray = Tray::new().ok();
     #[cfg(not(target_os = "macos"))]
     let tray: Option<Tray> = None;
+    // #539：托盘菜单显示版本号（只读项）。
+    if let Some(t) = &tray {
+        t.set_version(format!("v{}", env!("CARGO_PKG_VERSION")).into());
+    }
     let win = ui.as_weak();
     if let Some(tray) = &tray {
         tray.on_show_window(move || {
