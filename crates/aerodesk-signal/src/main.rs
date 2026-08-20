@@ -112,6 +112,9 @@ struct Peer {
     id: String,
     role: Role,
     ws: Arc<Mutex<Websocket>>,
+    /// #539 呼叫可靠送达：发送队列。session_loop 常驻阻塞读持有 ws 锁，
+    /// try_lock 会丢呼叫、阻塞 lock 会死锁——经队列投递由本连接循环 drain。
+    tx: std::sync::mpsc::Sender<String>,
     /// JWT sub（#171 per-user 配额计数用；静态/开发模式为 None）。
     user: Option<String>,
     /// 桥自身 publisher 腿（#246）：空闲回收/配额豁免按此区分，不计真实客户端。
@@ -1129,6 +1132,8 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
         return;
     };
     let ws = Arc::new(Mutex::new(ws_owned));
+    // #539 呼叫可靠送达：本连接发送队列（tx 存 Peer 供转发投递；rx 本循环 drain）。
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
     info!("session open");
     // 本连接加入时的 peer_id：用于校验 Description.from 属于本连接（防冒用）。
     let mut own_peer_id: Option<String> = None;
@@ -1137,6 +1142,12 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
     let mut own_dc_ready = false;
 
     loop {
+        // #539：先 drain 发送队列（呼叫等可靠消息经队列投递——try_lock 会丢、
+        // 阻塞 lock 会与下方 next() 的持锁等待互锁）。
+        while let Ok(s) = rx.try_recv() {
+            let mut w = ws.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = w.send_text(&s);
+        }
         let msg = match ws.lock().unwrap_or_else(|e| e.into_inner()).next() {
             Some(Message::Text(t)) => t,
             Some(_) => continue,
@@ -1169,6 +1180,8 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
         };
 
         match msg {
+            // #539 心跳：仅驱动读循环返回（发送队列 drain 在循环顶部），无业务。
+            SignalMessage::Ping => continue,
             SignalMessage::Join {
                 room,
                 role,
@@ -1438,6 +1451,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                         id: peer_id.clone(),
                         role,
                         ws: ws.clone(),
+                        tx: tx.clone(),
                         user,
                         bridge_leg,
                     });
@@ -1554,20 +1568,23 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                             to: from,
                             call_id,
                             reason: Some("target offline".into()),
+                            error_code: Some("offline".into()),
                         },
                     );
                     continue;
                 }
-                for target_ws in targets {
-                    send(
-                        target_ws,
-                        SignalMessage::Call {
-                            from: from.clone(),
-                            target: target.clone(),
-                            call_id: call_id.clone(),
-                            timeout_ms,
-                        },
-                    );
+                for target_tx in targets {
+                    info!("call forward: {from} -> {target} (call_id={call_id})");
+                    // #539：呼叫可靠送达——投递到被叫端连接发送队列（session_loop
+                    // drain 后经其 ws 写出；不碰 ws 锁，避免与阻塞读互锁/丢失）。
+                    if let Ok(text) = serde_json::to_string(&SignalMessage::Call {
+                        from: from.clone(),
+                        target: target.clone(),
+                        call_id: call_id.clone(),
+                        timeout_ms,
+                    }) {
+                        let _ = target_tx.send(text);
+                    }
                 }
             }
             SignalMessage::CallRinging { from, to, call_id } => {
@@ -1595,6 +1612,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 to,
                 call_id,
                 reason,
+                error_code,
             } => {
                 if !forward_from_own(&ws, own_peer_id.as_deref(), &from) {
                     continue;
@@ -1607,6 +1625,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                         to,
                         call_id,
                         reason,
+                        error_code,
                     },
                 );
             }
@@ -1749,7 +1768,7 @@ fn publisher_targets(
     rooms: &Rooms,
     target: &str,
     exclude_peer: &str,
-) -> Vec<Arc<Mutex<Websocket>>> {
+) -> Vec<std::sync::mpsc::Sender<String>> {
     let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
     rooms
         .get(target)
@@ -1757,27 +1776,32 @@ fn publisher_targets(
             peers
                 .iter()
                 .filter(|p| is_callable_publisher(p.role, &p.id, p.bridge_leg, exclude_peer))
-                .map(|p| p.ws.clone())
+                .map(|p| p.tx.clone())
                 .collect()
         })
         .unwrap_or_default()
 }
 
 /// 按 peer_id 转发一条信令消息；目标不存在时返回 false（不阻塞锁）。
+/// #539：经目标连接发送队列投递（session_loop 常驻读持有 ws 锁，try_lock
+/// 会丢弃呼叫/拒绝等可靠消息；阻塞 lock 会与读互锁——队列由本连接循环 drain）。
 fn forward_to_peer(rooms: &Rooms, to: &str, msg: SignalMessage) -> bool {
-    let target_ws = {
+    let target_tx = {
         let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
         rooms
             .values()
             .flat_map(|peers| peers.iter())
             .find(|p| p.id == to)
-            .map(|p| p.ws.clone())
+            .map(|p| p.tx.clone())
     };
-    let Some(target_ws) = target_ws else {
+    let Some(target_tx) = target_tx else {
         tracing::debug!("signal forward skipped: peer {to} not found");
         return false;
     };
-    send(target_ws, msg);
+    let Ok(text) = serde_json::to_string(&msg) else {
+        return false;
+    };
+    let _ = target_tx.send(text);
     true
 }
 

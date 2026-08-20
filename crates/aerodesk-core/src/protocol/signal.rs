@@ -26,6 +26,9 @@ pub struct TurnConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SignalMessage {
+    /// #539 心跳：presence 定期发送——驱动服务端读循环的发送队列 drain
+    /// （呼叫等可靠消息经队列投递，服务端在收到任一消息后执行 drain）。
+    Ping,
     /// 客户端加入房间。
     Join {
         room: String,
@@ -97,6 +100,10 @@ pub enum SignalMessage {
         to: String,
         call_id: String,
         reason: Option<String>,
+        /// #539 结构化拒绝码：timeout / user_rejected / busy / offline
+        /// （旧对端不带该字段，serde 缺省 None 兼容）。
+        #[serde(default)]
+        error_code: Option<String>,
     },
     /// 任一方挂断呼叫。
     Hangup {
@@ -206,6 +213,7 @@ mod tests {
                 to: "caller-peer".into(),
                 call_id: "call-1".into(),
                 reason: Some("target offline".into()),
+                error_code: Some("offline".into()),
             },
             SignalMessage::Hangup {
                 from: "caller-peer".into(),

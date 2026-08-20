@@ -257,6 +257,9 @@ pub struct SignalPresence {
     retry_at: Option<Instant>,
     stopped: bool,
     read_timeout: Duration,
+    /// #539 心跳节拍：每 5s 发 ws Ping（驱动服务端读循环 drain 发送队列，
+    /// 呼叫等可靠消息可送达；同时维持连接保活）。
+    last_ping: Instant,
     call: CallState,
     events: VecDeque<PresenceEvent>,
 }
@@ -270,6 +273,7 @@ impl SignalPresence {
             retry_at: None,
             stopped: true,
             read_timeout: Duration::from_millis(250),
+            last_ping: Instant::now(),
             call: CallState::default(),
             events: VecDeque::new(),
         }
@@ -317,8 +321,8 @@ impl SignalPresence {
         self.send_call_accepted(&active)
     }
 
-    /// 拒绝当前待接听呼叫。
-    pub fn reject_call(&mut self, reason: Option<&str>) -> Result<(), String> {
+    /// 拒绝当前待接听呼叫。`code` 为结构化拒绝码（#539：timeout/user_rejected 等）。
+    pub fn reject_call(&mut self, reason: Option<&str>, code: Option<&str>) -> Result<(), String> {
         let Some(incoming) = self.call.reject() else {
             return Err("no incoming call".into());
         };
@@ -327,6 +331,7 @@ impl SignalPresence {
             to: incoming.from,
             call_id: incoming.call_id,
             reason: reason.map(str::to_string),
+            error_code: code.map(str::to_string),
         })
     }
 
@@ -419,6 +424,15 @@ impl SignalPresence {
     }
 
     fn poll_online(&mut self) {
+        // #539：每 5s 发 ws Ping——服务端 session_loop 的阻塞 next() 收到即
+        // 返回并 drain 发送队列（呼叫可送达）；同时维持连接保活（纯收不发
+        // 会被中间层/服务端判死，LESSON_WS 心跳）。
+        if self.last_ping.elapsed() >= Duration::from_secs(5) {
+            self.last_ping = Instant::now();
+            if let Some(client) = self.client.as_mut() {
+                let _ = client.send_ping();
+            }
+        }
         let result = match self.client.as_mut() {
             Some(client) => client.recv_timeout(self.read_timeout),
             None => {
@@ -500,6 +514,7 @@ impl SignalPresence {
                     to: incoming.from,
                     call_id: incoming.call_id,
                     reason: Some("busy".into()),
+                    error_code: Some("busy".into()),
                 });
             }
         }

@@ -1,0 +1,45 @@
+// AeroDesk 桌面 UI —— 视觉对齐 RustDesk 官方 Flutter 客户端（浅色 Material 主题）。
+// #539 呼叫确认独立授权窗口：被呼叫且未静默授权时弹出（不依赖主窗口——App
+// 最小化/托盘时也能看到）。接受/拒绝按钮 + 30s 超时提示（超时由 Rust 侧自动拒绝）。
+import { RdButton } from "../common.slint";
+
+export component IncomingCallWindow inherits Window {
+    in-out property <string> from: "";
+    callback accept();
+    callback reject();
+    title: "接受远控请求";
+    // #539：授权窗口必须置顶（用户接受/拒绝前不被其它窗口遮挡）。
+    always-on-top: true;
+    width: 400px;
+    height: 240px;
+    background: #ffffff;
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #ffffff;
+        VerticalLayout {
+            padding-left: 28px;
+            padding-right: 28px;
+            padding-top: 24px;
+            padding-bottom: 20px;
+            spacing: 14px;
+            Text { text: "接受远控请求"; font-size: 19px; color: #212121; height: 26px; vertical-stretch: 0; }
+            Text {
+                text: "设备 " + root.from + " 请求控制此电脑";
+                font-size: 14px;
+                color: #6d6d73;
+                height: 44px;
+                vertical-stretch: 0;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                alignment: space-between;
+                spacing: 12px;
+                vertical-stretch: 0;
+                RdButton { text: "拒绝"; width: 160px; clicked => { root.reject(); } }
+                RdButton { text: "接受"; primary: true; width: 160px; clicked => { root.accept(); } }
+            }
+            Text { text: "30 秒未响应将自动拒绝"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+        }
+    }
+}
