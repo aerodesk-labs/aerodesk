@@ -5,10 +5,14 @@
 export component Tray inherits SystemTrayIcon {
     icon: @image-url("tray-icon.png");
     tooltip: "AeroDesk 远程桌面";
+    // #539 版本号（Rust 侧 set_version 注入，CARGO_PKG_VERSION）。
+    in property <string> version: "";
     callback show-window();
     callback quit-app();
     Menu {
         MenuItem { title: "显示主窗口"; activated => { root.show-window(); } }
+        MenuSeparator { }
+        MenuItem { title: "版本 " + root.version; enabled: false; }
         MenuSeparator { }
         MenuItem { title: "退出 AeroDesk"; activated => { root.quit-app(); } }
     }
