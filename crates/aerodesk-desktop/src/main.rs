@@ -3573,7 +3573,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // 托盘，保持默认关闭即退出。
     #[cfg(target_os = "windows")]
     {
-        ui.window().on_close_requested(move || slint::CloseRequestResponse::HideWindow);
+        ui.window()
+            .on_close_requested(move || slint::CloseRequestResponse::HideWindow);
     }
     ui.show()?;
     if let Some(tray) = &tray {
