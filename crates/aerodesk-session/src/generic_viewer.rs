@@ -209,7 +209,7 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
     let mut seen_video = false;
     let mut session_ui_joined = false;
     // #425：连接建立后 10s 内无任何 RTP → 提示"对方不在线/未开启被控"（保持等待）。
-    let no_media_deadline = Instant::now() + Duration::from_secs(10);
+    let no_media_deadline = Instant::now() + aerodesk_core::util::NO_MEDIA_DEADLINE;
     let mut no_media_notified = false;
     // 会话延时统计：端到端单向（cursor sent_ms）/ 网络 RTT（RTCP PeerStats）/
     // 解码帧率，500ms 节流推送给 UI。

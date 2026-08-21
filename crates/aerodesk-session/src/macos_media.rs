@@ -416,7 +416,9 @@ pub fn run_viewer<U, PF>(
                 }
             }
         }
-        // #458 聊天消息：UI 聊天窗口 → chat data channel → SFU → 被控端。
+        // #458 聊天消息：复用 cmd 通道（CmdAction::Chat），与 generic_viewer
+        // 同一线上协议（#487 审查批次 2：原 chat 通道自造 JSON 与 Windows/Linux
+        // 端互不兼容，同 App 双平台互相看不懂对方聊天包）。
         while let Ok(cmd) = chat_cmd_rx.try_recv() {
             match cmd {
                 crate::ChatCmd::Send(text) => {
@@ -424,17 +426,20 @@ pub fn run_viewer<U, PF>(
                     if text.is_empty() {
                         continue;
                     }
-                    let payload = serde_json::json!({
-                        "sender": "我",
-                        "text": text,
-                        "timestamp_ms": crate::system_time_millis(),
-                    });
-                    if let Ok(json) = serde_json::to_string(&payload) {
+                    let req = aerodesk_core::protocol::cmd::CmdRequest::new(
+                        crate::system_time_millis(),
+                        aerodesk_core::protocol::cmd::CmdAction::Chat {
+                            text,
+                            sender: "我".to_string(),
+                            timestamp_ms: crate::system_time_millis(),
+                        },
+                    );
+                    if let Ok(json) = serde_json::to_string(&req) {
                         let sent = live
                             .endpoint
-                            .send_channel_data("chat", false, json.as_bytes());
+                            .send_channel_data("cmd", false, json.as_bytes());
                         if !sent {
-                            ui.set_message_window_status("发送失败：chat 通道未就绪".to_string());
+                            ui.set_message_window_status("发送失败：cmd 通道未就绪".to_string());
                         }
                     }
                 }
@@ -446,20 +451,22 @@ pub fn run_viewer<U, PF>(
             if ft_enabled {
                 file_transfer.handle_event(&ev, &mut live.endpoint);
             }
-            // #109/#452 终端命令响应 → 终端独立窗口回显。
+            // #109/#452 终端命令响应 → 终端独立窗口回显；#458 聊天消息 →
+            // 聊天窗口消息列表（同 cmd 通道，先判 Chat 再落终端）。
             if let ClientEvent::ChannelData(cid, _, data) = &ev
                 && live.endpoint.channel_label(*cid).as_deref() == Some("cmd")
                 && let Ok(response) =
                     serde_json::from_slice::<aerodesk_core::protocol::cmd::CmdResponse>(data)
             {
-                ui.append_terminal_output(crate::generic_viewer::format_cmd_response(&response));
-            }
-            // #458 聊天消息：被控端经 chat 通道回传 → 聊天窗口消息列表。
-            if let ClientEvent::ChannelData(cid, _, data) = &ev
-                && live.endpoint.channel_label(*cid).as_deref() == Some("chat")
-                && let Some((sender, text)) = crate::decode_chat_text(data)
-            {
-                ui.append_chat_message(sender, text, false);
+                if let aerodesk_core::protocol::cmd::CmdResult::Chat { sender, text } =
+                    &response.result
+                {
+                    ui.append_chat_message(sender.clone(), text.clone(), false);
+                } else {
+                    ui.append_terminal_output(crate::generic_viewer::format_cmd_response(
+                        &response,
+                    ));
+                }
             }
             match ev {
                 ClientEvent::Media(data) => {
@@ -772,7 +779,7 @@ pub fn run_viewer<U, PF>(
         }
         // #487 对端停流检测：媒体停止 ≥10s 判死（对端断开/停止推流时远控窗口
         // 不再悬挂黑屏——此前无 watchdog，窗口永久开着）。
-        if last_media.elapsed() >= Duration::from_secs(10) {
+        if last_media.elapsed() >= aerodesk_core::util::NO_MEDIA_DEADLINE {
             tracing::warn!("对端停止推流 ≥10s，判定会话结束（{room}）");
             stop.store(true, Ordering::SeqCst);
             break;

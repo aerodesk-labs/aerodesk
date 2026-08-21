@@ -1770,7 +1770,8 @@ fn viewer(
     // #173 媒体静默检测：收到过包后连续无包超过阈值视为会话死亡（str0m is_alive
     // 在 recvonly 场景下不触发 ICE Failed，需主动探活）。
     let mut last_rx: Option<Instant> = None;
-    const DEAD_AFTER_NO_MEDIA: Duration = Duration::from_secs(8);
+    // #487 审查批次 2：统一为 core 常量（原 8s，与桌面端 10s 对齐）。
+    const DEAD_AFTER_NO_MEDIA: Duration = aerodesk_core::util::NO_MEDIA_DEADLINE;
 
     loop {
         // #173 自动重连：ICE 失效（SFU/网络断开）时退出会话，由主流程重连。

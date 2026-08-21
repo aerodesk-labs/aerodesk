@@ -1178,7 +1178,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
         // 需更换 WS 层实现（如 tungstenite 的 max_message_size）。
         if msg.len() > 1 << 20 {
             send(
-                ws.clone(),
+                &tx,
                 SignalMessage::Error {
                     message: "message too large".into(),
                 },
@@ -1189,7 +1189,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
         let parsed: Result<SignalMessage, _> = serde_json::from_str(&msg);
         let Ok(msg) = parsed else {
             send(
-                ws.clone(),
+                &tx,
                 SignalMessage::Error {
                     message: "invalid message".into(),
                 },
@@ -1210,7 +1210,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 // 房间名校验（防 query 注入 + 注册表滥用）。
                 if !bridge::sanitize_room(&room) {
                     send(
-                        ws.clone(),
+                        &tx,
                         SignalMessage::Error {
                             message: "invalid room".into(),
                         },
@@ -1220,7 +1220,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 // 单连接只允许 Join 一次（防重复 Join 泄漏 peer / 计数漂移）。
                 if own_peer_id.is_some() {
                     send(
-                        ws.clone(),
+                        &tx,
                         SignalMessage::Error {
                             message: "already joined".into(),
                         },
@@ -1236,7 +1236,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 };
                 if !auth_ok {
                     send(
-                        ws.clone(),
+                        &tx,
                         SignalMessage::Error {
                             message: "auth failed".into(),
                         },
@@ -1281,7 +1281,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                                     ) {
                                         info!("reject join room={room} role={role:?}: {reason}");
                                         send(
-                                            ws.clone(),
+                                            &tx,
                                             SignalMessage::Error {
                                                 message: reason.to_string(),
                                             },
@@ -1312,7 +1312,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                                         self = config.pop_id
                                     );
                                     send(
-                                        ws.clone(),
+                                        &tx,
                                         SignalMessage::Redirect {
                                             pop: pop.clone(),
                                             url: url.clone(),
@@ -1328,7 +1328,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                                     self = config.pop_id
                                 );
                                 send(
-                                    ws.clone(),
+                                    &tx,
                                     SignalMessage::Redirect {
                                         pop: pop.clone(),
                                         url: url.clone(),
@@ -1386,7 +1386,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 if !total_reserved {
                     info!("reject join room={room} role={role:?}: server full");
                     send(
-                        ws.clone(),
+                        &tx,
                         SignalMessage::Error {
                             message: "server full".into(),
                         },
@@ -1415,7 +1415,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                                 .fetch_sub(1, Ordering::Relaxed);
                             info!("reject join user={sub}: {reason}");
                             send(
-                                ws.clone(),
+                                &tx,
                                 SignalMessage::Error {
                                     message: reason.to_string(),
                                 },
@@ -1448,7 +1448,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                         }
                         info!("reject join room={room} role={role:?}: room full");
                         send(
-                            ws.clone(),
+                            &tx,
                             SignalMessage::Error {
                                 message: "room full".into(),
                             },
@@ -1483,7 +1483,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 release_prejoin(&PREJOIN_CLIENTS, prejoin_counted);
                 prejoin_counted = false;
                 send(
-                    ws.clone(),
+                    &tx,
                     SignalMessage::Joined {
                         peer_id,
                         peers,
@@ -1499,7 +1499,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 // 角色代发 SDP，绕过 SFU 的 viewer 禁发媒体检查。
                 if own_peer_id.as_deref() != Some(from.as_str()) {
                     send(
-                        ws.clone(),
+                        &tx,
                         SignalMessage::Error {
                             message: "description from mismatch".into(),
                         },
@@ -1509,7 +1509,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 let room = find_room(&rooms, &from);
                 let Some(room) = room else {
                     send(
-                        ws.clone(),
+                        &tx,
                         SignalMessage::Error {
                             message: "not in a room".into(),
                         },
@@ -1526,7 +1526,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                     .unwrap_or(Role::Viewer);
                 match proxy_to_sfu(&config, &room, role, own_dc_ready, &description) {
                     Ok(answer) => send(
-                        ws.clone(),
+                        &tx,
                         SignalMessage::Description {
                             from: "sfu".into(),
                             to: from,
@@ -1534,7 +1534,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                         },
                     ),
                     Err(e) => send(
-                        ws.clone(),
+                        &tx,
                         SignalMessage::Error {
                             message: format!("sfu error: {e}"),
                         },
@@ -1550,7 +1550,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 // #453：呼叫/响铃。Call.from 必须是本连接 peer_id（同 Description 防冒用）。
                 if own_peer_id.as_deref() != Some(from.as_str()) {
                     send(
-                        ws.clone(),
+                        &tx,
                         SignalMessage::Error {
                             message: "call from mismatch".into(),
                         },
@@ -1559,7 +1559,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 }
                 if !bridge::sanitize_room(&target) {
                     send(
-                        ws.clone(),
+                        &tx,
                         SignalMessage::Error {
                             message: "invalid target".into(),
                         },
@@ -1570,7 +1570,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 // 避免只持有其它房间 token 的 viewer 跨房间骚扰任意设备。
                 if find_room(&rooms, &from).as_deref() != Some(target.as_str()) {
                     send(
-                        ws.clone(),
+                        &tx,
                         SignalMessage::Error {
                             message: "call target must match joined room".into(),
                         },
@@ -1582,7 +1582,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 let targets = publisher_targets(&rooms, &target, &from);
                 if targets.is_empty() {
                     send(
-                        ws.clone(),
+                        &tx,
                         SignalMessage::CallRejected {
                             from: "signal".into(),
                             to: from,
@@ -1608,7 +1608,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 }
             }
             SignalMessage::CallRinging { from, to, call_id } => {
-                if !forward_from_own(&ws, own_peer_id.as_deref(), &from) {
+                if !forward_from_own(&tx, own_peer_id.as_deref(), &from) {
                     continue;
                 }
                 forward_to_peer(
@@ -1618,7 +1618,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 );
             }
             SignalMessage::CallAccepted { from, to, call_id } => {
-                if !forward_from_own(&ws, own_peer_id.as_deref(), &from) {
+                if !forward_from_own(&tx, own_peer_id.as_deref(), &from) {
                     continue;
                 }
                 forward_to_peer(
@@ -1634,7 +1634,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 reason,
                 error_code,
             } => {
-                if !forward_from_own(&ws, own_peer_id.as_deref(), &from) {
+                if !forward_from_own(&tx, own_peer_id.as_deref(), &from) {
                     continue;
                 }
                 forward_to_peer(
@@ -1655,7 +1655,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 call_id,
                 reason,
             } => {
-                if !forward_from_own(&ws, own_peer_id.as_deref(), &from) {
+                if !forward_from_own(&tx, own_peer_id.as_deref(), &from) {
                     continue;
                 }
                 forward_to_peer(
@@ -1744,20 +1744,17 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
     info!("session closed");
 }
 
-fn send(ws: Arc<Mutex<Websocket>>, msg: SignalMessage) {
-    if let Ok(text) = serde_json::to_string(&msg) {
-        // #66：非阻塞发送。每个连接自己的 session_loop 在阻塞读 `next()` 时
-        // 持有本连接的 ws Mutex；若这里用 `lock()` 等待，会与「清理广播持有
-        // rooms 锁再去锁其它连接 ws」形成锁序反转死锁——kill 一个连接后，
-        // 新连接的 Join 就永远拿不到 rooms 锁（Join 卡死）。
-        // 对本连接（Join/Description 应答）try_lock 必然成功；对其它连接的
-        // PeerLeft 广播为尽力而为（协议保留该消息，当前无消费方，见 #66）。
-        let Ok(mut ws) = ws.try_lock() else {
-            tracing::debug!("send skipped: peer websocket busy (non-blocking, #66)");
-            return;
-        };
-        let _ = ws.send_text(&text);
-    }
+/// 本连接发送队列投递（唯一发送通道，session_loop 循环顶部 drain）。
+///
+/// #487 审查批次 2：原 #66 try_lock 直写路径与队列并存，注释互相矛盾——
+/// 直写在对方 session_loop 阻塞读持有 ws 锁时**静默丢消息**（PeerLeft 曾因此
+/// 丢失，有消费方后已改队列）。统一后所有应答/错误都经队列：可靠投递，
+/// 延迟一个循环周期（微秒级，drain 在阻塞读之前执行，无顺序问题）。
+fn send(tx: &std::sync::mpsc::Sender<String>, msg: SignalMessage) {
+    let Ok(text) = serde_json::to_string(&msg) else {
+        return;
+    };
+    let _ = tx.send(text);
 }
 
 fn find_room(rooms: &Rooms, peer_id: &str) -> Option<String> {
@@ -1771,12 +1768,16 @@ fn find_room(rooms: &Rooms, peer_id: &str) -> Option<String> {
 }
 
 /// 校验信令消息的 `from` 是否属于当前连接；不匹配时回 `Error` 并返回 false。
-fn forward_from_own(ws: &Arc<Mutex<Websocket>>, own_peer_id: Option<&str>, from: &str) -> bool {
+fn forward_from_own(
+    tx: &std::sync::mpsc::Sender<String>,
+    own_peer_id: Option<&str>,
+    from: &str,
+) -> bool {
     if own_peer_id == Some(from) {
         return true;
     }
     send(
-        ws.clone(),
+        tx,
         SignalMessage::Error {
             message: "message from mismatch".into(),
         },

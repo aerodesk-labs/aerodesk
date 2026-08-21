@@ -49,31 +49,6 @@ pub fn system_time_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// 解析 `chat` data channel 收到的 JSON 文本。
-///
-/// #458 只依赖 JSON 形状（`sender` 可选、`text` 必填），不依赖协议侧可能尚未
-/// 合入的具体 Rust 类型，避免 UI 分支与并行 protocol 改动耦合。
-pub fn decode_chat_text(data: &[u8]) -> Option<(String, String)> {
-    let value: serde_json::Value = serde_json::from_slice(data).ok()?;
-    let text = value
-        .get("text")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if text.is_empty() {
-        return None;
-    }
-    let sender = value
-        .get("sender")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("对方")
-        .to_string();
-    Some((sender, text))
-}
-
 /// 会话层 → UI 的事件缝（#508 B1）：desktop 以 `Weak<AppWindow> + slot` 实现，
 /// 全部方法可从会话线程调用（实现方负责排队到 UI 线程）。
 ///
@@ -151,19 +126,4 @@ pub enum PublisherEvent {
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn decode_chat_text_accepts_protocol_json_shape() {
-        let json = r#"{"sender":"alice","text":"hello 你好","timestamp_ms":1723766400123}"#;
-        let (sender, text) = crate::decode_chat_text(json.as_bytes()).unwrap();
-        assert_eq!(sender, "alice");
-        assert_eq!(text, "hello 你好");
-
-        // sender 缺失时使用默认显示名，非法 JSON / 空文本不 panic。
-        let (sender, text) = crate::decode_chat_text(br#"{"text":"hi"}"#).unwrap();
-        assert_eq!(sender, "对方");
-        assert_eq!(text, "hi");
-        assert!(crate::decode_chat_text(b"not-json").is_none());
-        assert!(crate::decode_chat_text(br#"{"text":"   "}"#).is_none());
-    }
-}
+mod tests {}
