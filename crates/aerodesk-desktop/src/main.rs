@@ -3516,11 +3516,13 @@ fn main() -> Result<(), slint::PlatformError> {
     // #277 平台抽象：Dock 重开处理器走 core `AppShell` trait。
     aerodesk_platform::macos::dock::MacAppShell.install_reopen_handler();
 
-    // 系统托盘（Slint 1.17 SystemTrayIcon）：仅 macOS 创建；Linux/Windows 下
-    // Slint 托盘创建失败会 abort（Xvfb/CI 无 StatusNotifier），故非 macOS 不创建。
-    #[cfg(target_os = "macos")]
+    // 系统托盘（Slint 1.17 SystemTrayIcon）：macOS（NSStatusItem）/ Windows
+    // （Shell_NotifyIconW）均为官方支持（i-slint-core items/system_tray.rs
+    // 平台门控）；Linux 走 ksni（StatusNotifier），Xvfb/CI 无 StatusNotifier
+    // 时创建会 abort，故 Linux 不创建（桌面端不部署 Linux）。
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     let tray = Tray::new().ok();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     let tray: Option<Tray> = None;
     // #539：托盘菜单显示版本号（只读项）。
     if let Some(t) = &tray {
@@ -3564,6 +3566,14 @@ fn main() -> Result<(), slint::PlatformError> {
                 eprintln!("autoconnect: ui weak expired");
             }
         });
+    }
+    // 主窗口关闭行为（#487 自审对齐）：Windows 关窗 = 隐藏到托盘，进程常驻
+    // （呼入弹窗/被控继续，#539 不依赖主窗口）；托盘「显示主窗口」恢复。
+    // macOS 既有行为保持（关窗销毁窗口 + Dock/托盘恢复，已实测）；Linux 无
+    // 托盘，保持默认关闭即退出。
+    #[cfg(target_os = "windows")]
+    {
+        ui.window().on_close_requested(move || slint::CloseRequestResponse::HideWindow);
     }
     ui.show()?;
     if let Some(tray) = &tray {
