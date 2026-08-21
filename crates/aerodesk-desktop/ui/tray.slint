@@ -9,6 +9,9 @@ export component Tray inherits SystemTrayIcon {
     in property <string> version: "";
     callback show-window();
     callback quit-app();
+    // Windows 惯例：左键单击托盘图标直接恢复主窗口（WM_LBUTTONUP →
+    // SystemTrayIcon.clicked）；右键仍走菜单。
+    clicked => { root.show-window(); }
     Menu {
         MenuItem { title: "显示主窗口"; activated => { root.show-window(); } }
         MenuSeparator { }

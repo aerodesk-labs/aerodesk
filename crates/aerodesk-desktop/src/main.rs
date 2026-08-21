@@ -909,6 +909,19 @@ pub fn focus_window_to_front(window: &slint::Window) {
     }
 }
 
+/// Windows：托盘单击/菜单恢复主窗口——隐藏（HideWindow 关窗）后再 show
+/// 的窗口可能不重绘/透明：强制重绘 + SW_RESTORE 置前（#487 托盘实测）。
+#[cfg(target_os = "windows")]
+fn raise_window_windows(window: &slint::Window) {
+    use raw_window_handle::{HasRawWindowHandle, HasWindowHandle};
+    if let Ok(handle) = window.window_handle().window_handle()
+        && let Ok(raw) = handle.raw_window_handle()
+        && let raw_window_handle::RawWindowHandle::Win32(win32) = raw
+    {
+        aerodesk_platform::windows::session::raise_window(win32.hwnd.get() as *mut std::ffi::c_void);
+    }
+}
+
 /// slot（会话内部标识）→ 当前 UI 稠密索引（SESSIONS 顺序即标签顺序）。
 pub fn slot_to_ui_index(slot: usize) -> Option<usize> {
     SESSIONS
@@ -3983,7 +3996,17 @@ fn main() -> Result<(), slint::PlatformError> {
     // 平台门控）；Linux 走 ksni（StatusNotifier），Xvfb/CI 无 StatusNotifier
     // 时创建会 abort，故 Linux 不创建（桌面端不部署 Linux）。
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    let tray = Tray::new().ok();
+    // 托盘创建失败静默降级（无托盘仍可运行）——诊断：记录成败与原因。
+    let tray = match Tray::new() {
+        Ok(t) => {
+            tracing::info!("system tray created");
+            Some(t)
+        }
+        Err(e) => {
+            tracing::warn!("system tray create failed: {e:?}");
+            None
+        }
+    };
     #[cfg(target_os = "linux")]
     let tray: Option<Tray> = None;
     // #539：托盘菜单显示版本号（只读项）。
@@ -3998,6 +4021,25 @@ fn main() -> Result<(), slint::PlatformError> {
                 // “显示主窗口”：已打开时也要把窗口带到最前（含最小化还原）。
                 #[cfg(target_os = "macos")]
                 focus_window_to_front(ui.window());
+                // 托盘恢复（单击/菜单）：Windows 隐藏后再显示须强制重绘+置前，
+                // 否则窗口可能透明（HideWindow 恢复路径不触发重绘，#487 实测）。
+                // slint 1.17.1 winit 无上游修复——尺寸微调 ±1px 强制 surface
+                // 重建（标准 workaround），再置前。
+                #[cfg(target_os = "windows")]
+                {
+                    ui.window().request_redraw();
+                    let sz = ui.window().size();
+                    ui.window()
+                        .set_size(slint::WindowSize::Physical(slint::PhysicalSize::new(
+                            sz.width + 1,
+                            sz.height,
+                        )));
+                    ui.window()
+                        .set_size(slint::WindowSize::Physical(slint::PhysicalSize::new(
+                            sz.width, sz.height,
+                        )));
+                    raise_window_windows(ui.window());
+                }
             }
         });
         tray.on_quit_app(move || {

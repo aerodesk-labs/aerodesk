@@ -312,3 +312,15 @@ mod tests {
         }
     }
 }
+
+/// 置前窗口（托盘恢复主窗口用，#487 托盘实测）：
+/// SW_RESTORE 还原（含最小化）+ SetForegroundWindow 置前。传入 Win32
+/// HWND（raw-window-handle `Win32` 的 `hwnd.get()`）。
+pub fn raise_window(hwnd: *mut std::ffi::c_void) {
+    use windows::Win32::UI::WindowsAndMessaging::{SW_RESTORE, SetForegroundWindow, ShowWindow};
+    let hwnd = windows::Win32::Foundation::HWND(hwnd);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
