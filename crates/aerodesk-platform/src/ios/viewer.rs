@@ -70,7 +70,8 @@ impl ViewerSession {
             aerodesk_core::protocol::signal::Role::Viewer,
             None,
             true,
-        )?;
+        )
+        .map_err(|e| e.to_string())?;
         let latest = Arc::new(Mutex::new(None));
         let latest_camera = Arc::new(Mutex::new(None));
         let show_camera = Arc::new(AtomicBool::new(false));

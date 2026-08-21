@@ -29,10 +29,11 @@ impl ViewerSession {
     /// 候选（#201：规避 NAT/模拟器下直连候选假通导致媒体入站被丢）。
     pub fn connect(server: &str, room: &str, force_relay: bool) -> Result<ViewerSession, String> {
         let live = if force_relay {
-            aerodesk_core::connect::connect_live_forced(server, room, true)?
+            aerodesk_core::connect::connect_live_forced(server, room, true)
         } else {
-            aerodesk_core::connect::connect_live(server, room)?
-        };
+            aerodesk_core::connect::connect_live(server, room)
+        }
+        .map_err(|e| e.to_string())?;
         let latest = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let (input_tx, input_rx) = mpsc::channel();
