@@ -63,6 +63,7 @@ use rouille::{Request, Response};
 
 mod bridge;
 mod pop_registry;
+mod sip_server;
 
 struct Config {
     auth_tokens: Vec<String>,
@@ -625,6 +626,57 @@ fn main() {
     let _ = ROOMS.set(rooms.clone());
     let _ = TOTAL_CLIENTS.set(Arc::new(AtomicUsize::new(0)));
     let _ = USER_CONNS.set(Mutex::new(HashMap::new()));
+
+    // #551 SIP 信令端点（双栈并存，规范 §8）：任一 SIP_*_PORT 设置即开启，
+    // 默认全关 → 生产 JSON 路径不受影响。Digest 口令表由 SIP_DIGEST_USERS 注入。
+    {
+        let sip_tls = std::env::var("SIP_TLS_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok());
+        let sip_wss = std::env::var("SIP_WSS_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok());
+        let sip_udp = std::env::var("SIP_UDP_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok());
+        if sip_tls.is_some() || sip_wss.is_some() || sip_udp.is_some() {
+            let realm = std::env::var("SIP_REALM").unwrap_or_else(|_| "aerodesk".into());
+            let mut passwords = HashMap::new();
+            for kv in std::env::var("SIP_DIGEST_USERS")
+                .unwrap_or_default()
+                .split(',')
+            {
+                if let Some((u, t)) = kv.split_once('=').filter(|(u, _)| !u.is_empty()) {
+                    passwords.insert(u.to_string(), t.to_string());
+                }
+            }
+            let bind =
+                |port: Option<u16>| port.map(|p| std::net::SocketAddr::from(([0, 0, 0, 0], p)));
+            let sip_cfg = sip_server::SipConfig {
+                realm: realm.clone(),
+                tls_addr: bind(sip_tls),
+                wss_addr: bind(sip_wss),
+                udp_addr: bind(sip_udp),
+                passwords: Arc::new(passwords),
+                tls_identity: Some(aerodesk_protocol::tls::TlsIdentity {
+                    cert: tls.cert.clone(),
+                    key: tls.key.clone(),
+                    source: tls.source,
+                }),
+            };
+            std::thread::Builder::new()
+                .name("sip-endpoint".into())
+                .spawn(move || {
+                    let cancel = tokio_util::sync::CancellationToken::new();
+                    if let Err(e) = sip_server::run_sip_endpoint(sip_cfg, cancel) {
+                        error!(error=%e, "SIP 端点启动失败");
+                    }
+                })
+                .ok();
+            info!(realm, "SIP 信令端点已启动（双栈，与 JSON 并存）");
+        }
+    }
+
     // SFU 池：仅池 >1 时初始化负载感知状态并启动轮询；池=1 走纯哈希回退，
     // 不维护 room_sfu 注册表（避免单 SFU 部署下无界增长）。
     if config.sfu_urls.len() > 1 {
