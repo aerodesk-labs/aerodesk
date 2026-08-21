@@ -316,9 +316,8 @@ pub fn connect_live_role_codec_timeout(
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 connect_live_role_codec(&srv, &rm, role, auth.as_deref(), codec)
             }));
-            let _ = tx.send(r.unwrap_or_else(|_| {
-                Err(ConnectError::Setup("connect panicked".into()))
-            }));
+            let _ =
+                tx.send(r.unwrap_or_else(|_| Err(ConnectError::Setup("connect panicked".into()))));
         })
         .is_err()
     {
@@ -341,11 +340,9 @@ fn connect_live_role_impl(
     // 是否协商第二路视频轨（摄像头；观看端 recvonly）。
     with_camera: bool,
 ) -> Result<LiveSession, ConnectError> {
-    let mut signal = WsSignalClient::connect(server)
-        .map_err(|e| ConnectError::Signal(e.to_string()))?;
-    let (peer_id, turn) = signal
-        .join(room, role, auth)
-        .map_err(classify_join_error)?;
+    let mut signal =
+        WsSignalClient::connect(server).map_err(|e| ConnectError::Signal(e.to_string()))?;
+    let (peer_id, turn) = signal.join(room, role, auth).map_err(classify_join_error)?;
 
     // #539/#456 呼叫发起：主控（viewer）连接时通知房间内被叫端（Publisher）
     // 弹窗确认——被叫端接受后才出流采集。Call 是通知性质（不阻塞媒体协商）：
@@ -540,7 +537,7 @@ pub fn connect_viewer(server: &str, room: &str) -> Result<ConnectResult, Connect
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_join_error, strip_loopback_remote_candidates, ConnectError};
+    use super::{ConnectError, classify_join_error, strip_loopback_remote_candidates};
 
     #[test]
     fn strips_loopback_candidates_and_keeps_the_rest() {
