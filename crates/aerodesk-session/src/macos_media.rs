@@ -300,6 +300,9 @@ pub fn run_viewer<U, PF>(
     let mut audio_dropped: u64 = 0;
     let mut audio_buffered: usize = 0;
     let mut last_audio = Instant::now();
+    // #487 对端停流检测：视频/音频任一到达即续命；超时判死关窗（对端断开/
+    // 停止推流时远控窗口不再悬挂黑屏，参考 CLI 的 no-media 8s 判定）。
+    let mut last_media = Instant::now();
     let mut pending_frame: Option<(Vec<u8>, u32, u32, f64)> = None;
     // #136 关键帧请求：首包/不连续/切层时向 SFU 发 PLI（节流 1s）。
     let mut last_kf_request: Option<Instant> = None;
@@ -345,10 +348,18 @@ pub fn run_viewer<U, PF>(
             }
         }
         // #75：UI 指针输入 → input 通道 → SFU → 被控端注入。
+        let mut input_sent = 0u32;
         while let Ok(req) = input_rx.try_recv() {
-            let _ = live
+            let ok = live
                 .endpoint
                 .send_channel_data("input", false, req.as_bytes());
+            if !ok {
+                tracing::warn!("input 通道发送失败（通道未建立？）");
+            }
+            input_sent += 1;
+        }
+        if input_sent > 0 {
+            tracing::debug!("input 发送 {input_sent} 条");
         }
         // #29：UI 选层请求（画质/显示器按钮）→ control 通道 → SFU。
         while let Ok(req) = control_rx.try_recv() {
@@ -452,6 +463,7 @@ pub fn run_viewer<U, PF>(
             }
             match ev {
                 ClientEvent::Media(data) => {
+                    last_media = Instant::now();
                     // #58/#73 音频识别：SFU 转发时 mid 是 SFU 本地 mid，用协商
                     // codec（PCMU/Opus）识别音频帧。
                     if data.params.spec().codec == str0m::format::Codec::PCMU {
@@ -757,6 +769,13 @@ pub fn run_viewer<U, PF>(
             audio_played = 0;
             audio_dropped = 0;
             last_stat = Instant::now();
+        }
+        // #487 对端停流检测：媒体停止 ≥10s 判死（对端断开/停止推流时远控窗口
+        // 不再悬挂黑屏——此前无 watchdog，窗口永久开着）。
+        if last_media.elapsed() >= Duration::from_secs(10) {
+            tracing::warn!("对端停止推流 ≥10s，判定会话结束（{room}）");
+            stop.store(true, Ordering::SeqCst);
+            break;
         }
         std::thread::sleep(Duration::from_millis(1));
     }
