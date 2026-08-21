@@ -28,8 +28,8 @@ impl TlsIdentity {
         match (cert_env, key_env) {
             // 开发模式：两者都未配置 → 内嵌开发证书。
             (None, None) => Ok(TlsIdentity {
-                cert: include_bytes!("../../../../certs/cer.pem").to_vec(),
-                key: include_bytes!("../../../../certs/key.pem").to_vec(),
+                cert: include_bytes!("../../../certs/cer.pem").to_vec(),
+                key: include_bytes!("../../../certs/key.pem").to_vec(),
                 source: "embedded",
             }),
             // 显式配置：读取失败/内容为空 → fail fast。

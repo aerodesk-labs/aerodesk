@@ -20,7 +20,7 @@ pub struct AccessUnit {
 /// 访问单元组装器。
 ///
 /// # 用法
-/// 逐条喂入 [`crate::endpoint::ClientEvent::Media`] 的 AnnexB 数据；
+/// 逐条喂入 [`aerodesk_core::endpoint::ClientEvent::Media`] 的 AnnexB 数据；
 /// 时间戳变化时返回上一完整帧。流结束调用 [`Self::flush`] 收尾。
 #[derive(Debug)]
 pub struct AccessUnitAssembler {

@@ -53,7 +53,7 @@ impl PopRegistry {
             let m = self
                 .inner
                 .lock()
-                .unwrap_or_else(aerodesk_core::util::lock_recover);
+                .unwrap_or_else(aerodesk_protocol::util::lock_recover);
             let now = Self::now();
             match m.get(room) {
                 Some(e) if now.saturating_sub(e.updated_at) <= self.ttl_secs => Some(e.pop.clone()),
@@ -68,7 +68,7 @@ impl PopRegistry {
         let mut m = self
             .inner
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         let now = Self::now();
         match m.get(room) {
             Some(e) if now.saturating_sub(e.updated_at) <= self.ttl_secs => Some(e.pop.clone()),
@@ -89,7 +89,7 @@ impl PopRegistry {
             let mut m = self
                 .inner
                 .lock()
-                .unwrap_or_else(aerodesk_core::util::lock_recover);
+                .unwrap_or_else(aerodesk_protocol::util::lock_recover);
             match m.get(room) {
                 Some(e)
                     if e.pop == pop && now.saturating_sub(e.updated_at) <= self.ttl_secs / 2 =>
@@ -129,7 +129,7 @@ impl PopRegistry {
         let mut m = self
             .inner
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         // 文件里的新条目应覆盖本地的过期/旧条目（or_insert 会保留本地旧值，导致
         // 本地过期条目挡住文件里的新归属 → lookup 返回 None → 调用方误重新登记覆盖）。
         for (room, entry) in file_map {
@@ -149,7 +149,7 @@ impl PopRegistry {
     pub fn len(&self) -> usize {
         self.inner
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
             .len()
     }
 
@@ -164,7 +164,7 @@ impl PopRegistry {
         *self
             .inner
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover) = data;
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover) = data;
         Ok(())
     }
 
@@ -177,7 +177,7 @@ impl PopRegistry {
             let mut m = self
                 .inner
                 .lock()
-                .unwrap_or_else(aerodesk_core::util::lock_recover);
+                .unwrap_or_else(aerodesk_protocol::util::lock_recover);
             m.retain(|_, e| now.saturating_sub(e.updated_at) <= self.ttl_secs);
             serde_json::to_string_pretty(&*m).map_err(|e| e.to_string())?
         };

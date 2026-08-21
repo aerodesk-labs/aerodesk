@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+aerodesk-protocol = { path = "../aerodesk-protocol" }
 str0m = { workspace = true, features = ["rust-crypto"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -15,9 +16,6 @@ pcap-file = "2.0.0"
 sha2 = "0.10"
 sha1 = "0.10"
 hmac = "0.12"
-jsonwebtoken = "9"
-base64ct = { version = "1", features = ["std"] }
-md-5 = "0.10"
 libc = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "0.2"

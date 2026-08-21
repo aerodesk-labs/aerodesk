@@ -86,13 +86,11 @@ dependencies = [
 name = "aerodesk-core"
 version = "0.1.0"
 dependencies = [
+ "aerodesk-protocol",
  "arboard",
- "base64ct",
  "cpal",
  "hmac",
- "jsonwebtoken",
  "libc",
- "md-5",
  "pcap-file",
  "png 0.17.16",
  "rustls 0.23.43",
@@ -224,6 +222,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aerodesk-protocol"
+version = "0.1.0"
+dependencies = [
+ "base64ct",
+ "hmac",
+ "md-5",
+ "serde",
+ "serde_json",
+ "sha1 0.10.7",
+ "sha2",
+ "tracing",
+]
+
+[[package]]
 name = "aerodesk-session"
 version = "0.1.0"
 dependencies = [
@@ -241,7 +253,7 @@ dependencies = [
 name = "aerodesk-sfu"
 version = "0.1.0"
 dependencies = [
- "aerodesk-core",
+ "aerodesk-protocol",
  "ctrlc",
  "ipnet",
  "libc",
@@ -262,7 +274,7 @@ dependencies = [
 name = "aerodesk-signal"
 version = "0.1.0"
 dependencies = [
- "aerodesk-core",
+ "aerodesk-protocol",
  "libc",
  "rouille",
  "serde",
@@ -3749,21 +3761,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jsonwebtoken"
-version = "9.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
-dependencies = [
- "base64 0.22.1",
- "js-sys",
- "pem",
- "ring 0.17.14",
- "serde",
- "serde_json",
- "simple_asn1",
-]
-
-[[package]]
 name = "keyboard-types"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5210,16 +5207,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b17cddbe7ec3f8bc800887bab5e717348c95ea2ca0b1bf0837fb964dc67099"
 
 [[package]]
-name = "pem"
-version = "3.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
-dependencies = [
- "base64 0.22.1",
- "serde_core",
-]
-
-[[package]]
 name = "pem-rfc7468"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6434,18 +6421,6 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
-
-[[package]]
-name = "simple_asn1"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
-dependencies = [
- "num-bigint",
- "num-traits",
- "thiserror 2.0.19",
- "time",
-]
 
 [[package]]
 name = "simplecss"

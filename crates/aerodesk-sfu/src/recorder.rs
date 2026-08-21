@@ -289,7 +289,7 @@ impl Recorder {
         let mut guard = self
             .audit
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         let audit_path = self.root.join("audit.log");
         if guard.is_none() {
             *guard = OpenOptions::new()
@@ -348,7 +348,7 @@ impl Recorder {
         let mut recs = self
             .recordings
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
 
         // 按需模式：未显式 start 的房间不录制。
         if self.on_demand && !recs.contains_key(room) {
@@ -358,7 +358,7 @@ impl Recorder {
         if self
             .stopped
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
             .contains(room)
         {
             return;
@@ -436,7 +436,7 @@ impl Recorder {
         let mut recs = self
             .recordings
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         if let Some(existing) = recs.get(room) {
             if existing.failed {
                 // #240：失败哨兵不得被后续 start 当作成功（此前磁盘故障后
@@ -459,7 +459,7 @@ impl Recorder {
                 );
                 self.stopped
                     .lock()
-                    .unwrap_or_else(aerodesk_core::util::lock_recover)
+                    .unwrap_or_else(aerodesk_protocol::util::lock_recover)
                     .remove(room);
                 recs.insert(room.to_string(), rec);
                 Ok(())
@@ -478,7 +478,7 @@ impl Recorder {
         let mut recs = self
             .recordings
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         let Some(mut rec) = recs.remove(room) else {
             return false;
         };
@@ -501,7 +501,7 @@ impl Recorder {
         if !self.on_demand {
             self.stopped
                 .lock()
-                .unwrap_or_else(aerodesk_core::util::lock_recover)
+                .unwrap_or_else(aerodesk_protocol::util::lock_recover)
                 .insert(room.to_string());
         }
         true
@@ -512,7 +512,7 @@ impl Recorder {
         let recs = self
             .recordings
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         recs.values()
             .filter(|r| !r.failed)
             .map(|r| {
@@ -532,7 +532,7 @@ impl Recorder {
         let recs = self
             .recordings
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         recs.values().filter(|r| !r.failed).count()
     }
 
@@ -541,7 +541,7 @@ impl Recorder {
         let mut recs = self
             .recordings
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         let now = now_micros();
         for (_, mut rec) in recs.drain() {
             if rec.failed {

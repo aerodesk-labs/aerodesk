@@ -54,8 +54,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use aerodesk_core::protocol::jwt::Claims;
-use aerodesk_core::protocol::signal::{PeerInfo, Role, SignalMessage, TurnConfig};
+use aerodesk_protocol::jwt::Claims;
+use aerodesk_protocol::signal::{PeerInfo, Role, SignalMessage, TurnConfig};
 use bridge::{BridgeManager, BridgeOutcome};
 use pop_registry::PopRegistry;
 use rouille::websocket::{self, Message, Websocket};
@@ -175,7 +175,7 @@ impl SfuPool {
         let mut reg = self
             .room_sfu
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         let now = unix_secs();
         if let Some((i, last_used)) = reg.get_mut(room) {
             *last_used = now;
@@ -213,7 +213,7 @@ impl SfuPool {
         let mut reg = self
             .room_sfu
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         let before = reg.len();
         reg.retain(|room, (_, t)| alive.contains(room) || now.saturating_sub(*t) < ttl_secs);
         before - reg.len()
@@ -319,7 +319,7 @@ fn poll_sfu_pool(
         let alive: std::collections::HashSet<String> = {
             let rooms = rooms
                 .lock()
-                .unwrap_or_else(aerodesk_core::util::lock_recover);
+                .unwrap_or_else(aerodesk_protocol::util::lock_recover);
             rooms.keys().cloned().collect()
         };
         let evicted = pool.evict_stale(&alive, sticky_ttl_secs, unix_secs());
@@ -479,9 +479,9 @@ fn bind_wss_with_retry(
 /// SIGHUP：重读 TLS 身份并重建 WSS server（旧连接不受影响；同证书 no-op）。
 fn reload_tls(
     server: &mut Option<rouille::Server<fn(&Request) -> Response>>,
-    tls: &mut aerodesk_core::protocol::tls::TlsIdentity,
+    tls: &mut aerodesk_protocol::tls::TlsIdentity,
 ) {
-    match aerodesk_core::protocol::tls::TlsIdentity::load() {
+    match aerodesk_protocol::tls::TlsIdentity::load() {
         Ok(new_tls) => {
             if new_tls.cert == tls.cert && new_tls.key == tls.key {
                 info!(
@@ -556,12 +556,8 @@ fn sfu_for_room(pool: &[String], room: &str) -> usize {
 fn fresh_turn(config: &Config) -> Option<TurnConfig> {
     let urls = config.turn.as_ref()?.urls.clone();
     let secret = config.turn_secret.as_deref()?;
-    let creds = aerodesk_core::protocol::turn::generate_turn_credentials(
-        secret,
-        "aerodesk",
-        3600,
-        unix_secs(),
-    );
+    let creds =
+        aerodesk_protocol::turn::generate_turn_credentials(secret, "aerodesk", 3600, unix_secs());
     Some(TurnConfig {
         urls,
         username: creds.username,
@@ -611,7 +607,7 @@ fn main() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3001);
-    let tls = aerodesk_core::protocol::tls::TlsIdentity::load().unwrap_or_else(|e| {
+    let tls = aerodesk_protocol::tls::TlsIdentity::load().unwrap_or_else(|e| {
         eprintln!("fatal: TLS identity load failed: {e}");
         std::process::exit(1);
     });
@@ -664,7 +660,7 @@ fn main() {
                     let mut alive_now: std::collections::HashSet<String> =
                         running.iter().map(|(r, _)| r.clone()).collect();
                     let real_peers: HashMap<String, usize> = {
-                        let rooms = rooms.lock().unwrap_or_else(aerodesk_core::util::lock_recover);
+                        let rooms = rooms.lock().unwrap_or_else(aerodesk_protocol::util::lock_recover);
                         running
                             .iter()
                             .map(|(room, _)| {
@@ -687,7 +683,7 @@ fn main() {
                         // 记录为 monitor 主动停止（死亡检测排除），再二次确认 + 停桥。
                         monitor_stopped.insert(room.clone());
                         let stop = {
-                            let rooms = rooms.lock().unwrap_or_else(aerodesk_core::util::lock_recover);
+                            let rooms = rooms.lock().unwrap_or_else(aerodesk_protocol::util::lock_recover);
                             let real = rooms
                                 .get(&room)
                                 .map(|peers| peers.iter().filter(|p| !p.bridge_leg).count())
@@ -829,9 +825,8 @@ fn load_config() -> Config {
             .duration_since(UNIX_EPOCH)
             .expect("system time")
             .as_secs();
-        let creds = aerodesk_core::protocol::turn::generate_turn_credentials(
-            &secret, "aerodesk", 3600, now,
-        );
+        let creds =
+            aerodesk_protocol::turn::generate_turn_credentials(&secret, "aerodesk", 3600, now);
         TurnConfig {
             urls,
             username: creds.username,
@@ -1001,7 +996,7 @@ fn auth_result(config: &Config, token: Option<&str>, room: &str, role: Role) -> 
     let token = token.unwrap_or_default();
     if let Some(secret) = &config.jwt_secret {
         // JWT 认证：校验签名/过期/房间/角色。
-        match aerodesk_core::protocol::jwt::validate_token(secret, token, room, role) {
+        match aerodesk_protocol::jwt::validate_token(secret, token, room, role) {
             Ok(claims) => {
                 info!(
                     "jwt auth ok: user={} dev={:?} room={} role={:?}",
@@ -1011,7 +1006,7 @@ fn auth_result(config: &Config, token: Option<&str>, room: &str, role: Role) -> 
             }
             Err(new_err) => {
                 if let Some(old) = &config.jwt_secret_old {
-                    match aerodesk_core::protocol::jwt::validate_token(old, token, room, role) {
+                    match aerodesk_protocol::jwt::validate_token(old, token, room, role) {
                         Ok(claims) => {
                             info!(
                                 "jwt auth ok (legacy secret): user={} dev={:?} room={} role={:?}",
@@ -1080,7 +1075,7 @@ fn handle(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
         let clients = total_clients();
         let room_count = rooms
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
             .len();
         let payload = serde_json::json!({
             "status": "ok",
@@ -1097,7 +1092,7 @@ fn handle(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
         let clients = total_clients();
         let room_count = rooms
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
             .len();
         let bridges = config
             .bridge
@@ -1159,12 +1154,14 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
         // #539：先 drain 发送队列（呼叫等可靠消息经队列投递——try_lock 会丢、
         // 阻塞 lock 会与下方 next() 的持锁等待互锁）。
         while let Ok(s) = rx.try_recv() {
-            let mut w = ws.lock().unwrap_or_else(aerodesk_core::util::lock_recover);
+            let mut w = ws
+                .lock()
+                .unwrap_or_else(aerodesk_protocol::util::lock_recover);
             let _ = w.send_text(&s);
         }
         let msg = match ws
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
             .next()
         {
             Some(Message::Text(t)) => t,
@@ -1265,7 +1262,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                                 if !bridge_leg_pre {
                                     let room_len = rooms
                                         .lock()
-                                        .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                        .unwrap_or_else(aerodesk_protocol::util::lock_recover)
                                         .get(&room)
                                         .map(|peers| peers.len())
                                         .unwrap_or(0);
@@ -1407,7 +1404,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                             .get()
                             .expect("user conns initialized")
                             .lock()
-                            .unwrap_or_else(aerodesk_core::util::lock_recover);
+                            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
                         if let Err(reason) = user_quota_take(&mut uc, sub, max_conns) {
                             TOTAL_CLIENTS
                                 .get()
@@ -1430,7 +1427,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 let peers: Vec<PeerInfo> = {
                     let mut r = rooms
                         .lock()
-                        .unwrap_or_else(aerodesk_core::util::lock_recover);
+                        .unwrap_or_else(aerodesk_protocol::util::lock_recover);
                     let cur = r.get(&room).map(|peers| peers.len()).unwrap_or(0);
                     if !bridge_leg && config.max_room_clients > 0 && cur >= config.max_room_clients
                     {
@@ -1443,7 +1440,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                                 .get()
                                 .expect("user conns initialized")
                                 .lock()
-                                .unwrap_or_else(aerodesk_core::util::lock_recover);
+                                .unwrap_or_else(aerodesk_protocol::util::lock_recover);
                             user_quota_release(&mut uc, sub.as_str());
                         }
                         info!("reject join room={room} role={role:?}: room full");
@@ -1519,7 +1516,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 // #12：把 peer 角色传给 SFU，SFU 据此拒绝 viewer 发布媒体。
                 let role = rooms
                     .lock()
-                    .unwrap_or_else(aerodesk_core::util::lock_recover)
+                    .unwrap_or_else(aerodesk_protocol::util::lock_recover)
                     .get(&room)
                     .and_then(|peers| peers.iter().find(|p| p.id == from))
                     .map(|p| p.role)
@@ -1686,7 +1683,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
     let found = {
         let mut rooms = rooms
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         let mut found = None;
         for (room, peers) in rooms.iter_mut() {
             if let Some(idx) = peers.iter().position(|p| Arc::ptr_eq(&p.ws, &ws)) {
@@ -1715,7 +1712,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
             .get()
             .expect("user conns initialized")
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         user_quota_release(&mut uc, sub);
     }
     info!("peer {peer_id} left room {room}");
@@ -1727,7 +1724,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
     let target_txs: Vec<std::sync::mpsc::Sender<String>> = {
         let rooms = rooms
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         rooms
             .get(&room)
             .map(|peers| peers.iter().map(|p| p.tx.clone()).collect())
@@ -1760,7 +1757,7 @@ fn send(tx: &std::sync::mpsc::Sender<String>, msg: SignalMessage) {
 fn find_room(rooms: &Rooms, peer_id: &str) -> Option<String> {
     let rooms = rooms
         .lock()
-        .unwrap_or_else(aerodesk_core::util::lock_recover);
+        .unwrap_or_else(aerodesk_protocol::util::lock_recover);
     rooms
         .iter()
         .find(|(_, peers)| peers.iter().any(|p| p.id == peer_id))
@@ -1801,7 +1798,7 @@ fn publisher_targets(
 ) -> Vec<std::sync::mpsc::Sender<String>> {
     let rooms = rooms
         .lock()
-        .unwrap_or_else(aerodesk_core::util::lock_recover);
+        .unwrap_or_else(aerodesk_protocol::util::lock_recover);
     rooms
         .get(target)
         .map(|peers| {
@@ -1821,7 +1818,7 @@ fn forward_to_peer(rooms: &Rooms, to: &str, msg: SignalMessage) -> bool {
     let target_tx = {
         let rooms = rooms
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         rooms
             .values()
             .flat_map(|peers| peers.iter())
@@ -1888,7 +1885,7 @@ fn fastrand_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aerodesk_core::protocol::jwt::mint_token;
+    use aerodesk_protocol::jwt::mint_token;
 
     fn cfg(new: &str, old: Option<&str>) -> Config {
         Config {
@@ -1982,11 +1979,11 @@ mod tests {
         let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
         rooms
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
             .insert("room-a".into(), Vec::new());
         rooms
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
             .insert("room-b".into(), Vec::new());
         let config = Arc::new(cfg("s", None));
 
@@ -2312,7 +2309,7 @@ mod tests {
             let mut reg = pool
                 .room_sfu
                 .lock()
-                .unwrap_or_else(aerodesk_core::util::lock_recover);
+                .unwrap_or_else(aerodesk_protocol::util::lock_recover);
             reg.get_mut("live-quiet").unwrap().1 = unix_secs() - 7 * 3600;
             reg.get_mut("stale").unwrap().1 = unix_secs() - 7 * 3600;
         }
@@ -2323,7 +2320,7 @@ mod tests {
         let reg = pool
             .room_sfu
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         assert!(
             reg.contains_key("live-quiet"),
             "有活跃 peer 的房间即使映射空闲超时也不得淘汰"

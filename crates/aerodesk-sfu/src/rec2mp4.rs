@@ -13,7 +13,7 @@ use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use aerodesk_core::access_unit::AccessUnitAssembler;
+use aerodesk_protocol::access_unit::AccessUnitAssembler;
 use aerodesk_sfu::recorder::{
     CODEC_H264, CODEC_H265, CODEC_OPUS, CODEC_PCMU, KIND_AUDIO, KIND_VIDEO, MAGIC,
     PACKET_HEADER_LEN,

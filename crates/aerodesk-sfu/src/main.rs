@@ -32,7 +32,7 @@ mod tcp;
 mod turn_server;
 mod util;
 
-use aerodesk_core::protocol::signal::{Role, TurnConfig};
+use aerodesk_protocol::signal::{Role, TurnConfig};
 use aerodesk_sfu::recorder::Recorder;
 use shard::{Shard, ShardCommand, Shared};
 
@@ -376,9 +376,9 @@ fn bind_public_with_retry(
 
 fn reload_tls(
     public: &mut Option<Server<fn(&Request) -> Response>>,
-    tls: &mut aerodesk_core::protocol::tls::TlsIdentity,
+    tls: &mut aerodesk_protocol::tls::TlsIdentity,
 ) {
-    match aerodesk_core::protocol::tls::TlsIdentity::load() {
+    match aerodesk_protocol::tls::TlsIdentity::load() {
         Ok(new_tls) => {
             if new_tls.cert == tls.cert && new_tls.key == tls.key {
                 info!(
@@ -459,7 +459,7 @@ pub fn main() {
     let shard_count = resolve_shard_count();
     info!("Shards: {shard_count}");
 
-    let tls = aerodesk_core::protocol::tls::TlsIdentity::load().unwrap_or_else(|e| {
+    let tls = aerodesk_protocol::tls::TlsIdentity::load().unwrap_or_else(|e| {
         eprintln!("fatal: TLS identity load failed: {e}");
         std::process::exit(1);
     });
@@ -525,7 +525,7 @@ pub fn main() {
             .expect("system time")
             .as_secs();
         let creds =
-            aerodesk_core::protocol::turn::generate_turn_credentials(secret, "aerodesk", 3600, now);
+            aerodesk_protocol::turn::generate_turn_credentials(secret, "aerodesk", 3600, now);
         Some(TurnConfig {
             urls,
             username: creds.username,
@@ -649,14 +649,14 @@ pub fn main() {
                                 shared
                                     .tcp_streams
                                     .lock()
-                                    .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                    .unwrap_or_else(aerodesk_protocol::util::lock_recover)
                                     .insert(source, stream);
                             }
                             tcp::TcpEvent::Close { source } => {
                                 shared
                                     .tcp_streams
                                     .lock()
-                                    .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                    .unwrap_or_else(aerodesk_protocol::util::lock_recover)
                                     .remove(&source);
                                 shared
                                     .route_table
@@ -1277,7 +1277,7 @@ fn web_request(
         let loads: Vec<f64> = {
             let r = router
                 .lock()
-                .unwrap_or_else(aerodesk_core::util::lock_recover);
+                .unwrap_or_else(aerodesk_protocol::util::lock_recover);
             (0..metrics.len()).map(|i| r.load(i)).collect()
         };
         let shards: Vec<serde_json::Value> = metrics
@@ -1330,7 +1330,7 @@ fn web_request(
         let loads: Vec<f64> = {
             let r = router
                 .lock()
-                .unwrap_or_else(aerodesk_core::util::lock_recover);
+                .unwrap_or_else(aerodesk_protocol::util::lock_recover);
             (0..shared.metrics.len()).map(|i| r.load(i)).collect()
         };
         let body = prometheus_body(
@@ -1457,7 +1457,7 @@ fn web_request(
         } else {
             router
                 .lock()
-                .unwrap_or_else(aerodesk_core::util::lock_recover)
+                .unwrap_or_else(aerodesk_protocol::util::lock_recover)
                 .choose(&room)
         }
     };
@@ -1513,7 +1513,7 @@ mod tests {
     fn resolve_shard_count_env_override_and_fallback() {
         let _guard = TEST_LOCK
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         // 有效覆盖（1..=64）
         unsafe { std::env::set_var("SFU_SHARD_COUNT", "3") };
         assert_eq!(resolve_shard_count(), 3);
@@ -1625,7 +1625,7 @@ mod tests {
     fn healthz_endpoint_ok() {
         let _guard = TEST_LOCK
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         let shared = Shared::new(1);
         let router = Arc::new(Mutex::new(crate::router::ShardRouter::new(1)));
         let req = Request::fake_http("GET", "/healthz", vec![], Vec::new());
@@ -1897,7 +1897,7 @@ mod tests {
     fn start_rejected_while_draining() {
         let _guard = TEST_LOCK
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         DRAINING.store(true, Ordering::Relaxed);
         let shared = Shared::new(1);
         let router = Arc::new(Mutex::new(crate::router::ShardRouter::new(1)));

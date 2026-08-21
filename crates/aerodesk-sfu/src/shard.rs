@@ -20,7 +20,7 @@ use str0m::media::{KeyframeRequestKind, MediaKind};
 use str0m::net::Protocol;
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcError, net::Receive};
 
-use aerodesk_core::protocol::signal::Role;
+use aerodesk_protocol::signal::Role;
 
 use crate::bitrate::{BitrateController, Layer};
 use aerodesk_sfu::recorder::Recorder;
@@ -200,7 +200,7 @@ impl Shared {
         let mut m = self
             .room_clients
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         if room_cap > 0 && m.get(room).copied().unwrap_or(0) >= room_cap {
             return Err("room full");
         }
@@ -217,7 +217,7 @@ impl Shared {
         let mut m = self
             .room_clients
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         if let Some(n) = m.get_mut(room) {
             *n = n.saturating_sub(1);
             if *n == 0 {
@@ -266,7 +266,7 @@ impl Shared {
         let mut reg = self
             .room_registry
             .write()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         if let Some(set) = reg.get_mut(room) {
             set.remove(&shard);
             if set.is_empty() {
@@ -277,7 +277,7 @@ impl Shared {
         let mut sub = self
             .subscribers
             .write()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         if let Some(set) = sub.get_mut(room) {
             set.remove(&shard);
             if set.is_empty() {
@@ -321,7 +321,7 @@ impl Shared {
         let mut reg = self
             .client_shards
             .write()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         if reg.get(&(room.to_string(), client_id)) == Some(&shard) {
             reg.remove(&(room.to_string(), client_id));
         }
@@ -340,7 +340,7 @@ impl Shared {
     pub fn register_session(&self, info: SessionInfo) {
         self.sessions
             .write()
-            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
             .insert(info.id, info);
     }
 
@@ -349,7 +349,7 @@ impl Shared {
         let mut reg = self
             .sessions
             .write()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         if reg.get(&client_id).is_some_and(|s| s.shard == shard) {
             reg.remove(&client_id);
         }
@@ -359,7 +359,7 @@ impl Shared {
     pub fn session(&self, client_id: u64) -> Option<SessionInfo> {
         self.sessions
             .read()
-            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
             .get(&client_id)
             .cloned()
     }
@@ -368,7 +368,7 @@ impl Shared {
     pub fn session_snapshot(&self) -> Vec<SessionInfo> {
         self.sessions
             .read()
-            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
             .values()
             .cloned()
             .collect()
@@ -628,7 +628,7 @@ fn run_shard(
                 let q = c
                     .qos
                     .lock()
-                    .unwrap_or_else(aerodesk_core::util::lock_recover);
+                    .unwrap_or_else(aerodesk_protocol::util::lock_recover);
                 if let Some(r) = q.rtt {
                     rtt_s += r.as_nanos() as u64;
                     rtt_n += 1;
@@ -1230,7 +1230,7 @@ impl Client {
                     Protocol::Tcp | Protocol::SslTcp => {
                         let mut streams = tcp_streams
                             .lock()
-                            .unwrap_or_else(aerodesk_core::util::lock_recover);
+                            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
                         let Some(stream) = streams.get_mut(&transmit.destination) else {
                             warn!(
                                 "No TCP stream for {}, dropping {} bytes",
@@ -1297,7 +1297,7 @@ impl Client {
                     // #238：BWE 目标码率进质量快照。
                     self.qos
                         .lock()
-                        .unwrap_or_else(aerodesk_core::util::lock_recover)
+                        .unwrap_or_else(aerodesk_protocol::util::lock_recover)
                         .bwe_bps = target.as_f64() as u64;
                     trace!(
                         "client {} bwe estimate {estimate:?} target {target:?}",
@@ -1346,7 +1346,7 @@ impl Client {
                     let mut q = self
                         .qos
                         .lock()
-                        .unwrap_or_else(aerodesk_core::util::lock_recover);
+                        .unwrap_or_else(aerodesk_protocol::util::lock_recover);
                     q.rtt = data.rtt;
                     q.egress_loss = data.egress_loss_fraction;
                     q.ingress_loss = data.ingress_loss_fraction;

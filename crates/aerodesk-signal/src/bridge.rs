@@ -97,7 +97,7 @@ impl BridgeManager {
         self.reap_dead();
         self.running
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
             .contains_key(room)
     }
 
@@ -106,7 +106,7 @@ impl BridgeManager {
         self.reap_dead();
         self.running
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
             .iter()
             .map(|(r, rb)| (r.clone(), rb.epoch))
             .collect()
@@ -118,7 +118,7 @@ impl BridgeManager {
         let mut running = self
             .running
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         if let Some(mut rb) = running.remove(room) {
             rb.kill();
             info!("bridge: stopped for room {room}");
@@ -142,7 +142,7 @@ impl BridgeManager {
             let mut failed = self
                 .failed
                 .lock()
-                .unwrap_or_else(aerodesk_core::util::lock_recover);
+                .unwrap_or_else(aerodesk_protocol::util::lock_recover);
             if let Some(t) = failed.get(room) {
                 if t.elapsed() < self.fail_cooldown {
                     warn!(
@@ -162,7 +162,7 @@ impl BridgeManager {
             let mut running = self
                 .running
                 .lock()
-                .unwrap_or_else(aerodesk_core::util::lock_recover);
+                .unwrap_or_else(aerodesk_protocol::util::lock_recover);
             if !running.contains_key(room) {
                 // 全局并发上限：仅对「新 spawn」生效，已运行房间不受限。
                 if running.len() >= self.max_running {
@@ -194,7 +194,7 @@ impl BridgeManager {
                 let mut running = self
                     .running
                     .lock()
-                    .unwrap_or_else(aerodesk_core::util::lock_recover);
+                    .unwrap_or_else(aerodesk_protocol::util::lock_recover);
                 match running.get_mut(room) {
                     Some(rb) if rb.is_ready() => {
                         info!("bridge: room {room} ready");
@@ -234,7 +234,7 @@ impl BridgeManager {
         let mut running = self
             .running
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         let dead: Vec<String> = running
             .iter()
             .filter(|(_, rb)| rb.is_exited())
@@ -293,7 +293,7 @@ impl BridgeManager {
         let mut failed = self
             .failed
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         failed.insert(room.to_string(), Instant::now());
         // 有界：超过上限先清掉已过冷却期的，再按时间淘汰最旧，防失败房间永久累积。
         if failed.len() > MAX_FAILED {
@@ -318,7 +318,7 @@ impl Drop for BridgeManager {
         let mut running = self
             .running
             .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover);
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         for (_, mut rb) in running.drain() {
             rb.kill();
         }
