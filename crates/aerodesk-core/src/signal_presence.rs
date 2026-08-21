@@ -478,6 +478,23 @@ impl SignalPresence {
                     let _ = from; // `to` 由服务器填充，presence 只需按 call_id 匹配。
                 }
             }
+            // #487 对端离开（主控断开/退出）：结束当前呼叫（Active/Incoming 的
+            // 对端离开 → 清理状态 + 事件，上层据此停发布；主控不主动发 Hangup，
+            // 由 Signal 的 PeerLeft 广播兜底）。
+            SignalMessage::PeerLeft { peer_id } => {
+                let ended = match &self.call {
+                    CallState::Active(a) if a.from == peer_id => self.call.hangup(),
+                    CallState::Incoming(c) if c.from == peer_id => self.call.hangup(),
+                    _ => None,
+                };
+                if let Some(end) = ended {
+                    self.events.push_back(PresenceEvent::Hangup {
+                        call_id: end.call_id,
+                        from: end.from,
+                        reason: Some("peer_left".into()),
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -714,5 +731,34 @@ mod tests {
         assert!(status.is_online());
         assert_eq!(status.as_str(), "online");
         assert!(!PresenceStatus::Stopped.is_online());
+    }
+
+    /// #487 回归：对端离开（PeerLeft 广播）结束活跃呼叫——清理状态 + Hangup 事件。
+    #[test]
+    fn peer_left_ends_active_call() {
+        let mut presence = SignalPresence::new(test_config());
+        presence.call = CallState::Active(ActiveCallInfo {
+            call_id: "call-1".into(),
+            from: "caller-peer".into(),
+            deadline: Instant::now() + Duration::from_secs(60),
+        });
+        presence.handle_signal_message(SignalMessage::PeerLeft {
+            peer_id: "caller-peer".into(),
+        });
+        assert!(presence.active_call().is_none(), "对端离开应清除 Active");
+        let evs = presence.take_events();
+        assert_eq!(evs.len(), 1);
+        assert!(matches!(&evs[0], PresenceEvent::Hangup { from, .. } if from == "caller-peer"));
+        // 无关 peer 离开不影响当前呼叫。
+        presence.call = CallState::Active(ActiveCallInfo {
+            call_id: "call-2".into(),
+            from: "caller-peer".into(),
+            deadline: Instant::now() + Duration::from_secs(60),
+        });
+        presence.handle_signal_message(SignalMessage::PeerLeft {
+            peer_id: "other-peer".into(),
+        });
+        assert!(presence.active_call().is_some(), "无关 peer 离开不影响");
+        assert!(presence.take_events().is_empty());
     }
 }
