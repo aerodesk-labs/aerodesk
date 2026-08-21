@@ -878,6 +878,7 @@ export component AppWindow inherits Window {
                         Switch { text: "免授权（已授权设备呼叫直接接听，不弹确认框）"; enabled: root.inc-enabled; checked <=> root.inc-auto-accept; toggled => { root.auto-save(); } }
                         Switch { text: "开机自启（登录后自动接受被控）"; checked <=> root.auto-start; toggled => { root.toggle-auto-start(); } }
                         Switch { text: "允许声音（被控端采集系统音频）"; enabled: root.inc-enabled; checked <=> root.inc-audio; toggled => { root.auto-save(); } }
+                        Switch { text: "允许鼠标控制（远端可移动本机鼠标）"; enabled: root.inc-enabled; checked <=> root.inc-mouse; toggled => { root.auto-save(); } }
                         Switch { text: "仅观看（只读，禁止鼠标/键盘控制）"; enabled: root.inc-enabled; checked <=> root.inc-view-only; toggled => { root.auto-save(); } }
                         Text { text: "设置修改后自动保存；开关即时反映状态"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
                     }
