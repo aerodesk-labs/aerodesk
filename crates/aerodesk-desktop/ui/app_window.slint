@@ -80,6 +80,7 @@ export component AppWindow inherits Window {
     in-out property <string> perm-a11y: "未知";
     // 被控端设置
     in-out property <bool> inc-enabled: false;
+    in-out property <bool> inc-auto-accept: false;
     in-out property <bool> auto-start: false;   // #417 开机自启（Windows HKCU Run）
     in-out property <bool> inc-audio: true;
     in-out property <bool> inc-mouse: true;
@@ -874,6 +875,7 @@ export component AppWindow inherits Window {
                         spacing: 10px;
                         Text { text: "接入设置"; font-size: 15px; font-weight: 600; color: #212121; height: 20px; vertical-stretch: 0; }
                         Switch { text: "开启被控（允许被远程接入）"; checked <=> root.inc-enabled; toggled => { root.auto-save(); root.toggle-inc(); } }
+                        Switch { text: "免授权（已授权设备呼叫直接接听，不弹确认框）"; enabled: root.inc-enabled; checked <=> root.inc-auto-accept; toggled => { root.auto-save(); } }
                         Switch { text: "开机自启（登录后自动接受被控）"; checked <=> root.auto-start; toggled => { root.toggle-auto-start(); } }
                         Switch { text: "允许声音（被控端采集系统音频）"; enabled: root.inc-enabled; checked <=> root.inc-audio; toggled => { root.auto-save(); } }
                         Switch { text: "仅观看（只读，禁止鼠标/键盘控制）"; enabled: root.inc-enabled; checked <=> root.inc-view-only; toggled => { root.auto-save(); } }
