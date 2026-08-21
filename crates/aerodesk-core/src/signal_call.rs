@@ -222,7 +222,8 @@ mod tests {
         let active = state.accept(now).expect("incoming call should accept");
         assert_eq!(active.call_id, "c1");
         assert_eq!(active.from, "caller");
-        assert_eq!(active.deadline, now + Duration::from_millis(30_000));
+        // #539：活跃呼叫 deadline 为 24h 防悬挂兜底（远大于响铃超时 30s）。
+        assert!(active.deadline > now + Duration::from_secs(3600));
         assert!(state.active().is_some());
 
         assert_eq!(
@@ -265,11 +266,13 @@ mod tests {
         state.on_call(call("c1", Some(10)));
         state.accept(now).unwrap();
 
-        assert_eq!(state.expire(now + Duration::from_millis(9)), None);
+        // #539：活跃呼叫 deadline 为 24h 兜底——短于 deadline 不 expire。
+        let before_deadline = now + Duration::from_secs(24 * 3600 - 1);
+        assert_eq!(state.expire(before_deadline), None);
         assert!(state.active().is_some());
 
         assert_eq!(
-            state.expire(now + Duration::from_millis(10)),
+            state.expire(now + Duration::from_secs(24 * 3600 + 1)),
             Some(CallEnd {
                 call_id: "c1".into(),
                 from: "caller".into()
