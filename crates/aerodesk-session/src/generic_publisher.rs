@@ -427,6 +427,9 @@ mod imp {
                 let Ok(frame) = serde_json::from_slice::<InputFrame>(&data) else {
                     return;
                 };
+                // 输入链路诊断（与 cea288f 观看端 send_input_to_slot 对称）：
+                // debug 级逐事件，经 RUST_LOG=aerodesk_session=debug 打开。
+                tracing::debug!("被控端 input 事件: {:?}", frame.event);
                 match frame.event {
                     InputEvent::ClipboardText(text) => {
                         aerodesk_core::clipboard::set_cache(text.clone());
