@@ -1697,22 +1697,25 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
         user_quota_release(&mut uc, sub);
     }
     info!("peer {peer_id} left room {room}");
-    // #66：先快照同房间其它连接、释放 rooms 锁，再尽力广播 PeerLeft。
+    // #66：先快照同房间其它连接的发送队列、释放 rooms 锁，再广播 PeerLeft。
     // 不能在持有 rooms 锁时去锁其它连接的 ws（锁序反转 → 死锁）。
-    let peers: Vec<Arc<Mutex<Websocket>>> = {
+    // 广播经各连接发送队列投递（#539）——try_lock 直写 ws 在对方 session_loop
+    // 阻塞读时必然失败，而 PeerLeft 已有消费方（被控端清理 Active 呼叫，见
+    // signal_presence.rs peer_left 处理），必须可靠到达。
+    let target_txs: Vec<std::sync::mpsc::Sender<String>> = {
         let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
         rooms
             .get(&room)
-            .map(|peers| peers.iter().map(|p| p.ws.clone()).collect())
+            .map(|peers| peers.iter().map(|p| p.tx.clone()).collect())
             .unwrap_or_default()
     };
-    for p in peers {
-        send(
-            p,
-            SignalMessage::PeerLeft {
-                peer_id: peer_id.clone(),
-            },
-        );
+    let Ok(text) = serde_json::to_string(&SignalMessage::PeerLeft {
+        peer_id: peer_id.clone(),
+    }) else {
+        return;
+    };
+    for tx in target_txs {
+        let _ = tx.send(text.clone());
     }
     info!("session closed");
 }
