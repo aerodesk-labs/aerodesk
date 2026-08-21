@@ -167,18 +167,31 @@ impl WsSignalClient {
         Err("too many signal redirects".into())
     }
 
-    /// 发送 SDP offer，等待 SFU answer（阻塞）。
+    /// 发送 SDP offer，等待 SFU answer（有界阻塞）。
+    ///
+    /// #539 后审查（#487 互测）：无超时的 `recv()` 在 TCP 半开（网络切换/信令
+    /// 异常但连接未 RST）时永久卡死——被控端 run_publisher 卡在 connect 阶段，
+    /// UI 无任何失败提示（「已授权但无媒体」），且 STOP 置位无法中断（线程阻塞
+    /// 在 socket 读）。SFU answer 正常 <1s（公网 + TURN 分配 <3s），15s 总超时
+    /// 只拦截异常场景；macos_media 观看端已有同款 20s 保护（#487）。
     pub fn exchange_description(&mut self, sdp: &str) -> Result<String, String> {
+        const ANSWER_TIMEOUT: Duration = Duration::from_secs(15);
         let peer_id = self.peer_id.clone().ok_or("not joined")?;
         self.send(SignalMessage::Description {
             from: peer_id,
             to: "sfu".into(),
             description: sdp.into(),
         })?;
+        let deadline = std::time::Instant::now() + ANSWER_TIMEOUT;
         // #539：viewer 发起的 Call 响应（CallRejected/CallRinging 等）与 SDP
         // answer 交织到达（e2e 无被叫端时 CallRejected 先回）——跳过继续等。
         loop {
-            match self.recv()? {
+            let remain = deadline.saturating_duration_since(std::time::Instant::now());
+            if remain.is_zero() {
+                return Err("等待 SFU answer 超时：信令或 SFU 无响应".into());
+            }
+            let msg = self.recv_timeout(remain).map_err(|e| e.to_string())?;
+            match msg {
                 SignalMessage::Description { description, .. } => return Ok(description),
                 SignalMessage::Error { message } => return Err(message),
                 other => {

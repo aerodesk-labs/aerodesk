@@ -77,7 +77,7 @@ mod imp {
 
     use aerodesk_codec::audio::RealAudioSender;
     use aerodesk_core::Endpoint;
-    use aerodesk_core::connect::connect_live_role_codec;
+    use aerodesk_core::connect::connect_live_role_codec_timeout;
     use aerodesk_core::endpoint::ClientEvent;
     use aerodesk_core::media_pipeline::Codec;
     use aerodesk_core::media_socket::MediaSocket;
@@ -164,9 +164,17 @@ mod imp {
         let auth = Some(token.as_str()).filter(|t| !t.is_empty());
 
         // 发布端连接：H.264 视频 + 音频 m-line（core 泛型连接，CLI 同款）。
-        let mut live =
-            match connect_live_role_codec(&server, &room, Role::Publisher, auth, Some(Codec::H264))
-            {
+        // #487 审查：连接链路（TCP 握手/Join/SDP 交换）在异常网络下可能无限
+        // 阻塞且无法被 stop 中断——子线程 + 30s 总超时（正常约 1-5s），超时
+        // 报错返回，UI 不再「已授权但无媒体」式静默卡死。
+        let mut live = match connect_live_role_codec_timeout(
+            &server,
+            &room,
+            Role::Publisher,
+            auth,
+            Some(Codec::H264),
+            Duration::from_secs(30),
+        ) {
                 Ok(l) => l,
                 Err(e) => {
                     let msg = format!("被控端连接失败：{e}");

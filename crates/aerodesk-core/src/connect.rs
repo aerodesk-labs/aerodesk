@@ -266,6 +266,41 @@ pub fn connect_live_role_codec(
     )
 }
 
+/// 带总超时的连接（#487 审查）：TCP 握手/Join 应答/SDP 交换在异常网络
+/// （半开连接、信令无响应）下会无限阻塞，且阻塞无法被停止标志中断——
+/// 调用方（被控端 run_publisher）卡死时 UI 无失败提示、线程无法退出。
+/// 子线程 + `timeout` 兜底：超时返回 Err，调用方立即提示并退出。
+/// 正常路径耗时约 1-5s（WS 握手 + join + SDP 交换），ICE 泵不计入
+/// （ICE 超时返回 Ok 而非阻塞）。macos_media 观看端已有同款 20s 保护。
+pub fn connect_live_role_codec_timeout(
+    server: &str,
+    room: &str,
+    role: Role,
+    auth: Option<&str>,
+    codec: Option<Codec>,
+    timeout: Duration,
+) -> Result<LiveSession, String> {
+    let (tx, rx) = std::sync::mpsc::channel::<Result<LiveSession, String>>();
+    let srv = server.to_string();
+    let rm = room.to_string();
+    let auth = auth.map(|s| s.to_string());
+    // 数据通道收发链（str0m/SCTP）调用栈深，放大线程栈防溢出（RULE 同款）。
+    if std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                connect_live_role_codec(&srv, &rm, role, auth.as_deref(), codec)
+            }));
+            let _ = tx.send(r.unwrap_or_else(|_| Err("connect panicked".into())));
+        })
+        .is_err()
+    {
+        return Err("无法创建连接线程".into());
+    }
+    rx.recv_timeout(timeout)
+        .map_err(|_| format!("连接超时（{}s）：信令/SFU 无响应", timeout.as_secs()))?
+}
+
 #[allow(clippy::too_many_arguments)] // 内部实现：角色/鉴权/中继/音频/摄像头等开关收敛一处
 fn connect_live_role_impl(
     server: &str,

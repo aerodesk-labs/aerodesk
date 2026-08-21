@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aerodesk_codec::audio::RealAudioSender;
-use aerodesk_core::connect::connect_live_role_codec;
+use aerodesk_core::connect::connect_live_role_codec_timeout;
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media_pipeline::Codec;
 use aerodesk_core::platform::SystemWakeLock;
@@ -93,8 +93,16 @@ fn run_publisher(
     let stale = || stop.load(Ordering::SeqCst);
     let auth = Some(token.as_str()).filter(|t| !t.is_empty());
 
-    let mut live =
-        match connect_live_role_codec(&server, &room, Role::Publisher, auth, Some(Codec::H264)) {
+    // #487 审查：连接链路在异常网络下可能无限阻塞且无法被 stop 中断——
+    // 子线程 + 30s 总超时（正常约 1-5s），超时报错返回，不再静默卡死。
+    let mut live = match connect_live_role_codec_timeout(
+        &server,
+        &room,
+        Role::Publisher,
+        auth,
+        Some(Codec::H264),
+        Duration::from_secs(30),
+    ) {
             Ok(l) => l,
             Err(e) => {
                 let msg = format!("被控端连接失败：{e}");
