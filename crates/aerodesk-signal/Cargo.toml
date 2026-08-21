@@ -14,6 +14,9 @@ tracing-subscriber.workspace = true
 ureq = { version = "2", features = ["tls"] }
 # #10：仅依赖协议 crate，不再被迫链接客户端引擎重依赖。
 aerodesk-protocol = { path = "../aerodesk-protocol" }
+rsipstack = "0.6.4"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tokio-util = { version = "0.7.19", features = ["rt"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
