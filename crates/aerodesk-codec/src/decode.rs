@@ -196,7 +196,15 @@ mod tests {
         assert_eq!(out, src);
     }
 
+    /// roundtrip 系列串行锁（#487 自审批次 2）：SVT/VP9 编码器全核跑满时，
+    /// 并行 roundtrip 与解码线程抢 CPU 导致 av1_roundtrip 偶发超时类失败
+    /// （LESSON：av1-roundtrip 测试 SVT 并行资源竞争）。cargo test 单进程
+    /// 多线程，static Mutex 即进程内串行——四个 roundtrip 不再互相抢核。
+    static ROUNDTRIP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn roundtrip(codec: Codec) {
+        // 整个 roundtrip（编码+解码）持锁：同 crate 的 roundtrip 测试依次执行。
+        let _guard = ROUNDTRIP_LOCK.lock().unwrap();
         crate::encode::init();
         let (w, h) = (320u32, 180u32);
         // 显式软编：hevc_mf 在部分 windows runner 上永久阻塞，自动选编码器
