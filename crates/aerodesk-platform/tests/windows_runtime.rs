@@ -267,8 +267,8 @@ fn windows_cursor_normalized_in_range() {
 fn sendinput_mouse_move_reaches_cursor() {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+        GetCursorPos, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
     };
     let mut inj = SendInputInjector::new();
     let (tx, ty) = (0.1f64, 0.1f64); // 目标：虚拟屏幕 10% 处
