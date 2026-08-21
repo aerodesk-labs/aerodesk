@@ -220,13 +220,21 @@ impl SfuPool {
     }
 }
 
-/// 从 /metrics/prometheus 解析各分片 shard_load 的最大值（×10000）。
+/// 从 SFU `/metrics` 结构化 JSON 解析各分片 shard_load 的最大值（×10000）。
+///
+/// #487 审查批次 3（#12）：不再解析 Prometheus 文本——SFU 的 `/metrics` JSON
+/// 原生携带 `shards[].shard_load`（与 Prometheus 同源数据），负载均衡消费
+/// 结构化契约而非文本格式。解析失败/字段缺失按 load=0 处理（与旧文本解析
+/// 空响应同语义）。
 fn parse_max_shard_load(body: &str) -> u64 {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return 0;
+    };
     let mut max = 0.0f64;
-    for line in body.lines() {
-        if let Some(rest) = line.strip_prefix("aerodesk_sfu_shard_load{") {
-            if let Some(v) = rest.rsplit(' ').next().and_then(|s| s.parse::<f64>().ok()) {
-                max = max.max(v);
+    if let Some(shards) = v.get("shards").and_then(|s| s.as_array()) {
+        for shard in shards {
+            if let Some(load) = shard.get("shard_load").and_then(|l| l.as_f64()) {
+                max = max.max(load);
             }
         }
     }
@@ -248,7 +256,7 @@ enum PollErr {
 
 /// 探测单个 SFU 的 `shard_load` 最大值（×10000）。
 /// 必须携带 `X-Internal-Token`：SFU 内部端口在设置 `INTERNAL_TOKEN` 后对所有
-/// 请求（含 /metrics/prometheus）鉴权，缺头会 403 导致整个池被误判下线。
+/// 请求（含 /metrics）鉴权，缺头会 403 导致整个池被误判下线。
 fn poll_sfu_load(url: &str, token: Option<&str>) -> Result<u64, PollErr> {
     let mut req = ureq::get(url).timeout(Duration::from_secs(3));
     if let Some(token) = token {
@@ -284,7 +292,8 @@ fn poll_sfu_pool(
         // enumerate 而非 0..len：循环体并行索引 urls/loads/down_until/
         // last_unauth_log 四个集合，range 写法触发 needless_range_loop。
         for (i, _url) in pool.urls.iter().enumerate() {
-            let url = format!("{}/metrics/prometheus", pool.urls[i]);
+            // #12：消费结构化 /metrics JSON（内部端口鉴权覆盖该端点）。
+            let url = format!("{}/metrics", pool.urls[i]);
             match poll_sfu_load(&url, token.as_deref()) {
                 Ok(load) => {
                     pool.loads[i].store(load, Ordering::Relaxed);
@@ -1940,9 +1949,11 @@ mod tests {
 
     #[test]
     fn parse_max_shard_load_picks_hottest_shard() {
-        let body = "aerodesk_sfu_shard_load{shard=\"0\"} 0.2500\naerodesk_sfu_shard_load{shard=\"1\"} 0.9000\naerodesk_sfu_clients 5\n";
+        // #12：结构化 JSON（SFU /metrics），取最热分片 ×10000。
+        let body = r#"{"shards":[{"shard":0,"shard_load":0.25},{"shard":1,"shard_load":0.9}]}"#;
         assert_eq!(parse_max_shard_load(body), 9000);
-        assert_eq!(parse_max_shard_load("no metric here"), 0);
+        assert_eq!(parse_max_shard_load("not json"), 0);
+        assert_eq!(parse_max_shard_load(r#"{"shards":[]}"#), 0);
     }
 
     #[test]
@@ -2217,9 +2228,10 @@ mod tests {
     /// INTERNAL_TOKEN 后对所有请求鉴权，缺头会 403 导致整个池被误判下线。
     #[test]
     fn poll_sfu_load_sends_token_and_parses() {
-        let body = "aerodesk_sfu_shard_load{shard=\"0\"} 0.9000\n";
+        // #12：结构化 JSON（与 SFU /metrics 同构：shards[].shard_load）。
+        let body = r#"{"shards":[{"shard":0,"shard_load":0.9},{"shard":1,"shard_load":0.5}]}"#;
         let (addr, rx) = fake_http_server("HTTP/1.1 200 OK", body);
-        let url = format!("http://{addr}/metrics/prometheus");
+        let url = format!("http://{addr}/metrics");
         assert_eq!(poll_sfu_load(&url, Some("tok123")), Ok(9000));
         let req = rx
             .recv_timeout(Duration::from_secs(5))
@@ -2235,7 +2247,7 @@ mod tests {
     #[test]
     fn poll_sfu_load_classifies_unauthorized() {
         let (addr, _rx) = fake_http_server("HTTP/1.1 403 Forbidden", "");
-        let url = format!("http://{addr}/metrics/prometheus");
+        let url = format!("http://{addr}/metrics");
         assert_eq!(poll_sfu_load(&url, None), Err(PollErr::Unauthorized));
     }
 
