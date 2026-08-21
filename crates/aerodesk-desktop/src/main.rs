@@ -236,8 +236,10 @@ impl SessionWindow {
     }
 }
 
+/// 会话引擎通道（#487 审查批次 3 / #11）：viewer/publisher 线程使用的
+/// 连接参数与数据通道，与 UI 状态分离。
 #[derive(Clone)]
-pub struct SessionHandle {
+pub struct SessionEngine {
     pub slot: usize,
     pub room: String,
     pub server: String,
@@ -253,6 +255,11 @@ pub struct SessionHandle {
     pub show_camera: Arc<AtomicBool>,
     /// 观看模式：true=仅观看不发送键鼠输入。
     pub view_only: Arc<AtomicBool>,
+}
+
+/// 会话 UI 状态（UI 线程读写；viewer 线程经锁投影）。
+#[derive(Clone)]
+pub struct SessionView {
     /// #447 会话对应的独立窗口（无窗口的旧测试句柄为 None）。
     pub window: Option<SessionWindow>,
     /// 最近一帧（未收到帧时为 None，UI 显示空槽）。
@@ -271,6 +278,29 @@ pub struct SessionHandle {
     pub file_label: String,
 }
 
+impl Default for SessionView {
+    /// file_progress=-1.0 表示「无传输」（0.0 是真实进度起点，不能作默认）。
+    fn default() -> Self {
+        SessionView {
+            window: None,
+            frame: None,
+            cursor: None,
+            latency_ms: None,
+            rtt_ms: None,
+            fps: 0.0,
+            file_progress: -1.0,
+            file_label: String::new(),
+        }
+    }
+}
+
+/// 会话句柄：引擎通道 + UI 状态分组（#11），同一把锁内原子更新。
+#[derive(Clone)]
+pub struct SessionHandle {
+    pub engine: SessionEngine,
+    pub view: SessionView,
+}
+
 pub static SESSIONS: std::sync::Mutex<Vec<SessionHandle>> = std::sync::Mutex::new(Vec::new());
 /// #75 输入帧序号（全局递增；跨会话共用与旧行为一致）。
 pub static INPUT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -284,18 +314,26 @@ pub static FILE_TRANSFER_ENABLED: std::sync::atomic::AtomicBool =
 
 /// #452 文件传输独立窗口状态：(关联会话 slot, 窗口弱引用)。主界面同一时间只允许
 /// 打开一个文件窗口，关闭或会话清理时移除。
-static FILE_WINDOW_STATE: std::sync::Mutex<Option<(usize, slint::Weak<FileTransferWindow>)>> =
-    std::sync::Mutex::new(None);
+/// #447 独立功能窗口状态（#11 收敛：原 FILE/TERMINAL/MESSAGE/INCOMING 四个
+/// 模块级静态合一，访问面从 4 把锁并为 1 把）。
+struct WindowState {
+    file: Option<(usize, slint::Weak<FileTransferWindow>)>,
+    terminal: Option<(usize, slint::Weak<TerminalWindow>)>,
+    message: Option<(usize, slint::Weak<MessageWindow>)>,
+    incoming: Option<slint::Weak<IncomingCallWindow>>,
+}
+static WINDOW_STATE: std::sync::Mutex<WindowState> = std::sync::Mutex::new(WindowState {
+    file: None,
+    terminal: None,
+    message: None,
+    incoming: None,
+});
 /// #452 终端独立窗口状态：(关联会话 slot, 窗口弱引用)。
-static TERMINAL_WINDOW_STATE: std::sync::Mutex<Option<(usize, slint::Weak<TerminalWindow>)>> =
-    std::sync::Mutex::new(None);
 /// #452 终端命令请求 id（跨会话全局递增；响应按 id 回显即可）。
 static CMD_NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// 终端窗口输出上限：避免无限回显撑爆 UI 字符串。
 const MAX_TERMINAL_OUTPUT_CHARS: usize = 64 * 1024;
 /// #458 聊天窗口状态：(关联会话 slot, 窗口弱引用)。
-static MESSAGE_WINDOW_STATE: std::sync::Mutex<Option<(usize, slint::Weak<MessageWindow>)>> =
-    std::sync::Mutex::new(None);
 /// #458 聊天历史上限（按会话保存，窗口关闭后重开仍可回显）。
 const MAX_CHAT_MESSAGES: usize = 500;
 /// #458 会话内聊天历史项（非 Slint 类型，便于跨线程存放与截断）。
@@ -328,8 +366,6 @@ static PRESENCE: std::sync::Mutex<Option<PresenceHandle>> = std::sync::Mutex::ne
 /// #539 呼叫确认：未静默授权时弹窗待用户确认，30s 超时由 presence 循环自动拒绝。
 static PENDING_CALL: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 /// #539 呼叫确认独立窗口（不依赖主窗口——App 最小化/托盘时也可弹出）。
-static INCOMING_WINDOW: std::sync::Mutex<Option<slint::Weak<IncomingCallWindow>>> =
-    std::sync::Mutex::new(None);
 /// 会话相关测试共享锁：多会话 e2e 与无头 UI 状态测试都操作全局 SESSIONS，
 /// 必须串行执行避免互相污染。
 #[cfg(test)]
@@ -359,72 +395,72 @@ pub fn session_window_for_slot(slot: usize) -> Option<SessionWindow> {
         .lock()
         .unwrap()
         .iter()
-        .find(|s| s.slot == slot)
-        .and_then(|s| s.window.clone())
+        .find(|s| s.engine.slot == slot)
+        .and_then(|s| s.view.window.clone())
 }
 
 /// 当前活动会话的稳定 slot（独立功能窗口据此路由文件/终端命令）。
 fn active_session_slot(ui: &AppWindow) -> Option<usize> {
     let idx = ui.get_active_session() as usize;
-    SESSIONS.lock().unwrap().get(idx).map(|s| s.slot)
+    SESSIONS.lock().unwrap().get(idx).map(|s| s.engine.slot)
 }
 
 /// 文件传输独立窗口状态读取/写入。窗口只在 UI 线程创建，状态由 Rust 静态保存。
 fn file_window_weak_for_slot(slot: usize) -> Option<slint::Weak<FileTransferWindow>> {
-    let state = FILE_WINDOW_STATE.lock().unwrap();
-    match state.as_ref() {
+    let state = WINDOW_STATE.lock().unwrap();
+    match state.file.as_ref() {
         Some((s, weak)) if *s == slot => Some(weak.clone()),
         _ => None,
     }
 }
 
 fn register_file_window(slot: usize, weak: slint::Weak<FileTransferWindow>) {
-    *FILE_WINDOW_STATE.lock().unwrap() = Some((slot, weak));
+    WINDOW_STATE.lock().unwrap().file = Some((slot, weak));
 }
 
 fn unregister_file_window(slot: usize) {
-    let mut state = FILE_WINDOW_STATE.lock().unwrap();
-    if state.as_ref().is_some_and(|(s, _)| *s == slot) {
-        *state = None;
+    let mut state = WINDOW_STATE.lock().unwrap();
+    if state.file.as_ref().is_some_and(|(s, _)| *s == slot) {
+        state.file = None;
     }
 }
 
 fn terminal_window_weak_for_slot(slot: usize) -> Option<slint::Weak<TerminalWindow>> {
-    let state = TERMINAL_WINDOW_STATE.lock().unwrap();
-    match state.as_ref() {
+    let state = WINDOW_STATE.lock().unwrap();
+    match state.terminal.as_ref() {
         Some((s, weak)) if *s == slot => Some(weak.clone()),
         _ => None,
     }
 }
 
 fn register_terminal_window(slot: usize, weak: slint::Weak<TerminalWindow>) {
-    *TERMINAL_WINDOW_STATE.lock().unwrap() = Some((slot, weak));
+    WINDOW_STATE.lock().unwrap().terminal = Some((slot, weak));
 }
 
 fn unregister_terminal_window(slot: usize) {
-    let mut state = TERMINAL_WINDOW_STATE.lock().unwrap();
-    if state.as_ref().is_some_and(|(s, _)| *s == slot) {
-        *state = None;
+    let mut state = WINDOW_STATE.lock().unwrap();
+    if state.terminal.as_ref().is_some_and(|(s, _)| *s == slot) {
+        state.terminal = None;
     }
 }
 
 /// #458 聊天窗口状态读取/写入。与文件/终端窗口一致：主界面同时只允许一个窗口。
 fn message_window_weak_for_slot(slot: usize) -> Option<slint::Weak<MessageWindow>> {
-    let state = MESSAGE_WINDOW_STATE.lock().unwrap();
-    match state.as_ref() {
+    let state = WINDOW_STATE.lock().unwrap();
+    match state.message.as_ref() {
         Some((s, weak)) if *s == slot => Some(weak.clone()),
         _ => None,
     }
 }
 
 fn register_message_window(slot: usize, weak: slint::Weak<MessageWindow>) {
-    *MESSAGE_WINDOW_STATE.lock().unwrap() = Some((slot, weak));
+    WINDOW_STATE.lock().unwrap().message = Some((slot, weak));
 }
 
 fn unregister_message_window(slot: usize) {
-    let mut state = MESSAGE_WINDOW_STATE.lock().unwrap();
-    if state.as_ref().is_some_and(|(s, _)| *s == slot) {
-        *state = None;
+    let mut state = WINDOW_STATE.lock().unwrap();
+    if state.message.as_ref().is_some_and(|(s, _)| *s == slot) {
+        state.message = None;
     }
 }
 
@@ -572,8 +608,8 @@ pub fn session_set_status(ui_weak: &slint::Weak<AppWindow>, slot: usize, msg: St
 pub fn request_session_stop(slot: usize) {
     INPUT_CAPTURING.store(false, Ordering::SeqCst);
     let sessions = SESSIONS.lock().unwrap();
-    if let Some(s) = sessions.iter().find(|s| s.slot == slot) {
-        s.stop.store(true, Ordering::SeqCst);
+    if let Some(s) = sessions.iter().find(|s| s.engine.slot == slot) {
+        s.engine.stop.store(true, Ordering::SeqCst);
     }
 }
 
@@ -592,10 +628,14 @@ pub fn format_session_stats(latency_ms: Option<u64>, rtt_ms: Option<u64>, fps: f
 
 /// 把会话句柄状态同步到其独立窗口（帧/输入捕获态/文案）。
 fn sync_session_window(window: &SessionWindow, s: &SessionHandle) {
-    if let Some(frame) = &s.frame {
+    if let Some(frame) = &s.view.frame {
         window.set_frame(frame);
     }
-    window.set_stats(format_session_stats(s.latency_ms, s.rtt_ms, s.fps));
+    window.set_stats(format_session_stats(
+        s.view.latency_ms,
+        s.view.rtt_ms,
+        s.view.fps,
+    ));
 }
 
 /// 在所有会话注册表变更后，刷新仍存活的独立窗口。
@@ -604,7 +644,7 @@ fn sync_all_session_windows() {
         let sessions = SESSIONS.lock().unwrap();
         sessions
             .iter()
-            .map(|s| (s.window.clone(), s.frame.clone()))
+            .map(|s| (s.view.window.clone(), s.view.frame.clone()))
             .collect()
     };
     for (window, frame) in snapshots {
@@ -658,8 +698,8 @@ fn send_input_to_slot(
     let frame = aerodesk_core::protocol::input::InputFrame::new(seq, event);
     if let Ok(json) = serde_json::to_string(&frame) {
         let sessions = SESSIONS.lock().unwrap();
-        if let Some(s) = sessions.iter().find(|s| s.slot == slot) {
-            let _ = s.input_tx.send(json);
+        if let Some(s) = sessions.iter().find(|s| s.engine.slot == slot) {
+            let _ = s.engine.input_tx.send(json);
         }
     }
 }
@@ -719,8 +759,8 @@ fn send_key_to_slot(
     let frame = aerodesk_core::protocol::input::InputFrame::new(seq, event);
     if let Ok(json) = serde_json::to_string(&frame) {
         let sessions = SESSIONS.lock().unwrap();
-        if let Some(s) = sessions.iter().find(|s| s.slot == slot) {
-            let _ = s.input_tx.send(json);
+        if let Some(s) = sessions.iter().find(|s| s.engine.slot == slot) {
+            let _ = s.engine.input_tx.send(json);
         }
     }
     true
@@ -752,8 +792,8 @@ fn send_wheel_to_slot(
     let frame = aerodesk_core::protocol::input::InputFrame::new(seq, event);
     if let Ok(json) = serde_json::to_string(&frame) {
         let sessions = SESSIONS.lock().unwrap();
-        if let Some(s) = sessions.iter().find(|s| s.slot == slot) {
-            let _ = s.input_tx.send(json);
+        if let Some(s) = sessions.iter().find(|s| s.engine.slot == slot) {
+            let _ = s.engine.input_tx.send(json);
         }
     }
 }
@@ -824,7 +864,11 @@ pub fn focus_window_to_front(window: &slint::Window) {
 
 /// slot（会话内部标识）→ 当前 UI 稠密索引（SESSIONS 顺序即标签顺序）。
 pub fn slot_to_ui_index(slot: usize) -> Option<usize> {
-    SESSIONS.lock().unwrap().iter().position(|s| s.slot == slot)
+    SESSIONS
+        .lock()
+        .unwrap()
+        .iter()
+        .position(|s| s.engine.slot == slot)
 }
 
 /// 从任意线程更新 UI：Slint 1.17 的 `Weak::upgrade()` 仅在创建线程可用
@@ -887,13 +931,13 @@ impl aerodesk_session::SessionUi for SlintSessionUi {
         session_cleanup_weak(&self.ui, self.slot, terminal);
     }
     fn set_remote_cursor(&self, x: f32, y: f32) {
-        with_session_ui_state(&self.ui, self.slot, move |s| s.cursor = Some((x, y)));
+        with_session_ui_state(&self.ui, self.slot, move |s| s.view.cursor = Some((x, y)));
     }
     fn set_session_stats(&self, latency_ms: Option<u64>, rtt_ms: Option<u64>, fps: f32) {
         with_session_ui_state(&self.ui, self.slot, move |s| {
-            s.latency_ms = latency_ms;
-            s.rtt_ms = rtt_ms;
-            s.fps = fps;
+            s.view.latency_ms = latency_ms;
+            s.view.rtt_ms = rtt_ms;
+            s.view.fps = fps;
         });
     }
     fn add_recent(&self, room: &str, server: &str) {
@@ -920,8 +964,8 @@ impl aerodesk_session::SessionUi for SlintSessionUi {
     }
     fn set_file_progress(&self, progress: f32, label: String) {
         with_session_ui_state(&self.ui, self.slot, move |s| {
-            s.file_progress = progress;
-            s.file_label = label;
+            s.view.file_progress = progress;
+            s.view.file_label = label;
         });
     }
     fn set_camera_available(&self, available: bool) {
@@ -1037,11 +1081,11 @@ fn wire_camera_window(win: &CameraWindow, slot: usize) {
         };
         let show_camera = {
             let sessions = SESSIONS.lock().unwrap();
-            let Some(s) = sessions.iter().find(|s| s.slot == slot) else {
+            let Some(s) = sessions.iter().find(|s| s.engine.slot == slot) else {
                 win.set_status("会话已结束".into());
                 return;
             };
-            !s.show_camera.fetch_xor(true, Ordering::SeqCst)
+            !s.engine.show_camera.fetch_xor(true, Ordering::SeqCst)
         };
         win.set_camera_active(show_camera);
         win.set_status(
@@ -1120,9 +1164,12 @@ fn send_selected_file_from_window(win_weak: slint::Weak<FileTransferWindow>, slo
         }
         let sent = {
             let sessions = SESSIONS.lock().unwrap();
-            match sessions.iter().find(|s| s.slot == slot) {
+            match sessions.iter().find(|s| s.engine.slot == slot) {
                 Some(s) => {
-                    let _ = s.file_tx.send(FileCmd::SendFile(path.clone().into()));
+                    let _ = s
+                        .engine
+                        .file_tx
+                        .send(FileCmd::SendFile(path.clone().into()));
                     true
                 }
                 None => false,
@@ -1144,9 +1191,9 @@ fn cancel_file_from_window(win_weak: slint::Weak<FileTransferWindow>, slot: usiz
     let _ = win_weak.upgrade_in_event_loop(move |win| {
         let sent = {
             let sessions = SESSIONS.lock().unwrap();
-            match sessions.iter().find(|s| s.slot == slot) {
+            match sessions.iter().find(|s| s.engine.slot == slot) {
                 Some(s) => {
-                    let _ = s.file_tx.send(FileCmd::Cancel);
+                    let _ = s.engine.file_tx.send(FileCmd::Cancel);
                     true
                 }
                 None => false,
@@ -1229,8 +1276,8 @@ fn send_message_from_window(win_weak: slint::Weak<MessageWindow>, slot: usize, t
         }
         let sent = {
             let sessions = SESSIONS.lock().unwrap();
-            match sessions.iter().find(|s| s.slot == slot) {
-                Some(s) => s.chat_tx.send(ChatCmd::Send(text.clone())).is_ok(),
+            match sessions.iter().find(|s| s.engine.slot == slot) {
+                Some(s) => s.engine.chat_tx.send(ChatCmd::Send(text.clone())).is_ok(),
                 None => false,
             }
         };
@@ -1323,10 +1370,10 @@ fn send_terminal_command_from_window(
         }
         let sent = {
             let sessions = SESSIONS.lock().unwrap();
-            match sessions.iter().find(|s| s.slot == slot) {
+            match sessions.iter().find(|s| s.engine.slot == slot) {
                 Some(s) => {
                     let id = CMD_NEXT.fetch_add(1, Ordering::SeqCst);
-                    let _ = s.cmd_tx.send(CmdRequest::run(id, command.clone()));
+                    let _ = s.engine.cmd_tx.send(CmdRequest::run(id, command.clone()));
                     true
                 }
                 None => false,
@@ -1451,27 +1498,25 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
     {
         let mut sessions = SESSIONS.lock().unwrap();
         sessions.push(SessionHandle {
-            slot,
-            room: room.clone(),
-            server: server.clone(),
-            input_tx: input_tx.clone(),
-            control_tx: control_tx.clone(),
-            cmd_tx: cmd_tx.clone(),
-            file_tx: file_cmd_tx.clone(),
-            chat_tx: chat_cmd_tx.clone(),
-            muted: muted.clone(),
-            volume: volume.clone(),
-            stop: stop.clone(),
-            show_camera: show_camera.clone(),
-            view_only: view_only.clone(),
-            window: Some(window.clone()),
-            frame: None,
-            cursor: None,
-            latency_ms: None,
-            rtt_ms: None,
-            fps: 0.0,
-            file_progress: -1.0,
-            file_label: String::new(),
+            engine: SessionEngine {
+                slot,
+                room: room.clone(),
+                server: server.clone(),
+                input_tx: input_tx.clone(),
+                control_tx: control_tx.clone(),
+                cmd_tx: cmd_tx.clone(),
+                file_tx: file_cmd_tx.clone(),
+                chat_tx: chat_cmd_tx.clone(),
+                muted: muted.clone(),
+                volume: volume.clone(),
+                stop: stop.clone(),
+                show_camera: show_camera.clone(),
+                view_only: view_only.clone(),
+            },
+            view: SessionView {
+                window: Some(window.clone()),
+                ..Default::default()
+            },
         });
     }
     let weak2 = ui.as_weak();
@@ -1688,7 +1733,7 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                                                 }
                                                 let _ = w2.upgrade_in_event_loop(|ui| { ui.hide(); });
                                             });
-                                            *INCOMING_WINDOW.lock().unwrap_or_else(aerodesk_core::util::lock_recover) =
+                                            WINDOW_STATE.lock().unwrap_or_else(aerodesk_core::util::lock_recover).incoming =
                                                 Some(win.as_weak());
                                             let _ = win.show();
                                             ui.set_status(
@@ -1729,7 +1774,7 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                     // #539：超时先主动关闭授权窗口（事件循环投递），再向对端
                     // 返回结构化错误码（写超时兜底，reject 失败不阻塞循环）。
                     if let Some(w) =
-                        INCOMING_WINDOW.lock().unwrap_or_else(aerodesk_core::util::lock_recover).as_ref()
+                        WINDOW_STATE.lock().unwrap_or_else(aerodesk_core::util::lock_recover).incoming.as_ref()
                     {
                         let _ = w.upgrade_in_event_loop(|ui| { ui.hide(); });
                     }
@@ -1792,10 +1837,13 @@ fn connect_signal_from_settings(ui: &AppWindow) {
 pub fn build_tabs_frames(
     sessions: &[SessionHandle],
 ) -> (Vec<slint::SharedString>, Vec<slint::Image>) {
-    let tabs = sessions.iter().map(|s| s.room.clone().into()).collect();
+    let tabs = sessions
+        .iter()
+        .map(|s| s.engine.room.clone().into())
+        .collect();
     let frames = sessions
         .iter()
-        .map(|s| match &s.frame {
+        .map(|s| match &s.view.frame {
             Some(f) => {
                 let buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
                     &f.rgba, f.w, f.h,
@@ -1828,10 +1876,10 @@ pub fn present_frame(
         // 的排队闭包在 UI 线程串行执行），保证帧归属与模型一致。
         let (ui_idx, frames, window, frame) = {
             let mut sessions = SESSIONS.lock().unwrap();
-            let Some(ui_idx) = sessions.iter().position(|s| s.slot == slot) else {
+            let Some(ui_idx) = sessions.iter().position(|s| s.engine.slot == slot) else {
                 return; // 会话已移除（断开清理中），跳过渲染
             };
-            sessions[ui_idx].frame = Some(SessionFrame {
+            sessions[ui_idx].view.frame = Some(SessionFrame {
                 rgba: rgba.clone(),
                 w: w as u32,
                 h: h as u32,
@@ -1839,8 +1887,8 @@ pub fn present_frame(
             (
                 ui_idx,
                 build_tabs_frames(&sessions).1,
-                sessions[ui_idx].window.clone(),
-                sessions[ui_idx].frame.clone(),
+                sessions[ui_idx].view.window.clone(),
+                sessions[ui_idx].view.frame.clone(),
             )
         };
         fui.set_session_frames(slint::ModelRc::new(slint::VecModel::from(frames.clone())));
@@ -1889,7 +1937,7 @@ impl Renderer for SlintRenderer {
 }
 
 fn img_from_session_frame(s: &SessionHandle) -> slint::Image {
-    match &s.frame {
+    match &s.view.frame {
         Some(f) => {
             let buf =
                 slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(&f.rgba, f.w, f.h);
@@ -1960,7 +2008,7 @@ pub fn session_cleanup(ui: &AppWindow, slot: usize, terminal: Option<String>) {
     }
     {
         let mut sessions = SESSIONS.lock().unwrap();
-        sessions.retain(|s| s.slot != slot);
+        sessions.retain(|s| s.engine.slot != slot);
     }
     session_refresh_ui(ui);
     if let Some(msg) = terminal {
@@ -1980,13 +2028,13 @@ pub fn sync_active_session_ui(ui: &AppWindow) {
             return;
         };
         (
-            s.volume.load(Ordering::SeqCst) as f32 / 100.0,
-            s.muted.load(Ordering::SeqCst),
-            s.show_camera.load(Ordering::SeqCst),
-            s.cursor,
-            s.frame.as_ref().map(|f| (f.w as f32, f.h as f32)),
-            s.file_progress,
-            s.file_label.clone(),
+            s.engine.volume.load(Ordering::SeqCst) as f32 / 100.0,
+            s.engine.muted.load(Ordering::SeqCst),
+            s.engine.show_camera.load(Ordering::SeqCst),
+            s.view.cursor,
+            s.view.frame.as_ref().map(|f| (f.w as f32, f.h as f32)),
+            s.view.file_progress,
+            s.view.file_label.clone(),
         )
     };
     ui.set_volume(vol);
@@ -2027,18 +2075,18 @@ where
 {
     let (is_active, window) = {
         let mut sessions = SESSIONS.lock().unwrap();
-        let Some(idx) = sessions.iter().position(|s| s.slot == slot) else {
+        let Some(idx) = sessions.iter().position(|s| s.engine.slot == slot) else {
             return;
         };
         f(&mut sessions[idx]);
         (
             ACTIVE_SESSION.load(Ordering::SeqCst) == idx as i32,
-            sessions[idx].window.clone(),
+            sessions[idx].view.window.clone(),
         )
     };
     if let Some(window) = window {
         let sessions = SESSIONS.lock().unwrap();
-        if let Some(s) = sessions.iter().find(|s| s.slot == slot) {
+        if let Some(s) = sessions.iter().find(|s| s.engine.slot == slot) {
             sync_session_window(&window, s);
         }
     }
@@ -2104,7 +2152,7 @@ impl FileDropHandler {
         let idx = ui.get_active_session() as usize;
         let tx = {
             let sessions = crate::SESSIONS.lock().unwrap();
-            sessions.get(idx).map(|s| s.file_tx.clone())
+            sessions.get(idx).map(|s| s.engine.file_tx.clone())
         };
         dispatch_dropped_files(tx.as_ref(), paths)
     }
@@ -2193,7 +2241,10 @@ fn pick_file_and_send(ui: slint::Weak<AppWindow>) {
                 let idx = ui.get_active_session() as usize;
                 let sessions = SESSIONS.lock().unwrap();
                 if let Some(s) = sessions.get(idx) {
-                    let _ = s.file_tx.send(FileCmd::SendFile(path.clone().into()));
+                    let _ = s
+                        .engine
+                        .file_tx
+                        .send(FileCmd::SendFile(path.clone().into()));
                     drop(sessions);
                     ui.set_session_status(format!("发送文件：{path}").into());
                 } else {
@@ -2500,7 +2551,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let stopped = {
                 let sessions = SESSIONS.lock().unwrap();
                 if let Some(s) = sessions.get(idx) {
-                    s.stop.store(true, Ordering::SeqCst);
+                    s.engine.stop.store(true, Ordering::SeqCst);
                     true
                 } else {
                     false
@@ -2577,7 +2628,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let sessions = SESSIONS.lock().unwrap();
                 let idx = ui.get_active_session() as usize;
                 if let Some(s) = sessions.get(idx) {
-                    let _ = s.input_tx.send(json);
+                    let _ = s.engine.input_tx.send(json);
                 }
             }
         }
@@ -2648,7 +2699,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let sessions = SESSIONS.lock().unwrap();
                 let idx = ui.get_active_session() as usize;
                 if let Some(s) = sessions.get(idx) {
-                    let _ = s.input_tx.send(json);
+                    let _ = s.engine.input_tx.send(json);
                 }
             }
             true
@@ -2676,7 +2727,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let sessions = SESSIONS.lock().unwrap();
                 let idx = ui.get_active_session() as usize;
                 if let Some(s) = sessions.get(idx) {
-                    let _ = s.input_tx.send(json);
+                    let _ = s.engine.input_tx.send(json);
                 }
             }
         }
@@ -2910,7 +2961,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     ui.set_session_status("没有活动会话".into());
                     return;
                 };
-                !s.muted.fetch_xor(true, Ordering::SeqCst)
+                !s.engine.muted.fetch_xor(true, Ordering::SeqCst)
             };
             // 本地静音只对当前会话生效（观看端丢帧）；不下发控制指令，
             // 避免把共享音频流的其它观看者一起静音（审查 #255 Important）。
@@ -2932,7 +2983,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     ui.set_session_status("没有活动会话".into());
                     return;
                 };
-                !s.show_camera.fetch_xor(true, Ordering::SeqCst)
+                !s.engine.show_camera.fetch_xor(true, Ordering::SeqCst)
             };
             ui.set_camera_active(m);
             ui.set_session_status(
@@ -2950,7 +3001,7 @@ fn main() -> Result<(), slint::PlatformError> {
             {
                 let sessions = SESSIONS.lock().unwrap();
                 if let Some(s) = sessions.get(idx) {
-                    s.volume.store(pct, Ordering::SeqCst);
+                    s.engine.volume.store(pct, Ordering::SeqCst);
                 }
             }
             ui.set_session_status(format!("音量：{pct}%").into());
@@ -3026,7 +3077,7 @@ fn main() -> Result<(), slint::PlatformError> {
             {
                 let sessions = SESSIONS.lock().unwrap();
                 if let Some(s) = sessions.get(idx) {
-                    let _ = s.control_tx.send(format!("{{\"display\":{n}}}"));
+                    let _ = s.engine.control_tx.send(format!("{{\"display\":{n}}}"));
                 }
             }
             ui.set_session_status(format!("显示器：{n}（切换指令已下发）").into());
@@ -3047,7 +3098,10 @@ fn main() -> Result<(), slint::PlatformError> {
             {
                 let sessions = SESSIONS.lock().unwrap();
                 if let Some(s) = sessions.get(idx) {
-                    let _ = s.control_tx.send(format!("{{\"layer\":\"{layer}\"}}"));
+                    let _ = s
+                        .engine
+                        .control_tx
+                        .send(format!("{{\"layer\":\"{layer}\"}}"));
                 }
             }
             ui.set_session_status(
@@ -3094,7 +3148,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let sessions = SESSIONS.lock().unwrap();
                 sessions
                     .get(ui.get_active_session() as usize)
-                    .map(|s| s.file_tx.send(FileCmd::Cancel))
+                    .map(|s| s.engine.file_tx.send(FileCmd::Cancel))
                     .is_some()
             };
             ui.set_session_status(if ok {
@@ -3153,7 +3207,7 @@ fn main() -> Result<(), slint::PlatformError> {
                             let idx = ui.get_active_session() as usize;
                             let sessions = SESSIONS.lock().unwrap();
                             if let Some(s) = sessions.get(idx) {
-                                let _ = s.file_tx.send(FileCmd::SendClipboardImage(png));
+                                let _ = s.engine.file_tx.send(FileCmd::SendClipboardImage(png));
                                 drop(sessions);
                                 ui.set_session_status("已发送剪贴板图片到被控端".into());
                             } else {
@@ -3169,7 +3223,7 @@ fn main() -> Result<(), slint::PlatformError> {
                                 let idx = ui.get_active_session() as usize;
                                 let sessions = SESSIONS.lock().unwrap();
                                 if let Some(s) = sessions.get(idx) {
-                                    let _ = s.file_tx.send(FileCmd::SendClipboard(text));
+                                    let _ = s.engine.file_tx.send(FileCmd::SendClipboard(text));
                                     drop(sessions);
                                     ui.set_session_status("已发送剪贴板到被控端".into());
                                 } else {
@@ -3876,27 +3930,22 @@ mod tests {
         let (file_tx, _) = std::sync::mpsc::channel();
         let (chat_tx, _) = std::sync::mpsc::channel::<ChatCmd>();
         SessionHandle {
-            slot,
-            room: room.into(),
-            server: "127.0.0.1:3003".into(),
-            input_tx,
-            control_tx,
-            cmd_tx,
-            file_tx,
-            chat_tx,
-            muted: Arc::new(AtomicBool::new(false)),
-            volume: Arc::new(AtomicU16::new(100)),
-            stop: Arc::new(AtomicBool::new(false)),
-            show_camera: Arc::new(AtomicBool::new(false)),
-            view_only: Arc::new(AtomicBool::new(false)),
-            window: None,
-            frame: None,
-            cursor: None,
-            latency_ms: None,
-            rtt_ms: None,
-            fps: 0.0,
-            file_progress: -1.0,
-            file_label: String::new(),
+            engine: SessionEngine {
+                slot,
+                room: room.into(),
+                server: "127.0.0.1:3003".into(),
+                input_tx,
+                control_tx,
+                cmd_tx,
+                file_tx,
+                chat_tx,
+                muted: Arc::new(AtomicBool::new(false)),
+                volume: Arc::new(AtomicU16::new(100)),
+                stop: Arc::new(AtomicBool::new(false)),
+                show_camera: Arc::new(AtomicBool::new(false)),
+                view_only: Arc::new(AtomicBool::new(false)),
+            },
+            view: SessionView::default(),
         }
     }
 
@@ -3906,7 +3955,7 @@ mod tests {
     }
 
     fn with_frame(mut h: SessionHandle, rgba: Vec<u8>, w: u32, hh: u32) -> SessionHandle {
-        h.frame = Some(SessionFrame {
+        h.view.frame = Some(SessionFrame {
             rgba: Arc::new(rgba),
             w,
             h: hh,
@@ -3956,19 +4005,19 @@ mod tests {
         let ui = AppWindow::new().unwrap();
 
         let mut a = session_handle(0, "A");
-        a.volume.store(60, Ordering::SeqCst);
-        a.cursor = Some((0.5, 0.5));
-        a.frame = Some(SessionFrame {
+        a.engine.volume.store(60, Ordering::SeqCst);
+        a.view.cursor = Some((0.5, 0.5));
+        a.view.frame = Some(SessionFrame {
             rgba: Arc::new(vec![0u8; 2 * 1 * 4]),
             w: 2,
             h: 1,
         });
-        a.file_progress = 0.4;
-        a.file_label = "发送 a.zip 40%".into();
+        a.view.file_progress = 0.4;
+        a.view.file_label = "发送 a.zip 40%".into();
         let mut b = session_handle(1, "B");
-        b.volume.store(20, Ordering::SeqCst);
-        b.cursor = Some((0.2, 0.3));
-        b.frame = Some(SessionFrame {
+        b.engine.volume.store(20, Ordering::SeqCst);
+        b.view.cursor = Some((0.2, 0.3));
+        b.view.frame = Some(SessionFrame {
             rgba: Arc::new(vec![0u8; 3 * 1 * 4]),
             w: 3,
             h: 1,
@@ -4477,8 +4526,8 @@ mod multi_session_e2e {
         );
         let json = serde_json::to_string(&frame).unwrap();
         let sessions = SESSIONS.lock().unwrap();
-        if let Some(s) = sessions.iter().find(|s| s.slot == slot) {
-            let _ = s.input_tx.send(json);
+        if let Some(s) = sessions.iter().find(|s| s.engine.slot == slot) {
+            let _ = s.engine.input_tx.send(json);
         }
     }
 
@@ -4573,27 +4622,22 @@ mod multi_session_e2e {
             let slot = SESSION_NEXT.fetch_add(1, Ordering::SeqCst);
             let stop = Arc::new(AtomicBool::new(false));
             SESSIONS.lock().unwrap().push(SessionHandle {
-                slot,
-                room: room.to_string(),
-                server: server.clone(),
-                input_tx: input_tx.clone(),
-                control_tx: std::sync::mpsc::channel().0,
-                cmd_tx: std::sync::mpsc::channel::<CmdRequest>().0,
-                file_tx: std::sync::mpsc::channel().0,
-                chat_tx: std::sync::mpsc::channel::<ChatCmd>().0,
-                muted: Arc::new(AtomicBool::new(false)),
-                volume: Arc::new(AtomicU16::new(100)),
-                stop: stop.clone(),
-                show_camera: Arc::new(AtomicBool::new(false)),
-                view_only: Arc::new(AtomicBool::new(false)),
-                window: None,
-                frame: None,
-                cursor: None,
-                latency_ms: None,
-                rtt_ms: None,
-                fps: 0.0,
-                file_progress: -1.0,
-                file_label: String::new(),
+                engine: SessionEngine {
+                    slot,
+                    room: room.to_string(),
+                    server: server.clone(),
+                    input_tx: input_tx.clone(),
+                    control_tx: std::sync::mpsc::channel().0,
+                    cmd_tx: std::sync::mpsc::channel::<CmdRequest>().0,
+                    file_tx: std::sync::mpsc::channel().0,
+                    chat_tx: std::sync::mpsc::channel::<ChatCmd>().0,
+                    muted: Arc::new(AtomicBool::new(false)),
+                    volume: Arc::new(AtomicU16::new(100)),
+                    stop: stop.clone(),
+                    show_camera: Arc::new(AtomicBool::new(false)),
+                    view_only: Arc::new(AtomicBool::new(false)),
+                },
+                view: SessionView::default(),
             });
             let st = stop.clone();
             std::thread::spawn(move || {
@@ -4642,7 +4686,7 @@ mod multi_session_e2e {
                     std::thread::sleep(Duration::from_millis(1));
                 }
                 // 退出（断开）：从注册表移除本会话。
-                SESSIONS.lock().unwrap().retain(|s| s.slot != slot);
+                SESSIONS.lock().unwrap().retain(|s| s.engine.slot != slot);
             });
             stops.push(stop);
         }
