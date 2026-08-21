@@ -21,6 +21,43 @@ pub struct ConnectResult {
     pub ice_connected: bool,
 }
 
+/// 连接链路错误（#487 自审批次 4）：此前全链路 `Result<_, String>`，调用方
+/// （desktop/CLI/session）只能整串显示、无法稳定分支。集中类型化后：
+/// 认证失败（提示检查凭据）、房间满（提示换房）、超时（提示重试）可 match
+/// 变体；分类在 connect 内集中一次完成，服务器文案变更只改此处。
+#[derive(Debug, thiserror::Error)]
+pub enum ConnectError {
+    /// 信令 WS 连接失败（IO/握手/协议）。
+    #[error("signal connect: {0}")]
+    Signal(String),
+    /// 认证被拒（服务器 `auth failed`，契约字面量见 signal main）。
+    #[error("认证失败: {0}")]
+    Auth(String),
+    /// Join 被服务器拒绝（room full / server full / 重定向循环等）。
+    #[error("join: {0}")]
+    Join(String),
+    /// SDP 交换失败（SFU answer 超时/拒绝/解析）。
+    #[error("answer: {0}")]
+    Sdp(String),
+    /// 连接建立总超时兜底（#487：半开连接/无响应防无限阻塞）。
+    #[error("连接超时（{0}s）：信令/SFU 无响应")]
+    Timeout(u64),
+    /// 环境/设置失败（udp 绑定、线程创建、连接线程 panic）。
+    #[error("{0}")]
+    Setup(String),
+}
+
+/// join 拒绝文案分类：`auth failed` 是信号服务固定拒绝文案（signal main
+/// 字面量）——集中映射到 Auth，其余（room full / server full / 重定向循环
+/// 等）进 Join。服务器文案变更只改此处（有契约测试守护）。
+fn classify_join_error(e: String) -> ConnectError {
+    if e.contains("auth") {
+        ConnectError::Auth(e)
+    } else {
+        ConnectError::Join(e)
+    }
+}
+
 impl ConnectResult {
     pub fn summary(&self) -> String {
         format!(
@@ -132,7 +169,7 @@ fn discover_local_ip() -> Option<std::net::IpAddr> {
 }
 
 /// 连接并保留活跃会话（观看端）。
-pub fn connect_live(server: &str, room: &str) -> Result<LiveSession, String> {
+pub fn connect_live(server: &str, room: &str) -> Result<LiveSession, ConnectError> {
     connect_live_role(server, room, Role::Viewer, None)
 }
 
@@ -142,7 +179,7 @@ pub fn connect_live_forced(
     server: &str,
     room: &str,
     force_relay: bool,
-) -> Result<LiveSession, String> {
+) -> Result<LiveSession, ConnectError> {
     connect_live_role_impl(
         server,
         room,
@@ -161,7 +198,7 @@ pub fn connect_live_role(
     room: &str,
     role: Role,
     auth: Option<&str>,
-) -> Result<LiveSession, String> {
+) -> Result<LiveSession, ConnectError> {
     connect_live_role_impl(
         server,
         room,
@@ -183,7 +220,7 @@ pub fn connect_live_role_with_camera(
     role: Role,
     auth: Option<&str>,
     camera: bool,
-) -> Result<LiveSession, String> {
+) -> Result<LiveSession, ConnectError> {
     connect_live_role_impl(
         server,
         room,
@@ -241,7 +278,7 @@ pub fn connect_live_role_codec(
     role: Role,
     auth: Option<&str>,
     codec: Option<Codec>,
-) -> Result<LiveSession, String> {
+) -> Result<LiveSession, ConnectError> {
     connect_live_role_impl(
         server,
         room,
@@ -267,8 +304,8 @@ pub fn connect_live_role_codec_timeout(
     auth: Option<&str>,
     codec: Option<Codec>,
     timeout: Duration,
-) -> Result<LiveSession, String> {
-    let (tx, rx) = std::sync::mpsc::channel::<Result<LiveSession, String>>();
+) -> Result<LiveSession, ConnectError> {
+    let (tx, rx) = std::sync::mpsc::channel::<Result<LiveSession, ConnectError>>();
     let srv = server.to_string();
     let rm = room.to_string();
     let auth = auth.map(|s| s.to_string());
@@ -279,14 +316,16 @@ pub fn connect_live_role_codec_timeout(
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 connect_live_role_codec(&srv, &rm, role, auth.as_deref(), codec)
             }));
-            let _ = tx.send(r.unwrap_or_else(|_| Err("connect panicked".into())));
+            let _ = tx.send(r.unwrap_or_else(|_| {
+                Err(ConnectError::Setup("connect panicked".into()))
+            }));
         })
         .is_err()
     {
-        return Err("无法创建连接线程".into());
+        return Err(ConnectError::Setup("无法创建连接线程".into()));
     }
     rx.recv_timeout(timeout)
-        .map_err(|_| format!("连接超时（{}s）：信令/SFU 无响应", timeout.as_secs()))?
+        .map_err(|_| ConnectError::Timeout(timeout.as_secs()))?
 }
 
 #[allow(clippy::too_many_arguments)] // 内部实现：角色/鉴权/中继/音频/摄像头等开关收敛一处
@@ -301,11 +340,12 @@ fn connect_live_role_impl(
     with_audio: bool,
     // 是否协商第二路视频轨（摄像头；观看端 recvonly）。
     with_camera: bool,
-) -> Result<LiveSession, String> {
-    let mut signal = WsSignalClient::connect(server).map_err(|e| format!("signal connect: {e}"))?;
+) -> Result<LiveSession, ConnectError> {
+    let mut signal = WsSignalClient::connect(server)
+        .map_err(|e| ConnectError::Signal(e.to_string()))?;
     let (peer_id, turn) = signal
         .join(room, role, auth)
-        .map_err(|e| format!("join: {e}"))?;
+        .map_err(classify_join_error)?;
 
     // #539/#456 呼叫发起：主控（viewer）连接时通知房间内被叫端（Publisher）
     // 弹窗确认——被叫端接受后才出流采集。Call 是通知性质（不阻塞媒体协商）：
@@ -328,11 +368,13 @@ fn connect_live_role_impl(
     // #157 M2：join 返回 TURN 配置时建立中继传输（失败仅告警，直连兜底）。
     let turn_transport = turn.as_ref().and_then(|tc| setup_turn(tc, loopback_signal));
     let direct = if loopback_signal {
-        UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("udp bind: {e}"))?
+        UdpSocket::bind("127.0.0.1:0").map_err(|e| ConnectError::Setup(format!("udp bind: {e}")))?
     } else {
-        UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("udp bind: {e}"))?
+        UdpSocket::bind("0.0.0.0:0").map_err(|e| ConnectError::Setup(format!("udp bind: {e}")))?
     };
-    let bind_addr = direct.local_addr().map_err(|e| e.to_string())?;
+    let bind_addr = direct
+        .local_addr()
+        .map_err(|e| ConnectError::Setup(format!("udp bind: {e}")))?;
     // 通配符绑定（0.0.0.0）的 local_addr 不能作为 candidate（str0m 拒绝）。
     let mut candidates = Vec::new();
     if bind_addr.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
@@ -363,7 +405,7 @@ fn connect_live_role_impl(
         tracing::debug!("local candidate {addr}");
         endpoint
             .add_local_candidate(addr, Protocol::Udp)
-            .map_err(|e| format!("candidate: {e:?}"))?;
+            .map_err(|e| ConnectError::Setup(format!("candidate: {e:?}")))?;
     }
     // #157 M2：relayed 候选加入 offer（`typ relay`），ICE 按优先级直连优先、TURN 兜底。
     if let Some(tt) = socket.turn() {
@@ -405,11 +447,12 @@ fn connect_live_role_impl(
     }
     let (offer, pending, video_mid, audio_mid, camera_mid) = endpoint
         .create_offer()
-        .map_err(|e| format!("offer: {e:?}"))?;
-    let offer_json = serde_json::to_string(&offer).map_err(|e| e.to_string())?;
+        .map_err(|e| ConnectError::Sdp(format!("offer: {e:?}")))?;
+    let offer_json = serde_json::to_string(&offer)
+        .map_err(|e| ConnectError::Sdp(format!("offer serialize: {e}")))?;
     let answer_json = signal
         .exchange_description(&offer_json)
-        .map_err(|e| format!("answer: {e}"))?;
+        .map_err(|e| ConnectError::Sdp(format!("answer: {e}")))?;
     // 非回环信令时剔除回答里的回环候选：SFU 为同机客户端附带 127.0.0.1 候选
     // （#216 桥/本机 CLI），远端客户端拿到后 ICE 可能把发送对端切到本机回环
     // ——发布端媒体全丢进黑洞（观看端仅收流不受影响）。对远端客户端而言，
@@ -419,11 +462,11 @@ fn connect_live_role_impl(
     } else {
         strip_loopback_remote_candidates(&answer_json)
     };
-    let answer: str0m::change::SdpAnswer =
-        serde_json::from_str(&answer_json).map_err(|e| format!("answer parse: {e}"))?;
+    let answer: str0m::change::SdpAnswer = serde_json::from_str(&answer_json)
+        .map_err(|e| ConnectError::Sdp(format!("answer parse: {e}")))?;
     endpoint
         .accept_answer(pending, answer)
-        .map_err(|e| format!("accept: {e:?}"))?;
+        .map_err(|e| ConnectError::Sdp(format!("accept: {e:?}")))?;
 
     tracing::debug!("connect_live_role: SDP exchanged, entering ICE loop");
     let mut ice_connected = false;
@@ -486,7 +529,7 @@ fn connect_live_role_impl(
 }
 
 /// 观看端连接：WSS join → SDP 交换 → ICE 泵（5s 超时）。
-pub fn connect_viewer(server: &str, room: &str) -> Result<ConnectResult, String> {
+pub fn connect_viewer(server: &str, room: &str) -> Result<ConnectResult, ConnectError> {
     let live = connect_live_role(server, room, Role::Viewer, None)?;
     Ok(ConnectResult {
         room: live.room.clone(),
@@ -497,7 +540,7 @@ pub fn connect_viewer(server: &str, room: &str) -> Result<ConnectResult, String>
 
 #[cfg(test)]
 mod tests {
-    use super::strip_loopback_remote_candidates;
+    use super::{classify_join_error, strip_loopback_remote_candidates, ConnectError};
 
     #[test]
     fn strips_loopback_candidates_and_keeps_the_rest() {
@@ -524,5 +567,48 @@ mod tests {
         assert!(out.contains("10.0.0.2"));
         // 非法 JSON 原样返回
         assert_eq!(strip_loopback_remote_candidates("not json"), "not json");
+    }
+
+    #[test]
+    fn classify_join_error_auth_vs_other() {
+        // signal main 的拒绝文案契约：auth failed → Auth；其余 → Join。
+        // 服务器文案变更时此测试红，提醒同步分类（集中一处，见 classify_join_error）。
+        assert!(matches!(
+            classify_join_error("auth failed".into()),
+            ConnectError::Auth(_)
+        ));
+        assert!(matches!(
+            classify_join_error("room full".into()),
+            ConnectError::Join(_)
+        ));
+        assert!(matches!(
+            classify_join_error("server full".into()),
+            ConnectError::Join(_)
+        ));
+        assert!(matches!(
+            classify_join_error("too many signal redirects".into()),
+            ConnectError::Join(_)
+        ));
+    }
+
+    #[test]
+    fn connect_error_displays_are_stable() {
+        // Display 契约：调用方（desktop/CLI/session）按此显示，勿静默改文案。
+        assert_eq!(
+            ConnectError::Auth("auth failed".into()).to_string(),
+            "认证失败: auth failed"
+        );
+        assert_eq!(
+            ConnectError::Timeout(30).to_string(),
+            "连接超时（30s）：信令/SFU 无响应"
+        );
+        assert_eq!(
+            ConnectError::Join("room full".into()).to_string(),
+            "join: room full"
+        );
+        assert_eq!(
+            ConnectError::Signal("tls handshake".into()).to_string(),
+            "signal connect: tls handshake"
+        );
     }
 }

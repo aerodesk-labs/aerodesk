@@ -199,7 +199,7 @@ pub fn run_viewer<U, PF>(
     let auth = token.as_deref().filter(|t| !t.is_empty());
     // connect_live_role 可能阻塞（异常网络环境）；放子线程 + 20s 超时保护，
     // 避免连接中的会话占满 MAX_SESSIONS 槽位且无法取消。
-    let (tx, rx) = std::sync::mpsc::channel::<Result<_, String>>();
+    let (tx, rx) = std::sync::mpsc::channel::<Result<_, aerodesk_core::connect::ConnectError>>();
     let srv = server.clone();
     let rm = room.clone();
     let auth2 = auth.map(|s| s.to_string());

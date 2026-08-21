@@ -135,7 +135,7 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
     let auth = token.as_deref().filter(|t| !t.is_empty());
     // connect_live_role 在异常环境可能阻塞（如 UDP read_timeout 失效）；
     // 放子线程 + 20s 超时保护，避免 UI 线程永久挂起。
-    let (tx, rx) = std::sync::mpsc::channel::<Result<_, String>>();
+    let (tx, rx) = std::sync::mpsc::channel::<Result<_, aerodesk_core::connect::ConnectError>>();
     let srv = server.clone();
     let rm = room.clone();
     let auth2 = auth.map(|s| s.to_string());
