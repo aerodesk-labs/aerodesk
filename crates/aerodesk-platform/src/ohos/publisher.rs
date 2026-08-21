@@ -28,7 +28,8 @@ impl PublisherSession {
         room: &str,
         token: Option<&str>,
     ) -> Result<PublisherSession, String> {
-        let live = aerodesk_core::connect::connect_live_role(server, room, Role::Publisher, token)?;
+        let live = aerodesk_core::connect::connect_live_role(server, room, Role::Publisher, token)
+            .map_err(|e| e.to_string())?;
         let (input_tx, input_rx) = mpsc::channel();
         Ok(PublisherSession {
             live: Mutex::new(live),

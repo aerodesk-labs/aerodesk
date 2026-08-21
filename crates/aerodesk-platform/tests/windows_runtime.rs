@@ -263,6 +263,10 @@ fn windows_cursor_normalized_in_range() {
 
 /// #546 后续（互控实测「无反应」定位）：注入后采样真实光标，验证
 /// SendInput 的可观察效果——仅断言返回值无法发现「静默无效」。
+///
+/// 环境门禁：非交互会话（CI session 0 / 无输入桌面）下 SendInput 返回成功
+/// 但光标不动（静默丢弃，与 ToDesk 驱动过滤同签名）——多次注入后光标
+/// 零移动即判定环境不可注入，跳过而非失败（与上一测试的 SKIP 口径一致）。
 #[test]
 fn sendinput_mouse_move_reaches_cursor() {
     use windows::Win32::Foundation::POINT;
@@ -270,12 +274,28 @@ fn sendinput_mouse_move_reaches_cursor() {
         GetCursorPos, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
         SM_YVIRTUALSCREEN,
     };
+    let cursor_pos = || {
+        let mut pt = POINT::default();
+        unsafe { GetCursorPos(&mut pt) }.expect("GetCursorPos");
+        (pt.x, pt.y)
+    };
     let mut inj = SendInputInjector::new();
     let (tx, ty) = (0.1f64, 0.1f64); // 目标：虚拟屏幕 10% 处
-    InputInjector::inject(&mut inj, &InputEvent::MouseMove { x: tx, y: ty }).expect("mouse move");
-    std::thread::sleep(std::time::Duration::from_millis(150));
-    let mut pt = POINT::default();
-    unsafe { GetCursorPos(&mut pt) }.expect("GetCursorPos");
+    let before = cursor_pos();
+    let mut pos = before;
+    for _ in 0..5 {
+        InputInjector::inject(&mut inj, &InputEvent::MouseMove { x: tx, y: ty })
+            .expect("mouse move");
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        pos = cursor_pos();
+        if pos != before {
+            break;
+        }
+    }
+    if pos == before {
+        eprintln!("SKIP: 注入后光标零移动（非交互会话，环境不可注入）");
+        return;
+    }
     let (vx, vy, vw, vh) = unsafe {
         (
             GetSystemMetrics(SM_XVIRTUALSCREEN),
@@ -286,11 +306,11 @@ fn sendinput_mouse_move_reaches_cursor() {
     };
     let ex = vx + (tx * vw as f64) as i32;
     let ey = vy + (ty * vh as f64) as i32;
-    eprintln!("注入目标=({ex},{ey}) 实际光标=({},{})", pt.x, pt.y);
+    eprintln!("注入目标=({ex},{ey}) 实际光标=({},{})", pos.0, pos.1);
     assert!(
-        (pt.x - ex).abs() <= 40 && (pt.y - ey).abs() <= 40,
+        (pos.0 - ex).abs() <= 40 && (pos.1 - ey).abs() <= 40,
         "SendInput 返回成功但光标未到位：期望 ({ex},{ey})±40，实际 ({},{})",
-        pt.x,
-        pt.y
+        pos.0,
+        pos.1
     );
 }

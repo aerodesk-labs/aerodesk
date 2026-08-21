@@ -28,7 +28,8 @@ pub struct ViewerSession {
 impl ViewerSession {
     /// 连接信令并启动收流线程。`token` 为 JWT/静态 token（可选）。
     pub fn connect(server: &str, room: &str, token: Option<&str>) -> Result<ViewerSession, String> {
-        let live = aerodesk_core::connect::connect_live_role(server, room, Role::Viewer, token)?;
+        let live = aerodesk_core::connect::connect_live_role(server, room, Role::Viewer, token)
+            .map_err(|e| e.to_string())?;
         let latest = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let (input_tx, input_rx) = mpsc::channel();
