@@ -220,9 +220,18 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
         // 输入事件：UI 键鼠 → input data channel → SFU → 被控端。
         // #441 观看模式（仅观看）不发送键鼠输入。
         if !view_only.load(Ordering::SeqCst) {
+            let mut sent = 0u32;
             while let Ok(json) = input_rx.try_recv() {
-                live.endpoint
+                let ok = live
+                    .endpoint
                     .send_channel_data("input", false, json.as_bytes());
+                if !ok {
+                    tracing::warn!("input 通道发送失败（通道未建立？）");
+                }
+                sent += 1;
+            }
+            if sent > 0 {
+                tracing::debug!("input 发送 {sent} 条");
             }
         }
         // #109/#452 终端命令：UI 终端窗口 → cmd data channel → SFU → 被控端执行。
