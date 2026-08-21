@@ -1618,15 +1618,23 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                             crate::with_ui(&uiw, move |ui| {
                                 let inc = ui.get_inc_enabled();
                                 tracing::info!("incoming call from {from}: inc_enabled={inc}");
-                                if inc {
-                                    // 静默授权：直接接听出流。
+                                if !inc {
+                                    // 未开启被控：直接拒绝（开关语义 = 是否允许
+                                    // 被授权设备接入；关闭时不弹窗、不接受）。
+                                    let _ = p.lock().unwrap().reject_call(
+                                        Some("未开启被控"),
+                                        Some("control_disabled"),
+                                    );
+                                    ui.set_status("已拒绝呼叫：未开启被控".into());
+                                } else if ui.get_inc_auto_accept() {
+                                    // 免授权：已授权设备直接接听出流。
                                     *PENDING_CALL.lock().unwrap_or_else(|e| e.into_inner()) = None;
                                     let _ = p.lock().unwrap().accept_call();
                                     start_publisher_ui(ui);
                                     ui.set_status(format!("接听来自 {from} 的呼叫").into());
                                 } else {
-                                    // #539：未静默授权时弹独立授权窗口确认（30s
-                                    // 超时自动拒绝；不依赖主窗口——最小化/托盘也可弹）。
+                                    // #539：未开「免授权」时弹独立授权窗口确认
+                                    // （30s 超时自动拒绝；不依赖主窗口——最小化/托盘也可弹）。
                                     *PENDING_CALL.lock().unwrap_or_else(|e| e.into_inner()) =
                                         Some(std::time::Instant::now());
                                     match IncomingCallWindow::new() {
@@ -1637,14 +1645,28 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                                                 *PENDING_CALL
                                                     .lock()
                                                     .unwrap_or_else(|e| e.into_inner()) = None;
-                                                if let Some(h) =
-                                                    PRESENCE.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
-                                                {
-                                                    let _ = h.presence.lock().unwrap().accept_call();
-                                                }
-                                                // 经事件循环拿主窗口（MAIN_WINDOW 是
-                                                // macOS 门控的，跨平台用 accept_ui）。
+                                                // #545：确认期间用户可能已关闭「开启被控」
+                                                // ——接受前重读开关，关闭则拒绝出流。
                                                 crate::with_ui(&accept_ui, |ui| {
+                                                    if !ui.get_inc_enabled() {
+                                                        if let Some(h) =
+                                                            PRESENCE.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+                                                        {
+                                                            let _ = h.presence.lock().unwrap().reject_call(
+                                                                Some("确认期间关闭被控"),
+                                                                Some("control_disabled"),
+                                                            );
+                                                        }
+                                                        ui.set_status("已拒绝：确认期间关闭了被控".into());
+                                                        return;
+                                                    }
+                                                    if let Some(h) =
+                                                        PRESENCE.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+                                                    {
+                                                        let _ = h.presence.lock().unwrap().accept_call();
+                                                    }
+                                                    // 经事件循环拿主窗口（MAIN_WINDOW 是
+                                                    // macOS 门控的，跨平台用 accept_ui）。
                                                     start_publisher_ui(ui);
                                                     ui.set_status("已接受远控请求".into());
                                                 });
@@ -2258,12 +2280,12 @@ fn stop_publisher_ui(ui: &AppWindow) {
     aerodesk_session::generic_publisher::stop_publisher(publisher_event_sink(&ui.as_weak()));
 }
 
-/// 「开启被控」开关接入：开启时启动发布线程，关闭时置 stop 退出线程
-/// （Windows/macOS 各自的发布实现由 aerodesk-session 按平台分发，#487）。
+/// 「开启被控」开关接入（#539 语义修正）：开关 = 是否允许被授权设备接入。
+/// 关闭时若发布在跑立即停止（吊销授权）；开启时**不主动开流**——出流只发生在
+/// 呼叫接受后（弹窗确认或「免授权」静默接听，#541/#545）。
+/// presence 常驻与开关无关（启动即连信令，保持可被呼叫/可拒绝）。
 fn handle_toggle_inc(ui: &AppWindow) {
-    if ui.get_inc_enabled() {
-        start_publisher_ui(ui);
-    } else {
+    if !ui.get_inc_enabled() {
         stop_publisher_ui(ui);
     }
 }
@@ -2337,6 +2359,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_device_pw(pw_display.into());
     ui.set_pw_edit(settings.device_pw.clone().into());
     ui.set_inc_enabled(settings.inc_enabled);
+    ui.set_inc_auto_accept(settings.inc_auto_accept);
     // #417 开机自启状态回填（Windows HKCU Run；登录后自动启动并恢复被控）。
     #[cfg(target_os = "windows")]
     if let Ok(Some(_)) = aerodesk_platform::windows::autostart::installed() {
@@ -3270,6 +3293,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 device_id: ui.get_device_id().to_string(),
                 device_pw,
                 inc_enabled: ui.get_inc_enabled(),
+                inc_auto_accept: ui.get_inc_auto_accept(),
                 inc_audio: ui.get_inc_audio(),
                 inc_mouse: ui.get_inc_mouse(),
                 inc_view_only: ui.get_inc_view_only(),
@@ -3427,20 +3451,10 @@ fn main() -> Result<(), slint::PlatformError> {
     // 启动时刷一次权限状态
     ui.invoke_refresh_perms();
 
-    // Windows：上次退出前已开启被控，则事件循环起来后恢复发布（开关持久化）。
-    #[cfg(target_os = "windows")]
-    if ui.get_inc_enabled() {
-        let weak = ui.as_weak();
-        slint::Timer::single_shot(std::time::Duration::from_millis(800), move || {
-            if let Some(ui) = weak.upgrade() {
-                // #404 评审：触发前重读开关——用户在前 800ms 内关闭时不得再启动被控端，
-                // 否则界面上开关为关而采集/连接/「已启动」提示照常，需再开关一次才能停。
-                if ui.get_inc_enabled() {
-                    start_publisher_ui(&ui);
-                }
-            }
-        });
-    }
+    // #539/#545 语义修正：启动**不自动发布**——「开启被控」开关持久化恢复的
+    // 是「可被呼叫」状态（presence 启动即连），出流只在呼叫接受后发生
+    // （IncomingCall → 弹窗确认/免授权静默接听）。旧实现「inc_enabled=true
+    // 启动即恢复发布」会让任何能入房的人绕开授权直接控制（实测发现，见 #545）。
 
     // macOS：点击 Dock 图标恢复隐藏窗口（配合托盘隐藏）。
     #[cfg(target_os = "macos")]
@@ -4150,6 +4164,26 @@ mod tests {
         let saved = serde_json::to_value(&settings).unwrap();
         assert_eq!(saved["server_tls"], serde_json::json!(false));
     }
+
+    /// #539 免授权开关：旧设置文件（无 inc_auto_accept 字段）加载后默认 false
+    /// ——升级用户保持「每次呼叫弹确认框」，行为显式化后才可静默接听。
+    #[test]
+    fn settings_without_inc_auto_accept_defaults_false() {
+        let old = serde_json::json!({
+            "server_default": "129.226.150.174:14703",
+            "quality": 1,
+            "remember_token": false,
+            "token_default": "",
+            "device_id": "dev-1",
+            "device_pw": "pw-1",
+            "inc_enabled": true
+        });
+        let settings: AppSettings = serde_json::from_value(old).unwrap();
+        assert!(settings.inc_enabled);
+        assert!(!settings.inc_auto_accept);
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert_eq!(saved["inc_auto_accept"], serde_json::json!(false));
+    }
     // ---- #72 拖放发送（macOS winit 拦截）----
     #[cfg(target_os = "macos")]
     fn drop_handler() -> FileDropHandler {
@@ -4229,6 +4263,10 @@ struct AppSettings {
     /// 被控端：是否开启被控。
     #[serde(default)]
     inc_enabled: bool,
+    /// 被控端：免授权——「开启被控」下的静默接听开关（#539 语义修正：开启被控
+    /// = 允许被授权设备控制；本开关开启后已授权呼叫直接出流、不弹确认框）。
+    #[serde(default)]
+    inc_auto_accept: bool,
     /// 被控端：是否允许声音。
     #[serde(default = "default_true")]
     inc_audio: bool,
