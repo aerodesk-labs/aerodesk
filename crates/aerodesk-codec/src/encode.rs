@@ -10,7 +10,7 @@ use ffmpeg_next::format::Pixel;
 use ffmpeg_next::frame::Video;
 use ffmpeg_next::software::scaling::{Context as ScalingContext, flag::Flags as ScalingFlags};
 
-use aerodesk_core::media_pipeline::{Codec, EncodedUnit};
+use aerodesk_core::platform::{Codec, EncodedUnit};
 
 /// FFmpeg 全局初始化（进程一次）。
 pub(crate) fn init() {
@@ -433,7 +433,7 @@ impl aerodesk_core::platform::Encoder for FfmpegEncoder {
     fn encode(
         &mut self,
         frame: &aerodesk_core::platform::VideoFrame,
-    ) -> Result<Option<aerodesk_core::media_pipeline::EncodedUnit>, Self::Error> {
+    ) -> Result<Option<aerodesk_core::platform::EncodedUnit>, Self::Error> {
         let Some(raw) = &frame.raw else {
             return Err("ffmpeg encoder requires raw BGRA frame".into());
         };

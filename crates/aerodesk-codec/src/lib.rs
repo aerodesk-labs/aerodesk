@@ -19,7 +19,7 @@ pub fn version() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aerodesk_core::media_pipeline::{Codec, EncodedUnit};
+    use aerodesk_core::platform::{Codec, EncodedUnit};
     use decode::FfmpegDecoder;
     use encode::FfmpegEncoder;
 

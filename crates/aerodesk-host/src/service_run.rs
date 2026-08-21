@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use aerodesk_core::endpoint::ClientEvent;
-use aerodesk_core::media_pipeline::Codec;
+use aerodesk_core::platform::Codec;
 use aerodesk_core::protocol::signal::Role;
 use aerodesk_core::signal_presence::{PresenceConfig, PresenceEvent, SignalPresence};
 use aerodesk_platform::windows::service::{ServiceCtx, ServiceEvent, SessionChangeReason};

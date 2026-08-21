@@ -79,8 +79,8 @@ mod imp {
     use aerodesk_core::Endpoint;
     use aerodesk_core::connect::connect_live_role_codec_timeout;
     use aerodesk_core::endpoint::ClientEvent;
-    use aerodesk_core::media_pipeline::Codec;
     use aerodesk_core::media_socket::MediaSocket;
+    use aerodesk_core::platform::Codec;
     use aerodesk_core::platform::{
         CursorSource, Encoder, InputInjector, MediaSource, SystemWakeLock,
     };
@@ -175,13 +175,13 @@ mod imp {
             Some(Codec::H264),
             Duration::from_secs(30),
         ) {
-                Ok(l) => l,
-                Err(e) => {
-                    let msg = format!("被控端连接失败：{e}");
-                    on_event(PublisherEvent::Status(msg));
-                    return;
-                }
-            };
+            Ok(l) => l,
+            Err(e) => {
+                let msg = format!("被控端连接失败：{e}");
+                on_event(PublisherEvent::Status(msg));
+                return;
+            }
+        };
         let Some(video_mid) = live.video_mid else {
             on_event(PublisherEvent::Status("被控端连接失败：无视频 mid".into()));
             return;

@@ -449,7 +449,7 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
                     if renderer.is_none() {
                         renderer = Some(mk_renderer());
                     }
-                    let unit = aerodesk_core::media_pipeline::EncodedUnit {
+                    let unit = aerodesk_core::platform::EncodedUnit {
                         data: au.data.clone(),
                         keyframe: data.is_keyframe(),
                         pts_ms: au.pts_us / 1000,

@@ -92,67 +92,13 @@ impl Endpoint {
             // #73 音频：Opus（48kHz 立体声，PT 111）——发布端可按需选择发送。
             cfg.enable_opus(true);
         }
-        // 周期性 PeerStats（RTCP/ICE RTT 等）——会话延时显示的数据源。
-        config = config.set_stats_interval(Some(Duration::from_secs(1)));
-        Self {
-            rtc: config.build(Instant::now()),
-            events: VecDeque::new(),
-            channel_labels: HashMap::new(),
-            want_video: false,
-            video_direction: str0m::media::Direction::SendRecv,
-            video_simulcast: None,
-            want_audio: false,
-            audio_direction: str0m::media::Direction::SendRecv,
-            want_camera: false,
-            camera_direction: str0m::media::Direction::SendRecv,
-            remote_send_video_mids: Vec::new(),
-            local_video_mids: Vec::new(),
-            ice_connected: false,
-            last_rtt: None,
-        }
-    }
-
-    /// 仅启用 H.264 的端点（配合 x264/VideoToolbox 编码器）。
-    pub fn new_h264() -> Self {
-        let mut config = Rtc::builder();
-        {
-            let cfg = config.codec_config();
-            cfg.clear();
-            cfg.add_h264(
-                str0m::media::Pt::new_with_value(96),
-                None,
-                true,
-                0x42e01f, // Constrained Baseline
-            );
-            // #58 音频：PCMU（G.711）静态 PT 0，8kHz 单声道。
-            cfg.enable_pcmu(true);
-            // #73 音频：Opus（48kHz 立体声，PT 111）——发布端可按需选择发送。
-            cfg.enable_opus(true);
-        }
-        // 周期性 PeerStats（RTCP/ICE RTT 等）——会话延时显示的数据源。
-        config = config.set_stats_interval(Some(Duration::from_secs(1)));
-        Self {
-            rtc: config.build(Instant::now()),
-            events: VecDeque::new(),
-            channel_labels: HashMap::new(),
-            want_video: false,
-            video_direction: str0m::media::Direction::SendRecv,
-            video_simulcast: None,
-            want_audio: false,
-            audio_direction: str0m::media::Direction::SendRecv,
-            want_camera: false,
-            camera_direction: str0m::media::Direction::SendRecv,
-            remote_send_video_mids: Vec::new(),
-            local_video_mids: Vec::new(),
-            ice_connected: false,
-            last_rtt: None,
-        }
+        Self::wrap(config)
     }
 
     /// 仅启用指定视频 codec 的端点（H264/H265/VP9/AV1 + PCMU 音频），
     /// 配合 aerodesk-codec 编码器（#74）。
-    pub fn new_with_codec(codec: crate::media_pipeline::Codec) -> Self {
-        use crate::media_pipeline::Codec;
+    pub fn new_with_codec(codec: crate::platform::Codec) -> Self {
+        use crate::platform::Codec;
         let mut config = Rtc::builder();
         {
             let cfg = config.codec_config();
@@ -177,8 +123,12 @@ impl Endpoint {
             // #73 音频：Opus（48kHz 立体声，PT 111）——发布端可按需选择发送。
             cfg.enable_opus(true);
         }
-        // 周期性 PeerStats（RTCP/ICE RTT 等）——会话延时显示的数据源。
-        config = config.set_stats_interval(Some(Duration::from_secs(1)));
+        Self::wrap(config)
+    }
+
+    /// 构造公共部分：周期 PeerStats（RTCP/ICE RTT 等）——会话延时显示的数据源。
+    fn wrap(config: str0m::RtcConfig) -> Self {
+        let config = config.set_stats_interval(Some(Duration::from_secs(1)));
         Self {
             rtc: config.build(Instant::now()),
             events: VecDeque::new(),

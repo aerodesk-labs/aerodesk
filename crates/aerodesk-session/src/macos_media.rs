@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use aerodesk_core::access_unit::AccessUnitAssembler;
 use aerodesk_core::connect::connect_live_role_with_camera;
 use aerodesk_core::endpoint::ClientEvent;
-use aerodesk_core::media_pipeline::Codec;
+use aerodesk_core::platform::Codec;
 use aerodesk_core::protocol::cmd::CmdRequest;
 use aerodesk_core::protocol::signal::Role;
 use aerodesk_platform::macos::decode::{H264Decoder, HevcDecoder, to_rgba};
@@ -83,7 +83,7 @@ impl UiDecoder {
                 .decode_annexb(data, pts)
                 .map(|pb| pb.and_then(|pb| to_rgba(&pb).map(|(r, w, h)| (r, w as u32, h as u32)))),
             UiDecoder::Ffmpeg(d) => {
-                let unit = aerodesk_core::media_pipeline::EncodedUnit {
+                let unit = aerodesk_core::platform::EncodedUnit {
                     data: data.to_vec(),
                     keyframe: false,
                     pts_ms: pts.max(0) as u64 / 1000,
@@ -107,7 +107,7 @@ impl aerodesk_core::platform::Decoder for UiDecoder {
 
     fn decode(
         &mut self,
-        unit: &aerodesk_core::media_pipeline::EncodedUnit,
+        unit: &aerodesk_core::platform::EncodedUnit,
     ) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
         let pts_us = unit.pts_ms.saturating_mul(1000) as i64;
         match self {
@@ -883,7 +883,7 @@ mod tests {
     fn generic_decoder_trait_drives_macos_decoder() {
         fn count_frames<D: aerodesk_core::platform::Decoder>(
             dec: &mut D,
-            units: &[aerodesk_core::media_pipeline::EncodedUnit],
+            units: &[aerodesk_core::platform::EncodedUnit],
         ) -> usize {
             let mut n = 0;
             for u in units {
@@ -935,7 +935,7 @@ mod tests {
         fn pump<D: aerodesk_core::platform::Decoder, R: aerodesk_core::platform::Renderer>(
             dec: &mut D,
             ren: &mut R,
-            units: &[aerodesk_core::media_pipeline::EncodedUnit],
+            units: &[aerodesk_core::platform::EncodedUnit],
         ) -> usize {
             let mut rendered = 0;
             for u in units {

@@ -17,6 +17,26 @@
 use std::any::Any;
 use std::sync::Arc;
 
+/// 编码输出单元。
+#[derive(Debug, Clone)]
+pub struct EncodedUnit {
+    pub data: Vec<u8>,
+    pub keyframe: bool,
+    pub pts_ms: u64,
+    /// 编码帧对应的 RTP 时间戳增量。
+    pub rtp_timestamp: u32,
+}
+
+/// 编码格式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Codec {
+    H264,
+    Hevc,
+    Av1,
+    Vp8,
+    Vp9,
+}
+
 /// 原始视频帧（平台采集器输出）。
 ///
 /// 三通道并存，按平台能力选一：
@@ -249,7 +269,6 @@ struct NoopWakeGuard;
 impl WakeGuard for NoopWakeGuard {}
 
 /// 便捷 re-export：`use crate::platform::*` 同时拿到 Codec/EncodedUnit。
-pub use crate::media_pipeline::{Codec, EncodedUnit};
 
 #[cfg(test)]
 mod tests {

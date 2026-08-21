@@ -19,8 +19,8 @@ use ffmpeg_next::format::Pixel;
 use ffmpeg_next::frame::Video;
 use ffmpeg_next::software::scaling::{Context as ScalingContext, flag::Flags as ScalingFlags};
 
-use aerodesk_core::media_pipeline::{Codec, EncodedUnit};
 use aerodesk_core::platform::VideoFrame;
+use aerodesk_core::platform::{Codec, EncodedUnit};
 
 fn vaapi_device_path() -> String {
     std::env::var("AERODESK_VAAPI_DEVICE").unwrap_or_else(|_| "/dev/dri/renderD128".to_string())

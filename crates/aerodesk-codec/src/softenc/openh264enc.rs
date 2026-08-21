@@ -4,7 +4,7 @@
 
 use openh264::OpenH264API;
 use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate};
-use openh264::formats::{YUVBuffer, YUVSource};
+use openh264::formats::YUVBuffer;
 
 /// RGBA → I420（打包顺序 Y + U + V，BT.601 有限范围）。
 pub fn rgba_to_i420_packed(rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
@@ -110,8 +110,8 @@ mod tests {
             enc: &mut E,
             w: u32,
             h: u32,
-        ) -> Vec<aerodesk_core::media_pipeline::EncodedUnit> {
-            enc.configure(aerodesk_core::media_pipeline::Codec::H264, w, h, 30)
+        ) -> Vec<aerodesk_core::platform::EncodedUnit> {
+            enc.configure(aerodesk_core::platform::Codec::H264, w, h, 30)
                 .expect("configure");
             let mut frame = vec![0u8; (w * h * 4) as usize];
             let mut units = Vec::new();
@@ -136,7 +136,7 @@ mod tests {
 
         fn count_frames<D: aerodesk_core::platform::Decoder>(
             dec: &mut D,
-            units: &[aerodesk_core::media_pipeline::EncodedUnit],
+            units: &[aerodesk_core::platform::EncodedUnit],
         ) -> usize {
             let mut n = 0;
             for u in units {
@@ -189,12 +189,12 @@ impl aerodesk_core::platform::Encoder for OpenH264Encoder {
 
     fn configure(
         &mut self,
-        codec: aerodesk_core::media_pipeline::Codec,
+        codec: aerodesk_core::platform::Codec,
         width: u32,
         height: u32,
         fps: u32,
     ) -> Result<(), Self::Error> {
-        if codec != aerodesk_core::media_pipeline::Codec::H264 {
+        if codec != aerodesk_core::platform::Codec::H264 {
             return Err(format!("openh264 仅支持 H.264，收到 {codec:?}"));
         }
         *self = Self::new(width, height, fps, 1500)?;
@@ -204,7 +204,7 @@ impl aerodesk_core::platform::Encoder for OpenH264Encoder {
     fn encode(
         &mut self,
         frame: &aerodesk_core::platform::VideoFrame,
-    ) -> Result<Option<aerodesk_core::media_pipeline::EncodedUnit>, Self::Error> {
+    ) -> Result<Option<aerodesk_core::platform::EncodedUnit>, Self::Error> {
         let Some(raw) = &frame.raw else {
             return Err("openh264 encoder requires raw BGRA frame".into());
         };
@@ -212,7 +212,7 @@ impl aerodesk_core::platform::Encoder for OpenH264Encoder {
         let Some(out) = self.encode_rgba(&rgba)? else {
             return Ok(None);
         };
-        Ok(Some(aerodesk_core::media_pipeline::EncodedUnit {
+        Ok(Some(aerodesk_core::platform::EncodedUnit {
             data: out.data,
             keyframe: out.keyframe,
             pts_ms: frame.pts_ms,

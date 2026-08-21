@@ -80,11 +80,11 @@ impl aerodesk_core::platform::Decoder for SoftDecoder {
 
     fn configure(
         &mut self,
-        codec: aerodesk_core::media_pipeline::Codec,
+        codec: aerodesk_core::platform::Codec,
         _width: u32,
         _height: u32,
     ) -> Result<(), Self::Error> {
-        if codec != aerodesk_core::media_pipeline::Codec::H264 {
+        if codec != aerodesk_core::platform::Codec::H264 {
             return Err(format!("OpenH264 仅支持 H.264，收到 {codec:?}"));
         }
         Ok(())
@@ -92,7 +92,7 @@ impl aerodesk_core::platform::Decoder for SoftDecoder {
 
     fn decode(
         &mut self,
-        unit: &aerodesk_core::media_pipeline::EncodedUnit,
+        unit: &aerodesk_core::platform::EncodedUnit,
     ) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
         let Some((rgba, w, h)) = self.decode_rgba(&unit.data)? else {
             return Ok(None);

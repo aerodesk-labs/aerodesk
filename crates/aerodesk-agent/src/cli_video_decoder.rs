@@ -4,7 +4,7 @@
 //! DXVA2 支持 H.264/HEVC；VP9/AV1 在 Windows 上暂不回退（CLI 观看路径
 //! 默认协商 H.264/HEVC，VP9/AV1 仍由非 Windows FFmpeg 软解覆盖）。
 
-use aerodesk_core::media_pipeline::{Codec, EncodedUnit, VideoFrame};
+use aerodesk_core::platform::{Codec, EncodedUnit, VideoFrame};
 
 #[cfg(windows)]
 use aerodesk_codec::softenc::decode::SoftDecoder;

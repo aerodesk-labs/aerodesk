@@ -371,7 +371,7 @@ impl aerodesk_core::platform::Encoder for VtEncoder {
 
     fn configure(
         &mut self,
-        codec: aerodesk_core::media_pipeline::Codec,
+        codec: aerodesk_core::platform::Codec,
         width: u32,
         height: u32,
         fps: u32,
@@ -379,7 +379,7 @@ impl aerodesk_core::platform::Encoder for VtEncoder {
         // 默认码率：>=720p 8Mbps，其余 4Mbps（与 CLI 屏幕采集默认一致）。
         let bps = if width >= 1280 { 8_000_000 } else { 4_000_000 };
         let vt_codec = match codec {
-            aerodesk_core::media_pipeline::Codec::Hevc => Codec::HEVC,
+            aerodesk_core::platform::Codec::Hevc => Codec::HEVC,
             _ => Codec::H264,
         };
         self.reconfigure(vt_codec, width, height, fps, bps)
@@ -388,7 +388,7 @@ impl aerodesk_core::platform::Encoder for VtEncoder {
     fn encode(
         &mut self,
         frame: &aerodesk_core::platform::VideoFrame,
-    ) -> Result<Option<aerodesk_core::media_pipeline::EncodedUnit>, Self::Error> {
+    ) -> Result<Option<aerodesk_core::platform::EncodedUnit>, Self::Error> {
         use std::any::Any;
         let encoded = if let Some(any) = &frame.platform {
             let surface = any
@@ -405,7 +405,7 @@ impl aerodesk_core::platform::Encoder for VtEncoder {
         };
         let keyframe = self.is_keyframe_avcc(&encoded.data);
         let data = self.to_annexb(&encoded);
-        Ok(Some(aerodesk_core::media_pipeline::EncodedUnit {
+        Ok(Some(aerodesk_core::platform::EncodedUnit {
             data,
             keyframe,
             pts_ms: frame.pts_ms,

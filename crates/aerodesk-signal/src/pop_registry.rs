@@ -50,7 +50,10 @@ impl PopRegistry {
     /// 未命中且配置了共享文件时先刷新文件（其它 PoP 的登记），再查一次。
     pub fn lookup(&self, room: &str) -> Option<String> {
         let hit = {
-            let m = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let m = self
+                .inner
+                .lock()
+                .unwrap_or_else(aerodesk_core::util::lock_recover);
             let now = Self::now();
             match m.get(room) {
                 Some(e) if now.saturating_sub(e.updated_at) <= self.ttl_secs => Some(e.pop.clone()),
@@ -62,7 +65,10 @@ impl PopRegistry {
             return hit;
         }
         self.merge_file();
-        let mut m = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut m = self
+            .inner
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let now = Self::now();
         match m.get(room) {
             Some(e) if now.saturating_sub(e.updated_at) <= self.ttl_secs => Some(e.pop.clone()),
@@ -80,7 +86,10 @@ impl PopRegistry {
         self.merge_file();
         let now = Self::now();
         let should_save = {
-            let mut m = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let mut m = self
+                .inner
+                .lock()
+                .unwrap_or_else(aerodesk_core::util::lock_recover);
             match m.get(room) {
                 Some(e)
                     if e.pop == pop && now.saturating_sub(e.updated_at) <= self.ttl_secs / 2 =>
@@ -117,7 +126,10 @@ impl PopRegistry {
             return;
         };
         let now = Self::now();
-        let mut m = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut m = self
+            .inner
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         // 文件里的新条目应覆盖本地的过期/旧条目（or_insert 会保留本地旧值，导致
         // 本地过期条目挡住文件里的新归属 → lookup 返回 None → 调用方误重新登记覆盖）。
         for (room, entry) in file_map {
@@ -135,7 +147,10 @@ impl PopRegistry {
 
     /// 当前条目数（测试/观测）。
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.inner
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .len()
     }
 
     fn load(&self) -> Result<(), String> {
@@ -146,7 +161,10 @@ impl PopRegistry {
         // 启动即丢弃过期条目：重启不该继承死房间的归属。
         let now = Self::now();
         data.retain(|_, e| now.saturating_sub(e.updated_at) <= self.ttl_secs);
-        *self.inner.lock().unwrap_or_else(|e| e.into_inner()) = data;
+        *self
+            .inner
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover) = data;
         Ok(())
     }
 
@@ -156,7 +174,10 @@ impl PopRegistry {
         let path = self.path.as_ref().ok_or("no registry file path")?;
         let now = Self::now();
         let text = {
-            let mut m = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let mut m = self
+                .inner
+                .lock()
+                .unwrap_or_else(aerodesk_core::util::lock_recover);
             m.retain(|_, e| now.saturating_sub(e.updated_at) <= self.ttl_secs);
             serde_json::to_string_pretty(&*m).map_err(|e| e.to_string())?
         };

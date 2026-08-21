@@ -1629,14 +1629,14 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                                     ui.set_status("已拒绝呼叫：未开启被控".into());
                                 } else if ui.get_inc_auto_accept() {
                                     // 免授权：已授权设备直接接听出流。
-                                    *PENDING_CALL.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                                    *PENDING_CALL.lock().unwrap_or_else(aerodesk_core::util::lock_recover) = None;
                                     let _ = p.lock().unwrap().accept_call();
                                     start_publisher_ui(ui);
                                     ui.set_status(format!("接听来自 {from} 的呼叫").into());
                                 } else {
                                     // #539：未开「免授权」时弹独立授权窗口确认
                                     // （30s 超时自动拒绝；不依赖主窗口——最小化/托盘也可弹）。
-                                    *PENDING_CALL.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    *PENDING_CALL.lock().unwrap_or_else(aerodesk_core::util::lock_recover) =
                                         Some(std::time::Instant::now());
                                     match IncomingCallWindow::new() {
                                         Ok(win) => {
@@ -1645,13 +1645,13 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                                             win.on_accept(move || {
                                                 *PENDING_CALL
                                                     .lock()
-                                                    .unwrap_or_else(|e| e.into_inner()) = None;
+                                                    .unwrap_or_else(aerodesk_core::util::lock_recover) = None;
                                                 // #545：确认期间用户可能已关闭「开启被控」
                                                 // ——接受前重读开关，关闭则拒绝出流。
                                                 crate::with_ui(&accept_ui, |ui| {
                                                     if !ui.get_inc_enabled() {
                                                         if let Some(h) =
-                                                            PRESENCE.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+                                                            PRESENCE.lock().unwrap_or_else(aerodesk_core::util::lock_recover).as_ref()
                                                         {
                                                             let _ = h.presence.lock().unwrap().reject_call(
                                                                 Some("确认期间关闭被控"),
@@ -1662,7 +1662,7 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                                                         return;
                                                     }
                                                     if let Some(h) =
-                                                        PRESENCE.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+                                                        PRESENCE.lock().unwrap_or_else(aerodesk_core::util::lock_recover).as_ref()
                                                     {
                                                         let _ = h.presence.lock().unwrap().accept_call();
                                                     }
@@ -1677,9 +1677,9 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                                             win.on_reject(move || {
                                                 *PENDING_CALL
                                                     .lock()
-                                                    .unwrap_or_else(|e| e.into_inner()) = None;
+                                                    .unwrap_or_else(aerodesk_core::util::lock_recover) = None;
                                                 if let Some(h) =
-                                                    PRESENCE.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+                                                    PRESENCE.lock().unwrap_or_else(aerodesk_core::util::lock_recover).as_ref()
                                                 {
                                                     let _ = h.presence.lock().unwrap().reject_call(
                                                         Some("用户拒绝"),
@@ -1688,7 +1688,7 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                                                 }
                                                 let _ = w2.upgrade_in_event_loop(|ui| { ui.hide(); });
                                             });
-                                            *INCOMING_WINDOW.lock().unwrap_or_else(|e| e.into_inner()) =
+                                            *INCOMING_WINDOW.lock().unwrap_or_else(aerodesk_core::util::lock_recover) =
                                                 Some(win.as_weak());
                                             let _ = win.show();
                                             ui.set_status(
@@ -1718,18 +1718,18 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                 }
                 // #539 呼叫确认超时：30s 未响应自动拒绝（弹窗提示 30 秒时限）。
                 // 注意：先释放 PENDING_CALL 锁再进处理块（块内会再次加锁，重入死锁）。
-                let pending_call = PENDING_CALL.lock().unwrap_or_else(|e| e.into_inner());
+                let pending_call = PENDING_CALL.lock().unwrap_or_else(aerodesk_core::util::lock_recover);
                 let timed_out = pending_call
                     .as_ref()
                     .is_some_and(|p| p.elapsed() >= std::time::Duration::from_secs(30));
                 drop(pending_call);
                 if timed_out {
-                    *PENDING_CALL.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    *PENDING_CALL.lock().unwrap_or_else(aerodesk_core::util::lock_recover) = None;
                     tracing::info!("呼叫确认超时：关闭授权窗口");
                     // #539：超时先主动关闭授权窗口（事件循环投递），再向对端
                     // 返回结构化错误码（写超时兜底，reject 失败不阻塞循环）。
                     if let Some(w) =
-                        INCOMING_WINDOW.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+                        INCOMING_WINDOW.lock().unwrap_or_else(aerodesk_core::util::lock_recover).as_ref()
                     {
                         let _ = w.upgrade_in_event_loop(|ui| { ui.hide(); });
                     }

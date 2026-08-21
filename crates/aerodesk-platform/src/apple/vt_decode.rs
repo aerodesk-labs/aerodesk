@@ -438,7 +438,7 @@ impl aerodesk_core::platform::Decoder for H264Decoder {
 
     fn configure(
         &mut self,
-        _codec: aerodesk_core::media_pipeline::Codec,
+        _codec: aerodesk_core::platform::Codec,
         _w: u32,
         _h: u32,
     ) -> Result<(), Self::Error> {
@@ -447,7 +447,7 @@ impl aerodesk_core::platform::Decoder for H264Decoder {
 
     fn decode(
         &mut self,
-        unit: &aerodesk_core::media_pipeline::EncodedUnit,
+        unit: &aerodesk_core::platform::EncodedUnit,
     ) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
         let pts_us = unit.pts_ms.saturating_mul(1000) as i64;
         match self.decode_annexb(&unit.data, pts_us) {
@@ -475,7 +475,7 @@ impl aerodesk_core::platform::Decoder for HevcDecoder {
 
     fn configure(
         &mut self,
-        _codec: aerodesk_core::media_pipeline::Codec,
+        _codec: aerodesk_core::platform::Codec,
         _w: u32,
         _h: u32,
     ) -> Result<(), Self::Error> {
@@ -484,7 +484,7 @@ impl aerodesk_core::platform::Decoder for HevcDecoder {
 
     fn decode(
         &mut self,
-        unit: &aerodesk_core::media_pipeline::EncodedUnit,
+        unit: &aerodesk_core::platform::EncodedUnit,
     ) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
         let pts_us = unit.pts_ms.saturating_mul(1000) as i64;
         match self.decode_annexb(&unit.data, pts_us) {
@@ -668,7 +668,7 @@ mod tests {
     fn generic_decoder_trait_decodes_h264() {
         fn count_frames<D: aerodesk_core::platform::Decoder>(
             dec: &mut D,
-            units: &[aerodesk_core::media_pipeline::EncodedUnit],
+            units: &[aerodesk_core::platform::EncodedUnit],
         ) -> usize {
             let mut n = 0;
             for u in units {
@@ -688,7 +688,7 @@ mod tests {
                 *px = (i * 30 + (j as u32 / 100)) as u8;
             }
             if let Some(out) = enc.encode(&frame).expect("encode") {
-                units.push(aerodesk_core::media_pipeline::EncodedUnit {
+                units.push(aerodesk_core::platform::EncodedUnit {
                     data: out.data,
                     keyframe: out.keyframe,
                     pts_ms: (i * 33) as u64,
@@ -705,7 +705,7 @@ mod tests {
         // libx265/hevc_videotoolbox 关键帧 + P 帧 → VideoToolbox HEVC 硬解。
         // macOS 宿主机上 videotoolbox 可解 HEVC（iOS 同 API）。
         use aerodesk_codec::encode::FfmpegEncoder;
-        use aerodesk_core::media_pipeline::Codec;
+        use aerodesk_core::platform::Codec;
         let mut enc =
             FfmpegEncoder::new(320, 180, 30, 1_000_000, Codec::Hevc).expect("hevc encoder");
         enc.request_keyframe();

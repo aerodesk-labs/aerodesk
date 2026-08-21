@@ -67,7 +67,7 @@ impl ClientSink {
                 framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
                 framed.extend_from_slice(bytes);
                 w.lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(aerodesk_core::util::lock_recover)
                     .write_all(&framed)
             }
         }
@@ -134,7 +134,7 @@ impl TurnServer {
         self.shared
             .allocations
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(aerodesk_core::util::lock_recover)
             .len()
     }
 
@@ -401,7 +401,10 @@ fn udp_run(shared: Arc<Shared>, server: Arc<UdpSocket>) {
 }
 
 fn sweep(shared: &Shared) {
-    let mut allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
+    let mut allocs = shared
+        .allocations
+        .lock()
+        .unwrap_or_else(aerodesk_core::util::lock_recover);
     sweep_expired_locked(&mut allocs);
 }
 
@@ -602,7 +605,7 @@ fn cleanup_allocation(shared: &Shared, key: &ClientKey) {
     if let Some(a) = shared
         .allocations
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(aerodesk_core::util::lock_recover)
         .remove(key)
     {
         a.stop.store(true, Ordering::SeqCst);
@@ -644,7 +647,9 @@ fn tcp_conn_loop(
     let mut tmp = [0u8; 65535];
     loop {
         let n = {
-            let mut c = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let mut c = conn
+                .lock()
+                .unwrap_or_else(aerodesk_core::util::lock_recover);
             match c.read(&mut tmp) {
                 Ok(n) if n > 0 => n,
                 Ok(_) => break, // EOF
@@ -692,18 +697,24 @@ fn handle_packet(
         let len = u16::from_be_bytes([pkt[2], pkt[3]]) as usize;
         let payload = &pkt[4..(4 + len).min(pkt.len())];
         let peer = {
-            let allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
+            let allocs = shared
+                .allocations
+                .lock()
+                .unwrap_or_else(aerodesk_core::util::lock_recover);
             allocs.get(&key).and_then(|a| {
                 a.state
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(aerodesk_core::util::lock_recover)
                     .channels
                     .get(&chan)
                     .copied()
             })
         };
         if let Some(peer) = peer {
-            let allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
+            let allocs = shared
+                .allocations
+                .lock()
+                .unwrap_or_else(aerodesk_core::util::lock_recover);
             if let Some(a) = allocs.get(&key) {
                 let _ = a.relay.send_to(payload, peer);
             }
@@ -829,7 +840,10 @@ fn handle_allocate(
     // 过期残留把新 Allocate 楔在 437 最多 30s（配额门内的按需 sweep 只在
     // "其他 key 占满配额"时触发，重复 key 自身轮不到）。
     let dup_live = {
-        let mut allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
+        let mut allocs = shared
+            .allocations
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let live = allocs
             .get(&key)
             .is_some_and(|a| unix_now() < a.expires.load(Ordering::SeqCst));
@@ -911,7 +925,10 @@ fn handle_allocate(
     // 配额检查、按需清扫、驱逐与插入同一把锁（并发 Allocate 无法越限插入）；
     // 486 在任何破坏发生前返回（零副作用）。逻辑见 quota_gate_locked。
     let (evicted, allowed) = {
-        let mut allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
+        let mut allocs = shared
+            .allocations
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         quota_gate_locked(
             &mut allocs,
             key,
@@ -991,11 +1008,17 @@ fn handle_permission(
         send_error(server, sink, txid, method, 403, false, shared);
         return;
     }
-    let allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
+    let allocs = shared
+        .allocations
+        .lock()
+        .unwrap_or_else(aerodesk_core::util::lock_recover);
     let Some(alloc) = allocs.get(&key) else {
         return;
     };
-    let mut st = alloc.state.lock().unwrap_or_else(|e| e.into_inner());
+    let mut st = alloc
+        .state
+        .lock()
+        .unwrap_or_else(aerodesk_core::util::lock_recover);
     if channel_bind {
         let Some(chan_val) = find_attr(pkt, ATTR_CHANNEL_NUMBER) else {
             return;
@@ -1038,11 +1061,17 @@ fn handle_send(shared: &Shared, pkt: &[u8], key: ClientKey) {
     if peer_denied(shared, peer_val.ip()) {
         return;
     }
-    let allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
+    let allocs = shared
+        .allocations
+        .lock()
+        .unwrap_or_else(aerodesk_core::util::lock_recover);
     let Some(alloc) = allocs.get(&key) else {
         return;
     };
-    let st = alloc.state.lock().unwrap_or_else(|e| e.into_inner());
+    let st = alloc
+        .state
+        .lock()
+        .unwrap_or_else(aerodesk_core::util::lock_recover);
     let permitted = st.permissions.contains(&peer_val);
     drop(st);
     if permitted {
@@ -1058,7 +1087,10 @@ fn handle_refresh(
     sink: &ClientSink,
     txid: [u8; 12],
 ) {
-    let allocs = shared.allocations.lock().unwrap_or_else(|e| e.into_inner());
+    let allocs = shared
+        .allocations
+        .lock()
+        .unwrap_or_else(aerodesk_core::util::lock_recover);
     let Some(alloc) = allocs.get(&key) else {
         return;
     };
@@ -1100,7 +1132,9 @@ fn spawn_relay(
                 return;
             }
             if let Ok((n, peer)) = relay.recv_from(&mut buf) {
-                let st = state.lock().unwrap_or_else(|e| e.into_inner());
+                let st = state
+                    .lock()
+                    .unwrap_or_else(aerodesk_core::util::lock_recover);
                 if let Some(&chan) = st.peer_channel.get(&peer) {
                     let mut out = Vec::with_capacity(4 + n);
                     out.extend_from_slice(&chan.to_be_bytes());
@@ -1329,7 +1363,9 @@ mod tests {
 
     #[test]
     fn binding_returns_xor_mapped() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let (server_addr, _srv) = spawn_udp("testsecret");
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
         client
@@ -1349,7 +1385,9 @@ mod tests {
 
     #[test]
     fn allocate_relay_roundtrip_with_rest_credentials() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let secret = "testsecret";
         let (server_addr, _srv) = spawn_udp(secret);
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1431,7 +1469,9 @@ mod tests {
 
     #[test]
     fn allocate_rejects_bad_credentials() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let secret = "testsecret";
         let (server_addr, _srv) = spawn_udp(secret);
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1530,7 +1570,9 @@ mod tests {
 
     #[test]
     fn tcp_allocate_relay_roundtrip() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let secret = "testsecret";
         let (tcp_addr, _tls, _srv) = setup_tcp(secret, false);
         let mut stream = TcpStream::connect(tcp_addr).expect("tcp connect");
@@ -1583,7 +1625,9 @@ mod tests {
 
     #[test]
     fn tls_allocate_relay_roundtrip() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let secret = "testsecret";
         let (_tcp, tls_addr, _srv) = setup_tcp(secret, true);
         let cfg = rustls::ClientConfig::builder()
@@ -1683,7 +1727,9 @@ mod tests {
     /// #204：per-IP 配额超限 → 486。
     #[test]
     fn quota_per_ip_rejects_second_allocation() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let _env = EnvGuard::set(&[("MAX_TURN_ALLOCS_PER_IP", "1")]);
         let (server_addr, _srv) = spawn_udp("testsecret");
         let (u, p) = creds("testsecret");
@@ -1702,7 +1748,9 @@ mod tests {
     /// #222：TURN_LIFETIME_SEC 缩短 allocation lifetime（响应 ATTR_LIFETIME 生效）。
     #[test]
     fn lifetime_env_shortens_allocation() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let _env = EnvGuard::set(&[("TURN_LIFETIME_SEC", "60")]);
         let (server_addr, _srv) = spawn_udp("testsecret");
         let (u, p) = creds("testsecret");
@@ -1745,7 +1793,9 @@ mod tests {
     /// #204：全局配额超限 → 486（per-IP 放开）。
     #[test]
     fn quota_total_rejects_when_full() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let _env = EnvGuard::set(&[
             ("MAX_TURN_ALLOCS_TOTAL", "1"),
             ("MAX_TURN_ALLOCS_PER_IP", "0"),
@@ -1768,7 +1818,7 @@ mod tests {
             .shared
             .allocations
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         for a in allocs.values() {
             let now = unix_now();
             a.expires
@@ -1783,7 +1833,9 @@ mod tests {
     /// #482：配额满但现存 allocation 陈旧（≥450s 未刷新）→ 驱逐最旧而非 486。
     #[test]
     fn quota_full_evicts_stale_allocation() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let _env = EnvGuard::set(&[
             ("MAX_TURN_ALLOCS_TOTAL", "1"),
             ("MAX_TURN_ALLOCS_PER_IP", "0"),
@@ -1808,7 +1860,9 @@ mod tests {
     /// #482：配额满且现存 allocation 新鲜（存活客户端）→ 仍 486，不驱逐。
     #[test]
     fn quota_full_fresh_allocation_still_486() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let _env = EnvGuard::set(&[
             ("MAX_TURN_ALLOCS_TOTAL", "1"),
             ("MAX_TURN_ALLOCS_PER_IP", "0"),
@@ -1836,7 +1890,9 @@ mod tests {
     /// 必 486。直接调用纯函数，杜绝集成测试里 udp_run 周期 sweep 抢占的假绿。
     #[test]
     fn quota_gate_sweeps_expired_on_demand() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let ip: IpAddr = "203.0.113.7".parse().unwrap();
         let mk = |expires_in: i64| {
             let now = unix_now();
@@ -1876,7 +1932,9 @@ mod tests {
     /// Allocate 楔在 437——437 分支先回收已过期项（最多 30s 周期 sweep 的提前化）。
     #[test]
     fn duplicate_key_expired_residue_not_437() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let _env = EnvGuard::set(&[
             ("MAX_TURN_ALLOCS_TOTAL", "1"),
             ("MAX_TURN_ALLOCS_PER_IP", "0"),
@@ -1898,7 +1956,9 @@ mod tests {
     /// #482：per-IP 配额满且该 IP 残留陈旧 → 驱逐该 IP 最旧而非 486。
     #[test]
     fn quota_per_ip_evicts_stale_allocation() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let _env = EnvGuard::set(&[
             ("MAX_TURN_ALLOCS_PER_IP", "1"),
             ("MAX_TURN_ALLOCS_TOTAL", "0"),
@@ -1923,7 +1983,9 @@ mod tests {
     /// ≥20s 余量：不驱逐侧空闲随墙钟延迟增长，贴阈值 1s 会在 CI 负载下闪红。
     #[test]
     fn quota_full_stale_boundary_130_evicts_170_486() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let _env = EnvGuard::set(&[
             ("MAX_TURN_ALLOCS_TOTAL", "1"),
             ("MAX_TURN_ALLOCS_PER_IP", "0"),
@@ -1963,7 +2025,9 @@ mod tests {
     /// 寿命恒 <150s，按"剩余寿命"判定必被误驱逐；按"未刷新时长"判定永不误伤。
     #[test]
     fn quota_full_short_lifetime_live_client_not_evicted() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let _env = EnvGuard::set(&[
             ("MAX_TURN_ALLOCS_TOTAL", "1"),
             ("MAX_TURN_ALLOCS_PER_IP", "0"),
@@ -1980,7 +2044,7 @@ mod tests {
                 .shared
                 .allocations
                 .lock()
-                .unwrap_or_else(|e| e.into_inner());
+                .unwrap_or_else(aerodesk_core::util::lock_recover);
             for a in allocs.values() {
                 let now = unix_now();
                 a.expires.store(now + 60, Ordering::SeqCst);
@@ -2002,7 +2066,9 @@ mod tests {
     /// 旧实现 `v[..4]` 直接 panic 打掉 udp_run 线程（UDP 控制面整体 DoS）。
     #[test]
     fn refresh_malformed_lifetime_attr_does_not_panic() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let (server_addr, srv) = spawn_udp("testsecret");
         let (u, p) = creds("testsecret");
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -2047,7 +2113,9 @@ mod tests {
     /// #204：TURN_DENIED_PEER_CIDRS 内 peer → CreatePermission 403。
     #[test]
     fn denied_peer_returns_403() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         unsafe {
             std::env::set_var("TURN_DENIED_PEER_CIDRS", "192.0.2.0/24");
         }
@@ -2085,7 +2153,9 @@ mod tests {
     /// #204：IPv6（::1）allocate + relay 回环。
     #[test]
     fn ipv6_allocate_relay_roundtrip() {
-        let _g = TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = TESTS_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         unsafe {
             std::env::set_var("SFU_TURN_IPV6", "1");
         }

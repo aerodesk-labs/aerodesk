@@ -252,13 +252,13 @@ fn build_hvcc(vps: &[u8], sps: &[u8], pps: &[u8]) -> Result<Vec<u8>, String> {
 /// 解码首关键帧探测宽高（复用 FfmpegDecoder）。
 fn probe_size(
     video: &[&AdrecPacket],
-    codec: aerodesk_core::media_pipeline::Codec,
+    codec: aerodesk_core::platform::Codec,
 ) -> Result<(i32, i32), String> {
     let mut dec =
         crate::decode::FfmpegDecoder::new(codec).map_err(|e| format!("probe decoder: {e}"))?;
     for p in video {
         if p.keyframe {
-            let unit = aerodesk_core::media_pipeline::EncodedUnit {
+            let unit = aerodesk_core::platform::EncodedUnit {
                 data: p.payload.clone(),
                 keyframe: true,
                 pts_ms: 0,
@@ -287,10 +287,10 @@ fn mux(
         return Err(format!("{input:?} 无 codec={codec} 视频包"));
     }
     let core_codec = match codec {
-        CODEC_H264 => aerodesk_core::media_pipeline::Codec::H264,
-        CODEC_H265 => aerodesk_core::media_pipeline::Codec::Hevc,
-        CODEC_VP9 => aerodesk_core::media_pipeline::Codec::Vp9,
-        CODEC_AV1 => aerodesk_core::media_pipeline::Codec::Av1,
+        CODEC_H264 => aerodesk_core::platform::Codec::H264,
+        CODEC_H265 => aerodesk_core::platform::Codec::Hevc,
+        CODEC_VP9 => aerodesk_core::platform::Codec::Vp9,
+        CODEC_AV1 => aerodesk_core::platform::Codec::Av1,
         other => return Err(format!("不支持 codec={other}")),
     };
     let (w, h) = probe_size(&video, core_codec)?;

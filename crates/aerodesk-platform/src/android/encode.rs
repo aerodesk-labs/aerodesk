@@ -1,6 +1,6 @@
 //! MediaCodec 硬编（骨架）：实现 core `Encoder` trait，JNI 真机阶段补齐。
 
-use aerodesk_core::media_pipeline::Codec;
+use aerodesk_core::platform::Codec;
 
 /// TODO(P3)：JNI 桥接到 android.media.MediaCodec 硬编。
 /// 前置条件：Android SDK/NDK + `aarch64-linux-android`/`armv7-linux-androideabi` target。
@@ -35,7 +35,7 @@ impl aerodesk_core::platform::Encoder for MediaCodecEncoder {
     fn encode(
         &mut self,
         _frame: &aerodesk_core::platform::VideoFrame,
-    ) -> Result<Option<aerodesk_core::media_pipeline::EncodedUnit>, Self::Error> {
+    ) -> Result<Option<aerodesk_core::platform::EncodedUnit>, Self::Error> {
         Err("android: MediaCodec encoder JNI bridge not implemented yet (P3)".into())
     }
 

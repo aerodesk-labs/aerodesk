@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use aerodesk_codec::audio::RealAudioSender;
 use aerodesk_core::connect::connect_live_role_codec_timeout;
 use aerodesk_core::endpoint::ClientEvent;
-use aerodesk_core::media_pipeline::Codec;
+use aerodesk_core::platform::Codec;
 use aerodesk_core::platform::SystemWakeLock;
 use aerodesk_core::protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult};
 use aerodesk_core::protocol::input::{InputEvent, InputFrame};
@@ -103,13 +103,13 @@ fn run_publisher(
         Some(Codec::H264),
         Duration::from_secs(30),
     ) {
-            Ok(l) => l,
-            Err(e) => {
-                let msg = format!("被控端连接失败：{e}");
-                on_event(PublisherEvent::Status(msg));
-                return;
-            }
-        };
+        Ok(l) => l,
+        Err(e) => {
+            let msg = format!("被控端连接失败：{e}");
+            on_event(PublisherEvent::Status(msg));
+            return;
+        }
+    };
     let Some(video_mid) = live.video_mid else {
         on_event(PublisherEvent::Status("被控端连接失败：无视频 mid".into()));
         return;

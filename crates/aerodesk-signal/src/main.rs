@@ -172,7 +172,10 @@ impl SfuPool {
     /// 房间切成两半；新房间选最闲健康 SFU（负载相同时按 rendezvous 权重分摊），
     /// 全部下线回退哈希。锁贯穿「查/选/写」消除同房间并发首连的竞态。
     fn select(&self, room: &str) -> usize {
-        let mut reg = self.room_sfu.lock().unwrap_or_else(|e| e.into_inner());
+        let mut reg = self
+            .room_sfu
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let now = unix_secs();
         if let Some((i, last_used)) = reg.get_mut(room) {
             *last_used = now;
@@ -207,7 +210,10 @@ impl SfuPool {
         ttl_secs: u64,
         now: u64,
     ) -> usize {
-        let mut reg = self.room_sfu.lock().unwrap_or_else(|e| e.into_inner());
+        let mut reg = self
+            .room_sfu
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let before = reg.len();
         reg.retain(|room, (_, t)| alive.contains(room) || now.saturating_sub(*t) < ttl_secs);
         before - reg.len()
@@ -311,7 +317,9 @@ fn poll_sfu_pool(
             }
         }
         let alive: std::collections::HashSet<String> = {
-            let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
+            let rooms = rooms
+                .lock()
+                .unwrap_or_else(aerodesk_core::util::lock_recover);
             rooms.keys().cloned().collect()
         };
         let evicted = pool.evict_stale(&alive, sticky_ttl_secs, unix_secs());
@@ -656,7 +664,7 @@ fn main() {
                     let mut alive_now: std::collections::HashSet<String> =
                         running.iter().map(|(r, _)| r.clone()).collect();
                     let real_peers: HashMap<String, usize> = {
-                        let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
+                        let rooms = rooms.lock().unwrap_or_else(aerodesk_core::util::lock_recover);
                         running
                             .iter()
                             .map(|(room, _)| {
@@ -679,7 +687,7 @@ fn main() {
                         // 记录为 monitor 主动停止（死亡检测排除），再二次确认 + 停桥。
                         monitor_stopped.insert(room.clone());
                         let stop = {
-                            let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
+                            let rooms = rooms.lock().unwrap_or_else(aerodesk_core::util::lock_recover);
                             let real = rooms
                                 .get(&room)
                                 .map(|peers| peers.iter().filter(|p| !p.bridge_leg).count())
@@ -1070,7 +1078,10 @@ fn handle(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
     // 可观测性（#180 后续）：信号服务器此前只有 /ws，无健康/指标端点。
     if request.method() == "GET" && request.url() == "/healthz" {
         let clients = total_clients();
-        let room_count = rooms.lock().unwrap_or_else(|e| e.into_inner()).len();
+        let room_count = rooms
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .len();
         let payload = serde_json::json!({
             "status": "ok",
             "clients": clients,
@@ -1084,7 +1095,10 @@ fn handle(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
     }
     if request.method() == "GET" && request.url() == "/metrics/prometheus" {
         let clients = total_clients();
-        let room_count = rooms.lock().unwrap_or_else(|e| e.into_inner()).len();
+        let room_count = rooms
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .len();
         let bridges = config
             .bridge
             .as_ref()
@@ -1145,10 +1159,14 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
         // #539：先 drain 发送队列（呼叫等可靠消息经队列投递——try_lock 会丢、
         // 阻塞 lock 会与下方 next() 的持锁等待互锁）。
         while let Ok(s) = rx.try_recv() {
-            let mut w = ws.lock().unwrap_or_else(|e| e.into_inner());
+            let mut w = ws.lock().unwrap_or_else(aerodesk_core::util::lock_recover);
             let _ = w.send_text(&s);
         }
-        let msg = match ws.lock().unwrap_or_else(|e| e.into_inner()).next() {
+        let msg = match ws
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .next()
+        {
             Some(Message::Text(t)) => t,
             Some(_) => continue,
             None => break,
@@ -1247,7 +1265,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                                 if !bridge_leg_pre {
                                     let room_len = rooms
                                         .lock()
-                                        .unwrap_or_else(|e| e.into_inner())
+                                        .unwrap_or_else(aerodesk_core::util::lock_recover)
                                         .get(&room)
                                         .map(|peers| peers.len())
                                         .unwrap_or(0);
@@ -1389,7 +1407,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                             .get()
                             .expect("user conns initialized")
                             .lock()
-                            .unwrap_or_else(|e| e.into_inner());
+                            .unwrap_or_else(aerodesk_core::util::lock_recover);
                         if let Err(reason) = user_quota_take(&mut uc, sub, max_conns) {
                             TOTAL_CLIENTS
                                 .get()
@@ -1410,7 +1428,9 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 let peer_id = format!("{}-{}", room, fastrand_id());
                 // 房间配额检查 + peers 快照 + push 在同一 rooms 锁内（原子）。
                 let peers: Vec<PeerInfo> = {
-                    let mut r = rooms.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut r = rooms
+                        .lock()
+                        .unwrap_or_else(aerodesk_core::util::lock_recover);
                     let cur = r.get(&room).map(|peers| peers.len()).unwrap_or(0);
                     if !bridge_leg && config.max_room_clients > 0 && cur >= config.max_room_clients
                     {
@@ -1423,7 +1443,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                                 .get()
                                 .expect("user conns initialized")
                                 .lock()
-                                .unwrap_or_else(|e| e.into_inner());
+                                .unwrap_or_else(aerodesk_core::util::lock_recover);
                             user_quota_release(&mut uc, sub.as_str());
                         }
                         info!("reject join room={room} role={role:?}: room full");
@@ -1499,7 +1519,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                 // #12：把 peer 角色传给 SFU，SFU 据此拒绝 viewer 发布媒体。
                 let role = rooms
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(aerodesk_core::util::lock_recover)
                     .get(&room)
                     .and_then(|peers| peers.iter().find(|p| p.id == from))
                     .map(|p| p.role)
@@ -1664,7 +1684,9 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
 
     // 断开：移除并广播 PeerLeft
     let found = {
-        let mut rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rooms = rooms
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let mut found = None;
         for (room, peers) in rooms.iter_mut() {
             if let Some(idx) = peers.iter().position(|p| Arc::ptr_eq(&p.ws, &ws)) {
@@ -1693,7 +1715,7 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
             .get()
             .expect("user conns initialized")
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         user_quota_release(&mut uc, sub);
     }
     info!("peer {peer_id} left room {room}");
@@ -1703,7 +1725,9 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
     // 阻塞读时必然失败，而 PeerLeft 已有消费方（被控端清理 Active 呼叫，见
     // signal_presence.rs peer_left 处理），必须可靠到达。
     let target_txs: Vec<std::sync::mpsc::Sender<String>> = {
-        let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
+        let rooms = rooms
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         rooms
             .get(&room)
             .map(|peers| peers.iter().map(|p| p.tx.clone()).collect())
@@ -1737,7 +1761,9 @@ fn send(ws: Arc<Mutex<Websocket>>, msg: SignalMessage) {
 }
 
 fn find_room(rooms: &Rooms, peer_id: &str) -> Option<String> {
-    let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
+    let rooms = rooms
+        .lock()
+        .unwrap_or_else(aerodesk_core::util::lock_recover);
     rooms
         .iter()
         .find(|(_, peers)| peers.iter().any(|p| p.id == peer_id))
@@ -1772,7 +1798,9 @@ fn publisher_targets(
     target: &str,
     exclude_peer: &str,
 ) -> Vec<std::sync::mpsc::Sender<String>> {
-    let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
+    let rooms = rooms
+        .lock()
+        .unwrap_or_else(aerodesk_core::util::lock_recover);
     rooms
         .get(target)
         .map(|peers| {
@@ -1790,7 +1818,9 @@ fn publisher_targets(
 /// 会丢弃呼叫/拒绝等可靠消息；阻塞 lock 会与读互锁——队列由本连接循环 drain）。
 fn forward_to_peer(rooms: &Rooms, to: &str, msg: SignalMessage) -> bool {
     let target_tx = {
-        let rooms = rooms.lock().unwrap_or_else(|e| e.into_inner());
+        let rooms = rooms
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         rooms
             .values()
             .flat_map(|peers| peers.iter())
@@ -1951,11 +1981,11 @@ mod tests {
         let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
         rooms
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(aerodesk_core::util::lock_recover)
             .insert("room-a".into(), Vec::new());
         rooms
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(aerodesk_core::util::lock_recover)
             .insert("room-b".into(), Vec::new());
         let config = Arc::new(cfg("s", None));
 
@@ -2278,7 +2308,10 @@ mod tests {
         let _ = pool.select("live-quiet");
         let _ = pool.select("stale");
         {
-            let mut reg = pool.room_sfu.lock().unwrap_or_else(|e| e.into_inner());
+            let mut reg = pool
+                .room_sfu
+                .lock()
+                .unwrap_or_else(aerodesk_core::util::lock_recover);
             reg.get_mut("live-quiet").unwrap().1 = unix_secs() - 7 * 3600;
             reg.get_mut("stale").unwrap().1 = unix_secs() - 7 * 3600;
         }
@@ -2286,7 +2319,10 @@ mod tests {
         alive.insert("live-quiet".to_string());
         let evicted = pool.evict_stale(&alive, 6 * 3600, unix_secs());
         assert_eq!(evicted, 1, "只淘汰无 peer 且空闲超过 TTL 的房间");
-        let reg = pool.room_sfu.lock().unwrap_or_else(|e| e.into_inner());
+        let reg = pool
+            .room_sfu
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         assert!(
             reg.contains_key("live-quiet"),
             "有活跃 peer 的房间即使映射空闲超时也不得淘汰"

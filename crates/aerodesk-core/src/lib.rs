@@ -22,7 +22,6 @@ pub mod cmd_exec;
 pub mod endpoint;
 pub mod file_transfer;
 pub mod media;
-pub mod media_pipeline;
 pub mod media_socket;
 pub mod pcmu;
 pub mod platform;
@@ -39,3 +38,4 @@ pub use signal_presence::{
 pub mod connect;
 
 pub mod turn_client;
+pub mod util;

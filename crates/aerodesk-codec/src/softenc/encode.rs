@@ -167,12 +167,12 @@ impl aerodesk_core::platform::Encoder for X264Encoder {
 
     fn configure(
         &mut self,
-        codec: aerodesk_core::media_pipeline::Codec,
+        codec: aerodesk_core::platform::Codec,
         width: u32,
         height: u32,
         fps: u32,
     ) -> Result<(), Self::Error> {
-        if codec != aerodesk_core::media_pipeline::Codec::H264 {
+        if codec != aerodesk_core::platform::Codec::H264 {
             return Err(format!("x264 仅支持 H.264，收到 {codec:?}"));
         }
         *self = Self::new(width, height, fps, 800)?;
@@ -182,7 +182,7 @@ impl aerodesk_core::platform::Encoder for X264Encoder {
     fn encode(
         &mut self,
         frame: &aerodesk_core::platform::VideoFrame,
-    ) -> Result<Option<aerodesk_core::media_pipeline::EncodedUnit>, Self::Error> {
+    ) -> Result<Option<aerodesk_core::platform::EncodedUnit>, Self::Error> {
         let Some(raw) = &frame.raw else {
             return Err("x264 encoder requires raw BGRA frame".into());
         };
@@ -190,7 +190,7 @@ impl aerodesk_core::platform::Encoder for X264Encoder {
         let Some(out) = self.encode(&rgb)? else {
             return Ok(None);
         };
-        Ok(Some(aerodesk_core::media_pipeline::EncodedUnit {
+        Ok(Some(aerodesk_core::platform::EncodedUnit {
             data: out.data,
             keyframe: out.keyframe,
             pts_ms: frame.pts_ms,

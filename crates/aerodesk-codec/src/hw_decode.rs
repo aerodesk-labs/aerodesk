@@ -17,7 +17,7 @@ use ffmpeg_next::frame::Video;
 use ffmpeg_next::software::scaling::{Context as ScalingContext, flag::Flags as ScalingFlags};
 use ffmpeg_next::sys as ffi;
 
-use aerodesk_core::media_pipeline::{Codec, EncodedUnit};
+use aerodesk_core::platform::{Codec, EncodedUnit};
 use aerodesk_core::platform::{Decoder, VideoFrame};
 
 /// FFmpeg AVERROR(EAGAIN)：输入缓冲满/暂无输出，需交换收发。

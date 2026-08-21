@@ -7,7 +7,6 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use screencapturekit::prelude::*;
 use screencapturekit::stream::output_type::SCStreamOutputType;

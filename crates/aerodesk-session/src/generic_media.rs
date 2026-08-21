@@ -30,7 +30,7 @@ impl aerodesk_core::platform::Decoder for ViewerDecoder {
 
     fn configure(
         &mut self,
-        codec: aerodesk_core::media_pipeline::Codec,
+        codec: aerodesk_core::platform::Codec,
         width: u32,
         height: u32,
     ) -> Result<(), Self::Error> {
@@ -45,7 +45,7 @@ impl aerodesk_core::platform::Decoder for ViewerDecoder {
 
     fn decode(
         &mut self,
-        unit: &aerodesk_core::media_pipeline::EncodedUnit,
+        unit: &aerodesk_core::platform::EncodedUnit,
     ) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
         match self {
             Self::Soft(d) => aerodesk_core::platform::Decoder::decode(d, unit),
@@ -60,7 +60,7 @@ impl aerodesk_core::platform::Decoder for ViewerDecoder {
 fn mk_viewer_decoder() -> Result<ViewerDecoder, String> {
     #[cfg(target_os = "linux")]
     {
-        use aerodesk_core::media_pipeline::Codec;
+        use aerodesk_core::platform::Codec;
         match aerodesk_platform::linux::vaapi::VaapiDecoder::new(Codec::H264) {
             Ok(d) => {
                 tracing::info!("linux viewer: VAAPI 硬解启用");

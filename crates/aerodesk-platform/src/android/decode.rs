@@ -7,7 +7,7 @@
 //!
 //! 本骨架实现 aerodesk-core 的 [`Decoder`] trait，平台差异收敛在适配器。
 
-use aerodesk_core::media_pipeline::Codec;
+use aerodesk_core::platform::Codec;
 
 /// TODO(P3): JNI 桥接到 android.media.MediaCodec。
 /// 前置条件：Android SDK/NDK + `aarch64-linux-android`/`armv7-linux-androideabi` target。
@@ -33,7 +33,7 @@ impl aerodesk_core::platform::Decoder for MediaCodecDecoder {
 
     fn decode(
         &mut self,
-        _unit: &aerodesk_core::media_pipeline::EncodedUnit,
+        _unit: &aerodesk_core::platform::EncodedUnit,
     ) -> Result<Option<aerodesk_core::platform::VideoFrame>, Self::Error> {
         Ok(None)
     }

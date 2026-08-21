@@ -11,7 +11,7 @@ use crate::signaling::WsSignalClient;
 use crate::turn_client::setup_turn;
 use str0m::net::Protocol;
 
-use crate::media_pipeline::Codec;
+use crate::platform::Codec;
 
 /// 连接结果摘要。
 #[derive(Debug, Clone)]
@@ -137,12 +137,22 @@ pub fn connect_live(server: &str, room: &str) -> Result<LiveSession, String> {
 }
 
 /// 观看端 + force-relay（#201）：ICE 只通告 relayed 候选。
+/// 唯一消费者为 Android（#201/#218 模拟器 NAT 场景）。
 pub fn connect_live_forced(
     server: &str,
     room: &str,
     force_relay: bool,
 ) -> Result<LiveSession, String> {
-    connect_live_role_forced(server, room, Role::Viewer, None, force_relay)
+    connect_live_role_impl(
+        server,
+        room,
+        Role::Viewer,
+        None,
+        force_relay || force_relay_env(),
+        None,
+        false, // force-relay 路径不协商音频，避免 SDP 行为变化
+        false,
+    )
 }
 
 /// 连接并保留活跃会话（任意角色）。`auth` 为 JWT/静态 token（可选）。
@@ -183,28 +193,6 @@ pub fn connect_live_role_with_camera(
         None,
         false,
         camera,
-    )
-}
-
-/// force-relay（#201）：ICE 只通告 relayed 候选、跳过 host 候选。
-/// 适用于：NAT 下直连候选"假通"（连通性检查能过但媒体入站被丢，如 qemu
-/// slirp 模拟器），或要求媒体必须走 TURN 的部署。
-pub fn connect_live_role_forced(
-    server: &str,
-    room: &str,
-    role: Role,
-    auth: Option<&str>,
-    force_relay: bool,
-) -> Result<LiveSession, String> {
-    connect_live_role_impl(
-        server,
-        room,
-        role,
-        auth,
-        force_relay || force_relay_env(),
-        None,
-        false, // with_audio：force-relay 路径（CLI/移动端）不协商音频，避免 SDP 行为变化
-        false,
     )
 }
 
@@ -364,7 +352,7 @@ fn connect_live_role_impl(
     let mut socket = MediaSocket::new(direct, turn_transport);
     let mut endpoint = match codec {
         None => crate::Endpoint::new(),
-        Some(Codec::H264) => crate::Endpoint::new_h264(),
+        Some(Codec::H264) => crate::Endpoint::new_with_codec(Codec::H264),
         Some(c) => crate::Endpoint::new_with_codec(c),
     };
     for ip in &candidates {
@@ -497,33 +485,9 @@ fn connect_live_role_impl(
     })
 }
 
-/// 观看端连接：WSS join → SDP 交换 → ICE 泵（5s 超时）。/// 观看端连接：WSS join → SDP 交换 → ICE 泵（5s 超时）。
+/// 观看端连接：WSS join → SDP 交换 → ICE 泵（5s 超时）。
 pub fn connect_viewer(server: &str, room: &str) -> Result<ConnectResult, String> {
-    connect_viewer_auth(server, room, None)
-}
-
-/// 观看端连接（带认证 token）。
-pub fn connect_viewer_auth(
-    server: &str,
-    room: &str,
-    auth: Option<&str>,
-) -> Result<ConnectResult, String> {
-    connect_role(server, room, Role::Viewer, auth)
-}
-
-/// 发布端连接（参数化角色）。
-pub fn connect(server: &str, room: &str, role: Role) -> Result<ConnectResult, String> {
-    connect_role(server, room, role, None)
-}
-
-/// 连接（任意角色 + 认证 token）。
-pub fn connect_role(
-    server: &str,
-    room: &str,
-    role: Role,
-    auth: Option<&str>,
-) -> Result<ConnectResult, String> {
-    let live = connect_live_role(server, room, role, auth)?;
+    let live = connect_live_role(server, room, Role::Viewer, None)?;
     Ok(ConnectResult {
         room: live.room.clone(),
         peer_id: live.peer_id.clone(),

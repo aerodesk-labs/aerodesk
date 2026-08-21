@@ -20,6 +20,7 @@ mod file_transfer;
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
+use aerodesk_codec::audio::RealAudioSender;
 use aerodesk_codec::encode::FfmpegEncoder;
 use aerodesk_core::access_unit::AccessUnitAssembler;
 use aerodesk_core::endpoint::ClientEvent;
@@ -31,7 +32,7 @@ use aerodesk_core::protocol::input::{
 };
 use aerodesk_core::protocol::signal::Role;
 use aerodesk_core::turn_client::setup_turn;
-use aerodesk_core::{Endpoint, media_pipeline::Codec, signaling::WsSignalClient};
+use aerodesk_core::{Endpoint, platform::Codec, signaling::WsSignalClient};
 use str0m::media::{Frequency, MediaTime};
 use str0m::net::Protocol;
 use str0m::{Input, Output, net::Receive};
@@ -808,7 +809,7 @@ fn connect_inner(
 
     let mut endpoint = match codec {
         None => Endpoint::new(),
-        Some(Codec::H264) => Endpoint::new_h264(),
+        Some(Codec::H264) => Endpoint::new_with_codec(Codec::H264),
         Some(c) => Endpoint::new_with_codec(c),
     };
     // 通配绑定（0.0.0.0）的 local_addr 不能作为候选（str0m 拒绝）：探测出接口 IP
@@ -1121,110 +1122,6 @@ impl aerodesk_core::platform::AudioCapturer for NoAudioCapture {
 
     fn next_samples(&mut self, _max: usize) -> Result<Vec<f32>, String> {
         Ok(Vec::new())
-    }
-}
-
-/// #73 真实系统音频发送：系统音频采集（core `AudioCapturer`，f32 mono 48k）
-/// → Opus/PCMU。macOS：SCK audio-only SCStream；Linux：PipeWire sink 捕获（#316）。
-/// 采集失败时由调用方回退 AudioTicker（合成音）。
-struct RealAudioSender<C: aerodesk_core::platform::AudioCapturer<Error = String>> {
-    cap: C,
-    /// Opus 编码器（--audio-opus；libopus 缺失时回退 PCMU）。
-    opus: Option<aerodesk_codec::audio::OpusEncoder>,
-    /// 48kHz 单声道 i16 缓冲（Opus 直用；PCMU 先 6:1 降采样到 8k）。
-    buf48: Vec<i16>,
-    /// 8kHz 单声道 i16 缓冲（PCMU 用）。
-    buf8: Vec<i16>,
-    pts48: u64,
-    pts8: u64,
-    /// 下一帧发送时间（20ms 节拍；一次只发一帧，避免 WriteWithoutPoll 突发）。
-    next_send: Instant,
-}
-
-impl<C: aerodesk_core::platform::AudioCapturer<Error = String>> RealAudioSender<C> {
-    fn new(cap: C, audio_opus: bool) -> Self {
-        let opus = if audio_opus {
-            match aerodesk_codec::audio::OpusEncoder::new(64_000) {
-                Ok(enc) => Some(enc),
-                Err(err) => {
-                    warn!("opus encoder init failed, fallback PCMU: {err}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        Self {
-            cap,
-            opus,
-            buf48: Vec::new(),
-            buf8: Vec::new(),
-            pts48: 0,
-            pts8: 0,
-            next_send: Instant::now(),
-        }
-    }
-
-    /// 排空采集样本并按 20ms 节拍补发**一帧**完整音频（防 WriteWithoutPoll 突发）。
-    fn tick(&mut self, endpoint: &mut Endpoint, mid: str0m::media::Mid, now: Instant) {
-        if now < self.next_send {
-            return;
-        }
-        let samples = self.cap.next_samples(48_000 * 5).unwrap_or_default();
-        if !samples.is_empty() {
-            self.buf48.extend(
-                samples
-                    .into_iter()
-                    .map(|v| (v.clamp(-1.0, 1.0) * 32767.0) as i16),
-            );
-        }
-
-        // Opus（48k）：一次一帧；不足 960 样本时等下一拍。
-        if self.opus.is_some() {
-            if self.buf48.len() >= 960 {
-                let frame: Vec<i16> = self.buf48.drain(..960).collect();
-                let data = self
-                    .opus
-                    .as_mut()
-                    .and_then(|enc| enc.encode(&frame).ok().flatten());
-                if let Some(data) = data {
-                    let rtp_time = str0m::media::MediaTime::new(
-                        self.pts48 * 960,
-                        str0m::media::Frequency::FORTY_EIGHT_KHZ,
-                    );
-                    if let Err(e) = endpoint.send_audio_frame_opus(mid, data, rtp_time) {
-                        warn!("send opus audio failed: {e:?}");
-                    }
-                }
-                self.pts48 += 1;
-                self.next_send = now + Duration::from_millis(20);
-            } else {
-                self.next_send = now + Duration::from_millis(5);
-            }
-            return;
-        }
-
-        // PCMU（8kHz 电话级）：48k → 8k 6:1 降采样（简单平均），一次一帧。
-        let mut i = 0;
-        while i + 6 <= self.buf48.len() {
-            let sum: i32 = self.buf48[i..i + 6].iter().map(|&x| x as i32).sum();
-            self.buf8.push((sum / 6) as i16);
-            i += 6;
-        }
-        self.buf48.drain(..i);
-        if self.buf8.len() >= 160 {
-            let frame: Vec<i16> = self.buf8.drain(..160).collect();
-            let data = aerodesk_core::pcmu::pcmu_encode(&frame);
-            let rtp_time =
-                str0m::media::MediaTime::new(self.pts8 * 160, str0m::media::Frequency::EIGHT_KHZ);
-            if let Err(e) = endpoint.send_audio_frame(mid, data, rtp_time) {
-                warn!("send pcmu audio failed: {e:?}");
-            }
-            self.pts8 += 1;
-            self.next_send = now + Duration::from_millis(20);
-        } else {
-            self.next_send = now + Duration::from_millis(5);
-        }
     }
 }
 
@@ -2038,7 +1935,7 @@ fn viewer(
                                         data.is_keyframe(),
                                     )
                                 {
-                                    let unit = aerodesk_core::media_pipeline::EncodedUnit {
+                                    let unit = aerodesk_core::platform::EncodedUnit {
                                         data: au.data,
                                         keyframe: au.keyframe,
                                         pts_ms: 0,
@@ -2075,7 +1972,7 @@ fn viewer(
                                         data.is_keyframe(),
                                     )
                                 {
-                                    let unit = aerodesk_core::media_pipeline::EncodedUnit {
+                                    let unit = aerodesk_core::platform::EncodedUnit {
                                         data: au.data,
                                         keyframe: au.keyframe,
                                         pts_ms: 0,
@@ -3456,7 +3353,7 @@ impl aerodesk_core::platform::Encoder for LinuxScreenEncoder {
     fn encode(
         &mut self,
         frame: &aerodesk_core::platform::VideoFrame,
-    ) -> Result<Option<aerodesk_core::media_pipeline::EncodedUnit>, Self::Error> {
+    ) -> Result<Option<aerodesk_core::platform::EncodedUnit>, Self::Error> {
         match self {
             Self::Vaapi(e) => aerodesk_core::platform::Encoder::encode(e, frame),
             Self::Soft(e) => aerodesk_core::platform::Encoder::encode(e, frame),

@@ -7,8 +7,8 @@ pub use aerodesk_codec::softenc::decode::SoftDecoder;
 
 #[cfg(windows)]
 mod dxva2 {
-    use aerodesk_core::media_pipeline::{Codec, EncodedUnit};
     use aerodesk_core::platform::VideoFrame;
+    use aerodesk_core::platform::{Codec, EncodedUnit};
 
     /// Windows 观看端硬件解码器（DXVA2 / D3D11VA，H.264/HEVC → RGBA）。
     ///

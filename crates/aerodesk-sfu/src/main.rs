@@ -649,14 +649,14 @@ pub fn main() {
                                 shared
                                     .tcp_streams
                                     .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
+                                    .unwrap_or_else(aerodesk_core::util::lock_recover)
                                     .insert(source, stream);
                             }
                             tcp::TcpEvent::Close { source } => {
                                 shared
                                     .tcp_streams
                                     .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
+                                    .unwrap_or_else(aerodesk_core::util::lock_recover)
                                     .remove(&source);
                                 shared
                                     .route_table
@@ -1275,7 +1275,9 @@ fn web_request(
     if request.method() == "GET" && request.url() == "/metrics" {
         let metrics = shared.metrics.clone();
         let loads: Vec<f64> = {
-            let r = router.lock().unwrap_or_else(|e| e.into_inner());
+            let r = router
+                .lock()
+                .unwrap_or_else(aerodesk_core::util::lock_recover);
             (0..metrics.len()).map(|i| r.load(i)).collect()
         };
         let shards: Vec<serde_json::Value> = metrics
@@ -1326,7 +1328,9 @@ fn web_request(
 
     if request.method() == "GET" && request.url() == "/metrics/prometheus" {
         let loads: Vec<f64> = {
-            let r = router.lock().unwrap_or_else(|e| e.into_inner());
+            let r = router
+                .lock()
+                .unwrap_or_else(aerodesk_core::util::lock_recover);
             (0..shared.metrics.len()).map(|i| r.load(i)).collect()
         };
         let body = prometheus_body(
@@ -1453,7 +1457,7 @@ fn web_request(
         } else {
             router
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(aerodesk_core::util::lock_recover)
                 .choose(&room)
         }
     };
@@ -1507,7 +1511,9 @@ mod tests {
 
     #[test]
     fn resolve_shard_count_env_override_and_fallback() {
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         // 有效覆盖（1..=64）
         unsafe { std::env::set_var("SFU_SHARD_COUNT", "3") };
         assert_eq!(resolve_shard_count(), 3);
@@ -1617,7 +1623,9 @@ mod tests {
 
     #[test]
     fn healthz_endpoint_ok() {
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         let shared = Shared::new(1);
         let router = Arc::new(Mutex::new(crate::router::ShardRouter::new(1)));
         let req = Request::fake_http("GET", "/healthz", vec![], Vec::new());
@@ -1887,7 +1895,9 @@ mod tests {
 
     #[test]
     fn start_rejected_while_draining() {
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover);
         DRAINING.store(true, Ordering::Relaxed);
         let shared = Shared::new(1);
         let router = Arc::new(Mutex::new(crate::router::ShardRouter::new(1)));

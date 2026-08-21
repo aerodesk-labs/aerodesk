@@ -7,7 +7,7 @@ use ffmpeg_next::format::Pixel;
 use ffmpeg_next::frame::Video;
 use ffmpeg_next::software::scaling::{Context as ScalingContext, flag::Flags as ScalingFlags};
 
-use aerodesk_core::media_pipeline::{Codec, EncodedUnit, VideoFrame};
+use aerodesk_core::platform::{Codec, EncodedUnit, VideoFrame};
 
 fn codec_id(codec: Codec) -> ffmpeg_next::codec::Id {
     match codec {

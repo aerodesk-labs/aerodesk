@@ -12,7 +12,7 @@ mod tests {
     fn hevc_vt_decodes_ffmpeg_annexb() {
         use crate::macos::synthetic::SyntheticSource;
         use aerodesk_codec::encode::FfmpegEncoder;
-        use aerodesk_core::media_pipeline::Codec;
+        use aerodesk_core::platform::Codec;
 
         if !HevcDecoder::is_hardware_supported() {
             eprintln!("skip: 本机无 HEVC 硬解");
