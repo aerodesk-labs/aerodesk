@@ -737,7 +737,7 @@ mod tests {
     #[test]
     fn peer_left_ends_active_call() {
         let mut presence = SignalPresence::new(test_config());
-        presence.call = CallState::Active(ActiveCallInfo {
+        presence.call = CallState::Active(crate::signal_call::ActiveCallInfo {
             call_id: "call-1".into(),
             from: "caller-peer".into(),
             deadline: Instant::now() + Duration::from_secs(60),
@@ -750,7 +750,7 @@ mod tests {
         assert_eq!(evs.len(), 1);
         assert!(matches!(&evs[0], PresenceEvent::Hangup { from, .. } if from == "caller-peer"));
         // 无关 peer 离开不影响当前呼叫。
-        presence.call = CallState::Active(ActiveCallInfo {
+        presence.call = CallState::Active(crate::signal_call::ActiveCallInfo {
             call_id: "call-2".into(),
             from: "caller-peer".into(),
             deadline: Instant::now() + Duration::from_secs(60),
