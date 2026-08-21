@@ -1645,14 +1645,28 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                                                 *PENDING_CALL
                                                     .lock()
                                                     .unwrap_or_else(|e| e.into_inner()) = None;
-                                                if let Some(h) =
-                                                    PRESENCE.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
-                                                {
-                                                    let _ = h.presence.lock().unwrap().accept_call();
-                                                }
-                                                // 经事件循环拿主窗口（MAIN_WINDOW 是
-                                                // macOS 门控的，跨平台用 accept_ui）。
+                                                // #545：确认期间用户可能已关闭「开启被控」
+                                                // ——接受前重读开关，关闭则拒绝出流。
                                                 crate::with_ui(&accept_ui, |ui| {
+                                                    if !ui.get_inc_enabled() {
+                                                        if let Some(h) =
+                                                            PRESENCE.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+                                                        {
+                                                            let _ = h.presence.lock().unwrap().reject_call(
+                                                                Some("确认期间关闭被控"),
+                                                                Some("control_disabled"),
+                                                            );
+                                                        }
+                                                        ui.set_status("已拒绝：确认期间关闭了被控".into());
+                                                        return;
+                                                    }
+                                                    if let Some(h) =
+                                                        PRESENCE.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+                                                    {
+                                                        let _ = h.presence.lock().unwrap().accept_call();
+                                                    }
+                                                    // 经事件循环拿主窗口（MAIN_WINDOW 是
+                                                    // macOS 门控的，跨平台用 accept_ui）。
                                                     start_publisher_ui(ui);
                                                     ui.set_status("已接受远控请求".into());
                                                 });
@@ -2266,12 +2280,12 @@ fn stop_publisher_ui(ui: &AppWindow) {
     aerodesk_session::generic_publisher::stop_publisher(publisher_event_sink(&ui.as_weak()));
 }
 
-/// 「开启被控」开关接入：开启时启动发布线程，关闭时置 stop 退出线程
-/// （Windows/macOS 各自的发布实现由 aerodesk-session 按平台分发，#487）。
+/// 「开启被控」开关接入（#539 语义修正）：开关 = 是否允许被授权设备接入。
+/// 关闭时若发布在跑立即停止（吊销授权）；开启时**不主动开流**——出流只发生在
+/// 呼叫接受后（弹窗确认或「免授权」静默接听，#541/#545）。
+/// presence 常驻与开关无关（启动即连信令，保持可被呼叫/可拒绝）。
 fn handle_toggle_inc(ui: &AppWindow) {
-    if ui.get_inc_enabled() {
-        start_publisher_ui(ui);
-    } else {
+    if !ui.get_inc_enabled() {
         stop_publisher_ui(ui);
     }
 }
@@ -3437,20 +3451,10 @@ fn main() -> Result<(), slint::PlatformError> {
     // 启动时刷一次权限状态
     ui.invoke_refresh_perms();
 
-    // Windows：上次退出前已开启被控，则事件循环起来后恢复发布（开关持久化）。
-    #[cfg(target_os = "windows")]
-    if ui.get_inc_enabled() {
-        let weak = ui.as_weak();
-        slint::Timer::single_shot(std::time::Duration::from_millis(800), move || {
-            if let Some(ui) = weak.upgrade() {
-                // #404 评审：触发前重读开关——用户在前 800ms 内关闭时不得再启动被控端，
-                // 否则界面上开关为关而采集/连接/「已启动」提示照常，需再开关一次才能停。
-                if ui.get_inc_enabled() {
-                    start_publisher_ui(&ui);
-                }
-            }
-        });
-    }
+    // #539/#545 语义修正：启动**不自动发布**——「开启被控」开关持久化恢复的
+    // 是「可被呼叫」状态（presence 启动即连），出流只在呼叫接受后发生
+    // （IncomingCall → 弹窗确认/免授权静默接听）。旧实现「inc_enabled=true
+    // 启动即恢复发布」会让任何能入房的人绕开授权直接控制（实测发现，见 #545）。
 
     // macOS：点击 Dock 图标恢复隐藏窗口（配合托盘隐藏）。
     #[cfg(target_os = "macos")]
