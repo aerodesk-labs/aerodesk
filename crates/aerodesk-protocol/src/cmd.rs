@@ -66,6 +66,9 @@ pub enum CmdResult {
         truncated: bool,
         #[serde(default)]
         error: Option<String>,
+        /// #13 结构化错误码（[`crate::error::ErrorCode`] 的 wire 串；旧对端缺省 None）。
+        #[serde(default)]
+        code: Option<String>,
     },
     File {
         /// base64 数据。
@@ -74,17 +77,26 @@ pub enum CmdResult {
         size: u64,
         #[serde(default)]
         error: Option<String>,
+        /// #13 结构化错误码（[`crate::error::ErrorCode`] 的 wire 串；旧对端缺省 None）。
+        #[serde(default)]
+        code: Option<String>,
     },
     ProcessList {
         #[serde(default)]
         processes: Vec<ProcessInfo>,
         #[serde(default)]
         error: Option<String>,
+        /// #13 结构化错误码（[`crate::error::ErrorCode`] 的 wire 串；旧对端缺省 None）。
+        #[serde(default)]
+        code: Option<String>,
     },
     Killed {
         pid: u32,
         #[serde(default)]
         error: Option<String>,
+        /// #13 结构化错误码（[`crate::error::ErrorCode`] 的 wire 串；旧对端缺省 None）。
+        #[serde(default)]
+        code: Option<String>,
     },
     /// 发消息回显（被控端收到 Chat 后回给观看端）。
     Chat {
@@ -212,6 +224,7 @@ mod tests {
             stderr: String::new(),
             truncated: false,
             error: None,
+            code: None,
         };
         assert!(run.ok());
         let run_err = CmdResult::Run {
@@ -220,7 +233,26 @@ mod tests {
             stderr: String::new(),
             truncated: false,
             error: Some("blocked by policy".into()),
+            code: Some("blocked_by_policy".into()),
         };
         assert!(!run_err.ok());
+
+        // #13 兼容性：旧 JSON（无 code 字段）仍可解析，code 缺省 None。
+        let old_json = r#"{"id":1,"result":{"type":"run","exit_code":null,"stdout":"","stderr":"","truncated":false,"error":"boom"}}"#;
+        let old: CmdResponse = serde_json::from_str(old_json).unwrap();
+        match old.result {
+            CmdResult::Run { code, error, .. } => {
+                assert_eq!(code, None);
+                assert_eq!(error.as_deref(), Some("boom"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        // 新 JSON（带 code）round-trip 保持字段。
+        let new_json = r#"{"id":2,"result":{"type":"run","exit_code":null,"stdout":"","stderr":"","truncated":false,"error":"boom","code":"blocked_by_policy"}}"#;
+        let new: CmdResponse = serde_json::from_str(new_json).unwrap();
+        match new.result {
+            CmdResult::Run { code, .. } => assert_eq!(code.as_deref(), Some("blocked_by_policy")),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }

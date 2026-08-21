@@ -4,7 +4,7 @@
 //! 行为一致（`sh -c` / `ps` / `kill`），当前直接委托默认实现；本模块是 macOS
 //! 平台扩展点（后续可按需接入 `sandbox-exec`、`open` 文件处理、AppleScript 等）。
 
-use aerodesk_core::cmd_exec::{CmdOutput, DefaultCommandExecutor};
+use aerodesk_core::cmd_exec::{CmdExecError, CmdOutput, DefaultCommandExecutor};
 use aerodesk_core::platform::CommandExecutor;
 use aerodesk_core::protocol::cmd::ProcessInfo;
 
@@ -17,19 +17,19 @@ impl CommandExecutor for MacCommandExecutor {
         DefaultCommandExecutor.run_command(command, cwd, timeout_ms)
     }
 
-    fn read_file(&self, path: &str, max_bytes: Option<usize>) -> Result<Vec<u8>, String> {
+    fn read_file(&self, path: &str, max_bytes: Option<usize>) -> Result<Vec<u8>, CmdExecError> {
         DefaultCommandExecutor.read_file(path, max_bytes)
     }
 
-    fn write_file(&self, path: &str, data: &[u8]) -> Result<(), String> {
+    fn write_file(&self, path: &str, data: &[u8]) -> Result<(), CmdExecError> {
         DefaultCommandExecutor.write_file(path, data)
     }
 
-    fn list_processes(&self) -> Result<Vec<ProcessInfo>, String> {
+    fn list_processes(&self) -> Result<Vec<ProcessInfo>, CmdExecError> {
         DefaultCommandExecutor.list_processes()
     }
 
-    fn kill_process(&self, pid: u32) -> Result<(), String> {
+    fn kill_process(&self, pid: u32) -> Result<(), CmdExecError> {
         DefaultCommandExecutor.kill_process(pid)
     }
 }

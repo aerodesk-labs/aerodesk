@@ -56,19 +56,23 @@ fn busy_result(action: &CmdAction) -> CmdResult {
             stderr: String::new(),
             truncated: false,
             error: Some(busy()),
+            code: Some("busy".into()),
         },
         CmdAction::ReadFile { .. } | CmdAction::WriteFile { .. } => CmdResult::File {
             data: None,
             size: 0,
             error: Some(busy()),
+            code: Some("busy".into()),
         },
         CmdAction::ListProcesses => CmdResult::ProcessList {
             processes: Vec::new(),
             error: Some(busy()),
+            code: Some("busy".into()),
         },
         CmdAction::KillProcess { pid } => CmdResult::Killed {
             pid: *pid,
             error: Some(busy()),
+            code: Some("busy".into()),
         },
         CmdAction::Chat { .. } => CmdResult::Chat {
             sender: String::new(),
@@ -168,6 +172,7 @@ fn execute(action: &CmdAction) -> CmdResult {
                 stderr: out.stderr,
                 truncated: out.truncated,
                 error: out.error,
+                code: out.code,
             }
         }
         CmdAction::ReadFile { path, max_bytes } => match read_file(path, *max_bytes) {
@@ -175,11 +180,13 @@ fn execute(action: &CmdAction) -> CmdResult {
                 data: Some(encode_b64(&data)),
                 size: data.len() as u64,
                 error: None,
+                code: None,
             },
             Err(e) => CmdResult::File {
                 data: None,
                 size: 0,
-                error: Some(e),
+                error: Some(e.to_string()),
+                code: Some(e.code().as_str().into()),
             },
         },
         CmdAction::WriteFile { path, data } => match write_file(path, data, &allow) {
@@ -187,31 +194,37 @@ fn execute(action: &CmdAction) -> CmdResult {
                 data: None,
                 size: 0,
                 error: None,
+                code: None,
             },
             Err(e) => CmdResult::File {
                 data: None,
                 size: 0,
-                error: Some(e),
+                error: Some(e.to_string()),
+                code: Some(e.code().as_str().into()),
             },
         },
         CmdAction::ListProcesses => match list_processes() {
             Ok(processes) => CmdResult::ProcessList {
                 processes,
                 error: None,
+                code: None,
             },
             Err(e) => CmdResult::ProcessList {
                 processes: vec![],
-                error: Some(e),
+                error: Some(e.to_string()),
+                code: Some(e.code().as_str().into()),
             },
         },
         CmdAction::KillProcess { pid } => match kill_process(*pid, &allow) {
             Ok(()) => CmdResult::Killed {
                 pid: *pid,
                 error: None,
+                code: None,
             },
             Err(e) => CmdResult::Killed {
                 pid: *pid,
-                error: Some(e),
+                error: Some(e.to_string()),
+                code: Some(e.code().as_str().into()),
             },
         },
         CmdAction::Chat { text, sender, .. } => CmdResult::Chat {

@@ -531,7 +531,7 @@ impl SignalPresence {
                     to: incoming.from,
                     call_id: incoming.call_id,
                     reason: Some("busy".into()),
-                    error_code: Some("busy".into()),
+                    error_code: Some(crate::protocol::error::ErrorCode::Busy.as_str().into()),
                 });
             }
         }

@@ -1585,7 +1585,9 @@ fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, r
                             to: from,
                             call_id,
                             reason: Some("target offline".into()),
-                            error_code: Some("offline".into()),
+                            error_code: Some(
+                                aerodesk_protocol::error::ErrorCode::Offline.as_str().into(),
+                            ),
                         },
                     );
                     continue;

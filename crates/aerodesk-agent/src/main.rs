@@ -1144,6 +1144,7 @@ fn print_cmd_result(resp: &aerodesk_core::protocol::cmd::CmdResponse) {
             stderr,
             truncated,
             error,
+            code: _,
         } => {
             info!(
                 "CMD_RESULT: ok={} exit={:?} truncated={} error={:?}",
@@ -1155,7 +1156,12 @@ fn print_cmd_result(resp: &aerodesk_core::protocol::cmd::CmdResponse) {
             info!("CMD_STDOUT:\n{stdout}");
             info!("CMD_STDERR:\n{stderr}");
         }
-        CmdResult::File { data, size, error } => {
+        CmdResult::File {
+            data,
+            size,
+            error,
+            code: _,
+        } => {
             info!(
                 "CMD_RESULT: ok={} type=file size={size} error={error:?}",
                 error.is_none()
@@ -1166,7 +1172,11 @@ fn print_cmd_result(resp: &aerodesk_core::protocol::cmd::CmdResponse) {
                 }
             }
         }
-        CmdResult::ProcessList { processes, error } => {
+        CmdResult::ProcessList {
+            processes,
+            error,
+            code: _,
+        } => {
             info!(
                 "CMD_RESULT: ok={} type=ps count={} error={error:?}",
                 error.is_none(),
@@ -1176,7 +1186,11 @@ fn print_cmd_result(resp: &aerodesk_core::protocol::cmd::CmdResponse) {
                 info!("CMD_PROC: {} {}", p.pid, p.name);
             }
         }
-        CmdResult::Killed { pid, error } => {
+        CmdResult::Killed {
+            pid,
+            error,
+            code: _,
+        } => {
             info!(
                 "CMD_RESULT: ok={} type=kill pid={pid} error={error:?}",
                 error.is_none()

@@ -14,6 +14,7 @@ pub mod access_unit;
 pub mod chat;
 pub mod cmd;
 pub mod cursor;
+pub mod error;
 pub mod file;
 pub mod input;
 pub mod jwt;

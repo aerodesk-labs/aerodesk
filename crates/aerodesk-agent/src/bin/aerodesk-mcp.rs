@@ -522,6 +522,7 @@ fn format_result(resp: &aerodesk_core::protocol::cmd::CmdResponse) -> (String, b
             stderr,
             truncated,
             error,
+            code,
         } => {
             let mut t = format!("exit={exit_code:?}");
             if !stdout.is_empty() {
@@ -536,9 +537,17 @@ fn format_result(resp: &aerodesk_core::protocol::cmd::CmdResponse) -> (String, b
             if let Some(e) = error {
                 t.push_str(&format!("\nerror: {e}"));
             }
+            if let Some(c) = code {
+                t.push_str(&format!("\ncode: {c}"));
+            }
             (t, error.is_none() && *exit_code == Some(0))
         }
-        CmdResult::File { data, size, error } => {
+        CmdResult::File {
+            data,
+            size,
+            error,
+            code,
+        } => {
             if let Some(e) = error {
                 (format!("error: {e}"), false)
             } else if let Some(b64) = data {
@@ -553,7 +562,11 @@ fn format_result(resp: &aerodesk_core::protocol::cmd::CmdResponse) -> (String, b
                 (format!("size={size}"), true)
             }
         }
-        CmdResult::ProcessList { processes, error } => {
+        CmdResult::ProcessList {
+            processes,
+            error,
+            code,
+        } => {
             if let Some(e) = error {
                 (format!("error: {e}"), false)
             } else {
@@ -564,7 +577,7 @@ fn format_result(resp: &aerodesk_core::protocol::cmd::CmdResponse) -> (String, b
                 (t.trim_end().to_string(), true)
             }
         }
-        CmdResult::Killed { pid, error } => {
+        CmdResult::Killed { pid, error, code } => {
             if let Some(e) = error {
                 (format!("error: {e}"), false)
             } else {
@@ -627,6 +640,7 @@ mod tests {
                 stderr: String::new(),
                 truncated: false,
                 error: None,
+                code: None,
             },
         };
         let (t, ok) = format_result(&resp);
@@ -643,6 +657,7 @@ mod tests {
                 data: Some(aerodesk_core::protocol::cmd::encode_b64(b"hello")),
                 size: 5,
                 error: None,
+                code: None,
             },
         };
         let (t, ok) = format_result(&f);
@@ -655,6 +670,7 @@ mod tests {
                     name: "sh".into(),
                 }],
                 error: None,
+                code: None,
             },
         };
         let (t, ok) = format_result(&ps);

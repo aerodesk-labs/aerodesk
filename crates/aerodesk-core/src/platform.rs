@@ -215,6 +215,9 @@ pub struct CmdOutput {
     pub stderr: String,
     pub truncated: bool,
     pub error: Option<String>,
+    /// #13 结构化错误码（[`crate::protocol::error::ErrorCode`] 的 wire 串；
+    /// 无错误为 None）。
+    pub code: Option<String>,
 }
 
 /// 远程命令/文件/进程执行器（被控端；「bash」抽象）。
@@ -228,13 +231,19 @@ pub trait CommandExecutor {
     /// 错误放入 [`CmdOutput::error`]，不向调用方抛错。
     fn run_command(&self, command: &str, cwd: Option<&str>, timeout_ms: Option<u64>) -> CmdOutput;
     /// 读文件（`max_bytes` 为上限；超出返回错误）。
-    fn read_file(&self, path: &str, max_bytes: Option<usize>) -> Result<Vec<u8>, String>;
+    fn read_file(
+        &self,
+        path: &str,
+        max_bytes: Option<usize>,
+    ) -> Result<Vec<u8>, crate::cmd_exec::CmdExecError>;
     /// 写文件（`data` 为原始字节）。
-    fn write_file(&self, path: &str, data: &[u8]) -> Result<(), String>;
+    fn write_file(&self, path: &str, data: &[u8]) -> Result<(), crate::cmd_exec::CmdExecError>;
     /// 列出进程（平台格式差异收敛于此）。
-    fn list_processes(&self) -> Result<Vec<crate::protocol::cmd::ProcessInfo>, String>;
+    fn list_processes(
+        &self,
+    ) -> Result<Vec<crate::protocol::cmd::ProcessInfo>, crate::cmd_exec::CmdExecError>;
     /// 结束进程。
-    fn kill_process(&self, pid: u32) -> Result<(), String>;
+    fn kill_process(&self, pid: u32) -> Result<(), crate::cmd_exec::CmdExecError>;
 }
 
 /// 唤醒锁句柄：Drop 即释放（平台实现负责 kill 子进程/恢复系统状态）。

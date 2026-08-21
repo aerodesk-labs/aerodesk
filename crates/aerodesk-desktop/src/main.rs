@@ -1624,7 +1624,7 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                                     // 被授权设备接入；关闭时不弹窗、不接受）。
                                     let _ = p.lock().unwrap().reject_call(
                                         Some("未开启被控"),
-                                        Some("control_disabled"),
+                                        Some(aerodesk_core::protocol::error::ErrorCode::ControlDisabled.as_str()),
                                     );
                                     ui.set_status("已拒绝呼叫：未开启被控".into());
                                 } else if ui.get_inc_auto_accept() {
@@ -1655,7 +1655,7 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                                                         {
                                                             let _ = h.presence.lock().unwrap().reject_call(
                                                                 Some("确认期间关闭被控"),
-                                                                Some("control_disabled"),
+                                                                Some(aerodesk_core::protocol::error::ErrorCode::ControlDisabled.as_str()),
                                                             );
                                                         }
                                                         ui.set_status("已拒绝：确认期间关闭了被控".into());
@@ -1683,7 +1683,7 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                                                 {
                                                     let _ = h.presence.lock().unwrap().reject_call(
                                                         Some("用户拒绝"),
-                                                        Some("user_rejected"),
+                                                        Some(aerodesk_core::protocol::error::ErrorCode::UserRejected.as_str()),
                                                     );
                                                 }
                                                 let _ = w2.upgrade_in_event_loop(|ui| { ui.hide(); });
@@ -1737,7 +1737,7 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                     let _ = presence
                         .lock()
                         .unwrap()
-                        .reject_call(Some("呼叫确认超时"), Some("timeout"))
+                        .reject_call(Some("呼叫确认超时"), Some(aerodesk_core::protocol::error::ErrorCode::Timeout.as_str()))
                         .map_err(|e| tracing::warn!("timeout reject send failed: {e}"));
                     tracing::info!("呼叫确认超时：reject 完成");
                     let uiw = ui_weak.clone();

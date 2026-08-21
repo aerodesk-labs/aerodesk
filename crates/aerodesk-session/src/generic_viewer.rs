@@ -35,6 +35,7 @@ pub(crate) fn format_cmd_response(response: &CmdResponse) -> String {
             stderr,
             truncated,
             error,
+            code: _,
         } => {
             let mut out = String::new();
             if let Some(error) = error {
@@ -70,7 +71,11 @@ pub(crate) fn format_cmd_response(response: &CmdResponse) -> String {
                 format!("[文件响应] {size} 字节")
             }
         }
-        CmdResult::ProcessList { processes, error } => {
+        CmdResult::ProcessList {
+            processes,
+            error,
+            code: _,
+        } => {
             if let Some(error) = error {
                 format!("[进程列表错误] {error}")
             } else {
@@ -81,7 +86,11 @@ pub(crate) fn format_cmd_response(response: &CmdResponse) -> String {
                 out
             }
         }
-        CmdResult::Killed { pid, error } => {
+        CmdResult::Killed {
+            pid,
+            error,
+            code: _,
+        } => {
             if let Some(error) = error {
                 format!("[结束进程 {pid} 失败] {error}")
             } else {
@@ -646,6 +655,7 @@ mod tests {
                 stderr: String::new(),
                 truncated: false,
                 error: None,
+                code: None,
             },
         };
         let text = format_cmd_response(&response);
@@ -664,6 +674,7 @@ mod tests {
                 stderr: "denied".into(),
                 truncated: true,
                 error: Some("blocked by policy".into()),
+                code: Some("blocked_by_policy".into()),
             },
         };
         let text = format_cmd_response(&response);

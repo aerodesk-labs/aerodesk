@@ -18,6 +18,65 @@ use crate::platform::CommandExecutor;
 /// 命令执行结果（类型定义收敛在 `platform`，此处 re-export 保持旧路径可用）。
 pub use crate::platform::CmdOutput;
 
+/// 命令执行错误（#487 审查批次 3 / #13）。
+///
+/// Display 保持既有文案（wire 文本零变化）；[`Self::code`] 映射稳定错误码
+/// （[`aerodesk_protocol::error::ErrorCode`]），wire 层程序分支只认 code。
+#[derive(Debug, thiserror::Error)]
+pub enum CmdExecError {
+    #[error("empty command")]
+    EmptyCommand,
+    #[error("blocked by policy: {0}")]
+    BlockedByPolicy(String),
+    #[error("spawn failed: {0}")]
+    SpawnFailed(String),
+    #[error("wait failed: {0}")]
+    WaitFailed(String),
+    #[error("timeout after {0}ms")]
+    Timeout(u128),
+    #[error("read failed: {0}")]
+    ReadFailed(#[source] std::io::Error),
+    #[error("file too large (>{0}B)")]
+    FileTooLarge(u64),
+    #[error("mkdir: {0}")]
+    Mkdir(#[source] std::io::Error),
+    #[error("write failed: {0}")]
+    WriteFailed(#[source] std::io::Error),
+    #[error("ps failed: {0}")]
+    Ps(#[source] std::io::Error),
+    #[error("kill failed: {0}")]
+    KillFailed(#[source] std::io::Error),
+    #[error("taskkill failed: {0}")]
+    TaskkillFailed(#[source] std::io::Error),
+    #[error("kill pid {0} exit {1:?}")]
+    KillExit(u32, Option<i32>),
+    #[error("invalid base64")]
+    InvalidBase64,
+}
+
+impl CmdExecError {
+    /// wire 稳定错误码（[`aerodesk_protocol::error::ErrorCode`]）。
+    pub fn code(&self) -> aerodesk_protocol::error::ErrorCode {
+        use aerodesk_protocol::error::ErrorCode;
+        match self {
+            CmdExecError::EmptyCommand => ErrorCode::EmptyCommand,
+            CmdExecError::BlockedByPolicy(_) => ErrorCode::BlockedByPolicy,
+            CmdExecError::SpawnFailed(_) => ErrorCode::SpawnFailed,
+            CmdExecError::WaitFailed(_) => ErrorCode::WaitFailed,
+            CmdExecError::Timeout(_) => ErrorCode::Timeout,
+            CmdExecError::ReadFailed(_)
+            | CmdExecError::Mkdir(_)
+            | CmdExecError::WriteFailed(_)
+            | CmdExecError::Ps(_)
+            | CmdExecError::KillFailed(_)
+            | CmdExecError::TaskkillFailed(_) => ErrorCode::IoError,
+            CmdExecError::FileTooLarge(_) => ErrorCode::FileTooLarge,
+            CmdExecError::InvalidBase64 => ErrorCode::InvalidInput,
+            CmdExecError::KillExit(..) => ErrorCode::Internal,
+        }
+    }
+}
+
 /// 单流（stdout/stderr）输出上限。
 pub const MAX_OUTPUT_BYTES: usize = 1 << 20;
 /// 默认超时。
@@ -268,6 +327,7 @@ pub fn run_command_with(
     if command.is_empty() {
         return CmdOutput {
             error: Some("empty command".into()),
+            code: Some("empty_command".into()),
             ..Default::default()
         };
     }
@@ -278,6 +338,7 @@ pub fn run_command_with(
     if is_dangerous(&command) && !allowed {
         let out = CmdOutput {
             error: Some(format!("blocked by policy: {command}")),
+            code: Some("blocked_by_policy".into()),
             ..Default::default()
         };
         audit_opt(audit_path, &command, cwd, &out);
@@ -302,6 +363,7 @@ impl CommandExecutor for DefaultCommandExecutor {
         if command.is_empty() {
             return CmdOutput {
                 error: Some("empty command".into()),
+                code: Some("empty_command".into()),
                 ..Default::default()
             };
         }
@@ -326,6 +388,7 @@ impl CommandExecutor for DefaultCommandExecutor {
             Err(e) => {
                 return CmdOutput {
                     error: Some(format!("spawn failed: {e}")),
+                    code: Some("spawn_failed".into()),
                     ..Default::default()
                 };
             }
@@ -375,6 +438,7 @@ impl CommandExecutor for DefaultCommandExecutor {
                 Err(e) => {
                     return CmdOutput {
                         error: Some(format!("wait failed: {e}")),
+                        code: Some("wait_failed".into()),
                         ..Default::default()
                     };
                 }
@@ -402,33 +466,38 @@ impl CommandExecutor for DefaultCommandExecutor {
             } else {
                 None
             },
+            code: if timed_out {
+                Some("timeout".into())
+            } else {
+                None
+            },
         }
     }
 
-    fn read_file(&self, path: &str, max_bytes: Option<usize>) -> Result<Vec<u8>, String> {
+    fn read_file(&self, path: &str, max_bytes: Option<usize>) -> Result<Vec<u8>, CmdExecError> {
         let cap = max_bytes
             .unwrap_or(DEFAULT_READ_MAX_BYTES)
             .min(MAX_READ_BYTES);
-        let mut f = std::fs::File::open(path).map_err(|e| format!("read failed: {e}"))?;
+        let mut f = std::fs::File::open(path).map_err(CmdExecError::ReadFailed)?;
         // 只读 cap+1 字节：超大文件不整体读入内存；超限返回的 error 响应很小可送达。
         let mut buf = Vec::with_capacity(cap + 1);
         f.take((cap + 1) as u64)
             .read_to_end(&mut buf)
-            .map_err(|e| format!("read failed: {e}"))?;
+            .map_err(CmdExecError::ReadFailed)?;
         if buf.len() > cap {
-            return Err(format!("file too large (>{cap}B)"));
+            return Err(CmdExecError::FileTooLarge(cap as u64));
         }
         Ok(buf)
     }
 
-    fn write_file(&self, path: &str, data: &[u8]) -> Result<(), String> {
+    fn write_file(&self, path: &str, data: &[u8]) -> Result<(), CmdExecError> {
         if let Some(parent) = Path::new(path).parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
+            std::fs::create_dir_all(parent).map_err(CmdExecError::Mkdir)?;
         }
-        std::fs::write(path, data).map_err(|e| format!("write failed: {e}"))
+        std::fs::write(path, data).map_err(CmdExecError::WriteFailed)
     }
 
-    fn list_processes(&self) -> Result<Vec<ProcessInfo>, String> {
+    fn list_processes(&self) -> Result<Vec<ProcessInfo>, CmdExecError> {
         let mut cmd = if cfg!(windows) {
             let mut c = Command::new("tasklist");
             c.arg("/FO").arg("CSV");
@@ -438,7 +507,7 @@ impl CommandExecutor for DefaultCommandExecutor {
             c.arg("-axo").arg("pid=,comm=");
             c
         };
-        let out = cmd.output().map_err(|e| format!("ps failed: {e}"))?;
+        let out = cmd.output().map_err(CmdExecError::Ps)?;
         let text = String::from_utf8_lossy(&out.stdout);
         let mut procs = Vec::new();
         if cfg!(windows) {
@@ -468,24 +537,24 @@ impl CommandExecutor for DefaultCommandExecutor {
         Ok(procs)
     }
 
-    fn kill_process(&self, pid: u32) -> Result<(), String> {
+    fn kill_process(&self, pid: u32) -> Result<(), CmdExecError> {
         let status = if cfg!(windows) {
             Command::new("taskkill")
                 .arg("/PID")
                 .arg(pid.to_string())
                 .arg("/F")
                 .status()
-                .map_err(|e| format!("taskkill failed: {e}"))?
+                .map_err(CmdExecError::TaskkillFailed)?
         } else {
             Command::new("kill")
                 .arg(pid.to_string())
                 .status()
-                .map_err(|e| format!("kill failed: {e}"))?
+                .map_err(CmdExecError::KillFailed)?
         };
         if status.success() {
             Ok(())
         } else {
-            Err(format!("kill pid {pid} exit {:?}", status.code()))
+            Err(CmdExecError::KillExit(pid, status.code()))
         }
     }
 }
@@ -512,6 +581,7 @@ pub fn audit_at(path: &Path, command: &str, cwd: Option<&str>, out: &CmdOutput) 
         "cwd": cwd,
         "exit_code": out.exit_code,
         "error": out.error,
+        "code": out.code,
         "stdout_bytes": out.stdout.len(),
         "stderr_bytes": out.stderr.len(),
         "truncated": out.truncated,
@@ -693,7 +763,7 @@ pub fn is_forbidden_write_path(path: &str) -> bool {
 }
 
 /// 读文件（上限 max_bytes，默认 4MB，硬上限 16MB）。委托 [`DefaultCommandExecutor`]。
-pub fn read_file(path: &str, max_bytes: Option<usize>) -> Result<Vec<u8>, String> {
+pub fn read_file(path: &str, max_bytes: Option<usize>) -> Result<Vec<u8>, CmdExecError> {
     DefaultCommandExecutor.read_file(path, max_bytes)
 }
 
@@ -701,32 +771,32 @@ pub fn read_file(path: &str, max_bytes: Option<usize>) -> Result<Vec<u8>, String
 /// 策略检查后委托 [`DefaultCommandExecutor`] 原始写入。
 /// 白名单按归一化路径匹配前缀（防 `//` 变体绕过）；
 /// 路径穿越（`/../`）**不可**被白名单豁免。
-pub fn write_file(path: &str, data_b64: &str, allowlist: &[String]) -> Result<(), String> {
+pub fn write_file(path: &str, data_b64: &str, allowlist: &[String]) -> Result<(), CmdExecError> {
     let norm = normalize_write_path(path);
     let allowed = allowlist
         .iter()
         .any(|p| !p.is_empty() && norm.starts_with(&normalize_write_path(p)));
     if contains_traversal(&norm) || (is_forbidden_write_prefix(&norm) && !allowed) {
-        return Err(format!("blocked by policy: write {path}"));
+        return Err(CmdExecError::BlockedByPolicy(format!("write {path}")));
     }
-    let data = decode_b64(data_b64).ok_or_else(|| "invalid base64".to_string())?;
+    let data = decode_b64(data_b64).ok_or(CmdExecError::InvalidBase64)?;
     let write_path = normalize_write_path_for_io(path);
     DefaultCommandExecutor.write_file(&write_path, &data)
 }
 
 /// 列出进程（unix：`ps -axo pid=,comm=`；Windows：tasklist）。委托 [`DefaultCommandExecutor`]。
-pub fn list_processes() -> Result<Vec<ProcessInfo>, String> {
+pub fn list_processes() -> Result<Vec<ProcessInfo>, CmdExecError> {
     DefaultCommandExecutor.list_processes()
 }
 
 /// 结束进程（unix：`kill`；Windows：taskkill）。pid 0/1 默认禁止；
 /// 策略检查后委托 [`DefaultCommandExecutor`] 原始执行。
-pub fn kill_process(pid: u32, allowlist: &[String]) -> Result<(), String> {
+pub fn kill_process(pid: u32, allowlist: &[String]) -> Result<(), CmdExecError> {
     let allowed = allowlist
         .iter()
         .any(|p| p == "*" || p == &format!("kill:{pid}"));
     if (pid == 0 || pid == 1) && !allowed {
-        return Err(format!("blocked by policy: kill pid {pid}"));
+        return Err(CmdExecError::BlockedByPolicy(format!("kill pid {pid}")));
     }
     DefaultCommandExecutor.kill_process(pid)
 }
@@ -852,7 +922,7 @@ mod tests {
         assert_eq!(data, b"hello-aerodesk-file");
         // 超上限报错
         let err = read_file(f.to_str().unwrap(), Some(4)).unwrap_err();
-        assert!(err.contains("too large"));
+        assert!(err.to_string().contains("too large"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -864,10 +934,10 @@ mod tests {
         // 超过硬上限（700KiB）的默认读 → too large（错误响应可经 cmd 通道送达）。
         std::fs::write(&f, vec![0u8; MAX_READ_BYTES + 100]).unwrap();
         let err = read_file(f.to_str().unwrap(), None).unwrap_err();
-        assert!(err.contains("too large"), "{err}");
+        assert!(err.to_string().contains("too large"), "{err}");
         // 显式 max_bytes 超过硬上限时同样收敛到硬上限。
         let err = read_file(f.to_str().unwrap(), Some(MAX_READ_BYTES + 1)).unwrap_err();
-        assert!(err.contains("too large"), "{err}");
+        assert!(err.to_string().contains("too large"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -879,7 +949,7 @@ mod tests {
         assert_eq!(std::fs::read(&f).unwrap(), b"hello-write");
         // 敏感路径默认禁止
         let err = write_file("/etc/aerodesk-test.txt", &encode_b64(b"x"), &[]).unwrap_err();
-        assert!(err.contains("blocked by policy"));
+        assert!(err.to_string().contains("blocked by policy"));
         // 白名单放行：策略不再拦截（写入可能成功（如 Windows 根路径可写）或报
         // 系统权限错误，但都不应再是 blocked by policy）。
         match write_file(
@@ -889,7 +959,7 @@ mod tests {
         ) {
             Ok(()) => {}
             Err(e) => assert!(
-                !e.contains("blocked by policy"),
+                !e.to_string().contains("blocked by policy"),
                 "白名单应放行策略层拦截: {e}"
             ),
         }
@@ -905,11 +975,13 @@ mod tests {
         assert!(
             kill_process(0, &[])
                 .unwrap_err()
+                .to_string()
                 .contains("blocked by policy")
         );
         assert!(
             kill_process(1, &[])
                 .unwrap_err()
+                .to_string()
                 .contains("blocked by policy")
         );
     }
@@ -1006,7 +1078,7 @@ mod tests {
             &["/tmp".to_string()],
         )
         .unwrap_err();
-        assert!(err.contains("blocked by policy"), "{err}");
+        assert!(err.to_string().contains("blocked by policy"), "{err}");
         // 对照：白名单仍按原语义放行普通敏感前缀（不含穿越）。
         match write_file(
             "/etc/aerodesk-test2.txt",
@@ -1014,7 +1086,7 @@ mod tests {
             &["/etc/".to_string()],
         ) {
             Ok(()) => {}
-            Err(e) => assert!(!e.contains("blocked by policy"), "{e}"),
+            Err(e) => assert!(!e.to_string().contains("blocked by policy"), "{e}"),
         }
         // 白名单前缀也按归一化路径匹配（//tmp 仍命中 /tmp 前缀，不误拦）。
         match write_file(
@@ -1023,7 +1095,7 @@ mod tests {
             &["/tmp".to_string()],
         ) {
             Ok(()) => {}
-            Err(e) => assert!(!e.contains("blocked by policy"), "{e}"),
+            Err(e) => assert!(!e.to_string().contains("blocked by policy"), "{e}"),
         }
         let _ = std::fs::remove_file("/tmp/aerodesk-bypass.txt");
     }
