@@ -1265,53 +1265,57 @@ fn web_request(
         if let Some(resp) = record {
             return resp;
         }
+        // #12：/metrics 结构化 JSON 仅内部端口暴露（internal_handler 的
+        // INTERNAL_TOKEN 鉴权覆盖该端点）。分片负载/客户端数/TURN 分配是
+        // 运维数据，不随公共端口对外；/metrics/prometheus 保持公开
+        // （Prometheus 抓取兼容）。
+        if request.method() == "GET" && request.url() == "/metrics" {
+            let metrics = shared.metrics.clone();
+            let loads: Vec<f64> = {
+                let r = router
+                    .lock()
+                    .unwrap_or_else(aerodesk_protocol::util::lock_recover);
+                (0..metrics.len()).map(|i| r.load(i)).collect()
+            };
+            let shards: Vec<serde_json::Value> = metrics
+                .iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    serde_json::json!({
+                        "shard": i,
+                        "shard_load": loads.get(i).copied().unwrap_or(0.0),
+                        "clients": m.clients.load(std::sync::atomic::Ordering::Relaxed),
+                        "rx_packets": m.rx_packets.load(std::sync::atomic::Ordering::Relaxed),
+                        "rx_bytes": m.rx_bytes.load(std::sync::atomic::Ordering::Relaxed),
+                        "tx_packets": m.tx_packets.load(std::sync::atomic::Ordering::Relaxed),
+                        "tx_bytes": m.tx_bytes.load(std::sync::atomic::Ordering::Relaxed),
+                        // #238 媒体质量（最近 5s 心跳聚合）。
+                        "rtt_us": m.rtt_avg_ns.load(std::sync::atomic::Ordering::Relaxed) / 1000,
+                        "egress_loss": m.egress_loss_ppm.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+                        "ingress_loss": m.ingress_loss_ppm.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
+                        "bwe_tx_bps": m.bwe_tx_bps.load(std::sync::atomic::Ordering::Relaxed),
+                        "qos_clients": m.qos_clients.load(std::sync::atomic::Ordering::Relaxed),
+                    })
+                })
+                .collect();
+            let total: serde_json::Value = serde_json::json!({
+                "shards": shards,
+                "turn_allocations": turn_server.as_ref().map(|s| s.active_allocations()),
+                "turn_allocations_total": turn_server.as_ref().map(|s| s.allocations_total()),
+                "turn_evictions_total": turn_server.as_ref().map(|s| s.evictions_total()),
+                "recordings_active": shared.recorder.as_ref().map(|r| r.active_count()).unwrap_or(0),
+            });
+            return Response::from_data(
+                "application/json",
+                serde_json::to_vec(&total).expect("serialize metrics"),
+            );
+        }
         // #240：内部接口收到未知/错误方法的 record·session 路径直接 404，
         // 不落到公共 web/start 处理（避免 GET /session/kick 返回 web 页）。
         let url = request.url();
         if url.starts_with("/record/") || url.starts_with("/session/") {
             return Response::text("not found").with_status_code(404);
         }
-    }
-    if request.method() == "GET" && request.url() == "/metrics" {
-        let metrics = shared.metrics.clone();
-        let loads: Vec<f64> = {
-            let r = router
-                .lock()
-                .unwrap_or_else(aerodesk_protocol::util::lock_recover);
-            (0..metrics.len()).map(|i| r.load(i)).collect()
-        };
-        let shards: Vec<serde_json::Value> = metrics
-            .iter()
-            .enumerate()
-            .map(|(i, m)| {
-                serde_json::json!({
-                    "shard": i,
-                    "shard_load": loads.get(i).copied().unwrap_or(0.0),
-                    "clients": m.clients.load(std::sync::atomic::Ordering::Relaxed),
-                    "rx_packets": m.rx_packets.load(std::sync::atomic::Ordering::Relaxed),
-                    "rx_bytes": m.rx_bytes.load(std::sync::atomic::Ordering::Relaxed),
-                    "tx_packets": m.tx_packets.load(std::sync::atomic::Ordering::Relaxed),
-                    "tx_bytes": m.tx_bytes.load(std::sync::atomic::Ordering::Relaxed),
-                    // #238 媒体质量（最近 5s 心跳聚合）。
-                    "rtt_us": m.rtt_avg_ns.load(std::sync::atomic::Ordering::Relaxed) / 1000,
-                    "egress_loss": m.egress_loss_ppm.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
-                    "ingress_loss": m.ingress_loss_ppm.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
-                    "bwe_tx_bps": m.bwe_tx_bps.load(std::sync::atomic::Ordering::Relaxed),
-                    "qos_clients": m.qos_clients.load(std::sync::atomic::Ordering::Relaxed),
-                })
-            })
-            .collect();
-        let total: serde_json::Value = serde_json::json!({
-            "shards": shards,
-            "turn_allocations": turn_server.as_ref().map(|s| s.active_allocations()),
-            "turn_allocations_total": turn_server.as_ref().map(|s| s.allocations_total()),
-            "turn_evictions_total": turn_server.as_ref().map(|s| s.evictions_total()),
-            "recordings_active": shared.recorder.as_ref().map(|r| r.active_count()).unwrap_or(0),
-        });
-        return Response::from_data(
-            "application/json",
-            serde_json::to_vec(&total).expect("serialize metrics"),
-        );
     }
 
     if request.method() == "GET" && request.url() == "/healthz" {
@@ -1349,6 +1353,12 @@ fn web_request(
         let body =
             serde_json::to_vec(&serde_json::json!({ "turn": turn })).expect("serialize config");
         return Response::from_data("application/json", body);
+    }
+
+    // #12：/metrics 仅内部端口暴露（见 internal 分支）；公共端口 404，
+    // 不落到下方 index.html 兜底。
+    if request.method() == "GET" && request.url() == "/metrics" {
+        return Response::text("not found").with_status_code(404);
     }
 
     if request.method() == "GET" {
@@ -1664,6 +1674,48 @@ mod tests {
         let mut body = String::new();
         let ok = reader.read_to_string(&mut body).is_ok() && body.contains("aerodesk_sfu_clients");
         assert!(ok, "prometheus body expected, got: {body:.80}");
+    }
+
+    #[test]
+    fn metrics_json_internal_only() {
+        // #12 自审：/metrics 结构化 JSON 仅内部端口（internal=true 走 token
+        // 鉴权）暴露；公共端口 404，不落 index.html 兜底。
+        let shared = Shared::new(1);
+        let router = Arc::new(Mutex::new(crate::router::ShardRouter::new(1)));
+
+        // 公共端口：404。
+        let req = Request::fake_http("GET", "/metrics", vec![], Vec::new());
+        let resp = web_request(
+            &req,
+            "127.0.0.1:3478".parse().unwrap(),
+            "127.0.0.1:3478".parse().unwrap(),
+            Vec::new(),
+            router.clone(),
+            None,
+            None,
+            shared.clone(),
+            false,
+        );
+        assert_eq!(resp.status_code, 404, "public /metrics 必须 404");
+
+        // 内部端口：200 结构化 JSON。
+        let req = Request::fake_http("GET", "/metrics", vec![], Vec::new());
+        let resp = web_request(
+            &req,
+            "127.0.0.1:3478".parse().unwrap(),
+            "127.0.0.1:3478".parse().unwrap(),
+            Vec::new(),
+            router,
+            None,
+            None,
+            shared,
+            true,
+        );
+        assert_eq!(resp.status_code, 200);
+        let (mut reader, _size) = resp.data.into_reader_and_size();
+        let mut body = String::new();
+        let ok = reader.read_to_string(&mut body).is_ok() && body.contains("\"shards\"");
+        assert!(ok, "internal /metrics JSON expected, got: {body:.80}");
     }
 
     #[test]
