@@ -112,7 +112,10 @@ impl CallState {
         let active = ActiveCallInfo {
             call_id: call.call_id.clone(),
             from: call.from.clone(),
-            deadline: now + call.timeout,
+            // #539 实测：30s deadline 会让活跃会话（媒体在推）被无条件挂断——
+            // Windows 被控每 30s 停流。活跃呼叫持续到显式挂断；24h 仅作防悬挂
+            // 兜底（正常会话远短于此）。
+            deadline: now + Duration::from_secs(24 * 3600),
         };
         *self = Self::Active(active.clone());
         Some(active)
