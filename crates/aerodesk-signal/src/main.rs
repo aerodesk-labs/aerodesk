@@ -1165,6 +1165,16 @@ fn handle(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
              # TYPE aerodesk_signal_rooms gauge\naerodesk_signal_rooms {room_count}\n\
              # TYPE aerodesk_signal_bridges gauge\naerodesk_signal_bridges {bridges}\n"
         );
+        // #551：SIP 端点开启时附 sip_ 指标（未启动则省略，保持向后兼容）。
+        let body = match sip_server::metrics_snapshot() {
+            Some((regs, est, term)) => format!(
+                "{body}\
+                 # TYPE sip_registrations gauge\nsip_registrations {regs}\n\
+                 # TYPE sip_calls_established counter\nsip_calls_established {est}\n\
+                 # TYPE sip_calls_terminated counter\nsip_calls_terminated {term}\n"
+            ),
+            None => body,
+        };
         return Response::from_data(
             "text/plain; version=0.0.4; charset=utf-8",
             body.into_bytes(),
