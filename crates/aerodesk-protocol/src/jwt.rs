@@ -3,8 +3,9 @@
 //! HS256 签名；Claims 携带用户/设备/房间/角色授权。
 //! 环境变量 `JWT_SECRET` 为共享密钥（生产用强随机值，部署文档说明）。
 //!
-//! #487 审查批次 3（#10）：不再依赖 jsonwebtoken（其默认后端 ring 让 SFU
-//! 二进制同时携带 ring + aws-lc-rs 双加密栈）。HS256 仅需 HMAC-SHA256，
+//! #487 审查批次 3（#10）：不再依赖 jsonwebtoken（其默认后端 ring 是 SFU
+//! 双加密栈的来源之一；另一来源 rouille→tiny_http→rustls 0.20→ring 链仍在
+//! signal/sfu 直接依赖里，属遗留项）。HS256 仅需 HMAC-SHA256，
 //! 用 hmac+sha2+base64ct 直实现，compact 三段结构与既有线上 token 完全兼容。
 
 use base64ct::{Base64UrlUnpadded, Encoding};
