@@ -629,9 +629,7 @@ fn send_input_to_slot(
     if !INPUT_CAPTURING.load(Ordering::SeqCst) {
         return;
     }
-    tracing::debug!(
-        "send_input_to_slot: kind={kind} mx={mx} my={my} capturing=true slot={slot}"
-    );
+    tracing::debug!("send_input_to_slot: kind={kind} mx={mx} my={my} capturing=true slot={slot}");
     let (x, y) = viewer_to_remote_norm(mx, my, area_w, area_h, fw, fh);
     let button = match button {
         1 => aerodesk_core::protocol::input::MouseButton::Middle,
