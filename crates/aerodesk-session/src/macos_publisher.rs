@@ -18,8 +18,10 @@ use aerodesk_codec::audio::RealAudioSender;
 use aerodesk_core::connect::connect_live_role_codec_timeout;
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::platform::Codec;
+use aerodesk_core::platform::CursorSource;
 use aerodesk_core::platform::SystemWakeLock;
 use aerodesk_core::protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult};
+use aerodesk_core::protocol::cursor::CursorPos;
 use aerodesk_core::protocol::input::{InputEvent, InputFrame};
 use aerodesk_core::protocol::signal::Role;
 use str0m::Output;
@@ -31,6 +33,14 @@ use crate::generic_publisher::PublisherEventSink;
 
 const FPS: u32 = 30;
 const DEFAULT_BITRATE_BPS: u32 = 8_000_000;
+
+/// 发送侧墙钟（毫秒）：光标/延迟测量的 sent_ms 字段，与 Windows/CLI 同口径。
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// 当前发布线程的 stop 句柄（同一时刻只允许一个被控端发布线程）。
 static STOP: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
@@ -183,7 +193,12 @@ fn run_publisher(
     // 已被消费、connected 永远为 false，一帧不发（本地直连靠重协商二次事件掩盖）。
     let mut connected = live.ice_connected;
     let mut next_frame = Instant::now();
+    let mut next_cursor = Instant::now();
     let mut pts: i64 = 0;
+
+    // #487 光标列缺口（macOS 侧）：真实光标 30Hz 上报，与 Windows 端 #532
+    // 同款线格式（CursorPos + sent_ms）——观看端叠加层据此绘制远端光标。
+    let mut cursor_source = aerodesk_platform::macos::cursor::MacCursor;
 
     while !stale() {
         // #211：排空式读取 UDP，保证 SCTP ACK 及时消费，远端输入送达率不塌陷。
@@ -229,6 +244,19 @@ fn run_publisher(
             && let Some(sender) = &mut audio_sender
         {
             sender.tick(&mut live.endpoint, amid, Instant::now());
+        }
+
+        // 光标 30Hz 上报（静屏无视频帧时 cursor 通道仍常活，观看端能持续绘制）。
+        if connected && Instant::now() >= next_cursor {
+            next_cursor += Duration::from_millis(33);
+            if let Some((x, y)) = cursor_source.position_normalized() {
+                let pos =
+                    CursorPos::new(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)).with_sent_ms(now_ms());
+                if let Ok(json) = serde_json::to_string(&pos) {
+                    live.endpoint
+                        .send_channel_data("cursor", false, json.as_bytes());
+                }
+            }
         }
 
         if connected && Instant::now() >= next_frame {
