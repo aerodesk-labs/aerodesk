@@ -260,3 +260,37 @@ fn windows_cursor_normalized_in_range() {
         None => eprintln!("SKIP: GetCursorPos 不可用"),
     }
 }
+
+/// #546 后续（互控实测「无反应」定位）：注入后采样真实光标，验证
+/// SendInput 的可观察效果——仅断言返回值无法发现「静默无效」。
+#[test]
+fn sendinput_mouse_move_reaches_cursor() {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    };
+    let mut inj = SendInputInjector::new();
+    let (tx, ty) = (0.1f64, 0.1f64); // 目标：虚拟屏幕 10% 处
+    InputInjector::inject(&mut inj, &InputEvent::MouseMove { x: tx, y: ty }).expect("mouse move");
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let mut pt = POINT::default();
+    unsafe { GetCursorPos(&mut pt) }.expect("GetCursorPos");
+    let (vx, vy, vw, vh) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN).max(0) as u32,
+            GetSystemMetrics(SM_CYVIRTUALSCREEN).max(0) as u32,
+        )
+    };
+    let ex = vx + (tx * vw as f64) as i32;
+    let ey = vy + (ty * vh as f64) as i32;
+    eprintln!("注入目标=({ex},{ey}) 实际光标=({},{})", pt.x, pt.y);
+    assert!(
+        (pt.x - ex).abs() <= 40 && (pt.y - ey).abs() <= 40,
+        "SendInput 返回成功但光标未到位：期望 ({ex},{ey})±40，实际 ({},{})",
+        pt.x,
+        pt.y
+    );
+}
