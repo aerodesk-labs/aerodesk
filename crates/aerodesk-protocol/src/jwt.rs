@@ -234,24 +234,23 @@ mod tests {
         );
     }
 
-    /// 兼容性：jsonwebtoken 签发的标准 HS256 JWT 仍须通过（线上存量 token）。
+    /// 兼容性黄金向量：独立于本实现计算的标准 HS256 JWT（Python hmac 手工
+    /// 签名，与 jsonwebtoken::encode 输出等价）——防自举测试（同一代码签名
+    /// 再验签）掩盖 header/序列化/签名格式的漂移，确保线上存量 token 永续。
+    /// secret = "golden-vector-secret-0123456789"
     #[test]
     fn jsonwebtoken_issued_token_still_validates() {
-        // 用同一 claims 手工构造：与 jsonwebtoken::encode(HS256) 输出等价。
-        let claims = Claims {
-            sub: "user-1".into(),
-            dev: Some("dev-1".into()),
-            room: Some("room-a".into()),
-            role: Some("publisher".into()),
-            max_conns: None,
-            iat: 1750000000,
-            exp: 1900000000,
-        };
-        let payload = b64(serde_json::to_string(&claims).unwrap().as_bytes());
-        let signing_input = format!("{}.{payload}", b64(HEADER.as_bytes()));
-        let t = format!("{signing_input}.{}", b64(&sign(SECRET, &signing_input)));
-        let c = validate_token(SECRET, &t, "room-a", Role::Publisher).unwrap();
+        let token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyLTEiLCJkZXYiOiJkZXYtMSIsInJvb20iOiJyb29tLWEiLCJyb2xlIjoicHVibGlzaGVyIiwiaWF0IjoxNzUwMDAwMDAwLCJleHAiOjE5MDAwMDAwMDB9.y5KWOtXGrPl6x5j7Wfz8fIFORseABGFTFXCmnrK6KG4";
+        let c = validate_token(
+            "golden-vector-secret-0123456789",
+            token,
+            "room-a",
+            Role::Publisher,
+        )
+        .unwrap();
         assert_eq!(c.sub, "user-1");
+        assert_eq!(c.dev.as_deref(), Some("dev-1"));
+        assert_eq!(c.room.as_deref(), Some("room-a"));
     }
 
     #[test]
