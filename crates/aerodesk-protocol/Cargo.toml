@@ -18,3 +18,7 @@ rsipstack = "0.6.4"
 # sip_client(#552):UA 自带独立 tokio runtime(与 aerodesk-signal 同版本/特性)。
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 tokio-util = { version = "0.7.19", features = ["rt"] }
+# rustls 仅用于显式装默认 CryptoProvider（见 sip_client::ensure_rustls_provider）：
+# 工作区同时 pin ring(core/rsipstack) 与 aws_lc_rs(sfu)，--workspace 联合构建下
+# rustls 无法自动判定 provider，rsipstack 的 ClientConfig::builder() 会 panic。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
