@@ -278,6 +278,7 @@ dependencies = [
 name = "aerodesk-signal"
 version = "0.1.0"
 dependencies = [
+ "aerodesk-core",
  "aerodesk-protocol",
  "libc",
  "rcgen",
@@ -285,6 +286,7 @@ dependencies = [
  "rsipstack",
  "serde",
  "serde_json",
+ "str0m",
  "tokio",
  "tokio-util",
  "tracing",

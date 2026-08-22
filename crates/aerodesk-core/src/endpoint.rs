@@ -148,11 +148,13 @@ impl Endpoint {
     }
 
     /// 添加本地 host candidate（调用方绑定 UDP socket 后调用）。
+    /// 返回候选的 `candidate:` 属性串（trickle 发送面：#552 后到候选经信令
+    /// INFO sdpfrag 转发，线格式即 `TrickleCandidate::candidate`）。
     pub fn add_local_candidate(
         &mut self,
         addr: SocketAddr,
         proto: Protocol,
-    ) -> Result<(), RtcError> {
+    ) -> Result<String, RtcError> {
         let proto_str = match proto {
             Protocol::Udp => "udp",
             Protocol::Tcp => "tcp",
@@ -161,8 +163,9 @@ impl Endpoint {
         };
         let candidate = Candidate::host(addr, proto_str)
             .map_err(|e| RtcError::Io(std::io::Error::other(e.to_string())))?;
+        let sdp = candidate.to_sdp_string();
         let _ = self.rtc.add_local_candidate(candidate);
-        Ok(())
+        Ok(sdp)
     }
 
     /// 添加 relayed（TURN）本地候选（#157 M2）：offer 下发 `typ relay`，
@@ -175,6 +178,16 @@ impl Endpoint {
         let candidate = Candidate::relayed(relayed, local, "udp")
             .map_err(|e| RtcError::Io(std::io::Error::other(e.to_string())))?;
         let _ = self.rtc.add_local_candidate(candidate);
+        Ok(())
+    }
+
+    /// 注入远端候选（trickle：#552 信令 sdpfrag 的 `candidate:` 属性串，
+    /// RFC 5245 §15.1 全格式，与 `TrickleCandidate::candidate` 同形。
+    /// fork 的 `Rtc::add_remote_candidate` 支持协商后追加，ICE 按需启动检查）。
+    pub fn add_remote_candidate(&mut self, sdp_candidate: &str) -> Result<(), String> {
+        let candidate = Candidate::from_sdp_string(sdp_candidate)
+            .map_err(|e| format!("remote candidate 解析失败: {e}"))?;
+        self.rtc.add_remote_candidate(candidate);
         Ok(())
     }
 
