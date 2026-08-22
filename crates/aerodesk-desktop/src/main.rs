@@ -1597,6 +1597,34 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
         .expect("spawn viewer thread");
     #[cfg(not(target_os = "macos"))]
     {
+        // #552 拓扑（1:1 P2P / ≥3 人 SFU）：设备 ID 形（AD-xxxxxx，见
+        // default_device_id）→ SIP 1:1 P2P 呼叫；其余（会议/Web 发布房间名）
+        // → SFU 观看（e2e/Web 观看面保持原路径）。macOS 观看端仍走 SFU。
+        if !room.starts_with("AD-") {
+            std::thread::Builder::new()
+                .stack_size(16 * 1024 * 1024)
+                .spawn(move || {
+                    aerodesk_session::generic_media::run_generic_viewer(
+                        server_url,
+                        room,
+                        Some(token),
+                        SlintSessionUi::new(weak2.clone(), slot),
+                        input_rx,
+                        cmd_rx,
+                        file_cmd_rx,
+                        chat_cmd_rx,
+                        stop,
+                        view_only,
+                        {
+                            let ui2 = weak2.clone();
+                            move || SlintRenderer::new(ui2.clone(), slot)
+                        },
+                    );
+                    with_ui(&weak2, |ui| ui.set_connecting(false));
+                })
+                .expect("spawn viewer thread");
+            return;
+        }
         // #552：SIP 1:1 P2P 主叫——presence 线程完成 call→Answered 后回调移交
         // 会话线程（同一 UA，禁止双 UA 同 device_id 注册）。
         let _ = (&(&token, &control_rx, &server_url));
