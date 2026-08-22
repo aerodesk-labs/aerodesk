@@ -966,6 +966,28 @@ pub(crate) mod testutil {
     }
 }
 
+/// #552 P2P：由「逗号分隔 URL 串 + 凭证」构 TURN 传输（nil = 无 TURN 配置）。
+/// 供 desktop/host 设置字段 → P2pCallConfig.turn 复用（对 SIP 路径没有
+/// join 下发 TurnConfig 的一环，须本地配置；运行时联网建连，不要在 UI 线程调）。
+pub fn p2p_turn_transport(urls: &str, username: &str, credential: &str) -> Option<TurnTransport> {
+    let urls: Vec<String> = urls
+        .split(',')
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .collect();
+    if urls.is_empty() {
+        return None;
+    }
+    setup_turn(
+        &super::protocol::signal::TurnConfig {
+            urls,
+            username: username.to_string(),
+            credential: credential.to_string(),
+        },
+        false,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::testutil::{spawn_mock_turn_tcp, start_mock};
@@ -1163,5 +1185,16 @@ mod tests {
             0x8c, 0x8e, 0xf1, 0x46, 0xbe, 0x00,
         ];
         assert_eq!(mac, expect);
+    }
+
+    /// #552：逗号分隔 URL 串解析（空/空白 → None；多余分隔容忍）。
+    #[test]
+    fn p2p_turn_urls_parsing() {
+        // 空配置/纯空白 → None（无网络调用）。
+        assert!(p2p_turn_transport("", "u", "p").is_none());
+        assert!(p2p_turn_transport("  , , ", "u", "p").is_none());
+        // 非空但无法解析/dns 失败（测试环境无 TURN）→ 返回 None 或 Some 都允许，
+        // 关键是解析路径不 panic；此处用不可达地址验证函数形状。
+        let _ = p2p_turn_transport("turn:192.0.2.1:3478", "u", "p");
     }
 }

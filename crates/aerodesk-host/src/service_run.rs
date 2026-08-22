@@ -62,6 +62,16 @@ pub struct ServiceSettings {
     /// #552 SIP 迁移：TLS CA PEM 文件路径（空 = 系统根证书包）。
     #[serde(default)]
     pub sip_ca_pem: String,
+    /// #552 ICE：TURN 中继 URL（逗号分隔；空 = 直连）。SIP 路径无 join 下发
+    /// TurnConfig 一环，须本地配置。
+    #[serde(default)]
+    pub turn_urls: String,
+    /// #552 ICE：TURN 用户名。
+    #[serde(default)]
+    pub turn_username: String,
+    /// #552 ICE：TURN 口令。
+    #[serde(default)]
+    pub turn_credential: String,
 }
 
 fn default_true() -> bool {
@@ -163,6 +173,21 @@ pub fn sync_settings_from_user() -> Result<ServiceSettings, String> {
     if let Some(x) = v.get("sip_ca_pem").and_then(|x| x.as_str()) {
         if !x.is_empty() {
             s.sip_ca_pem = x.to_string();
+        }
+    }
+    if let Some(x) = v.get("turn_urls").and_then(|x| x.as_str()) {
+        if !x.is_empty() {
+            s.turn_urls = x.to_string();
+        }
+    }
+    if let Some(x) = v.get("turn_username").and_then(|x| x.as_str()) {
+        if !x.is_empty() {
+            s.turn_username = x.to_string();
+        }
+    }
+    if let Some(x) = v.get("turn_credential").and_then(|x| x.as_str()) {
+        if !x.is_empty() {
+            s.turn_credential = x.to_string();
         }
     }
     s.server = aerodesk_core::signaling::normalize_signal_url(&s.server);
@@ -419,7 +444,11 @@ impl Supervisor {
             with_camera: false,
             force_relay: false,
             bind: "0.0.0.0:0".parse().unwrap(),
-            turn: None,
+            turn: aerodesk_core::turn_client::p2p_turn_transport(
+                &self.settings.turn_urls,
+                &self.settings.turn_username,
+                &self.settings.turn_credential,
+            ),
             inline_candidates: true,
         };
         let mut p2p = P2pCall::new(cfg).map_err(|e| format!("P2P 端点创建：{e}"))?;

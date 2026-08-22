@@ -374,8 +374,11 @@ enum LinkCommand {
     Call {
         target: String,
         call_id: String,
-        p2p: P2pCall,
-        offer: String,
+        /// TURN 配置（URL 逗号分隔串；空 = 直连）。轻量且不联网——P2pCall 在
+        /// presence 线程构建（setup_turn 每 URL 最多 3s，不能在 UI 线程做）。
+        turn_urls: String,
+        turn_username: String,
+        turn_credential: String,
         /// Answered（answer 接受成功）后调用：线程内 spawn 会话。
         on_answered: Box<dyn FnOnce(P2pCall) + Send>,
         /// 被拒/取消/失败：传提示文本（UI 侧复位 + 清理）。
@@ -1640,36 +1643,8 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
             session_cleanup_weak(&ui.as_weak(), slot, Some("信令未连接".into()));
             return;
         };
-        let mut p2p = match P2pCall::new(P2pCallConfig {
-            role: P2pRole::Caller,
-            device_role: aerodesk_core::protocol::signal::Role::Viewer,
-            codec: None,
-            with_audio: false,
-            with_camera: false,
-            force_relay: false,
-            bind: "0.0.0.0:0".parse().unwrap(),
-            turn: None,
-            inline_candidates: true,
-        }) {
-            Ok(p) => p,
-            Err(e) => {
-                ui.set_connecting(false);
-                ui.set_conn_state(0);
-                ui.set_status(format!("媒体端点创建失败：{e}").into());
-                session_cleanup_weak(&ui.as_weak(), slot, Some(format!("媒体端点创建失败：{e}")));
-                return;
-            }
-        };
-        let offer = match p2p.create_offer() {
-            Ok(o) => o,
-            Err(e) => {
-                ui.set_connecting(false);
-                ui.set_conn_state(0);
-                ui.set_status(format!("SDP 创建失败：{e}").into());
-                session_cleanup_weak(&ui.as_weak(), slot, Some(format!("SDP 创建失败：{e}")));
-                return;
-            }
-        };
+        // #552 ICE：TURN 配置取本地设置（SIP 路径无 join 下发，须本地配置）。
+        let mut turn_cfg = load_settings();
         let call_id = format!(
             "c-{}-{}",
             slot,
@@ -1720,8 +1695,9 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
         if let Err(e) = cmd_tx.send(LinkCommand::Call {
             target,
             call_id,
-            p2p,
-            offer: offer.sdp,
+            turn_urls: std::mem::take(&mut turn_cfg.turn_urls),
+            turn_username: std::mem::take(&mut turn_cfg.turn_username),
+            turn_credential: std::mem::take(&mut turn_cfg.turn_credential),
             on_answered: Box::new(on_answered),
             on_failed: Box::new(on_failed),
         }) {
@@ -1794,6 +1770,9 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
     ui.set_presence_active(true);
     let ui_weak = ui.as_weak();
     let device_id = settings.device_id.clone();
+    let turn_urls = settings.turn_urls.clone();
+    let turn_username = settings.turn_username.clone();
+    let turn_credential = settings.turn_credential.clone();
     std::thread::Builder::new()
         .name("signal-presence".into())
         .spawn(move || {
@@ -1810,15 +1789,45 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                         LinkCommand::Call {
                             target,
                             call_id,
-                            p2p,
-                            offer,
+                            turn_urls,
+                            turn_username,
+                            turn_credential,
                             on_answered,
                             on_failed,
                         } => {
+                            // P2pCall + offer 在线程内构建（TURN 建连可能阻塞数秒）。
+                            let mut p2p = match P2pCall::new(P2pCallConfig {
+                                role: P2pRole::Caller,
+                                device_role: aerodesk_core::protocol::signal::Role::Viewer,
+                                codec: None,
+                                with_audio: false,
+                                with_camera: false,
+                                force_relay: false,
+                                bind: "0.0.0.0:0".parse().unwrap(),
+                                turn: aerodesk_core::turn_client::p2p_turn_transport(
+                                    &turn_urls,
+                                    &turn_username,
+                                    &turn_credential,
+                                ),
+                                inline_candidates: true,
+                            }) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    on_failed(format!("媒体端点创建失败：{e}"));
+                                    continue;
+                                }
+                            };
+                            let offer = match p2p.create_offer() {
+                                Ok(o) => o,
+                                Err(e) => {
+                                    on_failed(format!("SDP 创建失败：{e}"));
+                                    continue;
+                                }
+                            };
                             let res = link
                                 .lock()
                                 .unwrap_or_else(aerodesk_core::util::lock_recover)
-                                .call(&target, &call_id, &offer);
+                                .call(&target, &call_id, &offer.sdp);
                             if let Err(e) = res {
                                 on_failed(format!("呼叫发起失败：{e}"));
                             } else {
@@ -1883,7 +1892,11 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                                 with_camera: false,
                                 force_relay: false,
                                 bind: "0.0.0.0:0".parse().unwrap(),
-                                turn: None,
+                                turn: aerodesk_core::turn_client::p2p_turn_transport(
+                                    &turn_urls,
+                                    &turn_username,
+                                    &turn_credential,
+                                ),
                                 inline_candidates: true,
                             }) {
                                 Ok(p) => p,
@@ -3722,6 +3735,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 sip_port: base.sip_port,
                 sip_domain: std::mem::take(&mut base.sip_domain),
                 sip_ca_pem: std::mem::take(&mut base.sip_ca_pem),
+                turn_urls: std::mem::take(&mut base.turn_urls),
+                turn_username: std::mem::take(&mut base.turn_username),
+                turn_credential: std::mem::take(&mut base.turn_credential),
             };
             save_settings(&settings);
             // 即时生效：同步主页输入框（无需重启）。
@@ -4728,6 +4744,15 @@ struct AppSettings {
     /// #552 SIP：TLS CA PEM 文件路径（空 = 系统根证书包）。
     #[serde(default)]
     sip_ca_pem: String,
+    /// #552 ICE：TURN 中继 URL（逗号分隔；空 = 直连）。
+    #[serde(default)]
+    turn_urls: String,
+    /// #552 ICE：TURN 用户名。
+    #[serde(default)]
+    turn_username: String,
+    /// #552 ICE：TURN 口令。
+    #[serde(default)]
+    turn_credential: String,
 }
 
 fn default_sip_transport() -> String {
