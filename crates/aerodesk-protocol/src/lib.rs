@@ -22,6 +22,7 @@ pub mod input;
 pub mod jwt;
 pub mod signal;
 pub mod sip;
+pub mod sip_client;
 pub mod tls;
 pub mod turn;
 pub mod util;

@@ -135,11 +135,14 @@ pub struct SipMetrics {
     pub calls_terminated: AtomicU64,
 }
 
-static SIP_METRICS: std::sync::OnceLock<Arc<SipMetrics>> = std::sync::OnceLock::new();
+/// 当前 SIP 端点的指标句柄。每次 `serve()` 启动时**替换**（生产进程内仅一个端点，
+/// 语义不变；测试多实例并存时以最新启动者为准——测试侧另有串行锁防交叉）。
+static SIP_METRICS: std::sync::RwLock<Option<Arc<SipMetrics>>> = std::sync::RwLock::new(None);
 
 /// 供 main.rs `/metrics/prometheus` 读取（未启动 SIP 端点时为 None）。
 pub fn metrics_snapshot() -> Option<(u64, u64, u64)> {
-    let m = SIP_METRICS.get()?;
+    let guard = SIP_METRICS.read().ok()?;
+    let m = guard.as_ref()?;
     Some((
         m.registrations.load(Ordering::Relaxed),
         m.calls_established.load(Ordering::Relaxed),
@@ -351,7 +354,7 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
     // slice 2：dialog 层（透明 Proxy 的对话配对/状态机）+ 指标。
     let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
     let metrics = Arc::new(SipMetrics::default());
-    let _ = SIP_METRICS.set(metrics.clone());
+    *SIP_METRICS.write().unwrap() = Some(metrics.clone());
 
     info!("SIP 端点已就绪（Registrar + 透明 INVITE Proxy + OPTIONS）");
 
@@ -661,6 +664,14 @@ mod tests {
     const REALM: &str = "aerodesk.test";
     const NONCE: &str = "testnonce123";
 
+    /// serve() 系 e2e 的串行锁：SIP_METRICS 是进程级句柄（serve 启动时替换），
+    /// 并发起服的多实例会互相覆盖指标视图，须串行。
+    static SERVE_E2E_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn serve_e2e_guard() -> std::sync::MutexGuard<'static, ()> {
+        SERVE_E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn register_request(aor: &str, auth_header: Option<&str>, expires: Option<u32>) -> Request {
         let mut headers = String::new();
         if let Some(a) = auth_header {
@@ -855,8 +866,11 @@ mod tests {
         )
     }
 
+    // 串行锁须贯穿整个测试（含 await），属有意持有。
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn end_to_end_register_digest_over_udp() {
+        let _serial = serve_e2e_guard();
         let port = free_udp_port();
         let cancel = CancellationToken::new();
 
@@ -954,8 +968,11 @@ mod tests {
         assert_eq!(r.status_code, StatusCode::OK, "{user} 注册应 200");
     }
 
+    // 串行锁须贯穿整个测试（含 await），属有意持有。
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn end_to_end_invite_through_proxy() {
+        let _serial = serve_e2e_guard();
         let _ = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
             .with_test_writer()
@@ -1052,5 +1069,74 @@ mod tests {
 
         cancel.cancel();
         let _ = server.await;
+    }
+
+    // -- 端到端 #552 slice 1：SipClient UA（protocol 侧）注册到本服务端 --
+
+    #[test]
+    fn end_to_end_sip_client_register_and_bad_password() {
+        let _serial = serve_e2e_guard();
+        use aerodesk_protocol::sip_client::{
+            SipClientConfig, SipEvent, SipTransport, start_sip_client,
+        };
+
+        let port = free_udp_port();
+        let mut pw = HashMap::new();
+        pw.insert("AD-C1".to_string(), "tok-c1".to_string());
+        let cfg = SipConfig {
+            realm: REALM.into(),
+            tls_addr: None,
+            wss_addr: None,
+            udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+            passwords: Arc::new(pw),
+            tls_identity: None,
+        };
+        let server_cancel = CancellationToken::new();
+        let sc = server_cancel.clone();
+        let server = std::thread::spawn(move || run_sip_endpoint(cfg, sc));
+        std::thread::sleep(Duration::from_millis(400)); // 等 listener 起来
+
+        let client_cfg = |device: &str, password: &str| SipClientConfig {
+            device_id: device.into(),
+            domain: REALM.into(),
+            password: password.into(),
+            server: format!("127.0.0.1:{port}").parse().unwrap(),
+            transport: SipTransport::Udp,
+            register_expires: 60,
+        };
+
+        // 正确口令 → Registered（AoR = sip:<device>@<domain>）。
+        let good = start_sip_client(client_cfg("AD-C1", "tok-c1")).expect("client 启动");
+        let ev = good
+            .recv_event(Duration::from_secs(5))
+            .expect("应收到注册结果事件");
+        match ev {
+            SipEvent::Registered { aor, expires } => {
+                assert_eq!(aor, format!("sip:AD-C1@{REALM}"));
+                assert!(expires > 0);
+            }
+            other => panic!("应 Registered，实际 {other:?}"),
+        }
+
+        // 错口令 → RegisterFailed(403)（服务端不泄露设备存在性，统一 403）。
+        let bad = start_sip_client(client_cfg("AD-C1", "WRONG")).expect("client 启动");
+        let ev = bad
+            .recv_event(Duration::from_secs(5))
+            .expect("应收到注册结果事件");
+        match ev {
+            SipEvent::RegisterFailed { status, .. } => {
+                assert_eq!(status, 403, "错口令应 403")
+            }
+            other => panic!("应 RegisterFailed，实际 {other:?}"),
+        }
+
+        // 关停：注销 + join，不悬挂。
+        good.shutdown();
+        bad.shutdown();
+        server_cancel.cancel();
+        server
+            .join()
+            .expect("server 线程应退出")
+            .expect("server 应正常退出");
     }
 }

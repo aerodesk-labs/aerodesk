@@ -93,6 +93,18 @@ pub fn is_implemented_method(m: &rsip::Method) -> bool {
     matches!(m, Register | Invite | Ack | Bye | Cancel | Info | Options)
 }
 
+/// 同 [`is_implemented_method`] 的常量形式：endpoint `Allow` 头与 501 门禁共用
+///（signal 侧与 #552 客户端侧共用，避免两处清单漂移）。
+pub const IMPLEMENTED_METHODS: &[rsip::Method] = &[
+    rsip::Method::Register,
+    rsip::Method::Invite,
+    rsip::Method::Ack,
+    rsip::Method::Bye,
+    rsip::Method::Cancel,
+    rsip::Method::Info,
+    rsip::Method::Options,
+];
+
 // ---------------------------------------------------------------------------
 // SignalMessage → SIP 承载意图（规范 §2，13 变体全量覆盖）
 // ---------------------------------------------------------------------------
