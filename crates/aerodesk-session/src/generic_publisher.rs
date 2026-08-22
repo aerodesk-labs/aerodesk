@@ -44,9 +44,10 @@ pub fn start_publisher_peer(
     p2p: aerodesk_core::p2p_call::P2pCall,
     video_mid: str0m::media::Mid,
     room: String,
+    trickle_rx: Option<std::sync::mpsc::Receiver<String>>,
     on_event: PublisherEventSink,
 ) {
-    imp::start_publisher_peer(p2p, video_mid, room, on_event);
+    imp::start_publisher_peer(p2p, video_mid, room, trickle_rx, on_event);
 }
 
 /// #552：其余平台 P2P 被叫发布未接入（macOS 被控端仍走 SFU，mac slice 后续）。
@@ -55,6 +56,7 @@ pub fn start_publisher_peer(
     _p2p: aerodesk_core::p2p_call::P2pCall,
     _video_mid: str0m::media::Mid,
     _room: String,
+    _trickle_rx: Option<std::sync::mpsc::Receiver<String>>,
     on_event: PublisherEventSink,
 ) {
     on_event(PublisherEvent::StartFailed(
@@ -174,6 +176,7 @@ mod imp {
         p2p: P2pCall,
         video_mid: str0m::media::Mid,
         room: String,
+        trickle_rx: Option<std::sync::mpsc::Receiver<String>>,
         on_event: PublisherEventSink,
     ) {
         stop_publisher(on_event.clone());
@@ -183,7 +186,7 @@ mod imp {
         let sink = on_event.clone();
         if std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)
-            .spawn(move || run_publisher_peer(p2p, video_mid, room, sink, stop))
+            .spawn(move || run_publisher_peer(p2p, video_mid, room, sink, trickle_rx, stop))
             .is_err()
         {
             *STOP.lock().unwrap() = None;
@@ -248,6 +251,15 @@ mod imp {
                 Self::Peer(p2p) => p2p.endpoint(),
             }
         }
+
+        /// #552：注入对端后到候选（P2P trickle；SFU 路径 no-op）。
+        fn add_remote_candidate(&mut self, sdp_candidate: &str) {
+            if let Self::Peer(p2p) = self {
+                if let Err(e) = p2p.add_remote_candidate(sdp_candidate) {
+                    tracing::warn!("trickle 候选注入失败：{e}");
+                }
+            }
+        }
     }
 
     fn run_publisher(
@@ -300,16 +312,18 @@ mod imp {
             audio,
             mouse,
             view_only,
+            None,
             stop,
         );
     }
 
-    /// #552：SIP 1:1 P2P 被叫发布（P2pCall 已由调用方建立并 accept）。
+    /// #552：SIP 1:1 P2P 被叫发布（P2pCall 已由调用方建立并接受）。
     fn run_publisher_peer(
         p2p: P2pCall,
         video_mid: str0m::media::Mid,
         room: String,
         on_event: PublisherEventSink,
+        trickle_rx: Option<std::sync::mpsc::Receiver<String>>,
         stop: Arc<AtomicBool>,
     ) {
         // 就绪门槛：ChannelOpen（DTLS 完成），不用 IceConnected。
@@ -323,6 +337,7 @@ mod imp {
             false,
             true,
             false,
+            trickle_rx,
             stop,
         );
     }
@@ -338,6 +353,7 @@ mod imp {
         audio: bool,
         mouse: bool,
         view_only: bool,
+        trickle_rx: Option<std::sync::mpsc::Receiver<String>>,
         stop: Arc<AtomicBool>,
     ) {
         let stale = || stop.load(Ordering::SeqCst);
@@ -439,6 +455,12 @@ mod imp {
         let mut pts: i64 = 0;
 
         while !stale() {
+            // #552：信令面转发的对端后到候选（INFO sdpfrag；无积压时一次空转）。
+            if let Some(rx) = trickle_rx.as_ref() {
+                while let Ok(cand) = rx.try_recv() {
+                    t.add_remote_candidate(&cand);
+                }
+            }
             t.pump();
 
             while let Some(ev) = t.poll_event() {
