@@ -1507,9 +1507,25 @@ fn open_terminal_window(ui: &AppWindow) {
 
 /// 发起观看/控制会话（#441 连接页功能按钮共用一个启动路径）。
 fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
-    let server = ui.get_server_input().to_string();
-    let room = ui.get_room_input().to_string();
-    let token = ui.get_token_input().to_string();
+    open_viewer_session(
+        ui,
+        mode,
+        ui.get_server_input().to_string(),
+        ui.get_room_input().to_string(),
+        ui.get_token_input().to_string(),
+    );
+}
+
+/// 发起观看/控制会话（#441 连接页功能按钮共用一个启动路径；#552 302 升级
+/// 亦经此入口按会议 AoR 走 SFU 观看）。
+#[allow(clippy::too_many_arguments)]
+fn open_viewer_session(
+    ui: &AppWindow,
+    mode: ConnectMode,
+    server: String,
+    room: String,
+    token: String,
+) {
     {
         let sessions = SESSIONS.lock().unwrap();
         if sessions.len() >= MAX_SESSIONS {
@@ -1783,6 +1799,9 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
     ui.set_presence_active(true);
     let ui_weak = ui.as_weak();
     let device_id = settings.device_id.clone();
+    // #552 302 升级：EscalatedToSfu 时按会议 AoR 走 SFU 观看（服务器/凭证快照）。
+    let escalate_server = settings.server_default.clone();
+    let escalate_token = settings.token_default.clone();
     let turn_urls = settings.turn_urls.clone();
     let turn_username = settings.turn_username.clone();
     let turn_credential = settings.turn_credential.clone();
@@ -2096,6 +2115,35 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                                     f(format!("对方拒绝呼叫（{status}）"));
                                 }
                             }
+                        }
+                        aerodesk_core::sip_link::SipLinkEvent::EscalatedToSfu {
+                            call_id,
+                            view_aor,
+                        } => {
+                            // #552 §4.1：主叫 1:1 被对端 302 升级——关闭 P2P 会话，
+                            // 按会议 AoR（view_aor 的 user 部分 = SFU 房间）走 SFU 观看。
+                            let mut oc = OUTGOING.lock().unwrap_or_else(aerodesk_core::util::lock_recover);
+                            let matches = oc.as_ref().is_some_and(|o| o.call_id == call_id);
+                            if !matches {
+                                continue;
+                            }
+                            let mut o = oc.take().unwrap();
+                            drop(oc);
+                            if let Some(f) = o.on_failed.take() {
+                                f("对方已升级为会议，切换观看…".into());
+                            }
+                            let room = view_aor
+                                .trim_start_matches("sip:")
+                                .split('@')
+                                .next()
+                                .unwrap_or("")
+                                .to_string();
+                            let srv = escalate_server.clone();
+                            let tok = escalate_token.clone();
+                            let uiw = ui_weak.clone();
+                            crate::with_ui(&uiw, move |ui| {
+                                open_viewer_session(ui, ConnectMode::View, srv, room, tok);
+                            });
                         }
                         aerodesk_core::sip_link::SipLinkEvent::Trickle {
                             call_id: _,
