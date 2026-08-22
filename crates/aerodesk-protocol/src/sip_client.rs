@@ -1,4 +1,4 @@
-//! SIP 客户端 UA（#552 slice 1：注册/presence + 生命周期）。
+//! SIP 客户端 UA（#552 slice 2：呼叫面——INVITE/BYE/INFO trickle/302 升级）。
 //!
 //! 本模块把 rsipstack 的 dialog/transaction/transport 收敛为一个**语义事件 API**
 //! （规范 §8/§9：SIP UA 收敛在 protocol 信令层，core 按事件迁移而非按报文迁移，
@@ -9,30 +9,50 @@
 //! - UA → core：[`SipEvent`]（std mpsc，core 用 [`SipClientHandle::recv_event`]
 //!   带超时轮询，与现有 presence 循环的 stop-flag 轮询同构）。
 //!
-//! slice 1 范围：REGISTER（Digest 质询自动应答 + 周期刷新 + 关停注销）与
-//! OPTIONS/501 应答器。呼叫面命令（Call/Accept/Reject/Hangup/SendTrickle）先
-//! 定义稳定 API，slice 2 实现（收到时仅记 warn，不产生线报文）。
+//! 呼叫面模型（规范 §4/§4.1）：
+//! - 主叫：`Call` → 经 signal 透明 Proxy 的 INVITE（offer 字节透传）；`180`→
+//!   [`SipEvent::Ringing`]，`200`→[`SipEvent::Answered`]（answer 字节透传），
+//!   4xx/6xx→[`SipEvent::Rejected`]（error_code 按规范 §3 由响应码映射），
+//!   `302`→[`SipEvent::EscalatedToSfu`]（会议 AoR 按 §4.1 由对端设备确定性推导——
+//!   rsipstack `reject` 不能带 Contact，推导规则使两端同样收敛）。
+//! - 被叫：INVITE → [`SipEvent::IncomingCall`]；core 以 `Ring`/`Accept`/`Reject`/
+//!   `RedirectToSfu` 决策；对端 CANCEL → [`SipEvent::PeerHangup`]。
+//! - 对话内：`Hangup`→BYE（reason 透传 Reason 头；[`crate::sip::ESCALATE_BYE_REASON`]
+//!   即升级语义），对端 BYE → [`SipEvent::PeerHangup`]（cause=302 时改为
+//!   [`SipEvent::EscalatedToSfu`] 并抑制 PeerHangup）；`SendTrickle`→INFO sdpfrag，
+//!   对端 INFO → [`SipEvent::Trickle`]。
 //!
-//! 传输：slice 1 仅 UDP（内网/调试，规范 §0 可选项）；TLS 默认传输随呼叫面
-//! slice 落地（公网强制加密的口径不变）。
+//! 传输：slice 2 仍仅 UDP（内网/调试，规范 §0 可选项）；TLS 默认传输随联调 slice
+//! 落地（公网强制加密口径不变）。
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
 use rsipstack::dialog::authenticate::Credential;
+use rsipstack::dialog::dialog::{DialogState, DialogStateSender, TerminatedReason};
+use rsipstack::dialog::dialog_layer::DialogLayer;
+use rsipstack::dialog::invitation::InviteOption;
+use rsipstack::dialog::invite_dialog::InviteDialog;
 use rsipstack::dialog::registration::Registration;
-use rsipstack::sip::{Method, StatusCode};
+use rsipstack::sip::{Header, HeadersExt, Method, Response, StatusCode};
 use rsipstack::transaction::endpoint::EndpointBuilder;
-use rsipstack::transport::SipConnection;
-use rsipstack::transport::TransportLayer;
+use rsipstack::transaction::transaction::Transaction;
+use rsipstack::transport::sip_addr::SipAddr;
 use rsipstack::transport::udp::UdpConnection;
+use rsipstack::transport::{SipConnection, TransportLayer};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::sip::{IMPLEMENTED_METHODS, PROTOCOL_VERSION, TrickleCandidate, device_aor};
+use crate::sip::{
+    IMPLEMENTED_METHODS, PROTOCOL_VERSION, TRICKLE_ICE_CONTENT_TYPE, TrickleCandidate,
+    decode_trickle, device_aor, device_from_uri, encode_trickle, error_code_to_status,
+    is_escalation_reason, status_to_error_code, view_aor,
+};
 
-/// 信令传输（slice 1 仅 UDP；TLS 随呼叫面 slice）。
+/// 信令传输（当前仅 UDP；TLS 随联调 slice）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SipTransport {
     /// UDP（内网/调试；规范 §0 传输矩阵可选项）。
@@ -51,7 +71,7 @@ pub struct SipClientConfig {
     /// signal 的 SIP 监听地址（实际投递目标，RFC 5626 outbound proxy 语义：
     /// 报文头域保留 domain，UDP 包发往该地址）。
     pub server: SocketAddr,
-    /// 传输（slice 1 仅 [`SipTransport::Udp`]）。
+    /// 传输（当前仅 [`SipTransport::Udp`]）。
     pub transport: SipTransport,
     /// REGISTER 过期秒数（刷新周期 = expires/2）。
     pub register_expires: u32,
@@ -64,15 +84,15 @@ pub enum SipEvent {
     Registered { aor: String, expires: u32 },
     /// 注册失败（status=0 表示传输/内部错误，非 SIP 响应码）。
     RegisterFailed { status: u16, reason: String },
-    /// 来电（Call 同构；被叫侧）。slice 2 接线。
+    /// 来电（Call 同构；被叫侧）。
     IncomingCall {
         call_id: String,
         from_device: String,
         offer_sdp: String,
     },
-    /// 对端响铃（CallRinging 同构；主叫侧）。slice 2 接线。
+    /// 对端响铃（CallRinging 同构；主叫侧）。
     Ringing { call_id: String },
-    /// 对端接听（CallAccepted 同构；answer_sdp 端到端透传）。slice 2 接线。
+    /// 对端接听（CallAccepted 同构；answer_sdp 端到端透传）。
     Answered { call_id: String, answer_sdp: String },
     /// 呼叫被拒/失败（CallRejected 同构；error_code 按规范 §3 由响应码映射）。
     Rejected {
@@ -80,15 +100,15 @@ pub enum SipEvent {
         status: u16,
         error_code: Option<String>,
     },
-    /// 对端挂断（Hangup 同构；对话内 BYE）。slice 2 接线。
+    /// 对端挂断（Hangup 同构：对话内 BYE；被叫侧亦用于对端 CANCEL 未接呼叫）。
     PeerHangup {
         call_id: String,
         reason: Option<String>,
     },
-    /// 呼叫已升级至 SFU 会议 AoR（§4.1：BYE cause=302 或 302 重定向）。
-    /// core 应按 view_aor 重新发起呼叫（媒体切 SFU）。slice 2 接线。
+    /// 呼叫已升级至 SFU 会议 AoR（§4.1：对端 BYE cause=302，或主叫侧收 302）。
+    /// core 应按 view_aor 重新发起呼叫（媒体切 SFU）。
     EscalatedToSfu { call_id: String, view_aor: String },
-    /// 对端 trickle 候选（IceCandidate 同构，INFO sdpfrag）。slice 2 接线。
+    /// 对端 trickle 候选（IceCandidate 同构，INFO sdpfrag）。
     Trickle {
         call_id: String,
         candidate: TrickleCandidate,
@@ -97,7 +117,7 @@ pub enum SipEvent {
     EndpointStopped,
 }
 
-/// core → UA 的命令。呼叫面命令在 slice 2 接线（slice 1 收到仅记 warn）。
+/// core → UA 的命令。
 #[derive(Debug, Clone)]
 pub enum SipCommand {
     /// 发起呼叫（Call 同构：INVITE + SDP offer；call_id 由 core 生成 → Call-ID）。
@@ -106,11 +126,16 @@ pub enum SipCommand {
         call_id: String,
         offer_sdp: String,
     },
+    /// 响铃（CallRinging 同构：180；被叫侧弹出确认窗时发）。
+    Ring { call_id: String },
     /// 接听（CallAccepted 同构：200 OK + SDP answer）。
     Accept { call_id: String, answer_sdp: String },
     /// 拒接（CallRejected 同构：规范 §3 error_code → 响应码）。
     Reject { call_id: String, error_code: String },
-    /// 挂断（Hangup 同构：BYE，reason → Reason 头）。
+    /// 升级重定向（§4.1 被控端决策：对新入呼回 302，呼叫转移至会议 AoR）。
+    RedirectToSfu { call_id: String },
+    /// 挂断（Hangup 同构：已建立→BYE（reason 透传 Reason 头，
+    /// 升级场景用 [`crate::sip::ESCALATE_BYE_REASON`]）；未建立→CANCEL/拒绝）。
     Hangup {
         call_id: String,
         reason: Option<String>,
@@ -146,7 +171,7 @@ impl SipClientHandle {
         self.event_rx.recv_timeout(timeout).ok()
     }
 
-    /// 关停 UA：注销（best-effort）→ 停 endpoint → join 线程。
+    /// 关停 UA：摘所有对话（best-effort）→ 注销 → 停 endpoint → join 线程。
     pub fn shutdown(mut self) {
         self.cancel.cancel();
         if let Some(t) = self.thread.take() {
@@ -192,6 +217,33 @@ pub fn start_sip_client(cfg: SipClientConfig) -> Result<SipClientHandle, String>
     })
 }
 
+/// 一通呼叫的 UA 侧状态（按 Call-ID 索引；UAC/UAS 双腿同构存 `InviteDialog`）。
+struct CallEntry {
+    dialog: InviteDialog,
+    /// 对端设备 ID（升级时推导会议 AoR 用，§4.1）。
+    peer_device: String,
+    /// 本端是否主叫（UAC 腿）。
+    initiator: bool,
+    /// 对话已 Confirmed（200/ACK 之后）。
+    established: bool,
+    /// 终局事件（Answered/Rejected/EscalatedToSfu）已上报——去重
+    /// Confirmed 事件与 do_invite JoinHandle 的双通道到达。
+    final_notified: bool,
+    /// 升级事件已上报（BYE cause=302）——抑制后续 PeerHangup。
+    escalate_notified: bool,
+}
+
+/// `handle_command` 的静态上下文（收束参数个数）。
+struct CmdCtx<'a> {
+    cfg: &'a SipClientConfig,
+    dialog_layer: &'a Arc<DialogLayer>,
+    state_tx: &'a DialogStateSender,
+    invite_final_tx: &'a tokio::sync::mpsc::UnboundedSender<(String, Option<Response>)>,
+    contact: &'a Option<rsipstack::sip::Uri>,
+    dialogs: &'a mut HashMap<String, CallEntry>,
+    event_tx: &'a std_mpsc::Sender<SipEvent>,
+}
+
 async fn run_client(
     cfg: SipClientConfig,
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<SipCommand>,
@@ -204,8 +256,6 @@ async fn run_client(
             reason: e,
         });
     }
-    // 关停：best-effort 注销（expires=0），让 presence 立即下线而非等过期。
-    // 注意 endpoint/registration 已被 inner 消费——注销在 inner 内做。
     debug!(device = %cfg.device_id, "SIP 客户端 UA 退出");
 }
 
@@ -215,14 +265,19 @@ async fn run_client_inner(
     event_tx: &std_mpsc::Sender<SipEvent>,
     cancel: &CancellationToken,
 ) -> Result<(), String> {
-    let tl = TransportLayer::new(cancel.clone());
+    // 传输/端点生命周期独立于主循环 cancel：关停顺序是先撤对话、再注销，
+    // 复位期间仍需收发（BYE/REGISTER 的响应要能回来）——若与主循环共用
+    // token，cancel 瞬间传输即死，drain 的 hangup() 将永等不到 200 OK。
+    // 传输随 runtime 收尾 drop，无需显式 cancel。
+    let transport_cancel = CancellationToken::new();
+    let tl = TransportLayer::new(transport_cancel.clone());
     match cfg.transport {
         SipTransport::Udp => {
             // 客户端用 add_transport（非 add_listener）：get_via 须能看到该传输。
             let conn = UdpConnection::create_connection(
                 "0.0.0.0:0".parse().unwrap(),
                 None,
-                Some(cancel.clone()),
+                Some(transport_cancel.clone()),
             )
             .await
             .map_err(|e| format!("SIP/UDP 客户端传输创建失败: {e}"))?;
@@ -230,10 +285,14 @@ async fn run_client_inner(
         }
     }
 
+    // 本地传输地址（Contact 兜底；0.0.0.0 绑定不能作为对话目标——ACK/INFO 会
+    // 发到不可达地址，故 Contact 优先取注册时 Via received/rport 发现的公网地址）。
+    let local_addr = tl.get_addrs().into_iter().next();
+
     let endpoint = EndpointBuilder::new()
         .with_user_agent(PROTOCOL_VERSION)
         .with_transport_layer(tl)
-        .with_cancel_token(cancel.clone())
+        .with_cancel_token(transport_cancel.clone())
         .with_allows(IMPLEMENTED_METHODS.to_vec())
         .build();
 
@@ -250,38 +309,11 @@ async fn run_client_inner(
         });
     }
 
-    // 入站应答器（slice 1）：OPTIONS → 200 + Allow；其余一律 501（规范 §6 纪律）。
-    // INVITE/BYE/INFO 的呼叫面接线在 slice 2。
-    {
-        let cancel_in = cancel.clone();
-        tokio::spawn(async move {
-            loop {
-                let mut tx = tokio::select! {
-                    _ = cancel_in.cancelled() => break,
-                    maybe = incoming.recv() => match maybe {
-                        Some(tx) => tx,
-                        None => break,
-                    },
-                };
-                match tx.original.method {
-                    Method::Options => {
-                        let allow = rsipstack::sip::Header::Other(
-                            "Allow".into(),
-                            IMPLEMENTED_METHODS
-                                .iter()
-                                .map(|m| m.to_string())
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                        );
-                        let _ = tx.reply_with(StatusCode::OK, vec![allow], None).await;
-                    }
-                    _ => {
-                        let _ = tx.reply(StatusCode::NotImplemented).await;
-                    }
-                }
-            }
-        });
-    }
+    let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
+    let (state_tx, mut state_rx) = dialog_layer.new_dialog_state_channel();
+    // do_invite_async 的 JoinHandle 结果（终局响应）回注主循环。
+    let (invite_final_tx, mut invite_final_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, Option<Response>)>();
 
     let server_uri: rsipstack::sip::Uri = format!("sip:{}", cfg.domain)
         .try_into()
@@ -308,28 +340,68 @@ async fn run_client_inner(
         event_tx,
     )
     .await;
+    // NAT 感知 Contact（对话级本端地址：INVITE 的 Contact / UAS 腿的 local contact）。
+    let mut contact_uri = nat_contact(&registration, local_addr.as_ref(), &cfg.device_id);
 
-    // 命令 / 周期刷新 / 关停 主循环。
+    let mut dialogs: HashMap<String, CallEntry> = HashMap::new();
     let refresh = Duration::from_secs((cfg.register_expires as u64 / 2).max(5));
+
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
             cmd = cmd_rx.recv() => match cmd {
                 Some(SipCommand::Reregister) => {
-                    do_register(&mut registration, &server_uri, &aor, cfg.register_expires, event_tx).await;
+                    do_register(&mut registration, &server_uri, &aor, cfg.register_expires,
+                        event_tx).await;
+                    contact_uri = nat_contact(&registration, local_addr.as_ref(), &cfg.device_id);
                 }
-                Some(other) => {
-                    warn!(cmd = ?other, "呼叫面命令 slice 2 接线，当前忽略");
+                Some(cmd) => handle_command(
+                    cmd,
+                    CmdCtx {
+                        cfg,
+                        dialog_layer: &dialog_layer,
+                        state_tx: &state_tx,
+                        invite_final_tx: &invite_final_tx,
+                        contact: &contact_uri,
+                        dialogs: &mut dialogs,
+                        event_tx,
+                    },
+                ).await,
+                None => break,
+            },
+            maybe = incoming.recv() => match maybe {
+                Some(tx) => handle_incoming(
+                    tx, cfg, &dialog_layer, &state_tx, &contact_uri, &mut dialogs, event_tx,
+                ).await,
+                None => break,
+            },
+            st = state_rx.recv() => match st {
+                Some(st) => {
+                    handle_dialog_state(st, cfg, &dialog_layer, &mut dialogs, event_tx).await
+                }
+                None => break,
+            },
+            fin = invite_final_rx.recv() => match fin {
+                Some((call_id, resp)) => {
+                    handle_invite_final(&call_id, resp, cfg, &mut dialogs, event_tx)
                 }
                 None => break,
             },
             _ = tokio::time::sleep(refresh) => {
-                do_register(&mut registration, &server_uri, &aor, cfg.register_expires, event_tx).await;
+                do_register(&mut registration, &server_uri, &aor, cfg.register_expires, event_tx)
+                    .await;
+                contact_uri = nat_contact(&registration, local_addr.as_ref(), &cfg.device_id);
             }
         }
     }
 
-    // 关停注销（best-effort，2s 兜底不阻塞退出）。
+    // 关停：摘所有对话（best-effort）+ 注销（expires=0），presence 立即下线。
+    for (_, entry) in dialogs.drain() {
+        // best-effort：BYE 响应可能因对端/代理已下线而不至（UDP 非 INVITE
+        // 事务超时以十秒计），关停路径统一 2s 封顶，绝不让 shutdown 悬挂。
+        let _ = tokio::time::timeout(Duration::from_secs(2), entry.dialog.hangup()).await;
+        dialog_layer.remove_dialog(&entry.dialog.id());
+    }
     let _ = tokio::time::timeout(
         Duration::from_secs(2),
         registration.register(server_uri, Some(0)),
@@ -337,6 +409,532 @@ async fn run_client_inner(
     .await;
     info!(device = %cfg.device_id, "SIP 客户端 UA 已关停并注销");
     Ok(())
+}
+
+/// 构造 NAT 感知 Contact 的 URI：优先注册时 Via received/rport 发现的公网地址，
+/// 兜底本地传输地址。0.0.0.0 监听地址不可作对话目标（对端 ACK/INFO 不可达）。
+fn nat_contact(
+    registration: &Registration,
+    local_addr: Option<&SipAddr>,
+    device_id: &str,
+) -> Option<rsipstack::sip::Uri> {
+    let local = local_addr.cloned().unwrap_or_default();
+    Some(
+        Registration::create_nat_aware_contact(
+            device_id,
+            registration.public_address.clone(),
+            &local,
+        )
+        .uri,
+    )
+}
+
+/// core 命令处理（呼叫面全量）。静态上下文收束为 [`CmdCtx`]，主循环只传两项。
+async fn handle_command(cmd: SipCommand, ctx: CmdCtx<'_>) {
+    let CmdCtx {
+        cfg,
+        dialog_layer,
+        state_tx,
+        invite_final_tx,
+        contact,
+        dialogs,
+        event_tx,
+    } = ctx;
+    match cmd {
+        SipCommand::Call {
+            target_device,
+            call_id,
+            offer_sdp,
+        } => {
+            let callee: rsipstack::sip::Uri =
+                match device_aor(&target_device, &cfg.domain).try_into() {
+                    Ok(u) => u,
+                    Err(e) => {
+                        warn!(error = %e, "callee URI 构造失败");
+                        return;
+                    }
+                };
+            let caller: rsipstack::sip::Uri =
+                match device_aor(&cfg.device_id, &cfg.domain).try_into() {
+                    Ok(u) => u,
+                    Err(e) => {
+                        warn!(error = %e, "caller URI 构造失败");
+                        return;
+                    }
+                };
+            // 经 signal 透明 Proxy：destination 固定为 signal 监听地址（outbound
+            // proxy 语义，报文头域保留 domain）。
+            let mut destination = SipAddr::from(cfg.server);
+            destination.r#type = Some(rsipstack::sip::Transport::Udp);
+            let contact = match contact
+                .clone()
+                .or_else(|| dialog_layer.build_local_contact(None, None).ok())
+            {
+                Some(c) => c,
+                None => {
+                    warn!("local contact 构造失败");
+                    return;
+                }
+            };
+            let opt = InviteOption {
+                caller,
+                callee,
+                destination: Some(destination),
+                content_type: Some("application/sdp".into()),
+                offer: Some(offer_sdp.into_bytes()),
+                contact,
+                call_id: Some(call_id.clone()),
+                ..Default::default()
+            };
+            match dialog_layer.do_invite_async(opt, state_tx.clone()) {
+                Ok((dlg, join)) => {
+                    dialogs.insert(
+                        call_id.clone(),
+                        CallEntry {
+                            dialog: dlg,
+                            peer_device: target_device,
+                            initiator: true,
+                            established: false,
+                            final_notified: false,
+                            escalate_notified: false,
+                        },
+                    );
+                    // JoinHandle 终局响应回注主循环（302/4xx/6xx 的权威语义）。
+                    let final_tx = invite_final_tx.clone();
+                    let cid = call_id.clone();
+                    tokio::spawn(async move {
+                        let resp = match join.await {
+                            Ok(Ok((_, resp))) => resp,
+                            _ => None,
+                        };
+                        let _ = final_tx.send((cid, resp));
+                    });
+                }
+                Err(e) => {
+                    warn!(%call_id, error = %e, "INVITE 发起失败");
+                    let _ = event_tx.send(SipEvent::Rejected {
+                        call_id,
+                        status: 0,
+                        error_code: Some("invite_failed".into()),
+                    });
+                }
+            }
+        }
+        SipCommand::Ring { call_id } => {
+            if let Some(entry) = dialogs.get(&call_id) {
+                // 180 必须不带 body（带 body 会被 rsipstack 升为 183）。
+                if let Err(e) = entry.dialog.ringing(None, None) {
+                    warn!(%call_id, error = %e, "180 Ringing 发送失败");
+                }
+            }
+        }
+        SipCommand::Accept {
+            call_id,
+            answer_sdp,
+        } => {
+            if let Some(entry) = dialogs.get(&call_id) {
+                let ct = Header::Other("Content-Type".into(), "application/sdp".into());
+                if let Err(e) = entry
+                    .dialog
+                    .accept(Some(vec![ct]), Some(answer_sdp.into_bytes()))
+                {
+                    warn!(%call_id, error = %e, "200 OK(answer) 发送失败");
+                }
+            }
+        }
+        SipCommand::Reject {
+            call_id,
+            error_code,
+        } => {
+            if let Some(entry) = dialogs.get(&call_id) {
+                let status = StatusCode::from(error_code_to_status(&error_code));
+                if let Err(e) = entry.dialog.reject(Some(status), Some(error_code)) {
+                    warn!(%call_id, error = %e, "拒接响应发送失败");
+                }
+            }
+        }
+        SipCommand::RedirectToSfu { call_id } => {
+            if let Some(entry) = dialogs.get(&call_id) {
+                // rsipstack reject 不能带 Contact——302 语义 + §4.1 确定性推导
+                // 使 aerodesk 两端收敛（view AoR = sip:view-<对端设备>@<domain>）。
+                if let Err(e) = entry.dialog.reject(
+                    Some(StatusCode::MovedTemporarily),
+                    Some("aerodesk SFU escalation".into()),
+                ) {
+                    warn!(%call_id, error = %e, "302 重定向发送失败");
+                }
+            }
+        }
+        SipCommand::Hangup { call_id, reason } => {
+            if let Some(entry) = dialogs.get(&call_id) {
+                let r = if entry.established {
+                    match reason {
+                        Some(reason) => entry.dialog.bye_with_reason(reason).await,
+                        None => entry.dialog.bye().await,
+                    }
+                } else if entry.initiator {
+                    entry.dialog.cancel().await
+                } else {
+                    // 被叫未接即挂 = 拒接（603）。
+                    entry.dialog.reject(Some(StatusCode::Decline), reason)
+                };
+                if let Err(e) = r {
+                    warn!(%call_id, error = %e, "挂断发送失败");
+                }
+            }
+        }
+        SipCommand::SendTrickle { call_id, candidate } => {
+            if let Some(entry) = dialogs.get(&call_id) {
+                let ct = Header::Other("Content-Type".into(), TRICKLE_ICE_CONTENT_TYPE.into());
+                let body = encode_trickle(&candidate).into_bytes();
+                if let Err(e) = entry.dialog.info(Some(vec![ct]), Some(body)).await {
+                    warn!(%call_id, error = %e, "INFO trickle 发送失败");
+                }
+            }
+        }
+        // Reregister 由主循环臂直接处理（registration 不在此作用域）。
+        SipCommand::Reregister => {}
+    }
+}
+
+/// 入站事务处理（UAS 腿 + 对话内 BYE/INFO/re-INVITE 路由 + 严格子集 501）。
+async fn handle_incoming(
+    mut tx: Transaction,
+    cfg: &SipClientConfig,
+    dialog_layer: &Arc<DialogLayer>,
+    state_tx: &DialogStateSender,
+    contact: &Option<rsipstack::sip::Uri>,
+    dialogs: &mut HashMap<String, CallEntry>,
+    event_tx: &std_mpsc::Sender<SipEvent>,
+) {
+    let method = tx.original.method;
+
+    // 严格子集门禁（规范 §6）。ACK/CANCEL 由事务层吸收，不会到这里。
+    if !IMPLEMENTED_METHODS.contains(&method) {
+        let _ = tx.reply(StatusCode::NotImplemented).await;
+        return;
+    }
+
+    match method {
+        Method::Options => {
+            let allow = Header::Other(
+                "Allow".into(),
+                IMPLEMENTED_METHODS
+                    .iter()
+                    .map(|m| m.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            let _ = tx.reply_with(StatusCode::OK, vec![allow], None).await;
+        }
+        Method::Invite => {
+            // re-INVITE（对话内）走 match_dialog；新呼叫走 get_or_create。
+            if let Some(mut dlg) = dialog_layer.match_dialog(&tx) {
+                tokio::spawn(async move {
+                    let _ = dlg.handle(&mut tx).await;
+                });
+                return;
+            }
+            let req = tx.original.clone();
+            let call_id = match req.call_id_header() {
+                Ok(h) => h.value().to_string(),
+                Err(_) => {
+                    let _ = tx.reply(StatusCode::BadRequest).await;
+                    return;
+                }
+            };
+            let from_device = req
+                .from_header()
+                .ok()
+                .and_then(|f| f.uri().ok())
+                .and_then(|u| device_from_uri(&u.to_string()).map(str::to_string))
+                .unwrap_or_default();
+            let offer_sdp = String::from_utf8_lossy(req.body()).to_string();
+            match dialog_layer.get_or_create_server_invite(
+                &tx,
+                state_tx.clone(),
+                None,
+                contact.clone(),
+            ) {
+                Ok(dlg) => {
+                    // 驱动 server 腿：自动 100 Trying + ACK/CANCEL 吸收（不 spawn
+                    // 则 CANCEL 无人 487、ACK 无人 Confirmed）。
+                    let mut handle_dlg = dlg.clone();
+                    tokio::spawn(async move {
+                        let _ = handle_dlg.handle(&mut tx).await;
+                    });
+                    dialogs.insert(
+                        call_id.clone(),
+                        CallEntry {
+                            dialog: dlg,
+                            peer_device: from_device.clone(),
+                            initiator: false,
+                            established: false,
+                            final_notified: false,
+                            escalate_notified: false,
+                        },
+                    );
+                    info!(%call_id, from = %from_device, "SIP 来电");
+                    let _ = event_tx.send(SipEvent::IncomingCall {
+                        call_id,
+                        from_device,
+                        offer_sdp,
+                    });
+                }
+                Err(e) => {
+                    warn!(%call_id, error = %e, "server dialog 创建失败");
+                    let _ = tx.reply(StatusCode::ServerInternalError).await;
+                }
+            }
+        }
+        Method::Bye => {
+            // §4.1 升级识别：BYE 的 Reason 头含 cause=302 → 先上报 EscalatedToSfu，
+            // 随后正常 handle（自动 200 + Terminated 时抑制 PeerHangup）。
+            let escalate = tx
+                .original
+                .headers
+                .iter()
+                .any(|h| matches!(h, Header::Reason(r) if is_escalation_reason(r.value())));
+            if escalate && let Ok(h) = tx.original.call_id_header() {
+                let cid = h.value().to_string();
+                if let Some(entry) = dialogs.get_mut(&cid) {
+                    entry.escalate_notified = true;
+                    let view = view_aor(&entry.peer_device, &cfg.domain);
+                    info!(call_id = %cid, %view, "对端升级至 SFU（BYE cause=302）");
+                    let _ = event_tx.send(SipEvent::EscalatedToSfu {
+                        call_id: cid,
+                        view_aor: view,
+                    });
+                }
+            }
+            if let Some(mut dlg) = dialog_layer.match_dialog(&tx) {
+                tokio::spawn(async move {
+                    let _ = dlg.handle(&mut tx).await;
+                });
+            } else {
+                let _ = tx.reply(StatusCode::CallTransactionDoesNotExist).await;
+            }
+        }
+        Method::Info => {
+            if let Some(mut dlg) = dialog_layer.match_dialog(&tx) {
+                tokio::spawn(async move {
+                    let _ = dlg.handle(&mut tx).await;
+                });
+            } else {
+                let _ = tx.reply(StatusCode::CallTransactionDoesNotExist).await;
+            }
+        }
+        // REGISTER 不面向客户端；ACK/CANCEL 已被事务层吸收。
+        _ => {
+            let _ = tx.reply(StatusCode::NotImplemented).await;
+        }
+    }
+}
+
+/// 对话状态事件 → 语义事件（双腿合一通道，按 Call-ID 关联）。
+async fn handle_dialog_state(
+    st: DialogState,
+    cfg: &SipClientConfig,
+    dialog_layer: &Arc<DialogLayer>,
+    dialogs: &mut HashMap<String, CallEntry>,
+    event_tx: &std_mpsc::Sender<SipEvent>,
+) {
+    match st {
+        DialogState::Early(id, _resp) => {
+            if let Some(entry) = dialogs.get(&id.call_id)
+                && entry.initiator
+                && !entry.final_notified
+            {
+                let _ = event_tx.send(SipEvent::Ringing {
+                    call_id: id.call_id.clone(),
+                });
+            }
+        }
+        DialogState::Confirmed(id, resp) => {
+            if let Some(entry) = dialogs.get_mut(&id.call_id) {
+                entry.established = true;
+                if entry.initiator && !entry.final_notified {
+                    entry.final_notified = true;
+                    let _ = event_tx.send(SipEvent::Answered {
+                        call_id: id.call_id.clone(),
+                        answer_sdp: String::from_utf8_lossy(&resp.body).to_string(),
+                    });
+                }
+            }
+        }
+        DialogState::Info(id, req, handle) => {
+            let body = String::from_utf8_lossy(req.body()).to_string();
+            match decode_trickle(&body) {
+                Some(candidate) => {
+                    if dialogs.contains_key(&id.call_id) {
+                        let _ = event_tx.send(SipEvent::Trickle {
+                            call_id: id.call_id.clone(),
+                            candidate,
+                        });
+                    }
+                    let _ = handle.reply(StatusCode::OK).await;
+                }
+                None => {
+                    warn!(call_id = %id.call_id, "INFO sdpfrag 解析失败");
+                    let _ = handle.reply(StatusCode::BadRequest).await;
+                }
+            }
+        }
+        DialogState::Terminated(id, reason) => {
+            handle_terminated(id, reason, cfg, dialog_layer, dialogs, event_tx);
+        }
+        _ => {}
+    }
+}
+
+/// Terminated 归一化：区分「对端 BYE」「对端 CANCEL」「终局拒绝」「本端动作」。
+fn handle_terminated(
+    id: rsipstack::dialog::DialogId,
+    reason: TerminatedReason,
+    cfg: &SipClientConfig,
+    dialog_layer: &Arc<DialogLayer>,
+    dialogs: &mut HashMap<String, CallEntry>,
+    event_tx: &std_mpsc::Sender<SipEvent>,
+) {
+    let call_id = id.call_id.clone();
+    let Some(entry) = dialogs.get(&call_id) else {
+        dialog_layer.remove_dialog(&id);
+        return;
+    };
+    // BYE 方向判定（recon：收 BYE 时 server 腿→UacBye、client 腿→UasBye；
+    // 本端 bye() 反之）。
+    let peer_bye = matches!(
+        (&reason, entry.initiator),
+        (TerminatedReason::UasBye, true) | (TerminatedReason::UacBye, false)
+    );
+    if peer_bye {
+        if entry.established && !entry.escalate_notified {
+            let _ = event_tx.send(SipEvent::PeerHangup {
+                call_id: call_id.clone(),
+                reason: None,
+            });
+        }
+    } else if !entry.initiator && matches!(reason, TerminatedReason::UacCancel) {
+        // 被叫侧：对端在未接期间 CANCEL → 呼叫结束（关弹窗）。
+        if !entry.final_notified {
+            let _ = event_tx.send(SipEvent::PeerHangup {
+                call_id: call_id.clone(),
+                reason: Some("cancelled".into()),
+            });
+        }
+    } else if entry.initiator && !entry.final_notified {
+        // 主叫腿终局拒绝（与 invite_final 双通道，先到先报）。
+        match &reason {
+            TerminatedReason::UasOther(code) | TerminatedReason::UacOther(code) => {
+                report_final_status(&call_id, code, cfg, dialogs, event_tx);
+            }
+            TerminatedReason::UasBusy | TerminatedReason::UacBusy => {
+                report_final_status(&call_id, &StatusCode::BusyHere, cfg, dialogs, event_tx);
+            }
+            TerminatedReason::UasDecline => {
+                report_final_status(&call_id, &StatusCode::Decline, cfg, dialogs, event_tx);
+            }
+            TerminatedReason::Timeout => {
+                if let Some(entry) = dialogs.get_mut(&call_id) {
+                    entry.final_notified = true;
+                }
+                let _ = event_tx.send(SipEvent::Rejected {
+                    call_id: call_id.clone(),
+                    status: 408,
+                    error_code: Some("timeout".into()),
+                });
+            }
+            _ => {}
+        }
+    }
+    dialogs.remove(&call_id);
+    dialog_layer.remove_dialog(&id);
+}
+
+/// 主叫腿终局响应码 → Rejected / EscalatedToSfu（302，§4.1 推导会议 AoR）。
+fn report_final_status(
+    call_id: &str,
+    code: &StatusCode,
+    cfg: &SipClientConfig,
+    dialogs: &mut HashMap<String, CallEntry>,
+    event_tx: &std_mpsc::Sender<SipEvent>,
+) {
+    let status = u16::from(code.clone());
+    if let Some(entry) = dialogs.get_mut(call_id) {
+        entry.final_notified = true;
+        if status == 302 {
+            entry.escalate_notified = true;
+            let view = view_aor(&entry.peer_device, &cfg.domain);
+            info!(%call_id, %view, "呼叫被 302 重定向至 SFU 会议");
+            let _ = event_tx.send(SipEvent::EscalatedToSfu {
+                call_id: call_id.to_string(),
+                view_aor: view,
+            });
+            return;
+        }
+    }
+    let _ = event_tx.send(SipEvent::Rejected {
+        call_id: call_id.to_string(),
+        status,
+        error_code: status_to_error_code(status).map(str::to_string),
+    });
+}
+
+/// do_invite_async 的 JoinHandle 终局（302/4xx/6xx 权威；2xx 与 Confirmed 去重）。
+fn handle_invite_final(
+    call_id: &str,
+    resp: Option<Response>,
+    cfg: &SipClientConfig,
+    dialogs: &mut HashMap<String, CallEntry>,
+    event_tx: &std_mpsc::Sender<SipEvent>,
+) {
+    let Some(entry) = dialogs.get_mut(call_id) else {
+        return;
+    };
+    if entry.final_notified {
+        return;
+    }
+    match resp {
+        Some(resp) => {
+            let status = u16::from(resp.status_code.clone());
+            match status {
+                200..=299 => {
+                    entry.final_notified = true;
+                    entry.established = true;
+                    let _ = event_tx.send(SipEvent::Answered {
+                        call_id: call_id.to_string(),
+                        answer_sdp: String::from_utf8_lossy(&resp.body).to_string(),
+                    });
+                }
+                302 => {
+                    entry.final_notified = true;
+                    entry.escalate_notified = true;
+                    let view = view_aor(&entry.peer_device, &cfg.domain);
+                    info!(%call_id, %view, "呼叫被 302 重定向至 SFU 会议");
+                    let _ = event_tx.send(SipEvent::EscalatedToSfu {
+                        call_id: call_id.to_string(),
+                        view_aor: view,
+                    });
+                }
+                _ => {
+                    entry.final_notified = true;
+                    let _ = event_tx.send(SipEvent::Rejected {
+                        call_id: call_id.to_string(),
+                        status,
+                        error_code: status_to_error_code(status).map(str::to_string),
+                    });
+                }
+            }
+        }
+        None => {
+            entry.final_notified = true;
+            let _ = event_tx.send(SipEvent::Rejected {
+                call_id: call_id.to_string(),
+                status: 0,
+                error_code: Some("transport".into()),
+            });
+        }
+    }
 }
 
 /// 一次 REGISTER（Digest 质询由 Registration 自动应答），结果上报为语义事件。

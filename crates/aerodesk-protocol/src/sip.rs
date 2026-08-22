@@ -40,6 +40,21 @@ pub fn device_aor(device_id: &str, domain: &str) -> String {
     format!("sip:{device_id}@{domain}")
 }
 
+/// 设备 ID → SFU 会议 AoR（`sip:view-<device-id>@<domain>`，规范 §4.1）。
+/// 多方升级时参与方据此自行推导重 INVITE 目标，无需额外信令字段——
+/// 302 不带 Contact（rsipstack `reject` 限制）时两端同样收敛。
+pub fn view_aor(device_id: &str, domain: &str) -> String {
+    format!("sip:view-{device_id}@{domain}")
+}
+
+/// 升级 BYE 的 Reason 头值（规范 §4.1；RFC 3326，cause=302 = 呼叫已转移）。
+pub const ESCALATE_BYE_REASON: &str = "SIP;cause=302;text=\"escalated to SFU conference\"";
+
+/// Reason 头是否为升级语义（含 cause=302）。
+pub fn is_escalation_reason(reason: &str) -> bool {
+    reason.contains("cause=302")
+}
+
 /// AoR/URI → 设备 ID（取 userinfo 的 user 部分；非 sip: 形如 None）。
 pub fn device_from_uri(uri: &str) -> Option<&str> {
     let rest = uri
@@ -257,6 +272,15 @@ mod tests {
         assert_eq!(device_from_uri("sips:AD-X@d.example"), Some("AD-X"));
         assert_eq!(device_from_uri("AD-01AB3C"), None); // 无 scheme
         assert_eq!(device_from_uri("sip:@d"), None); // 空 user
+        // 会议 AoR 推导与升级 Reason 识别（规范 §4.1）
+        assert_eq!(
+            view_aor("AD-01AB3C", DEFAULT_DOMAIN),
+            "sip:view-AD-01AB3C@aerodesk.local"
+        );
+        assert!(is_escalation_reason(ESCALATE_BYE_REASON));
+        assert!(!is_escalation_reason(
+            "SIP;cause=200;text=\"normal clearing\""
+        ));
     }
 
     // -- 错误码双向映射（规范 §3 全量）--

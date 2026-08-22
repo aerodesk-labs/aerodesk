@@ -354,7 +354,9 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
     // slice 2：dialog 层（透明 Proxy 的对话配对/状态机）+ 指标。
     let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
     let metrics = Arc::new(SipMetrics::default());
-    *SIP_METRICS.write().unwrap() = Some(metrics.clone());
+    let _ = SIP_METRICS.write().unwrap().replace(metrics.clone());
+    // BYE Reason 头转发表（serve 循环捕获 → relay 级联时转发；Call-ID 键，Terminated 时消费）。
+    let bye_reasons: Arc<Mutex<HashMap<String, String>>> = Arc::default();
 
     info!("SIP 端点已就绪（Registrar + 透明 INVITE Proxy + OPTIONS）");
 
@@ -457,8 +459,9 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
                     Some(binding) => {
                         let dl = dialog_layer.clone();
                         let m = metrics.clone();
+                        let br = bye_reasons.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = proxy_call(dl, tx, binding, m).await {
+                            if let Err(e) = proxy_call(dl, tx, binding, m, br).await {
                                 warn!(error=%e, "proxy_call 失败");
                             }
                         });
@@ -467,7 +470,29 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
             }
             // 对话内 BYE/INFO：路由到已配对 dialog 处理（BYE 自动 200+Terminated；
             // INFO 经状态事件透传到对腿）。
-            Method::Bye | Method::Info => match dialog_layer.match_dialog(&tx) {
+            // BYE 的 Reason 头（如升级 cause=302，§4.1）不进 Terminated 事件——
+            // 在此捕获到共享表，relay 级联 BYE 时转发（端到端保真）。
+            Method::Bye => {
+                if let Ok(h) = tx.original.call_id_header()
+                    && let Some(r) = tx.original.headers.iter().find_map(|h| match h {
+                        Header::Reason(reason) => Some(reason.value().to_string()),
+                        _ => None,
+                    })
+                {
+                    bye_reasons.lock().unwrap().insert(h.value().to_string(), r);
+                }
+                match dialog_layer.match_dialog(&tx) {
+                    Some(mut dlg) => {
+                        tokio::spawn(async move {
+                            let _ = dlg.handle(&mut tx).await;
+                        });
+                    }
+                    None => {
+                        let _ = tx.reply(StatusCode::CallTransactionDoesNotExist).await;
+                    }
+                }
+            }
+            Method::Info => match dialog_layer.match_dialog(&tx) {
                 Some(mut dlg) => {
                     tokio::spawn(async move {
                         let _ = dlg.handle(&mut tx).await;
@@ -499,6 +524,7 @@ async fn proxy_call(
     mut tx: Transaction,
     binding: Binding,
     metrics: Arc<SipMetrics>,
+    bye_reasons: Arc<Mutex<HashMap<String, String>>>,
 ) -> Result<(), String> {
     let (state_tx, state_rx) = dl.new_dialog_state_channel();
 
@@ -545,7 +571,19 @@ async fn proxy_call(
     let b_id = client_dlg.id();
     info!(%a_id, %b_id, "Proxy 呼叫双腿已配对");
 
-    relay(state_rx, server_dlg, client_dlg, a_id, b_id, dl, metrics).await;
+    relay(
+        state_rx,
+        server_dlg,
+        client_dlg,
+        RelayCtx {
+            a_id,
+            b_id,
+            dl,
+            metrics,
+            bye_reasons,
+        },
+    )
+    .await;
     Ok(())
 }
 
@@ -555,15 +593,29 @@ async fn proxy_call(
 /// **腿匹配按 `local_tag`（腿创建即定、稳定），不能用整个 `DialogId`**——client 腿
 /// 的 remote_tag（对端 to-tag）在 18x/200 后才补上，创建时抓的 `id()` 与事件里的 id
 /// 不相等。两腿共享同一 Call-ID，故 local_tag 是唯一区分键。
-async fn relay(
-    mut state_rx: DialogStateReceiver,
-    server_dlg: InviteDialog,
-    client_dlg: InviteDialog,
+/// 双腿接力循环的静态上下文（对腿 id/注册表/指标/升级 BYE Reason 表）。
+/// 与 dialog 对（state_rx, server_dlg, client_dlg）分离，relay 签名保持在 4 参内。
+struct RelayCtx {
     a_id: DialogId,
     b_id: DialogId,
     dl: Arc<DialogLayer>,
     metrics: Arc<SipMetrics>,
+    bye_reasons: Arc<Mutex<HashMap<String, String>>>,
+}
+
+async fn relay(
+    mut state_rx: DialogStateReceiver,
+    server_dlg: InviteDialog,
+    client_dlg: InviteDialog,
+    ctx: RelayCtx,
 ) {
+    let RelayCtx {
+        a_id,
+        b_id,
+        dl,
+        metrics,
+        bye_reasons,
+    } = ctx;
     let a_local = a_id.local_tag.clone();
     let b_local = b_id.local_tag.clone();
     let is_a = |id: &DialogId| id.local_tag == a_local;
@@ -622,15 +674,24 @@ async fn relay(
                 if is_b(&id) {
                     b_done = true;
                 }
+                // BYE 的 Reason 头（升级 cause=302 等）消费并随级联 BYE 端到端转发。
+                let bye_reason = bye_reasons.lock().unwrap().remove(&id.call_id);
                 match reason {
                     // 主叫取消（A 腿）→ 级联 CANCEL 到被叫腿（487 已由栈自动回主叫）。
                     TerminatedReason::UacCancel if is_a(&id) => {
                         let _ = client_dlg.cancel().await;
                     }
-                    // 任一侧 BYE → 级联 BYE 到对腿。
+                    // 任一侧 BYE → 级联 BYE 到对腿（带 Reason 头则原样转发）。
                     TerminatedReason::UacBye | TerminatedReason::UasBye => {
                         let peer = if is_a(&id) { &client_dlg } else { &server_dlg };
-                        let _ = peer.bye().await;
+                        let r = match bye_reason {
+                            Some(r) => {
+                                peer.bye_with_headers(Some(vec![Header::Reason(r.into())]))
+                                    .await
+                            }
+                            None => peer.bye().await,
+                        };
+                        let _ = r;
                     }
                     // 被叫拒绝/忙/超时（B 腿）→ 原码回主叫（486/603/408/487…）。
                     TerminatedReason::UasOther(code) | TerminatedReason::UacOther(code)
@@ -1133,6 +1194,253 @@ mod tests {
         // 关停：注销 + join，不悬挂。
         good.shutdown();
         bad.shutdown();
+        server_cancel.cancel();
+        server
+            .join()
+            .expect("server 线程应退出")
+            .expect("server 应正常退出");
+    }
+
+    // -- 端到端 #552 slice 2：双 SipClient 经透明 Proxy 的全呼叫面 --
+    // INVITE→180→200(SDP 透传)→INFO trickle→BYE；拒接 486；302 升级；
+    // BYE cause=302 升级（抑制 PeerHangup）。
+
+    #[test]
+    fn end_to_end_sip_client_call_plane() {
+        let _serial = serve_e2e_guard();
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
+        use aerodesk_protocol::sip::{ESCALATE_BYE_REASON, TrickleCandidate};
+        use aerodesk_protocol::sip_client::{
+            SipClientConfig, SipCommand, SipEvent, SipTransport, start_sip_client,
+        };
+
+        let port = free_udp_port();
+        let mut pw = HashMap::new();
+        pw.insert("AD-CALLER".to_string(), "tok-caller".to_string());
+        pw.insert("AD-CALLEE".to_string(), "tok-callee".to_string());
+        let cfg = SipConfig {
+            realm: REALM.into(),
+            tls_addr: None,
+            wss_addr: None,
+            udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+            passwords: Arc::new(pw),
+            tls_identity: None,
+        };
+        let server_cancel = CancellationToken::new();
+        let sc = server_cancel.clone();
+        let server = std::thread::spawn(move || run_sip_endpoint(cfg, sc));
+        std::thread::sleep(Duration::from_millis(400));
+
+        let client_cfg = |device: &str| SipClientConfig {
+            device_id: device.into(),
+            domain: REALM.into(),
+            password: format!("tok-{}", device.trim_start_matches("AD-").to_lowercase()),
+            server: format!("127.0.0.1:{port}").parse().unwrap(),
+            transport: SipTransport::Udp,
+            register_expires: 60,
+        };
+        let caller = start_sip_client(client_cfg("AD-CALLER")).expect("caller 启动");
+        let callee = start_sip_client(client_cfg("AD-CALLEE")).expect("callee 启动");
+
+        // 收事件（跳过非目标种类，5s 兜底）。
+        let recv_until =
+            |h: &aerodesk_protocol::sip_client::SipClientHandle, want: &str| -> SipEvent {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    let remain = deadline.saturating_duration_since(std::time::Instant::now());
+                    assert!(!remain.is_zero(), "等 {want} 超时");
+                    // None 两种含义：窗口内超时（重试至 deadline）或对端通道关闭（UA 已停）。
+                    let Some(ev) = h.recv_event(remain) else {
+                        panic!("等 {want}：窗口内无事件或 UA 通道已关闭");
+                    };
+                    let hit = matches!(
+                        (&ev, want),
+                        (SipEvent::Registered { .. }, "Registered")
+                            | (SipEvent::IncomingCall { .. }, "IncomingCall")
+                            | (SipEvent::Ringing { .. }, "Ringing")
+                            | (SipEvent::Answered { .. }, "Answered")
+                            | (SipEvent::Rejected { .. }, "Rejected")
+                            | (SipEvent::PeerHangup { .. }, "PeerHangup")
+                            | (SipEvent::EscalatedToSfu { .. }, "EscalatedToSfu")
+                            | (SipEvent::Trickle { .. }, "Trickle")
+                    );
+                    if hit {
+                        return ev;
+                    }
+                }
+            };
+
+        assert!(matches!(
+            recv_until(&caller, "Registered"),
+            SipEvent::Registered { .. }
+        ));
+        assert!(matches!(
+            recv_until(&callee, "Registered"),
+            SipEvent::Registered { .. }
+        ));
+
+        // ---- 呼叫 1：全流程 ----
+        caller
+            .send(SipCommand::Call {
+                target_device: "AD-CALLEE".into(),
+                call_id: "c-1".into(),
+                offer_sdp: CALLER_SDP.into(),
+            })
+            .unwrap();
+        match recv_until(&callee, "IncomingCall") {
+            SipEvent::IncomingCall {
+                call_id,
+                from_device,
+                offer_sdp,
+            } => {
+                assert_eq!(call_id, "c-1");
+                assert_eq!(from_device, "AD-CALLER");
+                assert_eq!(offer_sdp, CALLER_SDP, "offer 应端到端字节一致");
+            }
+            _ => unreachable!(),
+        }
+        callee
+            .send(SipCommand::Ring {
+                call_id: "c-1".into(),
+            })
+            .unwrap();
+        assert!(
+            matches!(recv_until(&caller, "Ringing"), SipEvent::Ringing { ref call_id } if call_id == "c-1")
+        );
+        callee
+            .send(SipCommand::Accept {
+                call_id: "c-1".into(),
+                answer_sdp: CALLEE_SDP.into(),
+            })
+            .unwrap();
+        match recv_until(&caller, "Answered") {
+            SipEvent::Answered {
+                call_id,
+                answer_sdp,
+                ..
+            } => {
+                assert_eq!(call_id, "c-1");
+                assert_eq!(answer_sdp, CALLEE_SDP, "answer 应端到端字节一致");
+            }
+            _ => unreachable!(),
+        }
+        // trickle：主叫 → 被叫（INFO sdpfrag）。
+        caller
+            .send(SipCommand::SendTrickle {
+                call_id: "c-1".into(),
+                candidate: TrickleCandidate {
+                    candidate: "candidate:1 1 UDP 2130706431 192.0.2.1 5000 typ host".into(),
+                    sdp_mid: Some("0".into()),
+                    sdp_m_line_index: Some(0),
+                },
+            })
+            .unwrap();
+        match recv_until(&callee, "Trickle") {
+            SipEvent::Trickle {
+                call_id, candidate, ..
+            } => {
+                assert_eq!(call_id, "c-1");
+                assert_eq!(candidate.sdp_mid.as_deref(), Some("0"));
+                assert!(candidate.candidate.contains("192.0.2.1 5000"));
+            }
+            _ => unreachable!(),
+        }
+        // 被叫挂断 → 主叫 PeerHangup。
+        callee
+            .send(SipCommand::Hangup {
+                call_id: "c-1".into(),
+                reason: None,
+            })
+            .unwrap();
+        assert!(
+            matches!(recv_until(&caller, "PeerHangup"), SipEvent::PeerHangup { ref call_id, .. } if call_id == "c-1")
+        );
+
+        // ---- 呼叫 2：拒接（busy → 486）----
+        caller
+            .send(SipCommand::Call {
+                target_device: "AD-CALLEE".into(),
+                call_id: "c-2".into(),
+                offer_sdp: CALLER_SDP.into(),
+            })
+            .unwrap();
+        let _ = recv_until(&callee, "IncomingCall");
+        callee
+            .send(SipCommand::Reject {
+                call_id: "c-2".into(),
+                error_code: "busy".into(),
+            })
+            .unwrap();
+        match recv_until(&caller, "Rejected") {
+            SipEvent::Rejected {
+                call_id,
+                status,
+                error_code,
+            } => {
+                assert_eq!(call_id, "c-2");
+                assert_eq!(status, 486);
+                assert_eq!(error_code.as_deref(), Some("busy"));
+            }
+            _ => unreachable!(),
+        }
+
+        // ---- 呼叫 3：302 升级重定向（§4.1）----
+        caller
+            .send(SipCommand::Call {
+                target_device: "AD-CALLEE".into(),
+                call_id: "c-3".into(),
+                offer_sdp: CALLER_SDP.into(),
+            })
+            .unwrap();
+        let _ = recv_until(&callee, "IncomingCall");
+        callee
+            .send(SipCommand::RedirectToSfu {
+                call_id: "c-3".into(),
+            })
+            .unwrap();
+        match recv_until(&caller, "EscalatedToSfu") {
+            SipEvent::EscalatedToSfu { call_id, view_aor } => {
+                assert_eq!(call_id, "c-3");
+                assert_eq!(view_aor, format!("sip:view-AD-CALLEE@{REALM}"));
+            }
+            _ => unreachable!(),
+        }
+
+        // ---- 呼叫 4：已建立后 BYE cause=302 升级（抑制 PeerHangup）----
+        caller
+            .send(SipCommand::Call {
+                target_device: "AD-CALLEE".into(),
+                call_id: "c-4".into(),
+                offer_sdp: CALLER_SDP.into(),
+            })
+            .unwrap();
+        let _ = recv_until(&callee, "IncomingCall");
+        callee
+            .send(SipCommand::Accept {
+                call_id: "c-4".into(),
+                answer_sdp: CALLEE_SDP.into(),
+            })
+            .unwrap();
+        let _ = recv_until(&caller, "Answered");
+        callee
+            .send(SipCommand::Hangup {
+                call_id: "c-4".into(),
+                reason: Some(ESCALATE_BYE_REASON.into()),
+            })
+            .unwrap();
+        match recv_until(&caller, "EscalatedToSfu") {
+            SipEvent::EscalatedToSfu { call_id, view_aor } => {
+                assert_eq!(call_id, "c-4");
+                assert_eq!(view_aor, format!("sip:view-AD-CALLEE@{REALM}"));
+            }
+            _ => unreachable!(),
+        }
+
+        caller.shutdown();
+        callee.shutdown();
         server_cancel.cancel();
         server
             .join()
