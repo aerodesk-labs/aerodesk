@@ -20,3 +20,8 @@ tokio-util = { version = "0.7.19", features = ["rt"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# 测试证书生成（TLS e2e：CA + 服务端 EE，SAN 含 aerodesk.test/127.0.0.1）。
+# 不用于生产——生产证书由部署的 CERT_FILE/KEY_FILE 提供（内嵌证书仅开发）。
+[dev-dependencies]
+rcgen = "0.14.8"
