@@ -1609,6 +1609,7 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
             ui.set_connecting(false);
             ui.set_conn_state(0);
             ui.set_status("信令未连接，无法发起呼叫".into());
+            session_cleanup_weak(&ui.as_weak(), slot, Some("信令未连接".into()));
             return;
         };
         let mut p2p = match P2pCall::new(P2pCallConfig {
@@ -1627,6 +1628,7 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
                 ui.set_connecting(false);
                 ui.set_conn_state(0);
                 ui.set_status(format!("媒体端点创建失败：{e}").into());
+                session_cleanup_weak(&ui.as_weak(), slot, Some(format!("媒体端点创建失败：{e}")));
                 return;
             }
         };
@@ -1636,6 +1638,7 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
                 ui.set_connecting(false);
                 ui.set_conn_state(0);
                 ui.set_status(format!("SDP 创建失败：{e}").into());
+                session_cleanup_weak(&ui.as_weak(), slot, Some(format!("SDP 创建失败：{e}")));
                 return;
             }
         };
@@ -1697,6 +1700,7 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
             ui.set_connecting(false);
             ui.set_conn_state(0);
             ui.set_status(format!("发起呼叫失败：{e}").into());
+            session_cleanup_weak(&ui.as_weak(), slot, Some(format!("发起呼叫失败：{e}")));
         }
     }
 }
