@@ -890,6 +890,8 @@ mod tests {
         port
     }
 
+    use aerodesk_protocol::sip_client::SipClientConfig;
+
     async fn udp_client(
         cancel: &CancellationToken,
         username: &str,
@@ -1163,6 +1165,7 @@ mod tests {
             password: password.into(),
             server: format!("127.0.0.1:{port}").parse().unwrap(),
             transport: SipTransport::Udp,
+            tls: None,
             register_expires: 60,
         };
 
@@ -1201,47 +1204,64 @@ mod tests {
             .expect("server 应正常退出");
     }
 
-    // -- 端到端 #552 slice 2：双 SipClient 经透明 Proxy 的全呼叫面 --
+    // -- 端到端 #552 slice 2/3：双 SipClient 经透明 Proxy 的全呼叫面 --
     // INVITE→180→200(SDP 透传)→INFO trickle→BYE；拒接 486；302 升级；
-    // BYE cause=302 升级（抑制 PeerHangup）。
+    // BYE cause=302 升级（抑制 PeerHangup）。同一场景在 UDP 与 TLS 传输各跑一遍
+    // （slice 3：TLS=公网默认加密传输，客户端无监听，全呼叫面沿注册既有流）。
 
-    #[test]
-    fn end_to_end_sip_client_call_plane() {
-        let _serial = serve_e2e_guard();
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init();
+    /// 用 rcgen 现生成测试 CA + 服务端 EE 证书（SAN：DNS aerodesk.test + IP
+    /// 127.0.0.1）。不用内嵌开发证书（自签 CA:TRUE 端实体——rustls 0.23 webpki
+    /// 拒绝 caUsedAsEndEntity），也不用 openssl CLI（非 Windows 可移植）。
+    /// 返回（服务端身份, CA PEM）。
+    fn test_tls_material() -> (TlsIdentity, Vec<u8>) {
+        use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
+
+        let ca_key = KeyPair::generate().expect("CA key");
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "aerodesk.test test CA");
+        let ca = ca_params.self_signed(&ca_key).expect("CA cert");
+
+        let ee_key = KeyPair::generate().expect("EE key");
+        // 字符串自动识别：IP → SanType::IpAddress，域名 → SanType::DnsName。
+        let ee_params =
+            CertificateParams::new(vec!["aerodesk.test".to_string(), "127.0.0.1".to_string()])
+                .expect("EE params");
+        let ee = ee_params
+            .signed_by(&ee_key, &Issuer::from_params(&ca_params, &ca_key))
+            .expect("EE cert");
+
+        let identity = TlsIdentity {
+            cert: ee.pem().into_bytes(),
+            key: ee_key.serialize_pem().into_bytes(),
+            source: "test-rcgen",
+        };
+        (identity, ca.pem().into_bytes())
+    }
+
+    fn free_tcp_port() -> u16 {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        port
+    }
+
+    /// 全呼叫面场景主体（传输无关）：启动 server（监听差异由 `server_cfg` 注入）、
+    /// 双客户端注册、呼叫 1-4（全流程/拒接/302/BYE-302）、关停。
+    fn run_call_plane_scenario(
+        server_cfg: SipConfig,
+        client_cfg: &dyn Fn(&str) -> SipClientConfig,
+    ) {
         use aerodesk_protocol::sip::{ESCALATE_BYE_REASON, TrickleCandidate};
-        use aerodesk_protocol::sip_client::{
-            SipClientConfig, SipCommand, SipEvent, SipTransport, start_sip_client,
-        };
+        use aerodesk_protocol::sip_client::{SipCommand, SipEvent, start_sip_client};
 
-        let port = free_udp_port();
-        let mut pw = HashMap::new();
-        pw.insert("AD-CALLER".to_string(), "tok-caller".to_string());
-        pw.insert("AD-CALLEE".to_string(), "tok-callee".to_string());
-        let cfg = SipConfig {
-            realm: REALM.into(),
-            tls_addr: None,
-            wss_addr: None,
-            udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
-            passwords: Arc::new(pw),
-            tls_identity: None,
-        };
         let server_cancel = CancellationToken::new();
         let sc = server_cancel.clone();
-        let server = std::thread::spawn(move || run_sip_endpoint(cfg, sc));
+        let server = std::thread::spawn(move || run_sip_endpoint(server_cfg, sc));
         std::thread::sleep(Duration::from_millis(400));
 
-        let client_cfg = |device: &str| SipClientConfig {
-            device_id: device.into(),
-            domain: REALM.into(),
-            password: format!("tok-{}", device.trim_start_matches("AD-").to_lowercase()),
-            server: format!("127.0.0.1:{port}").parse().unwrap(),
-            transport: SipTransport::Udp,
-            register_expires: 60,
-        };
         let caller = start_sip_client(client_cfg("AD-CALLER")).expect("caller 启动");
         let callee = start_sip_client(client_cfg("AD-CALLEE")).expect("callee 启动");
 
@@ -1446,5 +1466,80 @@ mod tests {
             .join()
             .expect("server 线程应退出")
             .expect("server 应正常退出");
+    }
+
+    #[test]
+    fn end_to_end_sip_client_call_plane() {
+        let _serial = serve_e2e_guard();
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
+        use aerodesk_protocol::sip_client::{SipClientConfig, SipTransport};
+
+        let port = free_udp_port();
+        let mut pw = HashMap::new();
+        pw.insert("AD-CALLER".to_string(), "tok-caller".to_string());
+        pw.insert("AD-CALLEE".to_string(), "tok-callee".to_string());
+        let cfg = SipConfig {
+            realm: REALM.into(),
+            tls_addr: None,
+            wss_addr: None,
+            udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+            passwords: Arc::new(pw),
+            tls_identity: None,
+        };
+        let client_cfg = |device: &str| SipClientConfig {
+            device_id: device.into(),
+            domain: REALM.into(),
+            password: format!("tok-{}", device.trim_start_matches("AD-").to_lowercase()),
+            server: format!("127.0.0.1:{port}").parse().unwrap(),
+            transport: SipTransport::Udp,
+            tls: None,
+            register_expires: 60,
+        };
+        run_call_plane_scenario(cfg, &client_cfg);
+    }
+
+    /// slice 3：同一全呼叫面场景走 TLS（公网默认传输）。服务端仅开 TLS 监听，
+    /// 客户端无监听、复用注册建立的既出流。
+    #[test]
+    fn end_to_end_sip_client_call_plane_tls() {
+        let _serial = serve_e2e_guard();
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
+        use aerodesk_protocol::sip_client::{SipClientConfig, SipTlsConfig, SipTransport};
+
+        let port = free_tcp_port();
+        let (identity, ca_pem) = test_tls_material();
+        let mut pw = HashMap::new();
+        pw.insert("AD-CALLER".to_string(), "tok-caller".to_string());
+        pw.insert("AD-CALLEE".to_string(), "tok-callee".to_string());
+        let cfg = SipConfig {
+            realm: REALM.into(),
+            tls_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+            wss_addr: None,
+            udp_addr: None,
+            passwords: Arc::new(pw),
+            tls_identity: Some(identity),
+        };
+        let ca_pem_cfg = ca_pem.clone();
+        let client_cfg = |device: &str| SipClientConfig {
+            device_id: device.into(),
+            domain: REALM.into(),
+            password: format!("tok-{}", device.trim_start_matches("AD-").to_lowercase()),
+            server: format!("127.0.0.1:{port}").parse().unwrap(),
+            transport: SipTransport::Tls,
+            tls: Some(SipTlsConfig {
+                ca_certs: ca_pem_cfg.clone(),
+                sni_hostname: Some("aerodesk.test".into()),
+                client_cert: None,
+                client_key: None,
+            }),
+            register_expires: 60,
+        };
+        run_call_plane_scenario(cfg, &client_cfg);
     }
 }

@@ -22,8 +22,10 @@
 //!   [`SipEvent::EscalatedToSfu`] 并抑制 PeerHangup）；`SendTrickle`→INFO sdpfrag，
 //!   对端 INFO → [`SipEvent::Trickle`]。
 //!
-//! 传输：slice 2 仍仅 UDP（内网/调试，规范 §0 可选项）；TLS 默认传输随联调 slice
-//! 落地（公网强制加密口径不变）。
+//! 传输（规范 §0 传输矩阵）：[`SipTransport::Udp`] 内网/调试可选项、
+//! [`SipTransport::Tls`] 公网默认加密传输——客户端无监听，TLS 连接为
+//! 对 signal 的**既出流**（RFC 5923 alias 语义端到端复用：INVITE/BYE/INFO 与
+//! 注册共用同一条长连，in-dialog 请求由服务端沿同一流回推，不需要客户端回连）。
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -41,6 +43,7 @@ use rsipstack::sip::{Header, HeadersExt, Method, Response, StatusCode};
 use rsipstack::transaction::endpoint::EndpointBuilder;
 use rsipstack::transaction::transaction::Transaction;
 use rsipstack::transport::sip_addr::SipAddr;
+use rsipstack::transport::tls::{TlsConfig, TlsConnection};
 use rsipstack::transport::udp::UdpConnection;
 use rsipstack::transport::{SipConnection, TransportLayer};
 use tokio_util::sync::CancellationToken;
@@ -52,11 +55,27 @@ use crate::sip::{
     is_escalation_reason, status_to_error_code, view_aor,
 };
 
-/// 信令传输（当前仅 UDP；TLS 随联调 slice）。
+/// 信令传输（规范 §0 传输矩阵：UDP=内网/调试可选项，TLS=公网默认加密）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SipTransport {
     /// UDP（内网/调试；规范 §0 传输矩阵可选项）。
     Udp,
+    /// SIP over TLS（公网默认传输，强制加密；TLS 层不替代 Digest 应用层认证）。
+    Tls,
+}
+
+/// TLS 传输配置（[`SipTransport::Tls`] 时必填）。
+#[derive(Debug, Clone)]
+pub struct SipTlsConfig {
+    /// 服务端证书签发 CA 的 PEM（rsipstack 运行时只建 RootStore 信任锚，
+    /// 不支持系统根；生产由运营下发公网 CA，开发/联调用测试 CA）。
+    pub ca_certs: Vec<u8>,
+    /// SNI 与证书校验名（缺省取连接目标 host；公网部署必须与服务端证书 SAN 一致）。
+    pub sni_hostname: Option<String>,
+    /// 可选 mTLS 客户端证书（PEM；公网默认不做客户端证书认证——Digest 已认证）。
+    pub client_cert: Option<Vec<u8>>,
+    /// 可选 mTLS 客户端私钥（PEM，与 [`Self::client_cert`] 成对）。
+    pub client_key: Option<Vec<u8>>,
 }
 
 /// 客户端 UA 配置。
@@ -71,8 +90,10 @@ pub struct SipClientConfig {
     /// signal 的 SIP 监听地址（实际投递目标，RFC 5626 outbound proxy 语义：
     /// 报文头域保留 domain，UDP 包发往该地址）。
     pub server: SocketAddr,
-    /// 传输（当前仅 [`SipTransport::Udp`]）。
+    /// 传输（[`SipTransport::Udp`] 或 [`SipTransport::Tls`]）。
     pub transport: SipTransport,
+    /// TLS 配置（[`SipTransport::Tls`] 时必填）。
+    pub tls: Option<SipTlsConfig>,
     /// REGISTER 过期秒数（刷新周期 = expires/2）。
     pub register_expires: u32,
 }
@@ -271,7 +292,9 @@ async fn run_client_inner(
     // 传输随 runtime 收尾 drop，无需显式 cancel。
     let transport_cancel = CancellationToken::new();
     let tl = TransportLayer::new(transport_cancel.clone());
-    match cfg.transport {
+    // 本地传输地址（Contact 兜底；0.0.0.0 绑定不能作为对话目标——ACK/INFO 会
+    // 发到不可达地址，故 Contact 优先取注册时 Via received/rport 发现的公网地址）。
+    let local_addr = match cfg.transport {
         SipTransport::Udp => {
             // 客户端用 add_transport（非 add_listener）：get_via 须能看到该传输。
             let conn = UdpConnection::create_connection(
@@ -282,12 +305,42 @@ async fn run_client_inner(
             .await
             .map_err(|e| format!("SIP/UDP 客户端传输创建失败: {e}"))?;
             tl.add_transport(SipConnection::from(conn));
+            tl.get_addrs().into_iter().next()
         }
-    }
-
-    // 本地传输地址（Contact 兜底；0.0.0.0 绑定不能作为对话目标——ACK/INFO 会
-    // 发到不可达地址，故 Contact 优先取注册时 Via received/rport 发现的公网地址）。
-    let local_addr = tl.get_addrs().into_iter().next();
+        SipTransport::Tls => {
+            let tls_cfg = cfg
+                .tls
+                .as_ref()
+                .ok_or("TLS 传输必须提供 tls 配置（CA 证书）")?;
+            // 预连（非懒建）：REGISTER 的 Via/Contact 需要本端地址（get_via 取
+            // get_addrs().first()，纯 TLS 客户端无监听，首个连接建立前为空）。
+            // 连接一经 add_connection 即注册进 connections 表：后续 REGISTER/
+            // INVITE/BYE 的 lookup 按目标 TLS 地址直接命中复用，且 serve_connection
+            // 自动接管入站报文（INVITE/BYE/INFO 均在既有流上到达）。
+            let mut server_addr = SipAddr::from(cfg.server);
+            server_addr.r#type = Some(rsipstack::sip::Transport::Tls);
+            let srv_tls = TlsConfig {
+                cert: None,
+                key: None,
+                client_cert: tls_cfg.client_cert.clone(),
+                client_key: tls_cfg.client_key.clone(),
+                ca_certs: Some(tls_cfg.ca_certs.clone()),
+                sni_hostname: tls_cfg.sni_hostname.clone(),
+            };
+            let conn = TlsConnection::connect(
+                &server_addr,
+                Some(&srv_tls),
+                None,
+                Some(transport_cancel.clone()),
+            )
+            .await
+            .map_err(|e| format!("SIP/TLS 客户端传输创建失败: {e}"))?;
+            tl.add_connection(SipConnection::from(conn));
+            // 连接断开后的懒重连兜底（lookup 无命中时按 tls_config 自建）。
+            tl.set_tls_config(srv_tls);
+            tl.get_addrs().into_iter().next()
+        }
+    };
 
     let endpoint = EndpointBuilder::new()
         .with_user_agent(PROTOCOL_VERSION)
@@ -315,9 +368,14 @@ async fn run_client_inner(
     let (invite_final_tx, mut invite_final_rx) =
         tokio::sync::mpsc::unbounded_channel::<(String, Option<Response>)>();
 
-    let server_uri: rsipstack::sip::Uri = format!("sip:{}", cfg.domain)
-        .try_into()
-        .map_err(|e| format!("server URI 构造失败: {e}"))?;
+    // REGISTER 的 Request-URI：报文域保留 domain + 传输参数（TLS 时;transport=tls；
+    // 注册逻辑从该参数继承出站目的地的传输类型）。
+    let server_uri: rsipstack::sip::Uri = match cfg.transport {
+        SipTransport::Udp => format!("sip:{}", cfg.domain),
+        SipTransport::Tls => format!("sip:{};transport=tls", cfg.domain),
+    }
+    .try_into()
+    .map_err(|e| format!("server URI 构造失败: {e}"))?;
     let aor = device_aor(&cfg.device_id, &cfg.domain);
 
     let mut registration = Registration::new(
@@ -330,6 +388,18 @@ async fn run_client_inner(
     );
     // 域与实际投递解耦：报文头域保留 domain，包发往 signal 监听地址。
     registration.outbound_proxy = Some(cfg.server);
+    // 可靠传输的 REGISTER Contact 必须带 transport 参数（RFC 3261 §20.10）；
+    // 显式设置，避免 rsipstack 内部从 Via 构造的裸 `sip:user@addr` 无参数版本。
+    let sip_transport = match cfg.transport {
+        SipTransport::Udp => rsipstack::sip::Transport::Udp,
+        SipTransport::Tls => rsipstack::sip::Transport::Tls,
+    };
+    registration.contact = Some(nat_contact_typed(
+        &registration,
+        local_addr.as_ref(),
+        &cfg.device_id,
+        sip_transport,
+    ));
 
     // 首次注册（启动即报 presence）。
     do_register(
@@ -341,7 +411,12 @@ async fn run_client_inner(
     )
     .await;
     // NAT 感知 Contact（对话级本端地址：INVITE 的 Contact / UAS 腿的 local contact）。
-    let mut contact_uri = nat_contact(&registration, local_addr.as_ref(), &cfg.device_id);
+    let mut contact_uri = nat_contact(
+        &registration,
+        local_addr.as_ref(),
+        &cfg.device_id,
+        sip_transport,
+    );
 
     let mut dialogs: HashMap<String, CallEntry> = HashMap::new();
     let refresh = Duration::from_secs((cfg.register_expires as u64 / 2).max(5));
@@ -353,7 +428,7 @@ async fn run_client_inner(
                 Some(SipCommand::Reregister) => {
                     do_register(&mut registration, &server_uri, &aor, cfg.register_expires,
                         event_tx).await;
-                    contact_uri = nat_contact(&registration, local_addr.as_ref(), &cfg.device_id);
+                    contact_uri = nat_contact(&registration, local_addr.as_ref(), &cfg.device_id, sip_transport);
                 }
                 Some(cmd) => handle_command(
                     cmd,
@@ -390,7 +465,7 @@ async fn run_client_inner(
             _ = tokio::time::sleep(refresh) => {
                 do_register(&mut registration, &server_uri, &aor, cfg.register_expires, event_tx)
                     .await;
-                contact_uri = nat_contact(&registration, local_addr.as_ref(), &cfg.device_id);
+                contact_uri = nat_contact(&registration, local_addr.as_ref(), &cfg.device_id, sip_transport);
             }
         }
     }
@@ -411,22 +486,40 @@ async fn run_client_inner(
     Ok(())
 }
 
-/// 构造 NAT 感知 Contact 的 URI：优先注册时 Via received/rport 发现的公网地址，
-/// 兜底本地传输地址。0.0.0.0 监听地址不可作对话目标（对端 ACK/INFO 不可达）。
+/// 构造 NAT 感知 Contact（typed 形态，供 [`Registration::contact`] 显式设置）：
+/// 优先注册时 Via received/rport 发现的公网地址，兜底本地传输地址。
+/// 0.0.0.0 监听地址不可作对话目标（对端 ACK/INFO 不可达）；非 UDP 传输
+/// 追加 `;transport=<t>`（RFC 3261 §20.10——可靠传输的 Contact 必须声明传输，
+/// 否则对端/代理按默认 UDP 投递，呼叫面会静默失败）。
+fn nat_contact_typed(
+    registration: &Registration,
+    local_addr: Option<&SipAddr>,
+    device_id: &str,
+    transport: rsipstack::sip::Transport,
+) -> rsipstack::sip::typed::Contact {
+    let local = local_addr.cloned().unwrap_or_default();
+    let mut contact = Registration::create_nat_aware_contact(
+        device_id,
+        registration.public_address.clone(),
+        &local,
+    );
+    if transport != rsipstack::sip::Transport::Udp {
+        contact
+            .uri
+            .params
+            .push(rsipstack::sip::Param::Transport(transport));
+    }
+    contact
+}
+
+/// 构造 NAT 感知 Contact 的 URI（对话级：INVITE 的 Contact / UAS 腿 local contact）。
 fn nat_contact(
     registration: &Registration,
     local_addr: Option<&SipAddr>,
     device_id: &str,
+    transport: rsipstack::sip::Transport,
 ) -> Option<rsipstack::sip::Uri> {
-    let local = local_addr.cloned().unwrap_or_default();
-    Some(
-        Registration::create_nat_aware_contact(
-            device_id,
-            registration.public_address.clone(),
-            &local,
-        )
-        .uri,
-    )
+    Some(nat_contact_typed(registration, local_addr, device_id, transport).uri)
 }
 
 /// core 命令处理（呼叫面全量）。静态上下文收束为 [`CmdCtx`]，主循环只传两项。
@@ -463,9 +556,13 @@ async fn handle_command(cmd: SipCommand, ctx: CmdCtx<'_>) {
                     }
                 };
             // 经 signal 透明 Proxy：destination 固定为 signal 监听地址（outbound
-            // proxy 语义，报文头域保留 domain）。
+            // proxy 语义，报文头域保留 domain）；传输类型随配置（UDP 直发 / TLS
+            // 复用注册建立的既有流——lookup 按目标地址命中 connections 表）。
             let mut destination = SipAddr::from(cfg.server);
-            destination.r#type = Some(rsipstack::sip::Transport::Udp);
+            destination.r#type = Some(match cfg.transport {
+                SipTransport::Udp => rsipstack::sip::Transport::Udp,
+                SipTransport::Tls => rsipstack::sip::Transport::Tls,
+            });
             let contact = match contact
                 .clone()
                 .or_else(|| dialog_layer.build_local_contact(None, None).ok())
