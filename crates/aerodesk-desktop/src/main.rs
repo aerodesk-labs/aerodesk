@@ -9,9 +9,11 @@ slint::include_modules!();
 // #508 B1：会话引擎（viewer/publisher，含 macOS 专用路径）已全部迁入
 // aerodesk-session；本 crate 只保留 Slint 适配层（SessionUi 实现 + 帧呈现）。
 // 纯键位逻辑同名 re-export，保持调用点不变。
+use aerodesk_session::SessionUi;
 use aerodesk_session::keymap;
 use slint::Model;
 
+use aerodesk_core::p2p_call::{P2pCall, P2pCallConfig, P2pRole, offer_video_mid};
 use aerodesk_core::platform::{AppShell, FilePicker, Permissions, Renderer};
 use aerodesk_core::protocol::cmd::CmdRequest;
 use serde::{Deserialize, Serialize};
@@ -356,13 +358,51 @@ pub static MODIFIER_TRANSLATE: std::sync::atomic::AtomicU8 = std::sync::atomic::
 /// 信令 TLS 开关镜像（设置页「网络」tab 写，信令 URL 归一化读）：
 /// false=默认非 TLS（ws://，自建明文服务器场景）；true=wss://（#504）。
 pub static SERVER_TLS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// 信令 presence 常驻连接句柄（#504）：设置页「连接 / 登录」按钮可停止旧连接、
-/// 按当前服务器/TLS 选择重建。`stop` 置位后 presence 线程在下一轮循环退出。
+/// #552 SIP：信令常驻句柄（设置页「连接 / 登录」按钮可停止旧连接、按当前
+/// 服务器/TLS 选择重建）。`stop` 置位后线程在下一轮循环退出；链路经 Mutex
+/// 共享——主叫/被叫都走同一 UA（严禁双 UA 同 device_id 注册）。
 struct PresenceHandle {
     stop: Arc<AtomicBool>,
-    presence: Arc<std::sync::Mutex<aerodesk_core::signal_presence::SignalPresence>>,
+    link: Arc<std::sync::Mutex<aerodesk_core::sip_link::SipCallLink>>,
+    /// 主叫会话命令（UI 线程 → presence 线程；None = 未创建 UA）。
+    cmd_tx: Option<std::sync::mpsc::Sender<LinkCommand>>,
 }
+
+/// UI → presence 线程命令（#552 主叫呼出：P2pCall 已 create_offer，线程完成
+/// call → 等 Answered → 回调移交会话）。
+enum LinkCommand {
+    Call {
+        target: String,
+        call_id: String,
+        p2p: P2pCall,
+        offer: String,
+        /// Answered（answer 接受成功）后调用：线程内 spawn 会话。
+        on_answered: Box<dyn FnOnce(P2pCall) + Send>,
+        /// 被拒/取消/失败：传提示文本（UI 侧复位 + 清理）。
+        on_failed: Box<dyn FnOnce(String) + Send>,
+    },
+}
+
+/// 主叫进行中（presence 线程状态）。
+struct OutgoingCall {
+    call_id: String,
+    target: String,
+    p2p: Option<P2pCall>,
+    on_answered: Option<Box<dyn FnOnce(P2pCall) + Send>>,
+    on_failed: Option<Box<dyn FnOnce(String) + Send>>,
+}
+
+/// 被叫接听：presence 线程 accept_offer 后暂存；授权窗 accept 取出移交 publisher。
+struct IncomingMedia {
+    call_id: String,
+    p2p: P2pCall,
+    answer: String,
+    video_mid: str0m::media::Mid,
+}
+
 static PRESENCE: std::sync::Mutex<Option<PresenceHandle>> = std::sync::Mutex::new(None);
+static OUTGOING: std::sync::Mutex<Option<OutgoingCall>> = std::sync::Mutex::new(None);
+static INCOMING_MEDIA: std::sync::Mutex<Option<IncomingMedia>> = std::sync::Mutex::new(None);
 /// #539 呼叫确认：未静默授权时弹窗待用户确认，30s 超时由 presence 循环自动拒绝。
 static PENDING_CALL: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 /// #539 呼叫确认独立窗口（不依赖主窗口——App 最小化/托盘时也可弹出）。
@@ -1521,125 +1561,265 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
     }
     let weak2 = ui.as_weak();
     // #504 按设置页 TLS 开关归一化信令 URL（显式带 ws:// / wss:// 的输入不受影响）；
-    // `server` 原样保留用于状态条/最近列表展示。
+    // `server` 原样保留用于状态条/最近列表展示。macOS 仍走 SFU 观看（mac slice 后续）。
     let server_url = aerodesk_core::signaling::normalize_signal_url_with_tls(
         &server,
         SERVER_TLS.load(Ordering::SeqCst),
     );
+    #[cfg(target_os = "macos")]
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(move || {
-            #[cfg(target_os = "macos")]
-            {
-                aerodesk_session::macos_media::run_viewer(
-                    server_url,
-                    room,
-                    Some(token),
-                    SlintSessionUi::new(weak2.clone(), slot),
-                    control_rx,
-                    input_rx,
-                    cmd_rx,
-                    file_cmd_rx,
-                    chat_cmd_rx,
-                    muted,
-                    volume,
-                    show_camera,
-                    stop,
-                    &FILE_TRANSFER_ENABLED,
-                    {
-                        let ui2 = weak2.clone();
-                        move |rgba: &[u8], w: usize, h: usize| {
-                            crate::present_frame(&ui2, rgba, w, h, slot)
-                        }
-                    },
-                );
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                aerodesk_session::generic_media::run_generic_viewer(
-                    server_url,
-                    room,
-                    Some(token),
-                    SlintSessionUi::new(weak2.clone(), slot),
-                    input_rx,
-                    cmd_rx,
-                    file_cmd_rx,
-                    chat_cmd_rx,
-                    stop,
-                    view_only,
-                    {
-                        let ui2 = weak2.clone();
-                        move || SlintRenderer::new(ui2.clone(), slot)
-                    },
-                );
-            }
+            aerodesk_session::macos_media::run_viewer(
+                server_url,
+                room,
+                Some(token),
+                SlintSessionUi::new(weak2.clone(), slot),
+                control_rx,
+                input_rx,
+                cmd_rx,
+                file_cmd_rx,
+                chat_cmd_rx,
+                muted,
+                volume,
+                show_camera,
+                stop,
+                &FILE_TRANSFER_ENABLED,
+                {
+                    let ui2 = weak2.clone();
+                    move |rgba: &[u8], w: usize, h: usize| {
+                        crate::present_frame(&ui2, rgba, w, h, slot)
+                    }
+                },
+            );
             with_ui(&weak2, |ui| ui.set_connecting(false));
         })
         .expect("spawn viewer thread");
+    #[cfg(not(target_os = "macos"))]
+    {
+        // #552：SIP 1:1 P2P 主叫——presence 线程完成 call→Answered 后回调移交
+        // 会话线程（同一 UA，禁止双 UA 同 device_id 注册）。
+        let _ = (&(&token, &control_rx, &server_url));
+        let Some(cmd_tx) = PRESENCE
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .as_ref()
+            .and_then(|h| h.cmd_tx.clone())
+        else {
+            ui.set_connecting(false);
+            ui.set_conn_state(0);
+            ui.set_status("信令未连接，无法发起呼叫".into());
+            return;
+        };
+        let mut p2p = match P2pCall::new(P2pCallConfig {
+            role: P2pRole::Caller,
+            device_role: aerodesk_core::protocol::signal::Role::Viewer,
+            codec: None,
+            with_audio: false,
+            with_camera: false,
+            force_relay: false,
+            bind: "0.0.0.0:0".parse().unwrap(),
+            turn: None,
+            inline_candidates: true,
+        }) {
+            Ok(p) => p,
+            Err(e) => {
+                ui.set_connecting(false);
+                ui.set_conn_state(0);
+                ui.set_status(format!("媒体端点创建失败：{e}").into());
+                return;
+            }
+        };
+        let offer = match p2p.create_offer() {
+            Ok(o) => o,
+            Err(e) => {
+                ui.set_connecting(false);
+                ui.set_conn_state(0);
+                ui.set_status(format!("SDP 创建失败：{e}").into());
+                return;
+            }
+        };
+        let call_id = format!(
+            "c-{}-{}",
+            slot,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+        let target = room.clone();
+        let room2 = room.clone();
+        let on_answered = {
+            let weak2b = weak2.clone();
+            move |p2p: P2pCall| {
+                let ui2 = weak2b.clone();
+                let room3 = room2.clone();
+                std::thread::Builder::new()
+                    .stack_size(16 * 1024 * 1024)
+                    .spawn(move || {
+                        aerodesk_session::generic_media::run_generic_viewer_peer(
+                            p2p,
+                            room3,
+                            SlintSessionUi::new(ui2.clone(), slot),
+                            input_rx,
+                            cmd_rx,
+                            file_cmd_rx,
+                            chat_cmd_rx,
+                            stop,
+                            view_only,
+                            {
+                                let ui3 = ui2.clone();
+                                move || SlintRenderer::new(ui3.clone(), slot)
+                            },
+                        );
+                        with_ui(&ui2, |ui| ui.set_connecting(false));
+                    })
+                    .expect("spawn viewer thread");
+            }
+        };
+        let on_failed = {
+            let ui2 = weak2.clone();
+            move |msg: String| {
+                let sess_ui = SlintSessionUi::new(ui2.clone(), slot);
+                sess_ui.set_conn_state(3);
+                sess_ui.set_status(msg.clone());
+                sess_ui.cleanup(Some(msg));
+            }
+        };
+        if let Err(e) = cmd_tx.send(LinkCommand::Call {
+            target,
+            call_id,
+            p2p,
+            offer: offer.sdp,
+            on_answered: Box::new(on_answered),
+            on_failed: Box::new(on_failed),
+        }) {
+            ui.set_connecting(false);
+            ui.set_conn_state(0);
+            ui.set_status(format!("发起呼叫失败：{e}").into());
+        }
+    }
 }
 
-/// #446/#450 启动即自动连信令：后台常驻 presence，状态映射到主界面。
-/// #504：`tls` 决定裸地址补 ws:// 还是 wss://；句柄在 spawn 线程前原子登记到
-/// PRESENCE（先停掉旧连接），设置页「连接 / 登录」按钮可经 [`stop_signal_presence`]
-/// 停止后重建——连点按钮不会泄漏旧线程。
-fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: String, tls: bool) {
+/// #446/#450 启动即自动连信令：后台常驻 SIP UA（SipCallLink），状态映射到主界面。
+/// #552：call 配置来自 AppSettings（server_default/device_id/token_default/
+/// server_tls + sip_transport/sip_port/sip_domain/sip_ca_pem，经 core
+/// [`SipLinkConfig::from_parts`] 统一构造）；句柄在 spawn 线程前原子登记到
+/// PRESENCE（先停掉旧连接），设置页「连接 / 登录」按钮可停止后重建。
+fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
     // 先停旧句柄再校验早退（#505 审查 minor）：以空参调用等于「只停不连」，
     // 函数契约上「换配置」与「停旧」解耦，调用方不必自行先 stop。
-    if let Some(old) = PRESENCE.lock().unwrap().take() {
+    if let Some(old) = PRESENCE
+        .lock()
+        .unwrap_or_else(aerodesk_core::util::lock_recover)
+        .take()
+    {
         old.stop.store(true, Ordering::SeqCst);
-        old.presence.lock().unwrap().stop();
+        old.link
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .stop();
         ui.set_presence_active(false);
     }
-    let server = aerodesk_core::signaling::normalize_signal_url_with_tls(&server, tls);
-    if server.is_empty() || room.is_empty() || room == "—" {
+    let server = aerodesk_core::signaling::normalize_signal_url_with_tls(
+        &settings.server_default,
+        settings.server_tls,
+    );
+    if server.is_empty() || settings.device_id.is_empty() || settings.device_id == "—" {
         return;
     }
-    let mut config = aerodesk_core::signal_presence::PresenceConfig::new(
-        server,
-        room,
-        aerodesk_core::protocol::signal::Role::Publisher,
-    )
-    .with_auto_accept(false); // #456 由 UI 根据「开启被控」授权决定是否接听
-    if !token.is_empty() {
-        config = config.with_auth_token(token);
-    }
-    let presence = std::sync::Arc::new(std::sync::Mutex::new(
-        aerodesk_core::signal_presence::SignalPresence::new(config)
-            .with_read_timeout(std::time::Duration::from_millis(500)),
+    let cfg = match aerodesk_core::sip_link::SipLinkConfig::from_parts(
+        &server,
+        &settings.device_id,
+        &settings.token_default,
+        &settings.sip_transport,
+        settings.sip_port,
+        &settings.sip_domain,
+        &settings.sip_ca_pem,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            ui.set_signal_status(format!("SIP 配置无效：{e}").into());
+            ui.set_signal_online(false);
+            return;
+        }
+    };
+    let link = Arc::new(std::sync::Mutex::new(
+        aerodesk_core::sip_link::SipCallLink::new(cfg),
     ));
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<LinkCommand>();
     let stop = Arc::new(AtomicBool::new(false));
     {
         // 登记新句柄（旧句柄已在函数入口停止）。
-        *PRESENCE.lock().unwrap() = Some(PresenceHandle {
+        *PRESENCE
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover) = Some(PresenceHandle {
             stop: stop.clone(),
-            presence: presence.clone(),
+            link: link.clone(),
+            cmd_tx: Some(cmd_tx),
         });
     }
     ui.set_presence_active(true);
     let ui_weak = ui.as_weak();
+    let device_id = settings.device_id.clone();
     std::thread::Builder::new()
         .name("signal-presence".into())
         .spawn(move || {
-            presence.lock().unwrap().start();
+            link.lock()
+                .unwrap_or_else(aerodesk_core::util::lock_recover)
+                .start();
             loop {
                 if stop.load(Ordering::SeqCst) {
                     break;
                 }
-                let st = presence.lock().unwrap().poll();
+                // UI 命令：主叫呼出（P2pCall 已 create_offer，本线程 call 并等 Answered）。
+                while let Ok(cmd) = cmd_rx.try_recv() {
+                    match cmd {
+                        LinkCommand::Call {
+                            target,
+                            call_id,
+                            p2p,
+                            offer,
+                            on_answered,
+                            on_failed,
+                        } => {
+                            let res = link
+                                .lock()
+                                .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                .call(&target, &call_id, &offer);
+                            if let Err(e) = res {
+                                on_failed(format!("呼叫发起失败：{e}"));
+                            } else {
+                                *OUTGOING.lock().unwrap_or_else(aerodesk_core::util::lock_recover) =
+                                    Some(OutgoingCall {
+                                        call_id,
+                                        target,
+                                        p2p: Some(p2p),
+                                        on_answered: Some(on_answered),
+                                        on_failed: Some(on_failed),
+                                    });
+                            }
+                        }
+                    }
+                }
+                let st = link
+                    .lock()
+                    .unwrap_or_else(aerodesk_core::util::lock_recover)
+                    .poll();
                 // Stopped（含外部 stop 后的兜底复位）时同步 presence-active，
                 // 避免按钮文案停在「断开」（#505 审查 minor）。
-                let active = !matches!(st, aerodesk_core::signal_presence::PresenceStatus::Stopped);
+                let active = !matches!(st, aerodesk_core::sip_link::SipLinkStatus::Stopped);
                 let (text, online) = match st {
-                    aerodesk_core::signal_presence::PresenceStatus::Stopped => {
+                    aerodesk_core::sip_link::SipLinkStatus::Stopped => {
                         ("信令未连接".to_string(), false)
                     }
-                    aerodesk_core::signal_presence::PresenceStatus::Connecting { .. } => {
+                    aerodesk_core::sip_link::SipLinkStatus::Connecting { .. } => {
                         ("正在连接信令…".to_string(), false)
                     }
-                    aerodesk_core::signal_presence::PresenceStatus::Online { room, .. } => {
-                        (format!("已在线，可被呼叫：{room}"), true)
+                    aerodesk_core::sip_link::SipLinkStatus::Online { .. } => {
+                        (format!("已在线，可被呼叫：{device_id}"), true)
                     }
-                    aerodesk_core::signal_presence::PresenceStatus::Reconnecting { .. } => {
+                    aerodesk_core::sip_link::SipLinkStatus::Reconnecting { .. } => {
                         ("信令重连中…".to_string(), false)
                     }
                 };
@@ -1650,100 +1830,160 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                 });
 
                 // #456 被呼叫时再出流：接听→启动 publisher；挂断/超时→停止 publisher。
-                let events = presence.lock().unwrap().take_events();
+                let events = link
+                    .lock()
+                    .unwrap_or_else(aerodesk_core::util::lock_recover)
+                    .take_events();
                 for ev in events {
                     match ev {
-                        aerodesk_core::signal_presence::PresenceEvent::IncomingCall {
-                            from,
-                            ..
+                        aerodesk_core::sip_link::SipLinkEvent::IncomingCall {
+                            call_id,
+                            from_device,
+                            offer_sdp,
                         } => {
-                            tracing::info!("presence: incoming call from {from}");
-                            let p = presence.clone();
+                            tracing::info!("sip: incoming call from {from_device}");
+                            // 预协商：Callee 侧 accept_offer（失败直接拒答）。
+                            let mut p2p = match P2pCall::new(P2pCallConfig {
+                                role: P2pRole::Callee,
+                                device_role: aerodesk_core::protocol::signal::Role::Publisher,
+                                codec: None,
+                                with_audio: false,
+                                with_camera: false,
+                                force_relay: false,
+                                bind: "0.0.0.0:0".parse().unwrap(),
+                                turn: None,
+                                inline_candidates: true,
+                            }) {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    tracing::warn!("incoming call: p2p 端点创建失败 {e}");
+                                    crate::with_ui(&ui_weak, move |ui| {
+                                        ui.set_status(format!("拒绝呼叫：媒体端点创建失败（{e}）").into());
+                                    });
+                                    let _ = link
+                                        .lock()
+                                        .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                        .reject(&call_id, "internal");
+                                    continue;
+                                }
+                            };
+                            let answer = match p2p.accept_offer(&offer_sdp) {
+                                Ok(a) => a,
+                                Err(e) => {
+                                    tracing::warn!("incoming call: accept_offer 失败 {e}");
+                                    let _ = link
+                                        .lock()
+                                        .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                        .reject(&call_id, "internal");
+                                    continue;
+                                }
+                            };
+                            let Some(video_mid) = offer_video_mid(&offer_sdp) else {
+                                // 桌面被控仅发布视频：无视频 m-line 的呼叫拒接。
+                                let _ = link
+                                    .lock()
+                                    .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                    .reject(&call_id, "internal");
+                                continue;
+                            };
+                            let p = link.clone();
                             let uiw = ui_weak.clone();
                             let accept_ui = ui_weak.clone();
                             crate::with_ui(&uiw, move |ui| {
                                 let inc = ui.get_inc_enabled();
-                                tracing::info!("incoming call from {from}: inc_enabled={inc}");
+                                tracing::info!("incoming call from {from_device}: inc_enabled={inc}");
                                 if !inc {
                                     // 未开启被控：直接拒绝（开关语义 = 是否允许
                                     // 被授权设备接入；关闭时不弹窗、不接受）。
-                                    let _ = p.lock().unwrap().reject_call(
-                                        Some("未开启被控"),
-                                        Some(aerodesk_core::protocol::error::ErrorCode::ControlDisabled.as_str()),
-                                    );
+                                    let _ = p.lock()
+                                        .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                        .reject(&call_id, aerodesk_core::protocol::error::ErrorCode::ControlDisabled.as_str());
                                     ui.set_status("已拒绝呼叫：未开启被控".into());
                                 } else if ui.get_inc_auto_accept() {
                                     // 免授权：已授权设备直接接听出流。
                                     *PENDING_CALL.lock().unwrap_or_else(aerodesk_core::util::lock_recover) = None;
-                                    let _ = p.lock().unwrap().accept_call();
-                                    start_publisher_ui(ui);
-                                    ui.set_status(format!("接听来自 {from} 的呼叫").into());
+                                    let ok = p.lock()
+                                        .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                        .accept(&call_id, &answer);
+                                    if let Err(e) = ok {
+                                        tracing::warn!("accept 失败：{e}");
+                                    }
+                                    *INCOMING_MEDIA.lock().unwrap_or_else(aerodesk_core::util::lock_recover) = None;
+                                    start_publisher_ui_peer(ui, p2p, video_mid);
+                                    ui.set_status(format!("接听来自 {from_device} 的呼叫").into());
                                 } else {
                                     // #539：未开「免授权」时弹独立授权窗口确认
                                     // （30s 超时自动拒绝；不依赖主窗口——最小化/托盘也可弹）。
+                                    *INCOMING_MEDIA.lock().unwrap_or_else(aerodesk_core::util::lock_recover) =
+                                        Some(IncomingMedia { call_id: call_id.clone(), p2p, answer: answer.clone(), video_mid });
                                     *PENDING_CALL.lock().unwrap_or_else(aerodesk_core::util::lock_recover) =
                                         Some(std::time::Instant::now());
                                     match IncomingCallWindow::new() {
                                         Ok(win) => {
-                                            win.set_from(from.clone().into());
+                                            win.set_from(from_device.clone().into());
                                             let w = win.as_weak();
+                                            // 注意：slint 回调是 FnMut——每个回调捕获自己的
+                                            // 克隆（Arc/String），嵌套闭包再克隆一次（闭包本身
+                                            // 需 'static，不能带引用）。
+                                            let p_accept = p.clone();
+                                            let cid_accept = call_id.clone();
                                             win.on_accept(move || {
                                                 *PENDING_CALL
                                                     .lock()
                                                     .unwrap_or_else(aerodesk_core::util::lock_recover) = None;
                                                 // #545：确认期间用户可能已关闭「开启被控」
                                                 // ——接受前重读开关，关闭则拒绝出流。
-                                                crate::with_ui(&accept_ui, |ui| {
+                                                let link_arc = p_accept.clone();
+                                                let cid_inner = cid_accept.clone();
+                                                let uia = accept_ui.clone();
+                                                crate::with_ui(&uia, move |ui| {
+                                                    let mut accepted = false;
                                                     if !ui.get_inc_enabled() {
-                                                        if let Some(h) =
-                                                            PRESENCE.lock().unwrap_or_else(aerodesk_core::util::lock_recover).as_ref()
-                                                        {
-                                                            let _ = h.presence.lock().unwrap().reject_call(
-                                                                Some("确认期间关闭被控"),
-                                                                Some(aerodesk_core::protocol::error::ErrorCode::ControlDisabled.as_str()),
-                                                            );
-                                                        }
+                                                        let _ = link_arc.lock()
+                                                            .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                                            .reject(&cid_inner, aerodesk_core::protocol::error::ErrorCode::ControlDisabled.as_str());
                                                         ui.set_status("已拒绝：确认期间关闭了被控".into());
-                                                        return;
+                                                    } else if let Some(im) = INCOMING_MEDIA.lock().unwrap_or_else(aerodesk_core::util::lock_recover).take() {
+                                                        let _ = link_arc.lock()
+                                                            .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                                            .accept(&im.call_id, &im.answer);
+                                                        start_publisher_ui_peer(ui, im.p2p, im.video_mid);
+                                                        accepted = true;
                                                     }
-                                                    if let Some(h) =
-                                                        PRESENCE.lock().unwrap_or_else(aerodesk_core::util::lock_recover).as_ref()
-                                                    {
-                                                        let _ = h.presence.lock().unwrap().accept_call();
+                                                    if accepted {
+                                                        ui.set_status("已接受远控请求".into());
                                                     }
-                                                    // 经事件循环拿主窗口（MAIN_WINDOW 是
-                                                    // macOS 门控的，跨平台用 accept_ui）。
-                                                    start_publisher_ui(ui);
-                                                    ui.set_status("已接受远控请求".into());
                                                 });
                                                 let _ = w.upgrade_in_event_loop(|ui| { ui.hide(); });
                                             });
                                             let w2 = win.as_weak();
+                                            let p3 = p.clone();
+                                            let cid2 = call_id.clone();
                                             win.on_reject(move || {
                                                 *PENDING_CALL
                                                     .lock()
                                                     .unwrap_or_else(aerodesk_core::util::lock_recover) = None;
-                                                if let Some(h) =
-                                                    PRESENCE.lock().unwrap_or_else(aerodesk_core::util::lock_recover).as_ref()
-                                                {
-                                                    let _ = h.presence.lock().unwrap().reject_call(
-                                                        Some("用户拒绝"),
-                                                        Some(aerodesk_core::protocol::error::ErrorCode::UserRejected.as_str()),
-                                                    );
-                                                }
+                                                *INCOMING_MEDIA.lock().unwrap_or_else(aerodesk_core::util::lock_recover) = None;
+                                                let _ = p3.lock()
+                                                    .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                                    .reject(&cid2, aerodesk_core::protocol::error::ErrorCode::UserRejected.as_str());
                                                 let _ = w2.upgrade_in_event_loop(|ui| { ui.hide(); });
                                             });
                                             WINDOW_STATE.lock().unwrap_or_else(aerodesk_core::util::lock_recover).incoming =
                                                 Some(win.as_weak());
                                             let _ = win.show();
                                             ui.set_status(
-                                                format!("收到 {from} 的远控请求，等待确认").into(),
+                                                format!("收到 {from_device} 的远控请求，等待确认").into(),
                                             );
                                         }
                                         Err(e) => {
+                                            *INCOMING_MEDIA.lock().unwrap_or_else(aerodesk_core::util::lock_recover) = None;
+                                            let _ = p.lock()
+                                                .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                                .reject(&call_id, aerodesk_core::protocol::error::ErrorCode::Timeout.as_str());
                                             ui.set_status(
                                                 format!(
-                                                    "收到 {from} 的远控请求，但确认窗口创建失败：{e}"
+                                                    "收到 {from_device} 的远控请求，但确认窗口创建失败：{e}"
                                                 )
                                                 .into(),
                                             );
@@ -1752,13 +1992,79 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                                 }
                             });
                         }
-                        aerodesk_core::signal_presence::PresenceEvent::Hangup { .. }
-                        | aerodesk_core::signal_presence::PresenceEvent::CallTimeout { .. } => {
+                        aerodesk_core::sip_link::SipLinkEvent::Ringing { call_id } => {
+                            let oc = OUTGOING.lock().unwrap_or_else(aerodesk_core::util::lock_recover);
+                            if oc.as_ref().is_some_and(|o| o.call_id == call_id) {
+                                let target = oc.as_ref().map(|o| o.target.clone()).unwrap_or_default();
+                                drop(oc);
+                                let uiw = ui_weak.clone();
+                                crate::with_ui(&uiw, move |ui| {
+                                    ui.set_status(format!("正在呼叫 {target}…（对方响铃）").into());
+                                });
+                            }
+                        }
+                        aerodesk_core::sip_link::SipLinkEvent::Answered { call_id, answer_sdp } => {
+                            let mut oc = OUTGOING.lock().unwrap_or_else(aerodesk_core::util::lock_recover);
+                            if oc.as_ref().is_some_and(|o| o.call_id == call_id) {
+                                let mut o = oc.take().unwrap();
+                                drop(oc);
+                                if let Some(mut p2p) = o.p2p.take() {
+                                    let res = p2p.accept_answer(&answer_sdp).map(|_| p2p);
+                                    match res {
+                                        Ok(p2p) => {
+                                            if let Some(f) = o.on_answered.take() {
+                                                f(p2p);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            if let Some(f) = o.on_failed.take() {
+                                                f(format!("接受会话失败：{e}"));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        aerodesk_core::sip_link::SipLinkEvent::Rejected {
+                            call_id,
+                            status,
+                            error_code: _,
+                        } => {
+                            let mut oc = OUTGOING.lock().unwrap_or_else(aerodesk_core::util::lock_recover);
+                            if oc.as_ref().is_some_and(|o| o.call_id == call_id) {
+                                let mut o = oc.take().unwrap();
+                                drop(oc);
+                                if let Some(f) = o.on_failed.take() {
+                                    f(format!("对方拒绝呼叫（{status}）"));
+                                }
+                            }
+                        }
+                        aerodesk_core::sip_link::SipLinkEvent::PeerHangup {
+                            call_id,
+                            reason: _,
+                        } => {
+                            // 主叫：对方取消/挂断；被叫：对端 CANCEL——停 publisher + 清确认状态。
+                            let mut oc = OUTGOING.lock().unwrap_or_else(aerodesk_core::util::lock_recover);
+                            if oc.as_ref().is_some_and(|o| o.call_id == call_id) {
+                                let mut o = oc.take().unwrap();
+                                drop(oc);
+                                if let Some(f) = o.on_failed.take() {
+                                    f("对方已取消呼叫".into());
+                                }
+                            }
+                            *PENDING_CALL.lock().unwrap_or_else(aerodesk_core::util::lock_recover) = None;
+                            *INCOMING_MEDIA.lock().unwrap_or_else(aerodesk_core::util::lock_recover) = None;
+                            if let Some(w) =
+                                WINDOW_STATE.lock().unwrap_or_else(aerodesk_core::util::lock_recover).incoming.as_ref()
+                            {
+                                let _ = w.upgrade_in_event_loop(|ui| { ui.hide(); });
+                            }
                             let uiw = ui_weak.clone();
-                            crate::with_ui(&uiw, |ui| {
+                            crate::with_ui(&uiw, move |ui| {
                                 stop_publisher_ui(ui);
                             });
                         }
+                        _ => {}
                     }
                 }
                 // #539 呼叫确认超时：30s 未响应自动拒绝（弹窗提示 30 秒时限）。
@@ -1769,6 +2075,8 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                     .is_some_and(|p| p.elapsed() >= std::time::Duration::from_secs(30));
                 drop(pending_call);
                 if timed_out {
+                    let inmedia = INCOMING_MEDIA.lock().unwrap_or_else(aerodesk_core::util::lock_recover).take();
+                    let call_id = inmedia.map(|m| m.call_id);
                     *PENDING_CALL.lock().unwrap_or_else(aerodesk_core::util::lock_recover) = None;
                     tracing::info!("呼叫确认超时：关闭授权窗口");
                     // #539：超时先主动关闭授权窗口（事件循环投递），再向对端
@@ -1779,11 +2087,13 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
                         let _ = w.upgrade_in_event_loop(|ui| { ui.hide(); });
                     }
                     tracing::info!("呼叫确认超时：发送 reject");
-                    let _ = presence
-                        .lock()
-                        .unwrap()
-                        .reject_call(Some("呼叫确认超时"), Some(aerodesk_core::protocol::error::ErrorCode::Timeout.as_str()))
-                        .map_err(|e| tracing::warn!("timeout reject send failed: {e}"));
+                    if let Some(cid) = call_id {
+                        let _ = link
+                            .lock()
+                            .unwrap_or_else(aerodesk_core::util::lock_recover)
+                            .reject(&cid, aerodesk_core::protocol::error::ErrorCode::Timeout.as_str())
+                            .map_err(|e| tracing::warn!("timeout reject send failed: {e}"));
+                    }
                     tracing::info!("呼叫确认超时：reject 完成");
                     let uiw = ui_weak.clone();
                     crate::with_ui(&uiw, |ui| {
@@ -1805,10 +2115,17 @@ fn spawn_signal_presence(ui: &AppWindow, server: String, room: String, token: St
 /// 断开 WebSocket、即时复位状态条；presence 线程在下一轮循环（≤300ms）退出，
 /// 仅兜底复位一次状态条（句柄已由本函数回收）。
 fn stop_signal_presence(ui: &AppWindow) {
-    let handle = PRESENCE.lock().unwrap().take();
+    let handle = PRESENCE
+        .lock()
+        .unwrap_or_else(aerodesk_core::util::lock_recover)
+        .take();
     if let Some(handle) = handle {
         handle.stop.store(true, Ordering::SeqCst);
-        handle.presence.lock().unwrap().stop();
+        handle
+            .link
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .stop();
     }
     ui.set_presence_active(false);
     ui.set_signal_status("信令未连接".into());
@@ -1828,9 +2145,14 @@ fn connect_signal_from_settings(ui: &AppWindow) {
         ui.set_settings_status("请先填写信令服务器地址".into());
         return;
     }
-    let room = ui.get_device_id().to_string();
-    let token = ui.get_token_default().to_string();
-    spawn_signal_presence(ui, server, room, token, SERVER_TLS.load(Ordering::SeqCst));
+    // #552：SIP 配置项（transport/port/domain/ca）暂只走配置文件（UI 后续 slice）；
+    // 连接按钮用「已加载设置 + 页面编辑值」重建链路。
+    let mut settings = load_settings();
+    settings.server_default = server;
+    settings.device_id = ui.get_device_id().to_string();
+    settings.token_default = ui.get_token_default().to_string();
+    settings.server_tls = SERVER_TLS.load(Ordering::SeqCst);
+    spawn_signal_presence(ui, &settings);
     ui.set_settings_status("正在连接信令…".into());
 }
 
@@ -2327,6 +2649,18 @@ fn start_publisher_ui(ui: &AppWindow) {
     );
 }
 
+/// #552：SIP 1:1 被叫接听——P2pCall 已由 presence 线程 accept_offer + link.accept，
+/// 移交 publisher（采集/编码/输入注入与 SFU 路径共用同一泵）。
+fn start_publisher_ui_peer(ui: &AppWindow, p2p: P2pCall, video_mid: str0m::media::Mid) {
+    let room = ui.get_device_id().to_string();
+    aerodesk_session::generic_publisher::start_publisher_peer(
+        p2p,
+        video_mid,
+        room,
+        publisher_event_sink(&ui.as_weak()),
+    );
+}
+
 /// 停止被控端（UI 入口）。
 fn stop_publisher_ui(ui: &AppWindow) {
     aerodesk_session::generic_publisher::stop_publisher(publisher_event_sink(&ui.as_weak()));
@@ -2439,13 +2773,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // 出流采集（IncomingCall 分支 accept_call + start_publisher_ui）。曾被 #487
     // 误修为「inc_enabled=true 启动即自动发布」——开关语义是「允许被呼叫时
     // 接听」而非「启动即采集」，已撤销。
-    spawn_signal_presence(
-        &ui,
-        settings.server_default.clone(),
-        settings.device_id.clone(),
-        settings.token_default.clone(),
-        settings.server_tls,
-    );
+    spawn_signal_presence(&ui, &settings);
     if !settings.server_default.is_empty() {
         ui.set_server_input(server_display.into());
     }
@@ -3340,6 +3668,9 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             // server-default 与主页 server-input 已在 UI 层双向同步。
             let server_default = display_server(&ui.get_server_default().to_string());
+            // #552：SIP 配置项暂只走配置文件（UI 后续 slice）——从已读设置带过，
+            // 防止 auto_save 用默认值清掉用户手改值。
+            let mut base = load_settings();
             let settings = AppSettings {
                 server_default: server_default.clone(),
                 quality: ui.get_quality(),
@@ -3355,6 +3686,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 show_remote_cursor: ui.get_show_remote_cursor(),
                 modifier_translate: ui.get_translate_mode() as u8,
                 server_tls: ui.get_server_tls(),
+                sip_transport: std::mem::take(&mut base.sip_transport),
+                sip_port: base.sip_port,
+                sip_domain: std::mem::take(&mut base.sip_domain),
+                sip_ca_pem: std::mem::take(&mut base.sip_ca_pem),
             };
             save_settings(&settings);
             // 即时生效：同步主页输入框（无需重启）。
@@ -4349,6 +4684,26 @@ struct AppSettings {
     /// 服务器场景开箱即用（#504）；显式带 ws:// / wss:// 前缀的地址不受其影响。
     #[serde(default)]
     server_tls: bool,
+    /// #552 SIP：传输（"udp"=内网/调试默认；"tls"=公网默认加密）。
+    #[serde(default = "default_sip_transport")]
+    sip_transport: String,
+    /// #552 SIP：SIP 端口（0 = 按传输默认：udp 5060 / tls 5061）。
+    #[serde(default)]
+    sip_port: u16,
+    /// #552 SIP：SIP 域（AoR 域；默认取产品默认域）。
+    #[serde(default = "default_sip_domain")]
+    sip_domain: String,
+    /// #552 SIP：TLS CA PEM 文件路径（空 = 系统根证书包）。
+    #[serde(default)]
+    sip_ca_pem: String,
+}
+
+fn default_sip_transport() -> String {
+    "udp".into()
+}
+
+fn default_sip_domain() -> String {
+    "aerodesk.test".into()
 }
 
 fn default_true() -> bool {

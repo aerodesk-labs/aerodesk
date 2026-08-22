@@ -38,6 +38,30 @@ pub fn stop_publisher(on_event: PublisherEventSink) {
     imp::stop_publisher(on_event);
 }
 
+/// #552：SIP 1:1 P2P 被叫发布入口（windows 实现；P2pCall 已建立）。
+#[cfg(windows)]
+pub fn start_publisher_peer(
+    p2p: aerodesk_core::p2p_call::P2pCall,
+    video_mid: str0m::media::Mid,
+    room: String,
+    on_event: PublisherEventSink,
+) {
+    imp::start_publisher_peer(p2p, video_mid, room, on_event);
+}
+
+/// #552：其余平台 P2P 被叫发布未接入（macOS 被控端仍走 SFU，mac slice 后续）。
+#[cfg(not(windows))]
+pub fn start_publisher_peer(
+    _p2p: aerodesk_core::p2p_call::P2pCall,
+    _video_mid: str0m::media::Mid,
+    _room: String,
+    on_event: PublisherEventSink,
+) {
+    on_event(PublisherEvent::StartFailed(
+        "SIP P2P 被控端发布当前仅 Windows 实现".into(),
+    ));
+}
+
 /// macOS 被控端：SCK+VT+CGEvent 实现（#487 互控最高优先级）。
 #[cfg(target_os = "macos")]
 pub fn start_publisher(cfg: PublisherConfig, on_event: PublisherEventSink) {
@@ -77,9 +101,10 @@ mod imp {
 
     use aerodesk_codec::audio::RealAudioSender;
     use aerodesk_core::Endpoint;
-    use aerodesk_core::connect::connect_live_role_codec_timeout;
+    use aerodesk_core::connect::{LiveSession, connect_live_role_codec_timeout};
     use aerodesk_core::endpoint::ClientEvent;
     use aerodesk_core::media_socket::MediaSocket;
+    use aerodesk_core::p2p_call::P2pCall;
     use aerodesk_core::platform::Codec;
     use aerodesk_core::platform::{
         CursorSource, Encoder, InputInjector, MediaSource, SystemWakeLock,
@@ -143,11 +168,86 @@ mod imp {
         }
     }
 
+    /// #552：SIP 1:1 P2P 被叫发布入口——P2pCall 已建立（accept_offer+accept
+    /// 由调用方完成），采集/编码/输入注入与 SFU 路径共用同一泵。
+    pub(super) fn start_publisher_peer(
+        p2p: P2pCall,
+        video_mid: str0m::media::Mid,
+        room: String,
+        on_event: PublisherEventSink,
+    ) {
+        stop_publisher(on_event.clone());
+        let stop = Arc::new(AtomicBool::new(false));
+        *STOP.lock().unwrap() = Some(stop.clone());
+        on_event(PublisherEvent::Starting);
+        let sink = on_event.clone();
+        if std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || run_publisher_peer(p2p, video_mid, room, sink, stop))
+            .is_err()
+        {
+            *STOP.lock().unwrap() = None;
+            on_event(PublisherEvent::StartFailed(
+                "被控端启动失败：无法创建线程".into(),
+            ));
+        }
+    }
+
     pub(super) fn stop_publisher(on_event: PublisherEventSink) {
         if let Some(stop) = STOP.lock().unwrap().take() {
             stop.store(true, Ordering::SeqCst);
         }
         on_event(PublisherEvent::Stopped);
+    }
+
+    /// 媒体通道抽象：SFU（LiveSession）与 P2P（P2pCall）共用采集/编码/输入泵。
+    /// P2P 模式 `poll_event` 以首个 `ChannelOpen` 为会话就绪（DTLS 完成 ⟺ SRTP
+    /// 密钥就绪；ICE connected 早于就绪，早写媒体帧被对端静默丢弃）。
+    enum PublisherTransport {
+        Sfu(LiveSession),
+        Peer(P2pCall),
+    }
+
+    impl PublisherTransport {
+        fn pump(&mut self) {
+            match self {
+                Self::Sfu(live) => {
+                    // #211：排空式读取 UDP，保证 SCTP ACK 及时消费。
+                    live.socket
+                        .set_read_timeout(Some(Duration::from_millis(5)))
+                        .ok();
+                    drain_udp_input(&mut live.socket, &mut live.endpoint, 512);
+                    let _ = live.endpoint.handle_timeout(Instant::now());
+                    while let Some(output) = live.endpoint.poll_output() {
+                        match output {
+                            Output::Transmit(t) => {
+                                let _ = live.socket.send_to(&t.contents, t.destination);
+                            }
+                            // 关键：Timeout 必须 break，否则 str0m 反复返回同一 Timeout。
+                            Output::Timeout(_) => break,
+                            Output::Event(_) => {}
+                        }
+                    }
+                }
+                Self::Peer(p2p) => {
+                    let _ = p2p.poll();
+                }
+            }
+        }
+
+        fn poll_event(&mut self) -> Option<ClientEvent> {
+            match self {
+                Self::Sfu(live) => live.endpoint.poll_event(),
+                Self::Peer(p2p) => p2p.poll_event(),
+            }
+        }
+
+        fn endpoint(&mut self) -> &mut Endpoint {
+            match self {
+                Self::Sfu(live) => &mut live.endpoint,
+                Self::Peer(p2p) => p2p.endpoint(),
+            }
+        }
     }
 
     fn run_publisher(
@@ -160,14 +260,13 @@ mod imp {
         view_only: bool,
         stop: Arc<AtomicBool>,
     ) {
-        let stale = || stop.load(Ordering::SeqCst);
         let auth = Some(token.as_str()).filter(|t| !t.is_empty());
 
         // 发布端连接：H.264 视频 + 音频 m-line（core 泛型连接，CLI 同款）。
         // #487 审查：连接链路（TCP 握手/Join/SDP 交换）在异常网络下可能无限
         // 阻塞且无法被 stop 中断——子线程 + 30s 总超时（正常约 1-5s），超时
         // 报错返回，UI 不再「已授权但无媒体」式静默卡死。
-        let mut live = match connect_live_role_codec_timeout(
+        let live = match connect_live_role_codec_timeout(
             &server,
             &room,
             Role::Publisher,
@@ -187,6 +286,61 @@ mod imp {
             return;
         };
         let audio_mid = live.audio_mid;
+        let connected0 = live.ice_connected;
+        // #477：connect 建链阶段的 ICE 泵会消费掉首个 IceConnected 事件——必须
+        // 用状态标志初始化（cli 同款），否则经公网/TURN 建链后事件已被消费、
+        // connected 永远为 false，一帧不发（本地直连靠重协商二次事件掩盖）。
+        run_publisher_pump(
+            PublisherTransport::Sfu(live),
+            video_mid,
+            audio_mid,
+            connected0,
+            room,
+            on_event,
+            audio,
+            mouse,
+            view_only,
+            stop,
+        );
+    }
+
+    /// #552：SIP 1:1 P2P 被叫发布（P2pCall 已由调用方建立并 accept）。
+    fn run_publisher_peer(
+        p2p: P2pCall,
+        video_mid: str0m::media::Mid,
+        room: String,
+        on_event: PublisherEventSink,
+        stop: Arc<AtomicBool>,
+    ) {
+        // 就绪门槛：ChannelOpen（DTLS 完成），不用 IceConnected。
+        run_publisher_pump(
+            PublisherTransport::Peer(p2p),
+            video_mid,
+            None,
+            false,
+            room,
+            on_event,
+            false,
+            true,
+            false,
+            stop,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_publisher_pump(
+        mut t: PublisherTransport,
+        video_mid: str0m::media::Mid,
+        audio_mid: Option<str0m::media::Mid>,
+        connected0: bool,
+        room: String,
+        on_event: PublisherEventSink,
+        audio: bool,
+        mouse: bool,
+        view_only: bool,
+        stop: Arc<AtomicBool>,
+    ) {
+        let stale = || stop.load(Ordering::SeqCst);
 
         // 屏幕采集链（#514）：WGC 主 → DXGI 备，首帧 GDI 引导内置（#477）。
         // （4K 软编性能不足，默认缩放到 1080p。）
@@ -277,35 +431,27 @@ mod imp {
             "正在注册被控端：设备 {room} · {w}x{h}@30"
         )));
 
-        // #477：connect 建链阶段的 ICE 泵会消费掉首个 IceConnected 事件——必须
-        // 用状态标志初始化（cli 同款），否则经公网/TURN 建链后事件已被消费、
-        // connected 永远为 false，一帧不发（本地直连靠重协商二次事件掩盖）。
-        let mut connected = live.ice_connected;
+        // #477：connect 阶段 ICE 泵可能已消费首个 IceConnected 事件——SFU 路径
+        // 用连接结果初始化；P2P 路径以 ChannelOpen（DTLS 完成）为就绪。
+        let mut connected = connected0;
         let mut next_frame = Instant::now();
         let mut next_cursor = Instant::now();
         let mut pts: i64 = 0;
 
         while !stale() {
-            // #211：排空式读取 UDP，保证 SCTP ACK 及时消费，远端输入送达率不塌陷。
-            let wait = Duration::from_millis(5);
-            live.socket.set_read_timeout(Some(wait)).ok();
-            drain_udp_input(&mut live.socket, &mut live.endpoint, 512);
-            let _ = live.endpoint.handle_timeout(Instant::now());
+            t.pump();
 
-            while let Some(output) = live.endpoint.poll_output() {
-                match output {
-                    Output::Transmit(t) => {
-                        let _ = live.socket.send_to(&t.contents, t.destination);
-                    }
-                    // 关键：Timeout 必须 break，否则 str0m 会反复返回同一 Timeout（100% CPU）。
-                    Output::Timeout(_) => break,
-                    Output::Event(_) => {}
-                }
-            }
-
-            while let Some(ev) = live.endpoint.poll_event() {
+            while let Some(ev) = t.poll_event() {
                 match ev {
                     ClientEvent::IceConnected => {
+                        connected = true;
+                        next_frame = Instant::now();
+                        on_event(PublisherEvent::Status(format!(
+                            "已在线，可被呼叫：设备 {room} · 屏幕发布中"
+                        )));
+                    }
+                    ClientEvent::ChannelOpen(..) => {
+                        // #552：P2P 会话就绪（SCTP 打开 ⟺ DTLS 完成 ⟺ SRTP 密钥就绪）。
                         connected = true;
                         next_frame = Instant::now();
                         on_event(PublisherEvent::Status(format!(
@@ -317,14 +463,14 @@ mod imp {
                         return;
                     }
                     ClientEvent::KeyframeRequest(_) => encoder.request_keyframe(),
-                    ev => handle_input(&mut live.endpoint, &mut injector, view_only, mouse, ev),
+                    ev => handle_input(t.endpoint(), &mut injector, view_only, mouse, ev),
                 }
             }
 
-            if let Some(amid) = audio_mid
+            if let Some(amid) = audio_mid.to_owned()
                 && let Some(sender) = &mut audio_sender
             {
-                sender.tick(&mut live.endpoint, amid, Instant::now());
+                sender.tick(t.endpoint(), amid, Instant::now());
             }
 
             // #487 光标列缺口：真实光标 30Hz 上报（静屏无视频帧时通道仍常活）。
@@ -338,7 +484,7 @@ mod imp {
                     )
                     .with_sent_ms(now_ms());
                     if let Ok(json) = serde_json::to_string(&pos) {
-                        live.endpoint
+                        t.endpoint()
                             .send_channel_data("cursor", false, json.as_bytes());
                     }
                 }
@@ -357,8 +503,8 @@ mod imp {
                 match encoder.encode(&frame) {
                     Ok(Some(unit)) => {
                         let rtp_time = MediaTime::new(pts as u64 * 3000, Frequency::NINETY_KHZ);
-                        if let Err(e) = live
-                            .endpoint
+                        if let Err(e) = t
+                            .endpoint()
                             .send_video_frame(video_mid, unit.data, rtp_time)
                         {
                             tracing::warn!("发送视频帧失败: {e:?}");
