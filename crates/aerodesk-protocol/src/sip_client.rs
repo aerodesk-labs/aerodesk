@@ -68,7 +68,8 @@ pub enum SipTransport {
 #[derive(Debug, Clone)]
 pub struct SipTlsConfig {
     /// 服务端证书签发 CA 的 PEM（rsipstack 运行时只建 RootStore 信任锚，
-    /// 不支持系统根；生产由运营下发公网 CA，开发/联调用测试 CA）。
+    /// 不支持系统根加载；生产由运营下发公网 CA 或经 [`system_ca_pem`] 取系统根，
+    /// 开发/联调用测试 CA）。空 Vec = 无信任锚（连接必失败）。
     pub ca_certs: Vec<u8>,
     /// SNI 与证书校验名（缺省取连接目标 host；公网部署必须与服务端证书 SAN 一致）。
     pub sni_hostname: Option<String>,
@@ -76,6 +77,37 @@ pub struct SipTlsConfig {
     pub client_cert: Option<Vec<u8>>,
     /// 可选 mTLS 客户端私钥（PEM，与 [`Self::client_cert`] 成对）。
     pub client_key: Option<Vec<u8>>,
+}
+
+/// 系统根证书 PEM 包（Windows 证书库 / macOS keychain / Linux 系统位置，语义随
+/// rustls-native-certs）：rsipstack 不自动加载系统根，TLS 客户端把本包作为
+/// [`SipTlsConfig::ca_certs`] 的默认值即可信任公网 CA。DER 证书逐个 PEM 包裹
+/// （base64ct 标准字母表 + 64 列换行，PEM 惯例）。
+pub fn system_ca_pem() -> Vec<u8> {
+    use base64ct::{Base64, Encoding};
+    let result = rustls_native_certs::load_native_certs();
+    if !result.errors.is_empty() {
+        warn!(
+            "系统根证书加载部分失败（{} 条，忽略并继续）",
+            result.errors.len()
+        );
+    }
+    let mut out = Vec::new();
+    for cert in &result.certs {
+        let b64 = Base64::encode_string(cert.as_ref());
+        out.extend_from_slice(b"-----BEGIN CERTIFICATE-----\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            out.extend_from_slice(chunk);
+            out.push(b'\n');
+        }
+        out.extend_from_slice(b"-----END CERTIFICATE-----\n");
+    }
+    out
+}
+
+/// 从 PEM 文件读 CA 包（路径来源：服务/桌面设置；不存在/不可读返回 Err）。
+pub fn load_ca_pem_file(path: &str) -> Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|e| format!("读 CA PEM {path}: {e}"))
 }
 
 /// 客户端 UA 配置。
@@ -1078,5 +1110,34 @@ async fn do_register(
                 reason: e.to_string(),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_ca_pem_produces_pem_bundle() {
+        let pem = system_ca_pem();
+        assert!(
+            !pem.is_empty(),
+            "系统根证书包不应为空（Windows 证书库可取系统根）"
+        );
+        let text = String::from_utf8_lossy(&pem);
+        assert!(text.contains("-----BEGIN CERTIFICATE-----"));
+        assert!(text.contains("-----END CERTIFICATE-----"));
+    }
+
+    #[test]
+    fn load_ca_pem_file_roundtrip() {
+        let path =
+            std::env::temp_dir().join(format!("aerodesk-test-ca-{}.pem", std::process::id()));
+        let body = b"-----BEGIN CERTIFICATE-----\nZm9v\n-----END CERTIFICATE-----\n";
+        std::fs::write(&path, body).unwrap();
+        let got = load_ca_pem_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(got, body);
+        std::fs::remove_file(&path).ok();
+        assert!(load_ca_pem_file("Z:\no-such-file.pem").is_err());
     }
 }

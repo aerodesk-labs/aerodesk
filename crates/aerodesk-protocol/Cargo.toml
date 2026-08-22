@@ -22,3 +22,5 @@ tokio-util = { version = "0.7.19", features = ["rt"] }
 # 工作区同时 pin ring(core/rsipstack) 与 aws_lc_rs(sfu)，--workspace 联合构建下
 # rustls 无法自动判定 provider，rsipstack 的 ClientConfig::builder() 会 panic。
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# 系统根证书 PEM 包（sip_client::system_ca_pem——rsipstack 不自动加载系统根）。
+rustls-native-certs = "0.8"

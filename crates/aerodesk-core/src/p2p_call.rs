@@ -339,6 +339,26 @@ fn media_candidates(bind_addr: SocketAddr, discover_external: bool) -> Vec<IpAdd
     candidates
 }
 
+/// 从 offer JSON（`{"type":"offer","sdp":"<SDP 文本>"}`）取**第一个视频 m-line**
+/// 的 mid——Callee 侧发送视频帧用：m-line 的 mid 双侧一致，answer 按方向反演但
+/// 不改 mid。offer 不含视频（纯音频/数据通道）返回 None。
+pub fn offer_video_mid(offer_sdp: &str) -> Option<str0m::media::Mid> {
+    let v: serde_json::Value = serde_json::from_str(offer_sdp).ok()?;
+    let sdp = v.get("sdp")?.as_str()?;
+    let mut lines = sdp.lines();
+    while let Some(line) = lines.next() {
+        if line.starts_with("m=video") {
+            for l in lines.by_ref() {
+                if let Some(mid) = l.strip_prefix("a=mid:") {
+                    return Some(str0m::media::Mid::from(mid));
+                }
+            }
+            return None;
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,5 +525,17 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert!(got_media, "主叫应收到被叫的 PCMU 媒体事件");
+    }
+
+    /// offer 视频 mid 推导：Callee 侧发送视频帧用（与主叫 create_offer 的
+    /// video_mid 一致——mid 双侧同值）。
+    #[test]
+    fn offer_video_mid_matches_caller_video_mid() {
+        let mut caller = P2pCall::new(call_config(P2pRole::Caller, Role::Viewer, true)).unwrap();
+        let offer = caller.create_offer().unwrap();
+        assert_eq!(offer_video_mid(&offer.sdp), offer.video_mid);
+        // 畸形/纯 SDP 无视频输入：None 分支健壮性。
+        assert_eq!(offer_video_mid("not-json"), None);
+        assert_eq!(offer_video_mid(r#"{"type":"offer","sdp":"v=0\r\n"}"#), None);
     }
 }

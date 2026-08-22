@@ -13,11 +13,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use aerodesk_core::endpoint::ClientEvent;
+use aerodesk_core::p2p_call::{P2pCall, P2pCallConfig, P2pRole, offer_video_mid};
 use aerodesk_core::platform::Codec;
 use aerodesk_core::protocol::signal::Role;
-use aerodesk_core::signal_presence::{PresenceConfig, PresenceEvent, SignalPresence};
+use aerodesk_core::sip_link::{SipCallLink, SipLinkConfig, SipLinkEvent};
 use aerodesk_platform::windows::service::{ServiceCtx, ServiceEvent, SessionChangeReason};
 use aerodesk_platform::windows::session;
+use aerodesk_protocol::sip_client::{SipTlsConfig, SipTransport, load_ca_pem_file, system_ca_pem};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -49,10 +51,30 @@ pub struct ServiceSettings {
     /// 本地联调固定端口手动起 helper）。
     #[serde(default)]
     pub helper_port: u16,
+    /// #552 SIP 迁移：传输（"udp"=内网/调试默认；"tls"=公网默认加密）。
+    #[serde(default = "default_sip_transport")]
+    pub sip_transport: String,
+    /// #552 SIP 迁移：SIP 端口（0 = 按传输默认：udp 5060 / tls 5061）。
+    #[serde(default)]
+    pub sip_port: u16,
+    /// #552 SIP 迁移：SIP 域（AoR 域；默认取产品默认域）。
+    #[serde(default = "default_sip_domain")]
+    pub sip_domain: String,
+    /// #552 SIP 迁移：TLS CA PEM 文件路径（空 = 系统根证书包）。
+    #[serde(default)]
+    pub sip_ca_pem: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_sip_transport() -> String {
+    "udp".into()
+}
+
+fn default_sip_domain() -> String {
+    "aerodesk.test".into()
 }
 
 impl ServiceSettings {
@@ -81,6 +103,82 @@ impl ServiceSettings {
     fn usable(&self) -> bool {
         !self.server.is_empty() && !self.device_id.is_empty()
     }
+
+    /// #552：SIP 链路配置（server URL 的 host + sip_port/sip_transport/
+    /// sip_domain/sip_ca_pem → [`SipLinkConfig`]）。
+    fn sip_config(&self) -> Result<SipLinkConfig, String> {
+        let host = signal_host(&self.server)?;
+        let transport = match self.sip_transport.as_str() {
+            "" | "udp" => SipTransport::Udp,
+            "tls" => SipTransport::Tls,
+            other => return Err(format!("sip_transport 未知：{other}")),
+        };
+        let port = if self.sip_port != 0 {
+            self.sip_port
+        } else {
+            match transport {
+                SipTransport::Udp => 5060,
+                SipTransport::Tls => 5061,
+            }
+        };
+        let server = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))
+            .map_err(|e| format!("SIP 地址解析失败（{host}:{port}）：{e}"))?
+            .next()
+            .ok_or_else(|| format!("SIP 地址解析无结果（{host}:{port}）"))?;
+        let tls = if transport == SipTransport::Tls {
+            let ca_certs = if self.sip_ca_pem.is_empty() {
+                system_ca_pem()
+            } else {
+                load_ca_pem_file(&self.sip_ca_pem)?
+            };
+            Some(SipTlsConfig {
+                ca_certs,
+                sni_hostname: Some(host.clone()),
+                client_cert: None,
+                client_key: None,
+            })
+        } else {
+            None
+        };
+        Ok(SipLinkConfig {
+            device_id: self.device_id.clone(),
+            // 缺省兜底：serde default 只在 JSON 缺字段时生效，
+            // `..Default::default()` 构造与手写文件都走这里。
+            domain: if self.sip_domain.is_empty() {
+                default_sip_domain()
+            } else {
+                self.sip_domain.clone()
+            },
+            password: self.token.clone(),
+            server,
+            transport,
+            tls,
+            register_expires: 60,
+        })
+    }
+}
+
+/// 从规范化信令 URL（`ws://host[:port]/ws` / `wss://…`，非环回裸地址默认
+/// wss——见 core `normalize_signal_url`）取 host（去括号去端口，供
+/// `ToSocketAddrs` 与 SNI 使用）：IPv6 字面量按中括号识别，其余去最后一个
+/// ':' 起的端口段。
+fn signal_host(url: &str) -> Result<String, String> {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let host_port = rest.split('/').next().unwrap_or("");
+    let host = if let Some(b) = host_port.strip_prefix('[') {
+        b.split(']')
+            .next()
+            .ok_or("信令 URL 中括号不闭合")?
+            .to_string()
+    } else if let Some((h, _)) = host_port.rsplit_once(':') {
+        h.to_string()
+    } else {
+        host_port.to_string()
+    };
+    if host.is_empty() || host.contains("://") {
+        return Err(format!("信令 URL 无有效 host：{url}"));
+    }
+    Ok(host)
 }
 
 fn program_data() -> PathBuf {
@@ -110,6 +208,26 @@ pub fn sync_settings_from_user() -> Result<ServiceSettings, String> {
         token: get("token_default"),
         ..Default::default()
     };
+    // #552 SIP 迁移：用户设置里已有的 SIP 字段才同步（缺失保持默认，
+    // 避免服务侧已配置的字段被默认值覆盖）。
+    if let Some(x) = v.get("sip_transport").and_then(|x| x.as_str()) {
+        if !x.is_empty() {
+            s.sip_transport = x.to_string();
+        }
+    }
+    if let Some(x) = v.get("sip_port").and_then(|x| x.as_u64()) {
+        s.sip_port = x as u16;
+    }
+    if let Some(x) = v.get("sip_domain").and_then(|x| x.as_str()) {
+        if !x.is_empty() {
+            s.sip_domain = x.to_string();
+        }
+    }
+    if let Some(x) = v.get("sip_ca_pem").and_then(|x| x.as_str()) {
+        if !x.is_empty() {
+            s.sip_ca_pem = x.to_string();
+        }
+    }
     s.server = aerodesk_core::signaling::normalize_signal_url(&s.server);
     s.save()?;
     Ok(s)
@@ -147,9 +265,10 @@ pub fn service_body_with(ctx: ServiceCtx, force_media: bool) {
 /// 让位状态机持有者（单线程服务体内使用）。
 struct Supervisor {
     settings: ServiceSettings,
-    /// 是否存在用户会话（true = 让位态，服务 presence 停）。
+    /// 是否存在用户会话（true = 让位态，服务 SIP 链路停）。
     user_session: bool,
-    presence: Option<SignalPresence>,
+    /// #552：SIP 呼叫信令链路（替代 presence——规范 §8 语义事件收敛点）。
+    link: Option<SipCallLink>,
     last_status: String,
     /// #471 M2：登录界面媒体线程（接听呼叫/auto_publish 启动）。
     media: Option<HeadlessMedia>,
@@ -166,7 +285,7 @@ impl Supervisor {
         let mut sup = Supervisor {
             settings,
             user_session,
-            presence: None,
+            link: None,
             last_status: String::new(),
             media: None,
         };
@@ -189,7 +308,7 @@ impl Supervisor {
             },
         );
         if !user_session {
-            sup.presence_start();
+            sup.link_start();
             // #471 M2：e2e/联调模式——启动即发布（生产由呼叫接听触发）。
             if sup.settings.auto_publish {
                 info!("auto_publish 开启：启动登录界面媒体（联调/e2e 模式）");
@@ -204,43 +323,42 @@ impl Supervisor {
         sup
     }
 
-    fn presence_start(&mut self) {
+    fn link_start(&mut self) {
         if !self.settings.usable() {
-            warn!("服务配置不完整（server/device_id 为空），信令常驻未启动——待配置就位后热重载");
+            warn!(
+                "服务配置不完整（server/device_id 为空），SIP 信令常驻未启动——待配置就位后热重载"
+            );
             return;
         }
-        let mut config = PresenceConfig::new(
-            self.settings.server.clone(),
-            self.settings.device_id.clone(),
-            Role::Publisher,
-        )
-        .with_auto_accept(false); // P0：登录前阶段不接听（呼叫超时自动挂断），#471 再接
-        if !self.settings.token.is_empty() {
-            config = config.with_auth_token(self.settings.token.clone());
-        }
-        let mut presence =
-            SignalPresence::new(config).with_read_timeout(Duration::from_millis(500));
-        let st = presence.start();
-        info!("presence 启动：{}", st.as_str());
+        let cfg = match self.settings.sip_config() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("SIP 配置解析失败，链路未启动：{e}");
+                return;
+            }
+        };
+        let mut link = SipCallLink::new(cfg);
+        let st = link.start();
+        info!("SIP 链路启动：{st:?}");
         self.last_status.clear();
-        self.presence = Some(presence);
+        self.link = Some(link);
     }
 
-    fn presence_stop(&mut self) {
-        if let Some(mut p) = self.presence.take() {
-            let st = p.stop();
-            info!("presence 停止（让位）：{}", st.as_str());
+    fn link_stop(&mut self) {
+        if let Some(mut l) = self.link.take() {
+            let st = l.stop();
+            info!("SIP 链路停止（让位）：{st:?}");
         }
     }
 
-    /// 配置热重载：NoSession 态重启 presence 以应用新配置。
+    /// 配置热重载：NoSession 态重启 SIP 链路以应用新配置。
     fn reload(&mut self, fresh: ServiceSettings) {
         self.settings = fresh;
         if self.user_session {
             return;
         }
-        self.presence_stop();
-        self.presence_start();
+        self.link_stop();
+        self.link_start();
     }
 
     fn on_event(&mut self, ev: ServiceEvent) {
@@ -251,7 +369,7 @@ impl Supervisor {
                 if !self.user_session {
                     self.user_session = true;
                     info!("WTS Logon（session {session_id}）：进入让位态");
-                    self.presence_stop();
+                    self.link_stop();
                     if let Some(mut m) = self.media.take() {
                         info!("WTS Logon：停登录界面媒体，切会话内采集");
                         m.stop_and_join();
@@ -264,7 +382,7 @@ impl Supervisor {
                 if self.user_session {
                     self.user_session = false;
                     info!("WTS Logoff/Terminate（session {session_id}）：回位 NoSession");
-                    self.presence_start();
+                    self.link_start();
                 }
             }
             // 锁屏/解锁等：P0 仅记录（#471 锁屏路由依据）。
@@ -300,50 +418,100 @@ impl Supervisor {
         }
     }
 
-    /// 驱动 presence：状态变化与事件记日志；#471 M2 起 NoSession 态接听呼叫
-    /// (媒体链路随帧源接入;P0 的"不接听"解除)。
+    /// 驱动 SIP 链路：状态变化与事件记日志；#471 M2 起 NoSession 态接听呼叫
+    /// （媒体链路随帧源接入；P0 的"不接听"解除——现在直接 200 OK 接听）。
     fn poll(&mut self) {
-        let Some(presence) = self.presence.as_mut() else {
+        let Some(link) = self.link.as_mut() else {
             return;
         };
-        let st = presence.poll();
+        let st = link.poll();
         if st.as_str() != self.last_status {
-            info!("presence：{st:?}");
+            info!("SIP 链路：{st:?}");
             self.last_status = st.as_str().to_string();
         }
-        for ev in presence.take_events() {
+        let events = link.take_events();
+        for ev in events {
             match ev {
-                PresenceEvent::IncomingCall { call_id, from, .. } => {
-                    info!("incoming call {call_id} from {from}——NoSession 态接听(登录界面媒体)");
-                    if let Err(e) = presence.accept_call() {
-                        warn!("接听失败：{e}");
-                    }
-                    // #471 M2：接听即启动登录界面媒体（合成源起步）。
+                SipLinkEvent::IncomingCall {
+                    call_id,
+                    from_device,
+                    offer_sdp,
+                } => {
+                    info!(
+                        "incoming call {call_id} from {from_device}——NoSession 态接听（登录界面媒体）"
+                    );
                     if self.media.is_none() {
-                        self.media = Some(media_start(&self.settings));
+                        if let Err(e) = self.start_p2p_media(&call_id, &offer_sdp) {
+                            warn!("SIP 接听失败：{e}");
+                        }
+                    } else {
+                        warn!("已有媒体会话，忽略新的 incoming call（{call_id}）");
                     }
                 }
-                PresenceEvent::Hangup { call_id, .. } => {
-                    info!("呼叫挂断（{call_id}），停登录界面媒体");
-                    if let Some(mut m) = self.media.take() {
-                        m.stop_and_join();
+                SipLinkEvent::PeerHangup { call_id, reason } => {
+                    info!("呼叫挂断（{call_id}，reason={reason:?}），停登录界面媒体");
+                    self.stop_media();
+                }
+                SipLinkEvent::Rejected { call_id, .. } => {
+                    info!("呼叫被拒（{call_id}），停登录界面媒体");
+                    self.stop_media();
+                }
+                SipLinkEvent::Trickle { call_id, candidate } => {
+                    if let Some(m) = self.media.as_ref()
+                        && let Some(tx) = &m.trickle_tx
+                    {
+                        info!("trickle 候选注入（{call_id}）");
+                        let _ = tx.send(candidate.candidate.clone());
                     }
                 }
-                PresenceEvent::CallTimeout { call_id, .. } => {
-                    info!("呼叫超时（{call_id}），停登录界面媒体");
-                    if let Some(mut m) = self.media.take() {
-                        m.stop_and_join();
-                    }
-                }
+                _ => {}
             }
         }
     }
 
-    fn shutdown(&mut self) {
+    /// 被叫媒体闭环：accept_offer → link.accept → 媒体线程（P2pCall 泵 +
+    /// 帧源推送）。offer 无视频 mid 时拒绝接听（登录界面媒体只发视频）。
+    fn start_p2p_media(&mut self, call_id: &str, offer_sdp: &str) -> Result<(), String> {
+        let video_mid = offer_video_mid(offer_sdp)
+            .ok_or_else(|| "offer 无视频 m-line（登录界面媒体只发视频）".to_string())?;
+        let cfg = P2pCallConfig {
+            role: P2pRole::Callee,
+            device_role: Role::Publisher,
+            codec: None,
+            with_audio: false,
+            with_camera: false,
+            force_relay: false,
+            bind: "0.0.0.0:0".parse().unwrap(),
+            turn: None,
+            inline_candidates: true,
+        };
+        let mut p2p = P2pCall::new(cfg).map_err(|e| format!("P2P 端点创建：{e}"))?;
+        let answer = p2p
+            .accept_offer(offer_sdp)
+            .map_err(|e| format!("accept_offer：{e}"))?;
+        self.link
+            .as_mut()
+            .ok_or("SIP 链路未启动")?
+            .accept(call_id, &answer)
+            .map_err(|e| format!("SIP accept：{e}"))?;
+        self.media = Some(media_start_p2p(
+            p2p,
+            video_mid,
+            self.settings.frame_source.clone(),
+            self.settings.helper_port,
+        ));
+        Ok(())
+    }
+
+    fn stop_media(&mut self) {
         if let Some(mut m) = self.media.take() {
             m.stop_and_join();
         }
-        self.presence_stop();
+    }
+
+    fn shutdown(&mut self) {
+        self.stop_media();
+        self.link_stop();
     }
 }
 
@@ -354,6 +522,8 @@ impl Supervisor {
 struct HeadlessMedia {
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
+    /// #552：trickle 候选注入通道（P2P 会话；None = SFU 会话无注入）。
+    trickle_tx: Option<std::sync::mpsc::Sender<String>>,
 }
 
 impl HeadlessMedia {
@@ -383,6 +553,7 @@ fn media_start(settings: &ServiceSettings) -> HeadlessMedia {
     HeadlessMedia {
         stop,
         handle: Some(handle),
+        trickle_tx: None,
     }
 }
 
@@ -428,33 +599,8 @@ fn run_media(
     let Ok(video_mid) = video_mid else {
         return;
     };
-    // #471 M3 帧源解析:
-    //   synthetic           — 合成源(测试/联调)
-    //   auto(默认/空)       — S0 DDA 直抓(实测矩阵 A);失败回退 helper(矩阵 B);再回退合成
-    //   helper              — 直接走 helper(服务经 winlogon token 拉起,真机登录界面路径)
-    let mut source: Box<dyn LogonFrameSource + Send> = match frame_source.as_str() {
-        "synthetic" => Box::new(SyntheticLogonSource::new(640, 360)),
-        "helper" => match helper_frame_source_auto_spawn(helper_port) {
-            Ok(s) => Box::new(s),
-            Err(e) => {
-                warn!("helper 帧源不可用，回退合成源：{e}");
-                Box::new(SyntheticLogonSource::new(640, 360))
-            }
-        },
-        _ => match DxgiFrameSource::new(640, 360) {
-            Ok(s) => Box::new(s),
-            Err(e) => {
-                warn!("S0 DDA 直抓不可用（{e}），回退 helper 帧源");
-                match helper_frame_source_auto_spawn(helper_port) {
-                    Ok(s) => Box::new(s),
-                    Err(e2) => {
-                        warn!("helper 帧源也不可用（{e2}），回退合成源");
-                        Box::new(SyntheticLogonSource::new(640, 360))
-                    }
-                }
-            }
-        },
-    };
+    // #471 M3 帧源解析（见 frame_source_box 注）；SFU 与 P2P 媒体线程共用。
+    let mut source = frame_source_box(&frame_source, helper_port);
     let mut encoder =
         match aerodesk_codec::encode::FfmpegEncoder::new(640, 360, 30, 1_500_000, Codec::H264) {
             Ok(e) => e,
@@ -532,6 +678,131 @@ fn run_media(
         std::thread::sleep(Duration::from_millis(1));
     }
     info!("登录界面媒体线程结束（共发 {pts} 帧）");
+}
+
+/// #471 M3 帧源解析（SFU/P2P 媒体线程共用）：
+///   synthetic           — 合成源(测试/联调)
+///   auto(默认/空)       — S0 DDA 直抓(实测矩阵 A);失败回退 helper(矩阵 B);再回退合成
+///   helper              — 直接走 helper(服务经 winlogon token 拉起,真机登录界面路径)
+fn frame_source_box(frame_source: &str, helper_port: u16) -> Box<dyn LogonFrameSource + Send> {
+    match frame_source {
+        "synthetic" => Box::new(SyntheticLogonSource::new(640, 360)),
+        "helper" => match helper_frame_source_auto_spawn(helper_port) {
+            Ok(s) => Box::new(s),
+            Err(e) => {
+                warn!("helper 帧源不可用，回退合成源：{e}");
+                Box::new(SyntheticLogonSource::new(640, 360))
+            }
+        },
+        _ => match DxgiFrameSource::new(640, 360) {
+            Ok(s) => Box::new(s),
+            Err(e) => {
+                warn!("S0 DDA 直抓不可用（{e}），回退 helper 帧源");
+                match helper_frame_source_auto_spawn(helper_port) {
+                    Ok(s) => Box::new(s),
+                    Err(e2) => {
+                        warn!("helper 帧源也不可用（{e2}），回退合成源");
+                        Box::new(SyntheticLogonSource::new(640, 360))
+                    }
+                }
+            }
+        },
+    }
+}
+
+/// 启动 P2P 被叫媒体线程（#552：accept_offer 已由调用方完成，P2pCall 已就绪）。
+fn media_start_p2p(
+    p2p: P2pCall,
+    video_mid: str0m::media::Mid,
+    frame_source: String,
+    helper_port: u16,
+) -> HeadlessMedia {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop2 = stop.clone();
+    let (trickle_tx, trickle_rx) = std::sync::mpsc::channel::<String>();
+    let handle = std::thread::Builder::new()
+        .name("logon-media-p2p".into())
+        .spawn(move || run_media_p2p(p2p, video_mid, frame_source, helper_port, trickle_rx, stop2))
+        .expect("spawn logon-media-p2p");
+    HeadlessMedia {
+        stop,
+        handle: Some(handle),
+        trickle_tx: Some(trickle_tx),
+    }
+}
+
+/// P2P 媒体主循环（#552 被叫侧）：与 SFU 路径同泵结构，区别在（1）无
+/// connect 步骤——P2pCall 已建；（2）就绪门槛是首个 `ChannelOpen`（DTLS 完成
+/// ⟺ SRTP 密钥就绪；ICE connected 早于会话就绪，早写媒体帧会被对端丢帧）。
+fn run_media_p2p(
+    mut p2p: P2pCall,
+    video_mid: str0m::media::Mid,
+    frame_source: String,
+    helper_port: u16,
+    trickle_rx: std::sync::mpsc::Receiver<String>,
+    stop: Arc<AtomicBool>,
+) {
+    let mut source = frame_source_box(&frame_source, helper_port);
+    let mut encoder =
+        match aerodesk_codec::encode::FfmpegEncoder::new(640, 360, 30, 1_500_000, Codec::H264) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("编码器初始化失败：{e}");
+                return;
+            }
+        };
+    info!("P2P 登录界面媒体线程启动（640x360@30 H264）");
+    let mut pts: u64 = 0;
+    let mut stat_at = Instant::now();
+    let mut ready = false;
+    let mut next_frame = Instant::now();
+    loop {
+        if stop.load(Ordering::SeqCst) || !p2p.is_alive() {
+            break;
+        }
+        // trickle 候选注入（信令 INFO sdpfrag；无积压时一次空转）。
+        while let Ok(cand) = trickle_rx.try_recv() {
+            if let Err(e) = p2p.add_remote_candidate(&cand) {
+                warn!("trickle 候选注入失败：{e}");
+            }
+        }
+        let _ = p2p.poll();
+        while let Some(ev) = p2p.poll_event() {
+            if let ClientEvent::ChannelOpen(..) = ev {
+                ready = true;
+                info!("P2P 会话就绪（SCTP 打开 = DTLS 完成）");
+            }
+        }
+        // 帧发送（90kHz：30fps = 3000 ticks/帧）。
+        if ready && Instant::now() >= next_frame {
+            next_frame += Duration::from_millis(33);
+            if let Some(f) = source.next_frame() {
+                match encoder.encode_bgra(&f.bgra) {
+                    Ok(Some(unit)) => {
+                        let rtp_time = str0m::media::MediaTime::new(
+                            pts * 3000,
+                            str0m::media::Frequency::NINETY_KHZ,
+                        );
+                        if let Err(e) = p2p
+                            .endpoint()
+                            .send_video_frame(video_mid, unit.data, rtp_time)
+                        {
+                            warn!("send frame：{e:?}");
+                        }
+                        pts += 1;
+                    }
+                    Ok(None) => {}
+                    Err(e) => warn!("encode：{e}"),
+                }
+            }
+        }
+        if stat_at.elapsed() >= Duration::from_secs(5) {
+            stat_at = Instant::now();
+            info!("P2P 媒体已发 {pts} 帧");
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    info!("P2P 登录界面媒体线程结束（共发 {pts} 帧）");
 }
 
 // ---------- #471 M2：登录界面帧源 ----------
@@ -916,39 +1187,59 @@ mod tests {
         assert_eq!(s.token, "");
         assert!(s.spawn_ui, "spawn_ui 缺省应为 true");
         assert_eq!(s.ui_exe, "");
+        assert_eq!(s.sip_transport, "udp", "sip_transport 缺省 udp");
+        assert_eq!(s.sip_port, 0, "sip_port 缺省 0（=按传输默认）");
+        assert_eq!(s.sip_domain, "aerodesk.test");
+        assert_eq!(s.sip_ca_pem, "");
     }
 
-    /// M2 联通验证：本地 signal server 在线时 presence 应 Online。
-    /// 无本地 server（CI/普通环境）→ detect-and-return（stderr 打印后返回，
-    /// 不 skip 凑绿，见 RULE_可达性）。
+    /// #552：SIP 配置映射（server URL host + 传输/端口/CA 默认值）。
     #[test]
-    fn presence_connects_when_signal_available() {
-        let probe = std::net::TcpStream::connect(("127.0.0.1", 3003));
-        if probe.is_err() {
-            eprintln!(
-                "presence_connects_when_signal_available：本地 3003 无 signal server，跳过执行"
-            );
-            return;
-        }
-        drop(probe);
-        let config =
-            PresenceConfig::new("ws://127.0.0.1:3003/ws", "svc-unit-test", Role::Publisher)
-                .with_auto_accept(false);
-        let mut presence =
-            SignalPresence::new(config).with_read_timeout(Duration::from_millis(200));
-        presence.start();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let st = presence.poll();
-            if st.is_online() {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "5s 内应 Online（本地 signal server 应答 Join），当前 {st:?}"
-            );
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        presence.stop();
+    fn sip_config_maps_settings() {
+        let mut s = ServiceSettings {
+            server: "ws://127.0.0.1:3003/ws".into(),
+            device_id: "AD-TEST".into(),
+            token: "tok".into(),
+            ..Default::default()
+        };
+        let cfg = s.sip_config().unwrap();
+        assert_eq!(cfg.device_id, "AD-TEST");
+        assert_eq!(cfg.domain, "aerodesk.test", "sip_domain 缺省");
+        assert_eq!(cfg.password, "tok");
+        assert_eq!(
+            cfg.server,
+            "127.0.0.1:5060".parse().unwrap(),
+            "udp 默认 5060"
+        );
+        assert!(cfg.tls.is_none(), "udp 无 TLS 配置");
+        // tls 传输：默认端口 5061 + 系统根 CA。
+        s.sip_transport = "tls".into();
+        let cfg2 = s.sip_config().unwrap();
+        assert_eq!(cfg2.server, "127.0.0.1:5061".parse().unwrap());
+        let tls = cfg2.tls.expect("tls 应带配置");
+        assert!(!tls.ca_certs.is_empty(), "默认应带系统根 CA");
+        assert_eq!(tls.sni_hostname.as_deref(), Some("127.0.0.1"));
+        // 显式端口。
+        s.sip_port = 5070;
+        assert_eq!(
+            s.sip_config().unwrap().server,
+            "127.0.0.1:5070".parse().unwrap()
+        );
+        // 非法传输。
+        s.sip_transport = "sctp".into();
+        assert!(s.sip_config().is_err());
+    }
+
+    /// #552：信令 URL → host 提取（环回/域名/IPv6 字面量/裸地址）。
+    #[test]
+    fn signal_host_parsing() {
+        assert_eq!(signal_host("ws://127.0.0.1:3003/ws").unwrap(), "127.0.0.1");
+        assert_eq!(
+            signal_host("wss://sip.aerodesk.test:443/ws").unwrap(),
+            "sip.aerodesk.test"
+        );
+        assert_eq!(signal_host("127.0.0.1:3003").unwrap(), "127.0.0.1");
+        assert_eq!(signal_host("wss://[::1]:444/ws").unwrap(), "::1");
+        assert!(signal_host("").is_err());
     }
 }

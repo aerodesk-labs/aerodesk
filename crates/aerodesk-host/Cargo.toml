@@ -9,6 +9,8 @@ rust-version.workspace = true
 [dependencies]
 aerodesk-core = { path = "../aerodesk-core" }
 aerodesk-codec = { path = "../aerodesk-codec" }
+# #552 SIP：SipLinkConfig 的 TLS 配置类型/系统根 CA 包（SipTlsConfig/system_ca_pem）。
+aerodesk-protocol = { path = "../aerodesk-protocol" }
 str0m = { workspace = true, features = ["rust-crypto"] }
 aerodesk-platform = { path = "../aerodesk-platform" }
 serde.workspace = true
