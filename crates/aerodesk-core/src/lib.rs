@@ -29,6 +29,7 @@ pub mod protocol;
 pub mod signal_call;
 pub mod signal_presence;
 pub mod signaling;
+pub mod sip_link;
 pub mod synthetic;
 
 pub use endpoint::{ClientEvent, Endpoint};
