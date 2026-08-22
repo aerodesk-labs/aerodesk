@@ -11,14 +11,77 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use aerodesk_core::access_unit::AccessUnitAssembler;
-use aerodesk_core::connect::connect_live_role;
+use aerodesk_core::connect::{LiveSession, connect_live_role};
 use aerodesk_core::endpoint::ClientEvent;
+use aerodesk_core::p2p_call::P2pCall;
 use aerodesk_core::platform::{Decoder, Renderer};
 use aerodesk_core::protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult};
 use aerodesk_core::protocol::signal::Role;
 use str0m::net::Protocol;
 
 use crate::SessionUi;
+
+/// 观看端传输抽象：SFU（LiveSession）与 P2P（已建立的 P2pCall）共用会话泵。
+/// P2P 模式 `poll_event` 以首个 `ChannelOpen` 为会话就绪（DTLS 完成 ⟺ SRTP
+/// 密钥就绪；ICE connected 早于就绪——早到媒体由接收侧静默丢弃）。
+enum ViewerTransport {
+    Sfu(LiveSession),
+    Peer(P2pCall),
+}
+
+impl ViewerTransport {
+    fn pump(&mut self) {
+        match self {
+            Self::Sfu(live) => {
+                live.socket
+                    .set_read_timeout(Some(Duration::from_millis(10)))
+                    .ok();
+                let mut buf = [0u8; 4096];
+                if let Ok((n, source)) = live.socket.recv_from(&mut buf) {
+                    if let Ok(contents) = buf[..n].try_into() {
+                        let _ = live.endpoint.handle_input(str0m::Input::Receive(
+                            Instant::now(),
+                            str0m::net::Receive {
+                                proto: Protocol::Udp,
+                                source,
+                                destination: live.socket.local_addr().unwrap(),
+                                contents,
+                            },
+                        ));
+                    }
+                }
+                let _ = live.endpoint.handle_timeout(Instant::now());
+                while let Some(output) = live.endpoint.poll_output() {
+                    match output {
+                        str0m::Output::Transmit(t) => {
+                            let _ = live.socket.send_to(&t.contents, t.destination);
+                        }
+                        // 必须 break：sans-IO 的 Timeout 不消费会 100% CPU 死循环（#125 教训）。
+                        str0m::Output::Timeout(_) => break,
+                        str0m::Output::Event(_) => {}
+                    }
+                }
+            }
+            Self::Peer(p2p) => {
+                let _ = p2p.poll();
+            }
+        }
+    }
+
+    fn poll_event(&mut self) -> Option<ClientEvent> {
+        match self {
+            Self::Sfu(live) => live.endpoint.poll_event(),
+            Self::Peer(p2p) => p2p.poll_event(),
+        }
+    }
+
+    fn endpoint(&mut self) -> &mut aerodesk_core::Endpoint {
+        match self {
+            Self::Sfu(live) => &mut live.endpoint,
+            Self::Peer(p2p) => p2p.endpoint(),
+        }
+    }
+}
 
 /// 解析 cursor 通道的 `CursorPos`（#75；归一化 0..1 坐标 + 发送端墙钟，
 /// 观看端据此计算端到端单向延时）。
@@ -121,8 +184,8 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
     stop: Arc<AtomicBool>,
     view_only: Arc<AtomicBool>,
     decoder_label: &'static str,
-    mut mk_decoder: DF,
-    mut mk_renderer: RF,
+    mk_decoder: DF,
+    mk_renderer: RF,
 ) where
     U: SessionUi,
     D: Decoder + 'static,
@@ -143,7 +206,7 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
         let r = connect_live_role(&srv, &rm, Role::Viewer, auth2.as_deref());
         let _ = tx.send(r);
     });
-    let mut live = match rx.recv_timeout(Duration::from_secs(20)) {
+    let live = match rx.recv_timeout(Duration::from_secs(20)) {
         Ok(Ok(l)) => l,
         Ok(Err(e)) => {
             let msg = format!("连接失败：{e}");
@@ -189,7 +252,89 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
     ui.session_status(connected_status);
     // #438：连上信令只表示设备已连接/可被找到，不进入观察页；
     // 收到首个渲染帧后才 joined 进入会话视图。
+    run_viewer_impl(
+        ViewerTransport::Sfu(live),
+        room,
+        ui,
+        input_rx,
+        cmd_rx,
+        file_cmd_rx,
+        chat_cmd_rx,
+        stop,
+        view_only,
+        mk_decoder,
+        mk_renderer,
+    );
+}
 
+/// #552：SIP 1:1 P2P 观看入口——P2pCall 已建立（create_offer→call→Answered→
+/// accept_answer 由调用方完成），解码/渲染/通道与 SFU 路径共用同一会话泵。
+#[allow(clippy::too_many_arguments)]
+pub fn run_viewer_generic_peer<U, D, R, DF, RF>(
+    p2p: aerodesk_core::p2p_call::P2pCall,
+    room: String,
+    ui: U,
+    input_rx: std::sync::mpsc::Receiver<String>,
+    cmd_rx: std::sync::mpsc::Receiver<aerodesk_core::protocol::cmd::CmdRequest>,
+    file_cmd_rx: std::sync::mpsc::Receiver<crate::FileCmd>,
+    chat_cmd_rx: std::sync::mpsc::Receiver<crate::ChatCmd>,
+    stop: Arc<AtomicBool>,
+    view_only: Arc<AtomicBool>,
+    decoder_label: &'static str,
+    mk_decoder: DF,
+    mk_renderer: RF,
+) where
+    U: SessionUi,
+    D: Decoder + 'static,
+    R: Renderer + 'static,
+    DF: FnMut() -> Result<D, String>,
+    RF: FnMut() -> R,
+{
+    let connected_status = format!("已连接：1:1 会话（{room}）");
+    ui.set_status(connected_status.clone());
+    ui.set_log(format!(
+        "设备: {room}\nSIP 1:1 P2P 会话\nSDP 交换: OK\n\n{decoder_label}渲染。"
+    ));
+    ui.add_recent(&room, &"sip".to_string());
+    ui.set_conn_state(2);
+    ui.session_status(connected_status);
+    run_viewer_impl(
+        ViewerTransport::Peer(p2p),
+        room,
+        ui,
+        input_rx,
+        cmd_rx,
+        file_cmd_rx,
+        chat_cmd_rx,
+        stop,
+        view_only,
+        mk_decoder,
+        mk_renderer,
+    );
+}
+
+/// 会话泵（SFU/P2P 共用）：媒体收发、通道事件、解码渲染、文件/剪贴板/统计。
+#[allow(clippy::too_many_arguments)]
+fn run_viewer_impl<U, D, R, DF, RF>(
+    mut t: ViewerTransport,
+    room: String,
+    ui: U,
+    input_rx: std::sync::mpsc::Receiver<String>,
+    cmd_rx: std::sync::mpsc::Receiver<aerodesk_core::protocol::cmd::CmdRequest>,
+    file_cmd_rx: std::sync::mpsc::Receiver<crate::FileCmd>,
+    chat_cmd_rx: std::sync::mpsc::Receiver<crate::ChatCmd>,
+    stop: Arc<AtomicBool>,
+    view_only: Arc<AtomicBool>,
+    mut mk_decoder: DF,
+    mut mk_renderer: RF,
+) where
+    U: SessionUi,
+    D: Decoder + 'static,
+    R: Renderer + 'static,
+    DF: FnMut() -> Result<D, String>,
+    RF: FnMut() -> R,
+{
+    let stale = || stop.load(Ordering::SeqCst);
     let mut assembler = AccessUnitAssembler::new();
     // #72/#271 文件/剪贴板状态机：观看端不落盘接收，但剪贴板文本/图片接收生效。
     let mut file_transfer = aerodesk_core::file_transfer::FileTransfer::new(None);
@@ -201,7 +346,6 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
     let mut decoder: Option<D> = None;
     let mut renderer: Option<R> = None;
     let mut frames: u64 = 0;
-    let mut pkts: u64 = 0;
     let mut media_evts: u64 = 0;
     let mut last_stat = Instant::now();
     // #73 观看端音频播放：PCMU 解码 → jitter buffer → cpal AudioSink（全平台）。
@@ -231,8 +375,8 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
         if !view_only.load(Ordering::SeqCst) {
             let mut sent = 0u32;
             while let Ok(json) = input_rx.try_recv() {
-                let ok = live
-                    .endpoint
+                let ok = t
+                    .endpoint()
                     .send_channel_data("input", false, json.as_bytes());
                 if !ok {
                     tracing::warn!("input 通道发送失败（通道未建立？）");
@@ -246,8 +390,8 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
         // #109/#452 终端命令：UI 终端窗口 → cmd data channel → SFU → 被控端执行。
         while let Ok(req) = cmd_rx.try_recv() {
             if let Ok(json) = serde_json::to_string(&req) {
-                let sent = live
-                    .endpoint
+                let sent = t
+                    .endpoint()
                     .send_channel_data("cmd", false, json.as_bytes());
                 if !sent {
                     ui.append_terminal_output("[错误] cmd 通道未就绪，命令未送达".to_string());
@@ -269,7 +413,7 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
                 },
                 crate::FileCmd::SendClipboard(text) => {
                     aerodesk_core::clipboard::set_cache(text.clone());
-                    let sent = file_transfer.send_clipboard(&text, &mut live.endpoint);
+                    let sent = file_transfer.send_clipboard(&text, t.endpoint());
                     let msg = if sent {
                         "已发送剪贴板到被控端".to_string()
                     } else {
@@ -290,7 +434,7 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
                     }
                 }
                 crate::FileCmd::Cancel => {
-                    file_transfer.cancel_send(&mut live.endpoint);
+                    file_transfer.cancel_send(t.endpoint());
                 }
             }
         }
@@ -312,8 +456,8 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
                         },
                     );
                     if let Ok(json) = serde_json::to_string(&req) {
-                        let sent = live
-                            .endpoint
+                        let sent = t
+                            .endpoint()
                             .send_channel_data("cmd", false, json.as_bytes());
                         if !sent {
                             ui.set_message_window_status("发送失败：cmd 通道未就绪".to_string());
@@ -322,44 +466,13 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
                 }
             }
         }
-        live.socket
-            .set_read_timeout(Some(Duration::from_millis(10)))
-            .ok();
-        let mut buf = [0u8; 4096];
-        if let Ok((n, source)) = live.socket.recv_from(&mut buf) {
-            pkts += 1;
-            if pkts % 200 == 0 {
-                eprintln!("generic viewer: udp={pkts} media={media_evts} frames={frames}");
-            }
-            if let Ok(contents) = buf[..n].try_into() {
-                let _ = live.endpoint.handle_input(str0m::Input::Receive(
-                    std::time::Instant::now(),
-                    str0m::net::Receive {
-                        proto: Protocol::Udp,
-                        source,
-                        destination: live.socket.local_addr().unwrap(),
-                        contents,
-                    },
-                ));
-            }
-        }
-        let _ = live.endpoint.handle_timeout(std::time::Instant::now());
-        while let Some(output) = live.endpoint.poll_output() {
-            match output {
-                str0m::Output::Transmit(t) => {
-                    let _ = live.socket.send_to(&t.contents, t.destination);
-                }
-                // 必须 break：sans-IO 的 Timeout 不消费会 100% CPU 死循环（#125 教训）。
-                str0m::Output::Timeout(_) => break,
-                str0m::Output::Event(_) => {}
-            }
-        }
-        while let Some(ev) = live.endpoint.poll_event() {
+        t.pump();
+        while let Some(ev) = t.poll_event() {
             // #72 文件通道事件交给状态机（非 file 事件为 no-op）。
-            file_transfer.handle_event(&ev, &mut live.endpoint);
+            file_transfer.handle_event(&ev, t.endpoint());
             // #109/#452 终端命令响应 → 终端独立窗口回显。
             if let ClientEvent::ChannelData(cid, _, data) = &ev
-                && live.endpoint.channel_label(*cid).as_deref() == Some("cmd")
+                && t.endpoint().channel_label(*cid).as_deref() == Some("cmd")
                 && let Ok(response) = serde_json::from_slice::<CmdResponse>(data)
             {
                 if let CmdResult::Chat { sender, text } = &response.result {
@@ -371,7 +484,7 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
             // #75 远程光标：被控端经 cursor 通道广播位置 → UI 叠加（与 macOS UI 一致）；
             // sent_ms 墙钟 → 端到端单向延时（#8，节流推送交给下方统计 ticker）。
             if let ClientEvent::ChannelData(cid, _, data) = &ev
-                && live.endpoint.channel_label(*cid).as_deref() == Some("cursor")
+                && t.endpoint().channel_label(*cid).as_deref() == Some("cursor")
                 && let Some(pos) = cursor_pos(data)
             {
                 ui.set_remote_cursor(pos.x as f32, pos.y as f32);
@@ -428,7 +541,7 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
                     .map(|t| now.duration_since(t) >= Duration::from_secs(1))
                     .unwrap_or(true);
                 if due && (rid_changed || !data.contiguous || !seen_video) {
-                    let _ = live.endpoint.request_keyframe(
+                    let _ = t.endpoint().request_keyframe(
                         data.mid,
                         data.rid,
                         str0m::media::KeyframeRequestKind::Fir,
@@ -502,7 +615,7 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
             let fps = (frames - last_stats_frames) as f32 / dt as f32;
             last_stats_frames = frames;
             last_stats_push = Instant::now();
-            let rtt_ms = live.endpoint.last_rtt().map(|d| d.as_millis() as u64);
+            let rtt_ms = t.endpoint().last_rtt().map(|d| d.as_millis() as u64);
             tracing::debug!(
                 "session stats: e2e={:?}ms rtt={:?}ms fps={fps:.1}",
                 last_e2e_ms,
@@ -511,7 +624,7 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
             ui.set_session_stats(last_e2e_ms, rtt_ms, fps);
         }
         // #72 文件传输推进 + 剪贴板接收落地（文本/图片写入系统剪贴板）。
-        file_transfer.tick(&mut live.endpoint);
+        file_transfer.tick(t.endpoint());
         if let Some(text) = file_transfer.take_incoming_clipboard() {
             aerodesk_core::clipboard::set_cache(text.clone());
             aerodesk_core::clipboard::write(&text);
@@ -576,7 +689,7 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
                     }
                 }
                 ClipboardSync::Text(text) => {
-                    if file_transfer.send_clipboard(&text, &mut live.endpoint) {
+                    if file_transfer.send_clipboard(&text, t.endpoint()) {
                         aerodesk_core::clipboard::set_cache(text.clone());
                         tracing::info!("clipboard auto-sync: text sent");
                     }

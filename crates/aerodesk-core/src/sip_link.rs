@@ -120,6 +120,94 @@ impl SipLinkConfig {
             register_expires: self.register_expires,
         }
     }
+
+    /// #552 host/desktop 共用构造：由信令 URL（`ws://host[:port]/ws` 或
+    /// `wss://…`，host 即 SIP 服务器主机）+ 传输/端口/域/CA 设置 →
+    /// [`SipLinkConfig`]。
+    ///
+    /// - `transport`：`"udp"`（内网/调试）或 `"tls"`（公网默认加密）；
+    /// - `port`：0 = 按传输默认（udp 5060 / tls 5061）；
+    /// - `domain`：空 = 产品默认 `aerodesk.test`；
+    /// - `ca_pem_path`：空 = 系统根证书包（rsipstack 不自动加载系统根，
+    ///   `SipTlsConfig::ca_certs` 空 = 无信任锚）。
+    pub fn from_parts(
+        server_url: &str,
+        device_id: &str,
+        password: &str,
+        transport: &str,
+        port: u16,
+        domain: &str,
+        ca_pem_path: &str,
+    ) -> Result<Self, String> {
+        let host = signal_host(server_url)?;
+        let transport = match transport {
+            "" | "udp" => SipTransport::Udp,
+            "tls" => SipTransport::Tls,
+            other => return Err(format!("sip_transport 未知：{other}")),
+        };
+        let port = if port != 0 {
+            port
+        } else {
+            match transport {
+                SipTransport::Udp => 5060,
+                SipTransport::Tls => 5061,
+            }
+        };
+        let server = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))
+            .map_err(|e| format!("SIP 地址解析失败（{host}:{port}）：{e}"))?
+            .next()
+            .ok_or_else(|| format!("SIP 地址解析无结果（{host}:{port}）"))?;
+        let tls = if transport == SipTransport::Tls {
+            let ca_certs = if ca_pem_path.is_empty() {
+                crate::protocol::sip_client::system_ca_pem()
+            } else {
+                crate::protocol::sip_client::load_ca_pem_file(ca_pem_path)?
+            };
+            Some(SipTlsConfig {
+                ca_certs,
+                sni_hostname: Some(host.clone()),
+                client_cert: None,
+                client_key: None,
+            })
+        } else {
+            None
+        };
+        Ok(SipLinkConfig {
+            device_id: device_id.to_string(),
+            domain: if domain.is_empty() {
+                "aerodesk.test".to_string()
+            } else {
+                domain.to_string()
+            },
+            password: password.to_string(),
+            server,
+            transport,
+            tls,
+            register_expires: 60,
+        })
+    }
+}
+
+/// 从规范化信令 URL（`ws://host[:port]/ws` / `wss://…`）取 host（去括号去
+/// 端口，供 `ToSocketAddrs` 与 SNI 使用）：IPv6 字面量按中括号识别，其余去
+/// 最后一个 ':' 起的端口段。
+fn signal_host(url: &str) -> Result<String, String> {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let host_port = rest.split('/').next().unwrap_or("");
+    let host = if let Some(b) = host_port.strip_prefix('[') {
+        b.split(']')
+            .next()
+            .ok_or("信令 URL 中括号不闭合")?
+            .to_string()
+    } else if let Some((h, _)) = host_port.rsplit_once(':') {
+        h.to_string()
+    } else {
+        host_port.to_string()
+    };
+    if host.is_empty() {
+        return Err(format!("信令 URL 无有效 host：{url}"));
+    }
+    Ok(host)
 }
 
 /// 常驻 SIP 呼叫信令链路。
@@ -548,5 +636,35 @@ mod tests {
             sdp_mid: Some("0".into()),
             sdp_m_line_index: Some(0),
         }
+    }
+
+    /// #552 host/desktop 共用构造：传输/端口/域/CA 默认值与 URL host 提取。
+    #[test]
+    fn from_parts_maps_settings() {
+        let cfg =
+            SipLinkConfig::from_parts("ws://127.0.0.1:3003/ws", "AD-TEST", "tok", "", 0, "", "")
+                .unwrap();
+        assert_eq!(cfg.device_id, "AD-TEST");
+        assert_eq!(cfg.domain, "aerodesk.test", "域缺省");
+        assert_eq!(
+            cfg.server,
+            "127.0.0.1:5060".parse().unwrap(),
+            "udp 默认 5060"
+        );
+        assert!(cfg.tls.is_none());
+        // tls：默认端口 5061 + 系统根 CA + SNI。
+        let cfg2 = SipLinkConfig::from_parts("wss://localhost:443/ws", "D", "p", "tls", 0, "", "")
+            .unwrap();
+        assert_eq!(cfg2.server.to_string(), "[::1]:5061");
+        let tls = cfg2.tls.expect("tls 配置");
+        assert!(!tls.ca_certs.is_empty());
+        assert_eq!(tls.sni_hostname.as_deref(), Some("localhost"));
+        // 显式端口 + IPv6 字面量。
+        let cfg3 =
+            SipLinkConfig::from_parts("wss://[::1]:444/ws", "D", "p", "udp", 5070, "", "").unwrap();
+        assert_eq!(cfg3.server, "[::1]:5070".parse().unwrap());
+        // 非法传输 / 无 host。
+        assert!(SipLinkConfig::from_parts("ws://h/ws", "D", "p", "sctp", 0, "", "").is_err());
+        assert!(SipLinkConfig::from_parts("", "D", "p", "", 0, "", "").is_err());
     }
 }

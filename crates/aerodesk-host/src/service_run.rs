@@ -19,7 +19,6 @@ use aerodesk_core::protocol::signal::Role;
 use aerodesk_core::sip_link::{SipCallLink, SipLinkConfig, SipLinkEvent};
 use aerodesk_platform::windows::service::{ServiceCtx, ServiceEvent, SessionChangeReason};
 use aerodesk_platform::windows::session;
-use aerodesk_protocol::sip_client::{SipTlsConfig, SipTransport, load_ca_pem_file, system_ca_pem};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -105,80 +104,18 @@ impl ServiceSettings {
     }
 
     /// #552：SIP 链路配置（server URL 的 host + sip_port/sip_transport/
-    /// sip_domain/sip_ca_pem → [`SipLinkConfig`]）。
+    /// sip_domain/sip_ca_pem → [`SipLinkConfig`]，统一经 core 构造）。
     fn sip_config(&self) -> Result<SipLinkConfig, String> {
-        let host = signal_host(&self.server)?;
-        let transport = match self.sip_transport.as_str() {
-            "" | "udp" => SipTransport::Udp,
-            "tls" => SipTransport::Tls,
-            other => return Err(format!("sip_transport 未知：{other}")),
-        };
-        let port = if self.sip_port != 0 {
-            self.sip_port
-        } else {
-            match transport {
-                SipTransport::Udp => 5060,
-                SipTransport::Tls => 5061,
-            }
-        };
-        let server = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))
-            .map_err(|e| format!("SIP 地址解析失败（{host}:{port}）：{e}"))?
-            .next()
-            .ok_or_else(|| format!("SIP 地址解析无结果（{host}:{port}）"))?;
-        let tls = if transport == SipTransport::Tls {
-            let ca_certs = if self.sip_ca_pem.is_empty() {
-                system_ca_pem()
-            } else {
-                load_ca_pem_file(&self.sip_ca_pem)?
-            };
-            Some(SipTlsConfig {
-                ca_certs,
-                sni_hostname: Some(host.clone()),
-                client_cert: None,
-                client_key: None,
-            })
-        } else {
-            None
-        };
-        Ok(SipLinkConfig {
-            device_id: self.device_id.clone(),
-            // 缺省兜底：serde default 只在 JSON 缺字段时生效，
-            // `..Default::default()` 构造与手写文件都走这里。
-            domain: if self.sip_domain.is_empty() {
-                default_sip_domain()
-            } else {
-                self.sip_domain.clone()
-            },
-            password: self.token.clone(),
-            server,
-            transport,
-            tls,
-            register_expires: 60,
-        })
+        SipLinkConfig::from_parts(
+            &self.server,
+            &self.device_id,
+            &self.token,
+            &self.sip_transport,
+            self.sip_port,
+            &self.sip_domain,
+            &self.sip_ca_pem,
+        )
     }
-}
-
-/// 从规范化信令 URL（`ws://host[:port]/ws` / `wss://…`，非环回裸地址默认
-/// wss——见 core `normalize_signal_url`）取 host（去括号去端口，供
-/// `ToSocketAddrs` 与 SNI 使用）：IPv6 字面量按中括号识别，其余去最后一个
-/// ':' 起的端口段。
-fn signal_host(url: &str) -> Result<String, String> {
-    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
-    let host_port = rest.split('/').next().unwrap_or("");
-    let host = if let Some(b) = host_port.strip_prefix('[') {
-        b.split(']')
-            .next()
-            .ok_or("信令 URL 中括号不闭合")?
-            .to_string()
-    } else if let Some((h, _)) = host_port.rsplit_once(':') {
-        h.to_string()
-    } else {
-        host_port.to_string()
-    };
-    if host.is_empty() || host.contains("://") {
-        return Err(format!("信令 URL 无有效 host：{url}"));
-    }
-    Ok(host)
 }
 
 fn program_data() -> PathBuf {
@@ -1228,18 +1165,5 @@ mod tests {
         // 非法传输。
         s.sip_transport = "sctp".into();
         assert!(s.sip_config().is_err());
-    }
-
-    /// #552：信令 URL → host 提取（环回/域名/IPv6 字面量/裸地址）。
-    #[test]
-    fn signal_host_parsing() {
-        assert_eq!(signal_host("ws://127.0.0.1:3003/ws").unwrap(), "127.0.0.1");
-        assert_eq!(
-            signal_host("wss://sip.aerodesk.test:443/ws").unwrap(),
-            "sip.aerodesk.test"
-        );
-        assert_eq!(signal_host("127.0.0.1:3003").unwrap(), "127.0.0.1");
-        assert_eq!(signal_host("wss://[::1]:444/ws").unwrap(), "::1");
-        assert!(signal_host("").is_err());
     }
 }
