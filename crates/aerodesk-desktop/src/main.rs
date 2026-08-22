@@ -406,6 +406,10 @@ struct IncomingMedia {
 static PRESENCE: std::sync::Mutex<Option<PresenceHandle>> = std::sync::Mutex::new(None);
 static OUTGOING: std::sync::Mutex<Option<OutgoingCall>> = std::sync::Mutex::new(None);
 static INCOMING_MEDIA: std::sync::Mutex<Option<IncomingMedia>> = std::sync::Mutex::new(None);
+/// #552：当前 P2P 会话的 trickle 候选注入通道（presence 线程收 Trickle 事件 →
+/// 媒体线程注入对端候选；媒体启动时建立，挂断/停止时清空）。
+static P2P_TRICKLE_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>> =
+    std::sync::Mutex::new(None);
 /// #539 呼叫确认：未静默授权时弹窗待用户确认，30s 超时由 presence 循环自动拒绝。
 static PENDING_CALL: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 /// #539 呼叫确认独立窗口（不依赖主窗口——App 最小化/托盘时也可弹出）。
@@ -1660,6 +1664,11 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
             move |p2p: P2pCall| {
                 let ui2 = weak2b.clone();
                 let room3 = room2.clone();
+                // #552：trickle 注入通道（presence 线程 → 会话线程）。
+                let (tx, rx) = std::sync::mpsc::channel::<String>();
+                *P2P_TRICKLE_TX
+                    .lock()
+                    .unwrap_or_else(aerodesk_core::util::lock_recover) = Some(tx);
                 std::thread::Builder::new()
                     .stack_size(16 * 1024 * 1024)
                     .spawn(move || {
@@ -1673,11 +1682,15 @@ fn start_viewer_session(ui: &AppWindow, mode: ConnectMode) {
                             chat_cmd_rx,
                             stop,
                             view_only,
+                            Some(rx),
                             {
                                 let ui3 = ui2.clone();
                                 move || SlintRenderer::new(ui3.clone(), slot)
                             },
                         );
+                        *P2P_TRICKLE_TX
+                            .lock()
+                            .unwrap_or_else(aerodesk_core::util::lock_recover) = None;
                         with_ui(&ui2, |ui| ui.set_connecting(false));
                     })
                     .expect("spawn viewer thread");
@@ -2084,6 +2097,17 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                                 }
                             }
                         }
+                        aerodesk_core::sip_link::SipLinkEvent::Trickle {
+                            call_id: _,
+                            candidate,
+                        } => {
+                            // #552：对端后到候选 → 当前 P2P 会话媒体线程注入。
+                            if let Some(tx) =
+                                P2P_TRICKLE_TX.lock().unwrap_or_else(aerodesk_core::util::lock_recover).as_ref()
+                            {
+                                let _ = tx.send(candidate.candidate.clone());
+                            }
+                        }
                         aerodesk_core::sip_link::SipLinkEvent::PeerHangup {
                             call_id,
                             reason: _,
@@ -2099,6 +2123,7 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                             }
                             *PENDING_CALL.lock().unwrap_or_else(aerodesk_core::util::lock_recover) = None;
                             *INCOMING_MEDIA.lock().unwrap_or_else(aerodesk_core::util::lock_recover) = None;
+                            *P2P_TRICKLE_TX.lock().unwrap_or_else(aerodesk_core::util::lock_recover) = None;
                             if let Some(w) =
                                 WINDOW_STATE.lock().unwrap_or_else(aerodesk_core::util::lock_recover).incoming.as_ref()
                             {
@@ -2698,10 +2723,16 @@ fn start_publisher_ui(ui: &AppWindow) {
 /// 移交 publisher（采集/编码/输入注入与 SFU 路径共用同一泵）。
 fn start_publisher_ui_peer(ui: &AppWindow, p2p: P2pCall, video_mid: str0m::media::Mid) {
     let room = ui.get_device_id().to_string();
+    // #552：trickle 注入通道（presence 线程 Trickle 事件 → 媒体线程）。
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    *P2P_TRICKLE_TX
+        .lock()
+        .unwrap_or_else(aerodesk_core::util::lock_recover) = Some(tx);
     aerodesk_session::generic_publisher::start_publisher_peer(
         p2p,
         video_mid,
         room,
+        Some(rx),
         publisher_event_sink(&ui.as_weak()),
     );
 }

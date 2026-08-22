@@ -155,6 +155,7 @@ pub fn run_generic_viewer_peer<U, R, RF>(
     chat_cmd_rx: std::sync::mpsc::Receiver<crate::ChatCmd>,
     stop: Arc<AtomicBool>,
     view_only: Arc<AtomicBool>,
+    trickle_rx: Option<std::sync::mpsc::Receiver<String>>,
     mk_renderer: RF,
 ) where
     U: SessionUi,
@@ -172,6 +173,7 @@ pub fn run_generic_viewer_peer<U, R, RF>(
         stop,
         view_only,
         decoder_label(),
+        trickle_rx,
         mk_viewer_decoder,
         mk_renderer,
     );

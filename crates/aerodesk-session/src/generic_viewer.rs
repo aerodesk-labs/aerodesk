@@ -81,6 +81,15 @@ impl ViewerTransport {
             Self::Peer(p2p) => p2p.endpoint(),
         }
     }
+
+    /// #552：注入对端后到候选（P2P trickle；SFU 路径 no-op）。
+    fn add_remote_candidate(&mut self, sdp_candidate: &str) {
+        if let Self::Peer(p2p) = self {
+            if let Err(e) = p2p.add_remote_candidate(sdp_candidate) {
+                tracing::warn!("trickle 候选注入失败：{e}");
+            }
+        }
+    }
 }
 
 /// 解析 cursor 通道的 `CursorPos`（#75；归一化 0..1 坐标 + 发送端墙钟，
@@ -262,6 +271,7 @@ pub fn run_viewer_generic<U, D, R, DF, RF>(
         chat_cmd_rx,
         stop,
         view_only,
+        None,
         mk_decoder,
         mk_renderer,
     );
@@ -281,6 +291,7 @@ pub fn run_viewer_generic_peer<U, D, R, DF, RF>(
     stop: Arc<AtomicBool>,
     view_only: Arc<AtomicBool>,
     decoder_label: &'static str,
+    trickle_rx: Option<std::sync::mpsc::Receiver<String>>,
     mk_decoder: DF,
     mk_renderer: RF,
 ) where
@@ -308,6 +319,7 @@ pub fn run_viewer_generic_peer<U, D, R, DF, RF>(
         chat_cmd_rx,
         stop,
         view_only,
+        trickle_rx,
         mk_decoder,
         mk_renderer,
     );
@@ -325,6 +337,7 @@ fn run_viewer_impl<U, D, R, DF, RF>(
     chat_cmd_rx: std::sync::mpsc::Receiver<crate::ChatCmd>,
     stop: Arc<AtomicBool>,
     view_only: Arc<AtomicBool>,
+    trickle_rx: Option<std::sync::mpsc::Receiver<String>>,
     mut mk_decoder: DF,
     mut mk_renderer: RF,
 ) where
@@ -370,6 +383,12 @@ fn run_viewer_impl<U, D, R, DF, RF>(
     let mut last_stats_push = Instant::now();
     let mut last_stats_frames: u64 = 0;
     while !stale() {
+        // #552：信令面转发的对端后到候选（INFO sdpfrag；无积压时一次空转）。
+        if let Some(rx) = trickle_rx.as_ref() {
+            while let Ok(cand) = rx.try_recv() {
+                t.add_remote_candidate(&cand);
+            }
+        }
         // 输入事件：UI 键鼠 → input data channel → SFU → 被控端。
         // #441 观看模式（仅观看）不发送键鼠输入。
         if !view_only.load(Ordering::SeqCst) {
