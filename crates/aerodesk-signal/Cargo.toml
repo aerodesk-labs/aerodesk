@@ -25,3 +25,7 @@ libc = "0.2"
 # 不用于生产——生产证书由部署的 CERT_FILE/KEY_FILE 提供（内嵌证书仅开发）。
 [dev-dependencies]
 rcgen = "0.14.8"
+# #552 slice 5：P2P 媒体 e2e——两 UA 经 SIP 交换真实 str0m offer/answer，
+# 双侧 ICE 建链 + 媒体载荷直达对端（媒体核心不 import SIP 类型）。
+aerodesk-core = { path = "../aerodesk-core" }
+str0m = { workspace = true }

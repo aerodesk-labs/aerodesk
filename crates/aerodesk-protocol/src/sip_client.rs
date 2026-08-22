@@ -265,12 +265,23 @@ struct CmdCtx<'a> {
     event_tx: &'a std_mpsc::Sender<SipEvent>,
 }
 
+/// rustls 0.23 在 feature 联合构建下无法自动判定 CryptoProvider：
+/// 本工作区 core/rsipstack 均 pin `ring`，aerodesk-sfu pin `aws_lc_rs`，
+/// `cargo test --workspace` 把两者合并 → `from_crate_features()` 返回 None →
+/// rsipstack 内部 `ClientConfig::builder()` 直接 panic（本文件 274 行 UA 线程
+/// 就此死于「Could not automatically determine the process-level CryptoProvider」）。
+/// 按 rustls 文档在应用层显式安装（进程级一次性；重复安装返回 Err 忽略）。
+fn ensure_rustls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 async fn run_client(
     cfg: SipClientConfig,
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<SipCommand>,
     event_tx: std_mpsc::Sender<SipEvent>,
     cancel: CancellationToken,
 ) {
+    ensure_rustls_provider();
     if let Err(e) = run_client_inner(&cfg, &mut cmd_rx, &event_tx, &cancel).await {
         let _ = event_tx.send(SipEvent::RegisterFailed {
             status: 0,

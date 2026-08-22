@@ -10,6 +10,7 @@
 //! ├── protocol   跨端共享协议类型（原 aerodesk-protocol，2026-08-19 并入）
 //! ├── signal_presence   常驻信令连接管理器（状态机 + 自动重连）
 //! ├── signal_call       被叫侧呼叫状态机（响铃/接听/挂断/超时）
+//! ├── p2p_call    1:1 P2P 呼叫媒体核心（#552：offer/answer 以对端为协商对象）
 //! └── media      媒体管线抽象 + VP8 测试媒体源
 //! ```
 
@@ -23,6 +24,7 @@ pub mod endpoint;
 pub mod file_transfer;
 pub mod media;
 pub mod media_socket;
+pub mod p2p_call;
 pub mod pcmu;
 pub mod platform;
 pub mod protocol;

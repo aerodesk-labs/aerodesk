@@ -1250,6 +1250,38 @@ mod tests {
 
     /// 全呼叫面场景主体（传输无关）：启动 server（监听差异由 `server_cfg` 注入）、
     /// 双客户端注册、呼叫 1-4（全流程/拒接/302/BYE-302）、关停。
+    /// 收事件（跳过非目标种类，5s 兜底）。模块级：呼叫面场景与 P2P 媒体
+    /// e2e 共用（近重复不可留两处，改事件集只改这一处）。
+    fn recv_until(
+        h: &aerodesk_protocol::sip_client::SipClientHandle,
+        want: &str,
+    ) -> aerodesk_protocol::sip_client::SipEvent {
+        use aerodesk_protocol::sip_client::SipEvent;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let remain = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(!remain.is_zero(), "等 {want} 超时");
+            // None 两种含义：窗口内超时（重试至 deadline）或对端通道关闭（UA 已停）。
+            let Some(ev) = h.recv_event(remain) else {
+                panic!("等 {want}：窗口内无事件或 UA 通道已关闭");
+            };
+            let hit = matches!(
+                (&ev, want),
+                (SipEvent::Registered { .. }, "Registered")
+                    | (SipEvent::IncomingCall { .. }, "IncomingCall")
+                    | (SipEvent::Ringing { .. }, "Ringing")
+                    | (SipEvent::Answered { .. }, "Answered")
+                    | (SipEvent::Rejected { .. }, "Rejected")
+                    | (SipEvent::PeerHangup { .. }, "PeerHangup")
+                    | (SipEvent::EscalatedToSfu { .. }, "EscalatedToSfu")
+                    | (SipEvent::Trickle { .. }, "Trickle")
+            );
+            if hit {
+                return ev;
+            }
+        }
+    }
+
     fn run_call_plane_scenario(
         server_cfg: SipConfig,
         client_cfg: &dyn Fn(&str) -> SipClientConfig,
@@ -1264,34 +1296,6 @@ mod tests {
 
         let caller = start_sip_client(client_cfg("AD-CALLER")).expect("caller 启动");
         let callee = start_sip_client(client_cfg("AD-CALLEE")).expect("callee 启动");
-
-        // 收事件（跳过非目标种类，5s 兜底）。
-        let recv_until =
-            |h: &aerodesk_protocol::sip_client::SipClientHandle, want: &str| -> SipEvent {
-                let deadline = std::time::Instant::now() + Duration::from_secs(5);
-                loop {
-                    let remain = deadline.saturating_duration_since(std::time::Instant::now());
-                    assert!(!remain.is_zero(), "等 {want} 超时");
-                    // None 两种含义：窗口内超时（重试至 deadline）或对端通道关闭（UA 已停）。
-                    let Some(ev) = h.recv_event(remain) else {
-                        panic!("等 {want}：窗口内无事件或 UA 通道已关闭");
-                    };
-                    let hit = matches!(
-                        (&ev, want),
-                        (SipEvent::Registered { .. }, "Registered")
-                            | (SipEvent::IncomingCall { .. }, "IncomingCall")
-                            | (SipEvent::Ringing { .. }, "Ringing")
-                            | (SipEvent::Answered { .. }, "Answered")
-                            | (SipEvent::Rejected { .. }, "Rejected")
-                            | (SipEvent::PeerHangup { .. }, "PeerHangup")
-                            | (SipEvent::EscalatedToSfu { .. }, "EscalatedToSfu")
-                            | (SipEvent::Trickle { .. }, "Trickle")
-                    );
-                    if hit {
-                        return ev;
-                    }
-                }
-            };
 
         assert!(matches!(
             recv_until(&caller, "Registered"),
@@ -1541,5 +1545,185 @@ mod tests {
             register_expires: 60,
         };
         run_call_plane_scenario(cfg, &client_cfg);
+    }
+
+    /// slice 5：SIP 信令承载 1:1 P2P 媒体——两 UA 经 INVITE/200 交换真实
+    /// str0m offer/answer（协商对象是对端，不经 SFU），双侧 ICE 建链，
+    /// PCMU 载荷直达主叫（DTLS/SRTP 贯通）。
+    #[test]
+    fn end_to_end_sip_client_p2p_media() {
+        let _serial = serve_e2e_guard();
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
+        use aerodesk_core::p2p_call::{P2pCall, P2pCallConfig, P2pRole};
+        use aerodesk_core::protocol::signal::Role;
+        use aerodesk_protocol::sip_client::{
+            SipClientConfig, SipCommand, SipEvent, SipTransport, start_sip_client,
+        };
+
+        let port = free_udp_port();
+        let mut pw = HashMap::new();
+        pw.insert("AD-CALLER".to_string(), "tok-caller".to_string());
+        pw.insert("AD-CALLEE".to_string(), "tok-callee".to_string());
+        let server_cancel = CancellationToken::new();
+        let sc = server_cancel.clone();
+        let server = std::thread::spawn(move || {
+            run_sip_endpoint(
+                SipConfig {
+                    realm: REALM.into(),
+                    tls_addr: None,
+                    wss_addr: None,
+                    udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+                    passwords: Arc::new(pw),
+                    tls_identity: None,
+                },
+                sc,
+            )
+        });
+        std::thread::sleep(Duration::from_millis(400));
+
+        let client_cfg = |device: &str| SipClientConfig {
+            device_id: device.into(),
+            domain: REALM.into(),
+            password: format!("tok-{}", device.trim_start_matches("AD-").to_lowercase()),
+            server: format!("127.0.0.1:{port}").parse().unwrap(),
+            transport: SipTransport::Udp,
+            tls: None,
+            register_expires: 60,
+        };
+        let caller = start_sip_client(client_cfg("AD-CALLER")).expect("caller 启动");
+        let callee = start_sip_client(client_cfg("AD-CALLEE")).expect("callee 启动");
+        assert!(matches!(
+            recv_until(&caller, "Registered"),
+            SipEvent::Registered { .. }
+        ));
+        assert!(matches!(
+            recv_until(&callee, "Registered"),
+            SipEvent::Registered { .. }
+        ));
+
+        // 媒体端双侧：主叫=Viewer（收流），被叫=Publisher（发流）；回环直连。
+        let media_cfg = |role: P2pRole, device_role: Role| P2pCallConfig {
+            role,
+            device_role,
+            codec: None,
+            with_audio: true,
+            with_camera: false,
+            force_relay: false,
+            bind: "127.0.0.1:0".parse().unwrap(),
+            turn: None,
+            inline_candidates: true,
+        };
+        let mut caller_media =
+            P2pCall::new(media_cfg(P2pRole::Caller, Role::Viewer)).expect("主叫媒体端");
+        let mut callee_media =
+            P2pCall::new(media_cfg(P2pRole::Callee, Role::Publisher)).expect("被叫媒体端");
+
+        let offer = caller_media.create_offer().expect("主叫 offer");
+        caller
+            .send(SipCommand::Call {
+                target_device: "AD-CALLEE".into(),
+                call_id: "c-p2p".into(),
+                offer_sdp: offer.sdp.clone(),
+            })
+            .unwrap();
+        // 被叫收到 offer（端到端字节一致），出 answer。
+        let SipEvent::IncomingCall { offer_sdp, .. } = recv_until(&callee, "IncomingCall") else {
+            unreachable!()
+        };
+        assert_eq!(offer_sdp, offer.sdp, "P2P offer 应经 SIP 端到端字节一致");
+        let answer = callee_media.accept_offer(&offer_sdp).expect("被叫 answer");
+        callee
+            .send(SipCommand::Accept {
+                call_id: "c-p2p".into(),
+                answer_sdp: answer.clone(),
+            })
+            .unwrap();
+        let SipEvent::Answered { answer_sdp, .. } = recv_until(&caller, "Answered") else {
+            unreachable!()
+        };
+        assert_eq!(answer_sdp, answer, "P2P answer 应经 SIP 端到端字节一致");
+        caller_media
+            .accept_answer(&answer_sdp)
+            .expect("主叫 accept");
+
+        // 双侧泵：ICE 建链 + 通道打开（= DTLS 完成 = SRTP 密钥就绪，10s 兜底）。
+        // 只等 ICE 就写媒体会被对端以「无 SRTP 接收上下文」丢帧（PCMU 无重传）。
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut got_media = false;
+        let mut channels_open = (0u32, 0u32);
+        while std::time::Instant::now() < deadline {
+            let _ = caller_media.poll();
+            let _ = callee_media.poll();
+            // 排空事件（ChannelOpen 等）；Media 事件单独捕获。
+            while let Some(ev) = caller_media.poll_event() {
+                if matches!(ev, aerodesk_core::endpoint::ClientEvent::ChannelOpen(..)) {
+                    channels_open.0 += 1;
+                }
+                if matches!(ev, aerodesk_core::endpoint::ClientEvent::Media(_)) {
+                    got_media = true;
+                }
+            }
+            while let Some(ev) = callee_media.poll_event() {
+                if matches!(ev, aerodesk_core::endpoint::ClientEvent::ChannelOpen(..)) {
+                    channels_open.1 += 1;
+                }
+            }
+            if (caller_media.ice_connected()
+                && callee_media.ice_connected()
+                && channels_open.0 >= 1
+                && channels_open.1 >= 1)
+                || got_media
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            caller_media.ice_connected() && callee_media.ice_connected(),
+            "SIP 承载的 P2P 呼叫 10s 内应 ICE 建链（caller_media={} callee_media={}）",
+            caller_media.bytes_received(),
+            callee_media.bytes_received()
+        );
+        assert!(
+            caller_media.bytes_received() > 0 && callee_media.bytes_received() > 0,
+            "双侧应有收包（ICE/DTLS）"
+        );
+        // 媒体载荷：被叫发一帧 PCMU → 主叫 Media 事件（不依赖编解码器）。
+        if !got_media {
+            let audio_mid = offer.audio_mid.expect("with_audio 应有音频 mid");
+            let payload: std::sync::Arc<[u8]> = std::sync::Arc::from(vec![0u8; 160]);
+            callee_media
+                .endpoint()
+                .send_audio_frame(
+                    audio_mid,
+                    payload,
+                    str0m::media::MediaTime::new(0, str0m::media::Frequency::EIGHT_KHZ),
+                )
+                .expect("写 PCMU 帧");
+            let media_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < media_deadline && !got_media {
+                let _ = caller_media.poll();
+                let _ = callee_media.poll();
+                while let Some(ev) = caller_media.poll_event() {
+                    if matches!(ev, aerodesk_core::endpoint::ClientEvent::Media(_)) {
+                        got_media = true;
+                    }
+                }
+                while callee_media.poll_event().is_some() {}
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        assert!(got_media, "主叫应收到被叫的 PCMU 媒体事件");
+
+        caller.shutdown();
+        callee.shutdown();
+        server_cancel.cancel();
+        server
+            .join()
+            .expect("server 线程应退出")
+            .expect("server 应正常退出");
     }
 }

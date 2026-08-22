@@ -108,7 +108,7 @@ impl LiveSession {
 /// 含 Clash TUN 假 IP 198.18.0.0/15）——这些地址对端不可达。
 /// 优先私有网段（LAN），否则取第一个非排除的全局地址；都没有则回退 127.0.0.1。
 #[cfg(unix)]
-fn discover_local_ip() -> Option<std::net::IpAddr> {
+pub(crate) fn discover_local_ip() -> Option<std::net::IpAddr> {
     unsafe {
         let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
         if libc::getifaddrs(&mut ifap) != 0 || ifap.is_null() {
@@ -162,7 +162,7 @@ fn discover_local_ip() -> Option<std::net::IpAddr> {
 /// 非 Unix 平台（Windows 等）：临时 UDP socket connect 到公共地址探测出口 IP；
 /// 失败回退 127.0.0.1。
 #[cfg(not(unix))]
-fn discover_local_ip() -> Option<std::net::IpAddr> {
+pub(crate) fn discover_local_ip() -> Option<std::net::IpAddr> {
     let probe = UdpSocket::bind("0.0.0.0:0").ok()?;
     probe.connect("8.8.8.8:80").ok()?;
     probe.local_addr().ok().map(|a| a.ip())
