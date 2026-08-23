@@ -5,6 +5,7 @@
 # 依赖：xvfb、Chrome、playwright-core、UI 系统库（CI ubuntu System deps 已装）。
 # 用法: scripts/linux-ui-e2e.sh [room]
 set -euo pipefail
+export PYTHONIOENCODING=utf-8
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 ROOM="${1:-linuxui-$(date +%s)}"
@@ -59,7 +60,7 @@ for _ in $(seq 1 50); do
     if nc -z 127.0.0.1 3003 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then OK=1; break; fi
     sleep 0.2
 done
-if [ "$OK" != "1" ]; then echo "FAIL: SFU/signal 未就绪"; tail -10 /tmp/linuxui-sfu.log; exit 1; fi
+if [ "$OK" != "1" ]; then echo "FAIL: SFU/signal not ready; logs:"; tail -20 /tmp/linuxui-sig.log /tmp/linuxui-sfu.log; exit 1; fi
 # SIP/UDP 5060 就绪门：desktop 观看经 SIP 会议桥（WSS 兜底已删），SIP 起不来必失败——
 # signal 的 SIP 绑定失败是非致命 error!（线程内），TCP 探活会漏。
 for _ in $(seq 1 50); do

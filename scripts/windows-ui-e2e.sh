@@ -4,6 +4,7 @@
 # 依赖：cargo、node/playwright-core、Edge（windows runner 预装）、UI 编译通过（#177）。
 # 用法: scripts/windows-ui-e2e.sh [room]  （Git Bash）
 set -euo pipefail
+export PYTHONIOENCODING=utf-8
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 ROOM="${1:-winui-$(date +%s)}"
@@ -56,19 +57,26 @@ import socket, time, sys
 ok = False
 for _ in range(50):
     try:
-        a = socket.create_connection(("127.0.0.1", 3003), 0.3); a.close()
-        b = socket.create_connection(("127.0.0.1", 3002), 0.3); b.close()
+        a = socket.create_connection(("127.0.0.1", 3003), 0.5); a.close()
+        b = socket.create_connection(("127.0.0.1", 3002), 0.5); b.close()
         ok = True; break
     except OSError:
         time.sleep(0.2)
 if not ok:
-    print("FAIL: SFU/signal 未就绪"); sys.exit(1)
+    print("FAIL: SFU/signal not ready; logs:")
+    for f in ("/tmp/winui-sig.log", "/tmp/winui-sfu.log"):
+        try:
+            print(f"--- {f} ---")
+            print(open(f, encoding="utf-8", errors="replace").read()[-2000:])
+        except OSError:
+            pass
+    sys.exit(1)
 PY
 # SIP/UDP 5060 就绪门：desktop 观看经 SIP 会议桥（WSS 兜底已删），SIP 起不来必失败——
 # signal 的 SIP 绑定失败是非致命 error!（线程内），TCP 探活会漏。
 python3 - <<'PY'
 import time
-for _ in range(50):
+for _ in range(80):
     try:
         if "SIP/UDP 监听已起" in open("/tmp/winui-sig.log", errors="replace").read():
             print("PASS SIP/UDP ready"); break
