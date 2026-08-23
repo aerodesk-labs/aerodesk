@@ -47,7 +47,9 @@ netsh advfirewall firewall add rule name="aerodesk-e2e-tcp" dir=in action=allow 
 REC="$(mktemp -d)"
 RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu.exe" >/tmp/winui-sfu.log 2>&1 &
 SFU=$!
-"$ROOT/target/debug/aerodesk-signal.exe" >/tmp/winui-sig.log 2>&1 &
+# SIP 会议桥链路：SIP/UDP 5060 + Digest 凭证（desktop 侧 settings 同步 seed）。
+SIP_UDP_PORT=5060 SIP_DIGEST_USERS="AD-E2EUI=e2e-token" \
+  "$ROOT/target/debug/aerodesk-signal.exe" >/tmp/winui-sig.log 2>&1 &
 SIG=$!
 python3 - <<'PY'
 import socket, time, sys
@@ -67,6 +69,25 @@ echo "== [3/6] Web 被控端发布（headless Edge 屏幕共享）"
 node "$E2E_DIR/e2e-pub.js" "$ROOM" &
 PUB=$!
 sleep 3
+
+echo "== [3.5/6] seed SIP 配置（desktop 启动即 REGISTER，观看经会议桥）"
+python3 - <<'PY'
+import json, os
+# e2e SIP 链路配置：desktop 启动时读 ~/.aerodesk-settings.json 建 SipCallLink
+# （REGISTER 用 Digest 凭证），观看任意房间经 SIP 会议桥入 SFU。
+settings = {
+    "server_default": "127.0.0.1:3003",
+    "device_id": "AD-E2EUI",
+    "token_default": "e2e-token",
+    "remember_token": True,
+    "server_tls": False,
+    "sip_transport": "udp",
+    "sip_port": 5060,
+}
+path = os.path.join(os.path.expanduser("~"), ".aerodesk-settings.json")
+open(path, "w").write(json.dumps(settings))
+print("seeded", path)
+PY
 
 echo "== [4/6] 启动 Windows UI（自动连接观看）"
 RUST_LOG=debug "$ROOT/target/debug/aerodesk-desktop.exe" \
@@ -101,7 +122,8 @@ for i in range(60):
         print("PASS Windows UI ICE Checking (signaling/SDP/ICE started)")
         ok = True
         break
-    if 'generic viewer connect failed' in txt or 'connect TIMEOUT' in txt:
+    if ('generic viewer connect failed' in txt or 'connect TIMEOUT' in txt
+            or 'sip call failed' in txt or '呼叫发起失败' in txt or '信令未连接' in txt):
         print("FAIL: connect 失败/超时"); ok = False; break
     time.sleep(1)
 if not ok:

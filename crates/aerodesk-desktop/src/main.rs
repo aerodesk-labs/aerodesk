@@ -1635,41 +1635,23 @@ fn open_viewer_session(
     {
         // #552 拓扑（1:1 P2P / ≥3 人 SFU）+ 会议桥（slice 12）：SIP 链路在线
         // → 任意房间一律经 SIP（服务端按绑定路由：AD- 设备 = 1:1 透明代理，
-        // 其余合法房间名 = SFU 会议桥）；链路未在线 → 非 AD 房间回退 WSS 观看
-        // （旧路径兼容；AD 房间提示需信令）。macOS 观看端仍走 SFU。
+        // 其余合法房间名 = SFU 会议桥）；链路未在线 → 明确提示连接信令
+        // （未发布期不留 WSS 兜底，macOS 观看端仍走 SFU 待迁）。
         let sip_online = PRESENCE
             .lock()
             .unwrap_or_else(aerodesk_core::util::lock_recover)
             .as_ref()
             .and_then(|h| h.cmd_tx.clone());
-        if !room.starts_with("AD-") && sip_online.is_none() {
-            std::thread::Builder::new()
-                .stack_size(16 * 1024 * 1024)
-                .spawn(move || {
-                    aerodesk_session::generic_media::run_generic_viewer(
-                        server_url,
-                        room,
-                        Some(token),
-                        SlintSessionUi::new(weak2.clone(), slot),
-                        input_rx,
-                        cmd_rx,
-                        file_cmd_rx,
-                        chat_cmd_rx,
-                        stop,
-                        view_only,
-                        {
-                            let ui2 = weak2.clone();
-                            move || SlintRenderer::new(ui2.clone(), slot)
-                        },
-                    );
-                    with_ui(&weak2, |ui| ui.set_connecting(false));
-                })
-                .expect("spawn viewer thread");
-            return;
-        }
         // #552：SIP 1:1 P2P 主叫——presence 线程完成 call→Answered 后回调移交
         // 会话线程（同一 UA，禁止双 UA 同 device_id 注册）。
-        let _ = (&(&token, &control_rx, &server_url));
+        let _ = (&(
+            &token,
+            &control_rx,
+            &server_url,
+            &muted,
+            &volume,
+            &show_camera,
+        ));
         let Some(cmd_tx) = sip_online else {
             ui.set_connecting(false);
             ui.set_conn_state(0);
@@ -1875,6 +1857,7 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                                 .unwrap_or_else(aerodesk_core::util::lock_recover)
                                 .call(&target, &call_id, &offer.sdp);
                             if let Err(e) = res {
+                                tracing::warn!("sip call failed: {e}");
                                 on_failed(format!("呼叫发起失败：{e}"));
                             } else {
                                 *OUTGOING.lock().unwrap_or_else(aerodesk_core::util::lock_recover) =
