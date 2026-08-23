@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aerodesk_codec::audio::RealAudioSender;
-use aerodesk_core::connect::connect_live_role_codec_timeout;
+use aerodesk_core::connect::{LiveSession, connect_live_role_codec_timeout};
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::platform::Codec;
 use aerodesk_core::platform::CursorSource;
@@ -402,7 +402,7 @@ fn run_publisher_pump(
                 let pos =
                     CursorPos::new(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)).with_sent_ms(now_ms());
                 if let Ok(json) = serde_json::to_string(&pos) {
-                    live.endpoint
+                    t.endpoint()
                         .send_channel_data("cursor", false, json.as_bytes());
                 }
             }
