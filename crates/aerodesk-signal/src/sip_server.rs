@@ -253,8 +253,12 @@ pub struct SipConfig {
     pub wss_addr: Option<SocketAddr>,
     /// SIP over UDP 监听地址（None = 不开；内网/调试用，规范 §0 传输矩阵可选项）。
     pub udp_addr: Option<SocketAddr>,
-    /// Digest 口令表：设备 ID → token。
+    /// Digest 口令表：设备 ID → token（显式覆盖，SIP_DIGEST_USERS）。
     pub passwords: Arc<HashMap<String, String>>,
+    /// 通用口令回退（规范 §8「迁移期同一凭据」）：未列设备以首个 AUTH_TOKEN
+    /// 为口令——服务器无需逐设备配置即可承接存量 token 客户端；多 token 部署
+    /// 用 SIP_DIGEST_USERS 显式覆盖。
+    pub token_password: Option<String>,
     /// TLS 身份（复用 signal 的证书加载）。
     pub tls_identity: Option<TlsIdentity>,
     /// SFU 池（会议桥用）：非设备 AoR 的 INVITE 代理到 SFU /start（规范 §4
@@ -398,7 +402,13 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
             Method::Register => {
                 let nonce = make_nonce(&nonce_counter, &nonce_secret);
                 let passwords = cfg.passwords.clone();
-                let password_of = move |user: &str| passwords.get(user).cloned();
+                let token_password = cfg.token_password.clone();
+                let password_of = move |user: &str| {
+                    passwords
+                        .get(user)
+                        .cloned()
+                        .or_else(|| token_password.clone())
+                };
                 match decide_register(req, &cfg.realm, &nonce, &password_of) {
                     RegisterDecision::Challenge(www) => {
                         let _ = tx
@@ -1093,6 +1103,7 @@ mod tests {
             tls_identity: None,
             sfu_urls: vec![],
             sfu_token: None,
+            token_password: None,
         };
         let server_cancel = cancel.clone();
         let server = tokio::spawn(async move { serve(cfg, server_cancel).await });
@@ -1201,6 +1212,7 @@ mod tests {
             tls_identity: None,
             sfu_urls: vec![],
             sfu_token: None,
+            token_password: None,
         };
         let sc = cancel.clone();
         let server = tokio::spawn(async move { serve(cfg, sc).await });
@@ -1324,6 +1336,7 @@ mod tests {
             tls_identity: None,
             sfu_urls: vec![format!("http://127.0.0.1:{sfu_port}")],
             sfu_token: None,
+            token_password: None,
         };
         let server_cancel = CancellationToken::new();
         let sc = server_cancel.clone();
@@ -1390,6 +1403,42 @@ mod tests {
         let _ = server.join();
     }
 
+    /// §8 迁移期同一凭据：未列设备以首个 AUTH_TOKEN 为 Digest 口令——
+    /// 服务器无需 SIP_DIGEST_USERS 逐设备配置即可承接存量 token 客户端。
+    #[test]
+    fn register_token_password_fallback() {
+        let pw = passwords();
+        let shared = "tok-shared".to_string();
+        let lookup = move |u: &str| pw.get(u).cloned().or_else(|| Some(shared.clone()));
+        let uri = format!("sip:{REALM}");
+        let resp = rsipstack::dialog::authenticate::compute_digest(
+            "AD-ANYONE",
+            "tok-shared",
+            REALM,
+            NONCE,
+            &Method::Register,
+            &uri,
+            rsipstack::sip::headers::auth::Algorithm::Md5,
+            None,
+        );
+        let auth_hdr = format!(
+            "Digest username=\"AD-ANYONE\", realm=\"{REALM}\", nonce=\"{NONCE}\", uri=\"{uri}\", response=\"{resp}\", algorithm=MD5"
+        );
+        // 用户名任意 + 口令=共享 token → Registered。
+        let req = register_request("AD-ANYONE", Some(&auth_hdr), None);
+        assert_eq!(
+            decide_register(&req, REALM, NONCE, &lookup),
+            RegisterDecision::Registered(DEFAULT_EXPIRES_SECS)
+        );
+        // 错口令 → Forbidden。
+        let bad = auth_hdr.replace(&resp, "deadbeef");
+        let req2 = register_request("AD-ANYONE", Some(&bad), None);
+        assert_eq!(
+            decide_register(&req2, REALM, NONCE, &lookup),
+            RegisterDecision::Forbidden
+        );
+    }
+
     /// #576 回归：会议桥 SFU 失败必须回 final response（503）——修复前
     /// INVITE 事务悬死（客户端无 Answered/Rejected，UI 静默卡住）。
     #[test]
@@ -1412,6 +1461,7 @@ mod tests {
             tls_identity: None,
             sfu_urls: vec![format!("http://127.0.0.1:{sfu_port}")],
             sfu_token: None,
+            token_password: None,
         };
         let server_cancel = CancellationToken::new();
         let sc = server_cancel.clone();
@@ -1489,6 +1539,7 @@ mod tests {
             tls_identity: None,
             sfu_urls: vec![],
             sfu_token: None,
+            token_password: None,
         };
         let server_cancel = CancellationToken::new();
         let sc = server_cancel.clone();
@@ -1830,6 +1881,7 @@ mod tests {
             tls_identity: None,
             sfu_urls: vec![],
             sfu_token: None,
+            token_password: None,
         };
         let client_cfg = |device: &str| SipClientConfig {
             device_id: device.into(),
@@ -1868,6 +1920,7 @@ mod tests {
             tls_identity: Some(identity),
             sfu_urls: vec![],
             sfu_token: None,
+            token_password: None,
         };
         let ca_pem_cfg = ca_pem.clone();
         let client_cfg = |device: &str| SipClientConfig {
@@ -1920,6 +1973,7 @@ mod tests {
                     tls_identity: None,
                     sfu_urls: vec![],
                     sfu_token: None,
+                    token_password: None,
                 },
                 sc,
             )

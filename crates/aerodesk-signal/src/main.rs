@@ -658,6 +658,8 @@ fn main() {
                 wss_addr: bind(sip_wss),
                 udp_addr: bind(sip_udp),
                 passwords: Arc::new(passwords),
+                // §8：未显式配置的设备以首个静态 token 为 Digest 口令。
+                token_password: config.auth_tokens.first().cloned(),
                 tls_identity: Some(aerodesk_protocol::tls::TlsIdentity {
                     cert: tls.cert.clone(),
                     key: tls.key.clone(),
