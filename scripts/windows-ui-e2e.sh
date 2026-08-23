@@ -74,17 +74,26 @@ if not ok:
 PY
 # SIP/UDP 5060 就绪门：desktop 观看经 SIP 会议桥（WSS 兜底已删），SIP 起不来必失败——
 # signal 的 SIP 绑定失败是非致命 error!（线程内），TCP 探活会漏。
+# Windows python 读不了 Git-Bash /tmp 路径（解析为 C:	mp）——cygpath 转
+# Windows 路径再进 python（与断言步 WINUI_LOG 同款，勿再踩）。
+export SIP_SIG_LOG="$(cygpath -w /tmp/winui-sig.log)"
 python3 - <<'PY'
-import time
+import os, time
+path = os.environ["SIP_SIG_LOG"]
 for _ in range(80):
     try:
-        if "SIP/UDP 监听已起" in open("/tmp/winui-sig.log", errors="replace").read():
+        if "SIP/UDP 监听已起" in open(path, encoding="utf-8", errors="replace").read():
             print("PASS SIP/UDP ready"); break
-    except FileNotFoundError:
+    except OSError:
         pass
     time.sleep(0.2)
 else:
-    print("FAIL: SIP/UDP 未就绪"); raise SystemExit(1)
+    print("FAIL: SIP/UDP 未就绪，signal 日志尾：")
+    try:
+        print(open(path, encoding="utf-8", errors="replace").read()[-2000:])
+    except OSError as e:
+        print("读取失败:", e)
+    raise SystemExit(1)
 PY
 
 echo "== [3/6] Web 被控端发布（headless Edge 屏幕共享）"
