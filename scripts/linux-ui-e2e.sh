@@ -60,6 +60,13 @@ for _ in $(seq 1 50); do
     sleep 0.2
 done
 if [ "$OK" != "1" ]; then echo "FAIL: SFU/signal 未就绪"; tail -10 /tmp/linuxui-sfu.log; exit 1; fi
+# SIP/UDP 5060 就绪门：desktop 观看经 SIP 会议桥（WSS 兜底已删），SIP 起不来必失败——
+# signal 的 SIP 绑定失败是非致命 error!（线程内），TCP 探活会漏。
+for _ in $(seq 1 50); do
+  if grep -q "SIP/UDP 监听已起" /tmp/linuxui-sig.log 2>/dev/null; then OK=1; break; fi
+  sleep 0.2
+done
+if [ "$OK" != "1" ]; then echo "FAIL: SIP/UDP 未就绪"; tail -10 /tmp/linuxui-sig.log; exit 1; fi
 
 echo "== [4/7] Web 被控端发布（headless Chrome 屏幕共享）"
 set +e
@@ -80,14 +87,15 @@ settings = {
     "sip_transport": "udp",
     "sip_port": 5060,
 }
-path = os.path.join(os.path.expanduser("~"), ".aerodesk-settings.json")
+import os as _os; path = _os.path.join(_os.environ.get("AERO_E2E_HOME", _os.path.expanduser("~")), ".aerodesk-settings.json")
 open(path, "w").write(json.dumps(settings))
 print("seeded", path)
 PY
 
 echo "== [5/7] 启动 Linux UI（Xvfb，自动连接观看）"
 ls -la "$ROOT/target/debug/aerodesk-desktop" || echo "UI BINARY MISSING"
-RUST_LOG=debug DISPLAY=:99 "$ROOT/target/debug/aerodesk-desktop" \
+export AERO_E2E_HOME="$E2E_DIR"
+RUST_LOG=debug DISPLAY=:99 HOME="$E2E_DIR" "$ROOT/target/debug/aerodesk-desktop" \
   -server 127.0.0.1:3003 -room "$ROOM" -autoconnect >/tmp/linuxui-ui.log 2>&1 &
 UI_PID=$!
 sleep 5
@@ -108,9 +116,9 @@ for i in range(60):  # 最多 60s
         print("PASS Linux UI ICE Completed (connected to SFU)")
         ok = True
         break
-    if ('generic viewer connect failed' in txt or 'connect TIMEOUT' in txt
-            or 'sip call failed' in txt or '呼叫发起失败' in txt or '信令未连接' in txt):
-        print("FAIL: connect 失败/超时")
+    if ('sip call failed' in txt or 'sip call rejected' in txt
+            or 'sip call peer hangup' in txt or '链路未启动' in txt):
+        print("FAIL: SIP 呼叫失败")
         ok = False
         break
     time.sleep(1)

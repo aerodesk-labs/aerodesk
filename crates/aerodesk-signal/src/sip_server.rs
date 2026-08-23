@@ -555,20 +555,25 @@ async fn proxy_call(
     let (state_tx, state_rx) = dl.new_dialog_state_channel();
 
     // 提取 A 侧 INVITE 字段（先克隆，随后 tx 移入 A 腿 handle 任务）。
+    // 全部失败出口都回 final response——否则 INVITE 事务悬死，客户端
+    // UI 静默卡住（与 conference_bridge 同责，#576 自审）。
     let orig = tx.original.clone();
     let call_id = orig.call_id_header().ok().map(|c| c.value().to_string());
     let offer = orig.body.clone();
-    let caller = orig
-        .from_header()
-        .ok()
-        .and_then(|f| f.uri().ok())
-        .ok_or("INVITE 缺 From 头")?;
+    let Some(caller) = orig.from_header().ok().and_then(|f| f.uri().ok()) else {
+        let _ = tx.reply(StatusCode::BadRequest).await;
+        return Err("INVITE 缺 From 头".into());
+    };
     let callee = orig.uri().clone();
 
     // A 腿 server dialog（生成 to-tag；自动 100 Trying/吸收 ACK/CANCEL 需驱动 handle）。
-    let server_dlg = dl
-        .get_or_create_server_invite(&tx, state_tx.clone(), None, None)
-        .map_err(|e| format!("建 server dialog 失败: {e}"))?;
+    let server_dlg = match dl.get_or_create_server_invite(&tx, state_tx.clone(), None, None) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = tx.reply(StatusCode::ServerInternalError).await;
+            return Err(format!("建 server dialog 失败: {e}"));
+        }
+    };
     let a_id = server_dlg.id();
     {
         let mut d = server_dlg.clone();
@@ -578,9 +583,13 @@ async fn proxy_call(
     }
 
     // B 腿 client dialog：destination = 注册 flow（可靠复用连接 / UDP 源地址）。
-    let contact = dl
-        .build_local_contact(None, None)
-        .map_err(|e| format!("构造 local contact 失败: {e}"))?;
+    let contact = match dl.build_local_contact(None, None) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = server_dlg.reject(Some(StatusCode::ServerInternalError), None);
+            return Err(format!("构造 local contact 失败: {e}"));
+        }
+    };
     let opt = InviteOption {
         caller,
         callee,
@@ -591,9 +600,13 @@ async fn proxy_call(
         call_id,
         ..Default::default()
     };
-    let (client_dlg, _final) = dl
-        .do_invite_async(opt, state_tx)
-        .map_err(|e| format!("转发 INVITE 到被叫失败: {e}"))?;
+    let (client_dlg, _final) = match dl.do_invite_async(opt, state_tx) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = server_dlg.reject(Some(StatusCode::ServiceUnavailable), None);
+            return Err(format!("转发 INVITE 到被叫失败: {e}"));
+        }
+    };
     let b_id = client_dlg.id();
     info!(%a_id, %b_id, "Proxy 呼叫双腿已配对");
 
@@ -758,44 +771,64 @@ async fn conference_bridge(
 ) -> Result<(), String> {
     let offer = String::from_utf8_lossy(&offer).to_string();
     info!(%room, "SIP 会议 INVITE → SFU 桥");
-    let (state_tx, _state_rx) = dl.new_dialog_state_channel();
+    // 本函数全部失败出口都回 final response——否则 INVITE 事务悬死，客户端
+    // 既无 Answered 也无 Rejected，UI 静默卡住（#576 CI 实测）。dialog 注册表
+    // 条目由终态看护清理（rsipstack 仅在显式 remove_dialog 时移除，否则无界增长）。
+    let (state_tx, mut state_rx) = dl.new_dialog_state_channel();
     // A 腿 server dialog：自动 100 Trying/吸收 ACK/BYE（Contact/to-tag 由
     // dialog 机制生成——裸 reply_with 缺 Contact 客户端建不了 dialog）。
-    let server_dlg = dl
-        .get_or_create_server_invite(&tx, state_tx, None, None)
-        .map_err(|e| format!("建 server dialog 失败: {e}"))?;
+    let server_dlg = match dl.get_or_create_server_invite(&tx, state_tx, None, None) {
+        Ok(d) => d,
+        Err(e) => {
+            // 腿未建（如缺 Contact）：事务仍在手——直接回 500，不悬死。
+            warn!(%room, error=%e, "conference_bridge 建腿失败，回 500");
+            let _ = tx.reply(StatusCode::ServerInternalError).await;
+            return Ok(());
+        }
+    };
     {
         let mut d = server_dlg.clone();
         tokio::spawn(async move {
             let _ = d.handle(&mut tx).await;
         });
     }
-    let urls = sfu_urls.clone();
-    let token = sfu_token.clone();
-    let room2 = room.clone();
+    // 终态看护：Terminated（BYE/CANCEL/超时）后移除注册表条目。
+    {
+        let dl = dl.clone();
+        let id = server_dlg.id();
+        tokio::spawn(async move {
+            while let Some(st) = state_rx.recv().await {
+                if matches!(st, DialogState::Terminated(..)) {
+                    dl.remove_dialog(&id);
+                    break;
+                }
+            }
+        });
+    }
     let answer = match tokio::task::spawn_blocking(move || {
-        sfu_proxy_start(&urls, token.as_deref(), &room2, &offer)
+        sfu_proxy_start(&sfu_urls, sfu_token.as_deref(), &room, &offer)
     })
     .await
     {
         Ok(Ok(answer)) => answer,
-        // 桥失败必须回 final response——否则 INVITE 事务悬死，客户端
-        // 既无 Answered 也无 Rejected，UI 静默卡住（#576 CI 实测）。
+        // 桥失败必须回 final response（客户端走 Rejected→失败提示）。
         Ok(Err(e)) => {
-            warn!(%room, error=%e, "SFU 桥接失败，回 503");
+            warn!(error=%e, "SFU 桥接失败，回 503");
             let _ = server_dlg.reject(Some(StatusCode::ServiceUnavailable), None);
             return Ok(());
         }
         Err(e) => {
-            warn!(%room, error=%e, "SFU 桥接任务失败，回 503");
+            warn!(error=%e, "SFU 桥接任务失败，回 503");
             let _ = server_dlg.reject(Some(StatusCode::ServiceUnavailable), None);
             return Ok(());
         }
     };
     let ct = Header::Other("Content-Type".into(), "application/sdp".into());
-    server_dlg
-        .accept(Some(vec![ct]), Some(answer.into_bytes()))
-        .map_err(|e| format!("accept 200: {e}"))
+    if let Err(e) = server_dlg.accept(Some(vec![ct]), Some(answer.into_bytes())) {
+        warn!(error=%e, "accept 200 失败，回 500");
+        let _ = server_dlg.reject(Some(StatusCode::ServerInternalError), None);
+    }
+    Ok(())
 }
 
 /// SFU /start 代理（viewer 角色；与 main.rs `proxy_to_sfu` 同构，SIP 侧独立
@@ -1353,6 +1386,84 @@ mod tests {
         });
 
         mock.join().expect("mock sfu 线程");
+        server_cancel.cancel();
+        let _ = server.join();
+    }
+
+    /// #576 回归：会议桥 SFU 失败必须回 final response（503）——修复前
+    /// INVITE 事务悬死（客户端无 Answered/Rejected，UI 静默卡住）。
+    #[test]
+    fn end_to_end_conference_invite_sfu_down_replies_503() {
+        let _serial = serve_e2e_guard();
+        // mock SFU 立即拒绝连接（bind 后关 listener）。
+        let sfu = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let sfu_port = sfu.local_addr().unwrap().port();
+        drop(sfu); // 端口无人监听 → connect refused
+
+        let port = free_udp_port();
+        let mut pw = HashMap::new();
+        pw.insert("AD-CALLER".to_string(), "tok-caller".to_string());
+        let cfg = SipConfig {
+            realm: REALM.into(),
+            tls_addr: None,
+            wss_addr: None,
+            udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+            passwords: Arc::new(pw),
+            tls_identity: None,
+            sfu_urls: vec![format!("http://127.0.0.1:{sfu_port}")],
+            sfu_token: None,
+        };
+        let server_cancel = CancellationToken::new();
+        let sc = server_cancel.clone();
+        let server = std::thread::spawn(move || run_sip_endpoint(cfg, sc));
+        std::thread::sleep(Duration::from_millis(400));
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let cancel = CancellationToken::new();
+            let (ep, dl) = build_ua(&cancel).await;
+            ua_register(&ep, port, "AD-CALLER", "tok-caller").await;
+            let (stx, _srx) = dl.new_dialog_state_channel();
+            let sa: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+            let mut proxy_addr = SipAddr::from(sa);
+            proxy_addr.r#type = Some(rsipstack::sip::Transport::Udp);
+            let opt = InviteOption {
+                caller: format!("sip:AD-CALLER@{REALM}").try_into().unwrap(),
+                callee: format!("sip:meet-down@{REALM}").try_into().unwrap(),
+                destination: Some(proxy_addr),
+                content_type: Some("application/sdp".into()),
+                offer: Some(CALLER_SDP.as_bytes().to_vec()),
+                contact: dl.build_local_contact(None, None).unwrap(),
+                call_id: Some("e2e-conf-503".into()),
+                ..Default::default()
+            };
+            // do_invite 在非 2xx final 时返回 Err（含响应码）——收到任何
+            // final（而非事务超时悬死）即为修复生效。
+            match dl.do_invite(opt, stx).await {
+                Err(e) => {
+                    assert!(
+                        e.to_string().contains("503")
+                            || e.to_string().contains("Service")
+                            || e.to_string().contains("Unavail"),
+                        "应 503，实得：{e}"
+                    );
+                }
+                Ok((_, Some(resp))) => {
+                    assert_eq!(
+                        resp.status_code,
+                        StatusCode::ServiceUnavailable,
+                        "应 503，实得 {}",
+                        resp.status_code
+                    );
+                }
+                Ok((_, None)) => panic!("不应无 final response（悬死回归）"),
+            }
+            cancel.cancel();
+        });
+
         server_cancel.cancel();
         let _ = server.join();
     }

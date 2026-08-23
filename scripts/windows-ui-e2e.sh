@@ -64,6 +64,20 @@ for _ in range(50):
 if not ok:
     print("FAIL: SFU/signal 未就绪"); sys.exit(1)
 PY
+# SIP/UDP 5060 就绪门：desktop 观看经 SIP 会议桥（WSS 兜底已删），SIP 起不来必失败——
+# signal 的 SIP 绑定失败是非致命 error!（线程内），TCP 探活会漏。
+python3 - <<'PY'
+import time
+for _ in range(50):
+    try:
+        if "SIP/UDP 监听已起" in open("/tmp/winui-sig.log", errors="replace").read():
+            print("PASS SIP/UDP ready"); break
+    except FileNotFoundError:
+        pass
+    time.sleep(0.2)
+else:
+    print("FAIL: SIP/UDP 未就绪"); raise SystemExit(1)
+PY
 
 echo "== [3/6] Web 被控端发布（headless Edge 屏幕共享）"
 node "$E2E_DIR/e2e-pub.js" "$ROOM" &
@@ -84,13 +98,14 @@ settings = {
     "sip_transport": "udp",
     "sip_port": 5060,
 }
-path = os.path.join(os.path.expanduser("~"), ".aerodesk-settings.json")
+import os as _os; path = _os.path.join(_os.environ.get("AERO_E2E_HOME", _os.path.expanduser("~")), ".aerodesk-settings.json")
 open(path, "w").write(json.dumps(settings))
 print("seeded", path)
 PY
 
 echo "== [4/6] 启动 Windows UI（自动连接观看）"
-RUST_LOG=debug "$ROOT/target/debug/aerodesk-desktop.exe" \
+export AERO_E2E_HOME="$E2E_DIR"
+RUST_LOG=debug HOME="$(cygpath -w "$E2E_DIR")" "$ROOT/target/debug/aerodesk-desktop.exe" \
   -server 127.0.0.1:3003 -room "$ROOM" -autoconnect >/tmp/winui-ui.log 2>&1 &
 UI_PID=$!
 sleep 8
@@ -111,7 +126,7 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 ok = False
 for i in range(60):
     try:
-        txt = open(os.environ['WINUI_LOG'], errors='replace').read()
+        txt = open(os.environ['WINUI_LOG'], encoding='utf-8', errors='replace').read()
     except FileNotFoundError:
         txt = ''
     if 'IceConnectionStateChange(Completed)' in txt or 'ICE remote address' in txt:
@@ -122,13 +137,13 @@ for i in range(60):
         print("PASS Windows UI ICE Checking (signaling/SDP/ICE started)")
         ok = True
         break
-    if ('generic viewer connect failed' in txt or 'connect TIMEOUT' in txt
-            or 'sip call failed' in txt or '呼叫发起失败' in txt or '信令未连接' in txt):
-        print("FAIL: connect 失败/超时"); ok = False; break
+    if ('sip call failed' in txt or 'sip call rejected' in txt
+            or 'sip call peer hangup' in txt or '链路未启动' in txt):
+        print("FAIL: SIP 呼叫失败"); ok = False; break
     time.sleep(1)
 if not ok:
     print("FAIL: 60s 内 ICE 未启动；UI 日志尾：")
-    print(open(os.environ['WINUI_LOG'], errors='replace').read()[-1500:])
+    print(open(os.environ['WINUI_LOG'], encoding='utf-8', errors='replace').read()[-1500:])
     sys.exit(1)
 PY
 

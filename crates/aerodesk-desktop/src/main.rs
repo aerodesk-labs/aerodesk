@@ -1644,14 +1644,7 @@ fn open_viewer_session(
             .and_then(|h| h.cmd_tx.clone());
         // #552：SIP 1:1 P2P 主叫——presence 线程完成 call→Answered 后回调移交
         // 会话线程（同一 UA，禁止双 UA 同 device_id 注册）。
-        let _ = (&(
-            &token,
-            &control_rx,
-            &server_url,
-            &muted,
-            &volume,
-            &show_camera,
-        ));
+        let _ = (&(&token, &control_rx, &server_url));
         let Some(cmd_tx) = sip_online else {
             ui.set_connecting(false);
             ui.set_conn_state(0);
@@ -1759,6 +1752,11 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
         settings.server_tls,
     );
     if server.is_empty() || settings.device_id.is_empty() || settings.device_id == "—" {
+        tracing::warn!(
+            "SIP 链路未启动：server_default/device_id 未配置（server={:?} device={:?}）",
+            settings.server_default,
+            settings.device_id
+        );
         return;
     }
     let cfg = match aerodesk_core::sip_link::SipLinkConfig::from_parts(
@@ -1783,12 +1781,8 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
             return;
         }
     };
-    tracing::info!(
-        "SIP 链路启动：device={} server={} transport={:?}",
-        settings.device_id,
-        server,
-        cfg.transport
-    );
+    // 真实投递地址/传输（from_parts 推导，可能与信令 URL 端口不同）。
+    let (sip_server_addr, sip_transport_kind) = (cfg.server, cfg.transport);
     let link = Arc::new(std::sync::Mutex::new(
         aerodesk_core::sip_link::SipCallLink::new(cfg),
     ));
@@ -1819,6 +1813,12 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
             link.lock()
                 .unwrap_or_else(aerodesk_core::util::lock_recover)
                 .start();
+            tracing::info!(
+                "SIP 链路启动：device={} sip_server={} transport={:?}",
+                device_id,
+                sip_server_addr,
+                sip_transport_kind
+            );
             loop {
                 if stop.load(Ordering::SeqCst) {
                     break;
@@ -2103,6 +2103,7 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                                             }
                                         }
                                         Err(e) => {
+                                            tracing::warn!("sip call accept_answer 失败：{e}");
                                             if let Some(f) = o.on_failed.take() {
                                                 f(format!("接受会话失败：{e}"));
                                             }
@@ -2116,6 +2117,7 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                             status,
                             error_code: _,
                         } => {
+                            tracing::warn!("sip call rejected: call_id={call_id} status={status}");
                             let mut oc = OUTGOING.lock().unwrap_or_else(aerodesk_core::util::lock_recover);
                             if oc.as_ref().is_some_and(|o| o.call_id == call_id) {
                                 let mut o = oc.take().unwrap();
@@ -2169,6 +2171,7 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                             call_id,
                             reason: _,
                         } => {
+                            tracing::warn!("sip call peer hangup: call_id={call_id}");
                             // 主叫：对方取消/挂断；被叫：对端 CANCEL——停 publisher + 清确认状态。
                             let mut oc = OUTGOING.lock().unwrap_or_else(aerodesk_core::util::lock_recover);
                             if oc.as_ref().is_some_and(|o| o.call_id == call_id) {
@@ -4329,6 +4332,20 @@ fn init_log() {
 
 #[cfg(test)]
 mod tests {
+    /// #576 回归：subset 配置 JSON 可解析（修复前被 unwrap_or_default 静默
+    /// 吞掉并反向覆写配置文件——e2e seed 实测踩坑）。
+    #[test]
+    fn settings_parse_accepts_subset_json() {
+        let s: AppSettings = serde_json::from_str(
+            r#"{"server_default":"127.0.0.1:3003","device_id":"AD-E2EUI","token_default":"tok","sip_transport":"udp","sip_port":5060}"#,
+        )
+        .expect("subset JSON 应可解析（struct 级 serde(default)）");
+        assert_eq!(s.server_default, "127.0.0.1:3003");
+        assert_eq!(s.device_id, "AD-E2EUI");
+        assert_eq!(s.sip_port, 5060);
+        assert_eq!(s.quality, 0, "缺省字段取 Default");
+    }
+
     use super::*;
 
     #[test]
