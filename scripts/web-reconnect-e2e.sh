@@ -46,7 +46,7 @@ start_sfu() {
 }
 start_signal() {
     SIGNAL_PORT=14501 SIGNAL_PLAIN_PORT=14503 SFU_URL=http://127.0.0.1:14502 \
-      ./target/debug/aerodesk-signal >/tmp/webrec-sig.log 2>&1 &
+      SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/webrec-sig.log 2>&1 &
     echo $! > /tmp/webrec-sig.pid
 }
 stop_services() {

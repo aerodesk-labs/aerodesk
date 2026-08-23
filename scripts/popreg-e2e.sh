@@ -20,9 +20,9 @@ RECORD_DIR="$REC/a" ./target/debug/aerodesk-sfu >/tmp/popreg-sfu-a.log 2>&1 &
 SFU_A=$!
 SFU_MEDIA_PORT=3479 SFU_SIGNAL_PORT=3005 SFU_INTERNAL_PORT=3007 RECORD_DIR="$REC/b" ./target/debug/aerodesk-sfu >/tmp/popreg-sfu-b.log 2>&1 &
 SFU_B=$!
-POP_ID=pop-a POP_URLS="pop-b=ws://127.0.0.1:3006/ws" POP_REGISTRY_FILE="$REG" ./target/debug/aerodesk-signal >/tmp/popreg-sig-a.log 2>&1 &
+SIP_UDP_PORT=5060 POP_ID=pop-a POP_URLS="pop-b=ws://127.0.0.1:3006/ws" POP_REGISTRY_FILE="$REG" ./target/debug/aerodesk-signal >/tmp/popreg-sig-a.log 2>&1 &
 SIG_A=$!
-POP_ID=pop-b POP_URLS="pop-a=ws://127.0.0.1:3003/ws" SIGNAL_PORT=3004 SIGNAL_PLAIN_PORT=3006 SFU_URL=http://127.0.0.1:3007 POP_REGISTRY_FILE="$REG" ./target/debug/aerodesk-signal >/tmp/popreg-sig-b.log 2>&1 &
+SIP_UDP_PORT=5060 POP_ID=pop-b POP_URLS="pop-a=ws://127.0.0.1:3003/ws" SIGNAL_PORT=3004 SIGNAL_PLAIN_PORT=3006 SFU_URL=http://127.0.0.1:3007 POP_REGISTRY_FILE="$REG" ./target/debug/aerodesk-signal >/tmp/popreg-sig-b.log 2>&1 &
 SIG_B=$!
 
 for _ in $(seq 1 50); do

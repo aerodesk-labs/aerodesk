@@ -53,7 +53,7 @@ sleep 0.5
 REC="$(mktemp -d)"
 RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu" >/tmp/webfile-sfu.log 2>&1 &
 SFU=$!
-"$ROOT/target/debug/aerodesk-signal" >/tmp/webfile-sig.log 2>&1 &
+SIP_UDP_PORT=5060 "$ROOT/target/debug/aerodesk-signal" >/tmp/webfile-sig.log 2>&1 &
 SIG=$!
 for _ in $(seq 1 50); do
     if nc -z 127.0.0.1 3003 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then break; fi

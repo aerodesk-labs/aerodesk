@@ -29,7 +29,7 @@ echo "== 启动 sfu/signal"
 # 本机/CI 网卡环境可能导致自动通告地址不可绑,显式通配绑定。
 SFU_BIND_ADDRESS=0.0.0.0 ./target/debug/aerodesk-sfu.exe >/tmp/logon-sfu.log 2>&1 &
 SFU_PID=$!
-./target/debug/aerodesk-signal.exe >/tmp/logon-sig.log 2>&1 &
+SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal.exe >/tmp/logon-sig.log 2>&1 &
 SIG_PID=$!
 sleep 2
 

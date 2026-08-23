@@ -660,6 +660,12 @@ fn main() {
                 passwords: Arc::new(passwords),
                 // §8：未显式配置的设备以首个静态 token 为 Digest 口令。
                 token_password: config.auth_tokens.first().cloned(),
+                // 开放注册（无任何鉴权源时，与 WSS join 同姿态）。
+                open_register: config.auth_tokens.is_empty()
+                    && config.jwt_secret.is_none()
+                    && std::env::var("SIP_DIGEST_USERS")
+                        .map(|v| v.trim().is_empty())
+                        .unwrap_or(true),
                 tls_identity: Some(aerodesk_protocol::tls::TlsIdentity {
                     cert: tls.cert.clone(),
                     key: tls.key.clone(),

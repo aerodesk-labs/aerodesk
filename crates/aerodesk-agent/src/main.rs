@@ -32,7 +32,7 @@ use aerodesk_core::protocol::input::{
 };
 use aerodesk_core::protocol::signal::Role;
 use aerodesk_core::turn_client::setup_turn;
-use aerodesk_core::{Endpoint, platform::Codec, signaling::WsSignalClient};
+use aerodesk_core::{Endpoint, platform::Codec};
 use str0m::media::{Frequency, MediaTime};
 use str0m::net::Protocol;
 use str0m::{Input, Output, net::Receive};
@@ -640,7 +640,7 @@ fn connect(
     audio: bool,
 ) -> Result<
     (
-        WsSignalClient,
+        SipSession,
         Endpoint,
         MediaSocket,
         str0m::media::Mid,
@@ -650,6 +650,36 @@ fn connect(
     String,
 > {
     connect_inner(signal_url, room, role, None, false, audio, auth, false)
+}
+
+/// SIP 会话句柄（#552：替代 connect 返回的 WsSignalClient——会话循环不消费
+/// 信令面；link 由 connect 内的看护线程持有至进程退出）。
+pub struct SipSession {
+    #[allow(dead_code)]
+    pub call_id: String,
+}
+
+/// #552 SIP 环境配置：AERO_SIP_TRANSPORT（udp|tls，默认 udp——e2e/内网）/
+/// AERO_SIP_PORT（0=按传输默认）/ AERO_SIP_DOMAIN / AERO_SIP_CA_PEM（TLS CA
+/// 路径，空=系统根）。TURN：AERO_TURN_URLS/USERNAME/CREDENTIAL（SIP 无 join
+/// 下发一环，须本地配置；空=直连）。
+fn sip_env_cfg(
+    signal_url: &str,
+    device_id: &str,
+    token: &str,
+) -> Result<aerodesk_core::sip_link::SipLinkConfig, String> {
+    aerodesk_core::sip_link::SipLinkConfig::from_parts(
+        signal_url,
+        device_id,
+        token,
+        &std::env::var("AERO_SIP_TRANSPORT").unwrap_or_default(),
+        std::env::var("AERO_SIP_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(0),
+        &std::env::var("AERO_SIP_DOMAIN").unwrap_or_default(),
+        &std::env::var("AERO_SIP_CA_PEM").unwrap_or_default(),
+    )
 }
 
 /// 探测本机出接口 IP（绑 0.0.0.0 连公共地址后取 local_addr；失败回退 loopback）。
@@ -677,7 +707,7 @@ fn connect_h264(
     audio: bool,
 ) -> Result<
     (
-        WsSignalClient,
+        SipSession,
         Endpoint,
         MediaSocket,
         str0m::media::Mid,
@@ -707,7 +737,7 @@ fn connect_codec(
     codec: Codec,
 ) -> Result<
     (
-        WsSignalClient,
+        SipSession,
         Endpoint,
         MediaSocket,
         str0m::media::Mid,
@@ -739,7 +769,7 @@ fn connect_camera(
     codec: Option<Codec>,
 ) -> Result<
     (
-        WsSignalClient,
+        SipSession,
         Endpoint,
         MediaSocket,
         str0m::media::Mid,
@@ -762,7 +792,7 @@ fn connect_inner(
     camera: bool,
 ) -> Result<
     (
-        WsSignalClient,
+        SipSession,
         Endpoint,
         MediaSocket,
         str0m::media::Mid,
@@ -771,29 +801,74 @@ fn connect_inner(
     ),
     String,
 > {
-    let mut signal =
-        WsSignalClient::connect(signal_url).map_err(|e| format!("signal connect: {e}"))?;
-    let (peer_id, turn) = signal.join(room, role, auth)?;
-    info!("joined room {room} as {peer_id}");
-
-    // #539/#456 呼叫发起：主控（viewer）连接时通知房间内被叫端（Publisher）
-    // 弹窗确认——被叫端接受后才出流采集。与 core connect_live_role 同款。
-    if role == Role::Viewer {
-        let _ = signal.send_signal(aerodesk_core::protocol::signal::SignalMessage::Call {
-            from: peer_id.clone(),
-            target: room.to_string(),
-            call_id: format!("call-{peer_id}"),
-            timeout_ms: Some(30_000),
-        });
+    // #552 SIP 信令面（替代 WSS join）：REGISTER → viewer INVITE 目标（房间名
+    // =设备 AoR 时 1:1 透明代理；无绑定时服务端会议桥入 SFU）；publisher 等
+    // IncomingCall（1:1 被叫，以 --room 值为设备 AoR——e2e 脚本 viewer 呼同
+    // 名房间即接通，脚本零改动）。
+    let _ = simulcast;
+    // publisher 以 --room 值为设备 AoR（viewer 呼同名房间即 1:1 接通——e2e
+    // 脚本零改动）；viewer 身份仅用于 REGISTER（任意名）。
+    let device_id = match role {
+        Role::Publisher => room.to_string(),
+        Role::Viewer => format!("agent-viewer-{}", std::process::id()),
+    };
+    info!("SIP device_id={device_id} target={room} role={role:?}");
+    let mut link = aerodesk_core::sip_link::SipCallLink::new(sip_env_cfg(
+        signal_url,
+        &device_id,
+        auth.unwrap_or(""),
+    )?);
+    link.start();
+    {
+        // 等 Online（10s；口令错/服务器不可达在此显式失败）。
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let st = link.poll();
+            if st.is_online() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "SIP 注册未完成（10s）：{st:?}——检查 signal 的 SIP 端口/口令"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        info!("SIP registered: {device_id}");
     }
+
+    // publisher：等 IncomingCall（300s；被叫 offer 到达后才建媒体端点）。
+    let incoming: Option<(String, String)> = if role == Role::Publisher {
+        let deadline = Instant::now() + Duration::from_secs(300);
+        let mut got: Option<(String, String)> = None;
+        while Instant::now() < deadline && got.is_none() {
+            let _st = link.poll();
+            for ev in link.take_events() {
+                if let aerodesk_core::sip_link::SipLinkEvent::IncomingCall {
+                    call_id,
+                    offer_sdp,
+                    ..
+                } = ev
+                {
+                    got = Some((call_id, offer_sdp));
+                    break;
+                }
+            }
+            if got.is_none() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        Some(got.ok_or("publisher 等待来电超时（300s 无 INVITE）")?)
+    } else {
+        None
+    };
 
     // #216 外部 NAT 场景：非回环信令绑 0.0.0.0（否则 127.0.0.1 源地址发不出外部
     // UDP，TURN UDP 中继不可用，只能退 TCP TURN）；与 aerodesk-core connect 对齐。
     let loopback_signal = signal_url.contains("127.0.0.1")
         || signal_url.contains("localhost")
         || signal_url.contains("::1");
-    // #218：force-relay（AERODESK_FORCE_RELAY=1|true，与 core 一致）——ICE 只通告
-    // relayed 候选、跳过 host 候选，强制媒体走 TURN 中继（NAT/弱网压测中继路径）。
+    // #218：force-relay（AERODESK_FORCE_RELAY=1|true）——ICE 只通告 relayed
+    // 候选、跳过 host 候选，强制媒体走 TURN 中继（NAT/弱网压测中继路径）。
     let force_relay = aerodesk_core::connect::force_relay_env();
     let direct = if loopback_signal {
         UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("bind udp: {e}"))?
@@ -803,8 +878,15 @@ fn connect_inner(
     let addr = direct.local_addr().map_err(|e| e.to_string())?;
     info!("local UDP addr: {addr}");
 
-    // #157 M2：join 返回 TURN 配置时建立中继传输（失败仅告警，直连兜底）。
-    let turn_transport = turn.as_ref().and_then(|tc| setup_turn(tc, loopback_signal));
+    // TURN：SIP 无 join 下发一环——AERO_TURN_* 环境配置（失败仅告警直连兜底）。
+    let turn_transport = aerodesk_core::turn_client::p2p_turn_transport(
+        &std::env::var("AERO_TURN_URLS").unwrap_or_default(),
+        &std::env::var("AERO_TURN_USERNAME").unwrap_or_default(),
+        &std::env::var("AERO_TURN_CREDENTIAL").unwrap_or_default(),
+    );
+    if turn_transport.is_none() {
+        info!("TURN 未配置（AERO_TURN_* 为空）——直连");
+    }
     let mut socket = MediaSocket::new(direct, turn_transport);
 
     let mut endpoint = match codec {
@@ -825,12 +907,10 @@ fn connect_inner(
             .add_local_candidate(host_candidate, Protocol::Udp)
             .map_err(|e| format!("candidate: {e}"))?;
     }
-    // #157 M2：relayed 候选加入 offer（`typ relay`），ICE 按优先级直连优先、TURN 兜底。
+    // relayed 候选（typ relay）：ICE 按优先级直连优先、TURN 兜底。
     if let Some(tt) = socket.turn() {
         let relayed = tt.relayed_addr();
         if let Ok(la) = tt.local_addr() {
-            // relayed 候选的 local 用 host 候选 IP（通配 0.0.0.0 会被 str0m 拒绝/无法映射，
-            // 与 aerodesk-core connect_live_role 的 candidates.first() 一致）。
             let local = std::net::SocketAddr::new(host_candidate.ip(), la.port());
             info!("relayed candidate {relayed} (local {local}) force_relay={force_relay}");
             if let Err(e) = endpoint.add_relay_candidate(relayed, local) {
@@ -838,51 +918,91 @@ fn connect_inner(
             }
         }
     } else if force_relay {
-        warn!("force-relay requested but no TURN transport (signal didn't issue TurnConfig)");
+        warn!("force-relay requested but no TURN transport (AERO_TURN_* 未配置)");
     }
 
-    // #12：viewer 的 offer 用 recvonly（SFU 拒绝 viewer 发布媒体）。
+    // 媒体轨：viewer 预配（recvonly）；publisher 不预配（被叫按 INVITE offer 反演）。
+    let camera_mid: Option<str0m::media::Mid>;
+    let audio_mid: Option<str0m::media::Mid>;
+    let video_mid: Option<str0m::media::Mid>;
+    let call_id_out;
     if role == Role::Viewer {
+        // #12：viewer 的 offer 用 recvonly。
         endpoint.add_video_recvonly();
-    } else if simulcast {
-        // #58：publisher 多路编码 → offer 携带 a=simulcast/rid（q/h/f）。
-        endpoint.add_video_simulcast();
-    } else {
-        endpoint.add_video();
-    }
-    // #58 音频：publisher 发 PCMU，viewer 收 PCMU（recvonly）。
-    if audio {
-        if role == Role::Viewer {
+        if audio {
             endpoint.add_audio_recvonly();
-        } else {
-            endpoint.add_audio();
         }
-    }
-    // 摄像头第二路视频轨（publisher 发布 / viewer recvonly）。
-    if camera {
-        if role == Role::Viewer {
+        if camera {
             endpoint.add_camera_recvonly();
-        } else {
-            endpoint.add_camera();
         }
+        let (offer, pending, vm, am, cm) =
+            endpoint.create_offer().map_err(|e| format!("offer: {e}"))?;
+        info!("video mid: {vm:?} audio mid: {am:?} camera mid: {cm:?}");
+        let offer_json = serde_json::to_string(&offer).map_err(|e| e.to_string())?;
+        let call_id = format!("c-{}", std::process::id());
+        link.call(room, &call_id, &offer_json)
+            .map_err(|e| format!("SIP INVITE: {e}"))?;
+        // 等 Answered/Rejected（30s；180 仅记日志）。
+        let answer_json = {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut got: Result<String, String> = Err("SIP INVITE 无应答（30s）".into());
+            'ans: while Instant::now() < deadline {
+                let _st = link.poll();
+                for ev in link.take_events() {
+                    match ev {
+                        aerodesk_core::sip_link::SipLinkEvent::Answered { answer_sdp, .. } => {
+                            got = Ok(answer_sdp);
+                            break 'ans;
+                        }
+                        aerodesk_core::sip_link::SipLinkEvent::Rejected { status, .. } => {
+                            got = Err(format!("SIP 呼叫被拒（{status}）"));
+                            break 'ans;
+                        }
+                        aerodesk_core::sip_link::SipLinkEvent::Ringing { .. } => {
+                            info!("SIP 180 Ringing");
+                        }
+                        _ => {}
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            got?
+        };
+        let answer: str0m::change::SdpAnswer =
+            serde_json::from_str(&answer_json).map_err(|e| format!("answer parse: {e}"))?;
+        debug!("answer media lines: {:?}", answer.media_lines);
+        endpoint
+            .accept_answer(pending, answer)
+            .map_err(|e| format!("accept answer: {e}"))?;
+        video_mid = vm;
+        audio_mid = am;
+        camera_mid = cm;
+        call_id_out = call_id;
+    } else {
+        let (call_id, offer_sdp) = incoming.expect("publisher 必有来电");
+        info!("incoming call {call_id}（offer {}B）", offer_sdp.len());
+        let offer: str0m::change::SdpOffer =
+            serde_json::from_str(&offer_sdp).map_err(|e| format!("offer parse: {e}"))?;
+        let answer = endpoint
+            .accept_offer(offer)
+            .map_err(|e| format!("accept offer: {e}"))?;
+        let answer_json = serde_json::to_string(&answer).map_err(|e| e.to_string())?;
+        // 被叫 mid 从 offer SDP 推导（answer 未带 mid 摘要）。
+        let vm = aerodesk_core::p2p_call::offer_video_mid(&offer_sdp);
+        let am = aerodesk_core::p2p_call::offer_audio_mid(&offer_sdp);
+        let cm: Option<str0m::media::Mid> = None;
+        info!("callee mids: video={vm:?} audio={am:?} camera={cm:?}");
+        link.accept(&call_id, &answer_json)
+            .map_err(|e| format!("SIP accept: {e}"))?;
+        video_mid = vm;
+        audio_mid = am;
+        camera_mid = cm;
+        call_id_out = call_id;
     }
-    let (offer, pending, video_mid, audio_mid, camera_mid) =
-        endpoint.create_offer().map_err(|e| format!("offer: {e}"))?;
-    info!("video mid: {video_mid:?} audio mid: {audio_mid:?} camera mid: {camera_mid:?}");
-    let offer_json = serde_json::to_string(&offer).map_err(|e| e.to_string())?;
-    let answer_json = signal.exchange_description(&offer_json)?;
-    let answer: str0m::change::SdpAnswer =
-        serde_json::from_str(&answer_json).map_err(|e| format!("answer parse: {e}"))?;
-    debug!("answer media lines: {:?}", answer.media_lines);
-    debug!("offer media lines: {:?}", offer.media_lines);
-    endpoint
-        .accept_answer(pending, answer)
-        .map_err(|e| format!("accept answer: {e}"))?;
 
     info!("SDP negotiated, awaiting ICE...");
-    // #477：ICE 等待收敛到 connect 阶段——超时显式失败（调用方的重连包装会
-    // 重试），不再进入会话循环静默空转（观测窗内表现为"0 帧"假失败，实际
-    // 是 ICE 从未建立）。TURN 路径建链慢（实测中继下 5-12s），给 15s。
+    // #477：ICE 等待收敛到 connect 阶段——超时显式失败。TURN 路径建链慢
+    // （实测中继下 5-12s），给 15s。
     {
         let ice_deadline =
             Instant::now() + Duration::from_secs(if socket.turn().is_some() { 15 } else { 5 });
@@ -910,13 +1030,11 @@ fn connect_inner(
                     Output::Transmit(t) => {
                         let _ = socket.send_to(&t.contents, t.destination);
                     }
-                    // Timeout 必须退出本轮排空（否则 100% CPU 死循环，见 core 注释）。
                     Output::Timeout(_) => break,
                     Output::Event(_) => {}
                 }
             }
-            // 查状态标志而非 poll_event：事件队列留给会话循环（IceConnected
-            // 触发编码器启动、ChannelOpen 触发文件请求等），消费掉会破坏它们。
+            // 查状态标志而非 poll_event：事件队列留给会话循环。
             if endpoint.ice_connected() {
                 break;
             }
@@ -926,8 +1044,41 @@ fn connect_inner(
         }
         info!("ICE connected (connect 阶段)");
     }
+
+    // 信令看护线程：持有 link 至进程退出（Drop 即 BYE/注销——会话循环只驱动
+    // endpoint/socket）；泵事件记 PeerHangup，后到 trickle 候选忽略（候选内联）。
+    {
+        let mut link = link;
+        std::thread::Builder::new()
+            .name("sip-link-watch".into())
+            .spawn(move || {
+                loop {
+                    let _ = link.poll();
+                    for ev in link.take_events() {
+                        if let aerodesk_core::sip_link::SipLinkEvent::PeerHangup {
+                            call_id, ..
+                        } = ev
+                        {
+                            info!("SIP 对端挂断：{call_id}");
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            })
+            .ok();
+    }
+
     let video_mid = video_mid.ok_or("no video mid")?;
-    Ok((signal, endpoint, socket, video_mid, audio_mid, camera_mid))
+    Ok((
+        SipSession {
+            call_id: call_id_out,
+        },
+        endpoint,
+        socket,
+        video_mid,
+        audio_mid,
+        camera_mid,
+    ))
 }
 
 /// VideoToolbox 合成源编码参数（--width/--height/--fps/--bitrate）。
@@ -1534,7 +1685,7 @@ fn publisher(
     let frames = parse_vp8_pcap(pcap);
     info!("loaded {} VP8 frames from pcap", frames.len());
 
-    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
+    let (_signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
         connect(signal_url, room, Role::Publisher, auth, audio)?;
     let mut connected = false;
     let mut audio_ticker = AudioTicker::new(audio_opus);
@@ -1669,7 +1820,6 @@ fn publisher(
         // SFU/str0m DTLS 接收队列的稳定速率上界；过快（>600/s）会触发
         // SACK 突发导致 Receive queue full 断连（实测）。
         std::thread::sleep(Duration::from_millis(2));
-        let _ = &mut signal;
     }
 }
 
@@ -1706,7 +1856,7 @@ fn viewer(
     request_file: Option<&str>,
     send_control: Option<&str>,
 ) -> Result<(), String> {
-    let (mut signal, mut endpoint, mut socket, _, _audio_mid, _camera_mid) = if camera {
+    let (_signal, mut endpoint, mut socket, _, _audio_mid, _camera_mid) = if camera {
         connect_camera(signal_url, room, Role::Viewer, auth, audio, None)?
     } else {
         connect(signal_url, room, Role::Viewer, auth, audio)?
@@ -2294,7 +2444,6 @@ fn viewer(
             info!("file upload confirmed; exiting");
             std::process::exit(0);
         }
-        let _ = &mut signal;
     }
 }
 
@@ -2353,7 +2502,7 @@ fn publisher_x264(
     const W: u32 = 640;
     const H: u32 = 360;
 
-    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
+    let (_signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
         match connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio) {
             Ok(v) => v,
             Err(e) => {
@@ -2491,7 +2640,6 @@ fn publisher_x264(
         }
 
         std::thread::sleep(Duration::from_millis(2));
-        let _ = &mut signal;
     }
 }
 /// VideoToolbox 硬编发布端：合成 BGRA → 硬编 → SFU。
@@ -2518,7 +2666,7 @@ fn publisher_vt(
     use aerodesk_platform::macos::vt_encoder::VtEncoder;
     use str0m::media::Rid;
 
-    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
+    let (_signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
         match connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio) {
             Ok(v) => v,
             Err(e) => {
@@ -2661,7 +2809,6 @@ fn publisher_vt(
         }
 
         std::thread::sleep(Duration::from_millis(2));
-        let _ = &mut signal;
     }
 }
 /// FFmpeg 发布端（#74）：合成 RGB → FfmpegEncoder（H264/H265/VP9/AV1）→ SFU。
@@ -2689,7 +2836,7 @@ fn publisher_generic<
     camera_cap: Option<CC>,
     mut cursor: Option<CS>,
 ) {
-    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) =
+    let (_signal, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) =
         match if camera_cap.is_some() {
             connect_camera(signal_url, room, Role::Publisher, auth, audio, Some(codec))
         } else {
@@ -2958,7 +3105,6 @@ fn publisher_generic<
         }
 
         std::thread::sleep(Duration::from_millis(2));
-        let _ = &mut signal;
     }
 }
 
@@ -3412,7 +3558,7 @@ fn publisher_capture_ffmpeg(
     const H: u32 = 0;
     const FPS: u32 = 30;
 
-    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
+    let (_signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
         match connect_codec(signal_url, room, Role::Publisher, auth, audio, codec) {
             Ok(v) => v,
             Err(e) => {
@@ -3541,7 +3687,6 @@ fn publisher_capture_ffmpeg(
         }
 
         std::thread::sleep(Duration::from_millis(2));
-        let _ = &mut signal;
     }
 }
 
@@ -3575,23 +3720,22 @@ fn publisher_capture(
         _ => VtCodec::H264,
     };
 
-    let (mut signal, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) =
-        match connect_inner(
-            signal_url,
-            room,
-            Role::Publisher,
-            Some(codec),
-            simulcast,
-            audio,
-            auth,
-            camera,
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("connect failed: {e}");
-                return;
-            }
-        };
+    let (_signal, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) = match connect_inner(
+        signal_url,
+        room,
+        Role::Publisher,
+        Some(codec),
+        simulcast,
+        audio,
+        auth,
+        camera,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("connect failed: {e}");
+            return;
+        }
+    };
 
     // #75 远程光标：真实光标位置（30Hz）。
     let mut last_cursor = Instant::now();
@@ -3965,7 +4109,6 @@ fn publisher_capture(
         }
 
         std::thread::sleep(Duration::from_millis(2));
-        let _ = &mut signal;
     }
     #[test]
     fn reconnect_backoff_values() {

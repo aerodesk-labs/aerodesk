@@ -22,7 +22,7 @@ REC="$(mktemp -d)"
 # #535 排查：SFU debug 级日志（通道开/轨道增删/键帧请求转发路径）。
 RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu" >/tmp/linux-native-sfu.log 2>&1 &
 SFU=$!
-"$ROOT/target/debug/aerodesk-signal" >/tmp/linux-native-sig.log 2>&1 &
+SIP_UDP_PORT=5060 "$ROOT/target/debug/aerodesk-signal" >/tmp/linux-native-sig.log 2>&1 &
 SIG=$!
 OK=0
 for _ in $(seq 1 50); do

@@ -16,7 +16,7 @@ REC="$(mktemp -d)"
 echo "== 启动 sfu/signal"
 RECORD_DIR="$REC" ./target/debug/aerodesk-sfu >/tmp/smoke-sfu.log 2>&1 &
 SFU_PID=$!
-./target/debug/aerodesk-signal >/tmp/smoke-sig.log 2>&1 &
+SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/smoke-sig.log 2>&1 &
 SIG_PID=$!
 # 等待信令服务器就绪（避免负载下启动慢导致 CLI 连接失败；最多 ~10s）。
 for _ in $(seq 1 50); do

@@ -50,7 +50,7 @@ SFU_MEDIA_PORT="${SFU_MEDIA_PORT:-3478}" SFU_SIGNAL_PORT="${SFU_SIGNAL_PORT:-300
 SFU=$!
 SIGNAL_PORT="${SIGNAL_PORT:-3001}" SIGNAL_PLAIN_PORT="${SIGNAL_PLAIN_PORT:-3003}" \
   SFU_URL="http://127.0.0.1:${SFU_INTERNAL_PORT:-3002}" \
-  ./target/debug/aerodesk-signal >/tmp/iossim-sig.log 2>&1 &
+  SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/iossim-sig.log 2>&1 &
 SIG=$!
 # 等 SFU/signal 就绪再起 publisher（此前固定 sleep 1.5，CI 负载下 SFU /start 会超时）
 for _ in $(seq 1 50); do
