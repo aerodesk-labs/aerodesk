@@ -1633,10 +1633,16 @@ fn open_viewer_session(
         .expect("spawn viewer thread");
     #[cfg(not(target_os = "macos"))]
     {
-        // #552 拓扑（1:1 P2P / ≥3 人 SFU）：设备 ID 形（AD-xxxxxx，见
-        // default_device_id）→ SIP 1:1 P2P 呼叫；其余（会议/Web 发布房间名）
-        // → SFU 观看（e2e/Web 观看面保持原路径）。macOS 观看端仍走 SFU。
-        if !room.starts_with("AD-") {
+        // #552 拓扑（1:1 P2P / ≥3 人 SFU）+ 会议桥（slice 12）：SIP 链路在线
+        // → 任意房间一律经 SIP（服务端按绑定路由：AD- 设备 = 1:1 透明代理，
+        // 其余合法房间名 = SFU 会议桥）；链路未在线 → 非 AD 房间回退 WSS 观看
+        // （旧路径兼容；AD 房间提示需信令）。macOS 观看端仍走 SFU。
+        let sip_online = PRESENCE
+            .lock()
+            .unwrap_or_else(aerodesk_core::util::lock_recover)
+            .as_ref()
+            .and_then(|h| h.cmd_tx.clone());
+        if !room.starts_with("AD-") && sip_online.is_none() {
             std::thread::Builder::new()
                 .stack_size(16 * 1024 * 1024)
                 .spawn(move || {
@@ -1664,12 +1670,7 @@ fn open_viewer_session(
         // #552：SIP 1:1 P2P 主叫——presence 线程完成 call→Answered 后回调移交
         // 会话线程（同一 UA，禁止双 UA 同 device_id 注册）。
         let _ = (&(&token, &control_rx, &server_url));
-        let Some(cmd_tx) = PRESENCE
-            .lock()
-            .unwrap_or_else(aerodesk_core::util::lock_recover)
-            .as_ref()
-            .and_then(|h| h.cmd_tx.clone())
-        else {
+        let Some(cmd_tx) = sip_online else {
             ui.set_connecting(false);
             ui.set_conn_state(0);
             ui.set_status("信令未连接，无法发起呼叫".into());

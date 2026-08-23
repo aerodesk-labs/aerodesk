@@ -663,6 +663,9 @@ fn main() {
                     key: tls.key.clone(),
                     source: tls.source,
                 }),
+                // 会议桥：SIP INVITE 非设备 AoR → SFU /start（与 WSS Join 同池）。
+                sfu_urls: config.sfu_urls.clone(),
+                sfu_token: config.sfu_token.clone(),
             };
             std::thread::Builder::new()
                 .name("sip-endpoint".into())

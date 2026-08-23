@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::bridge;
 use rsipstack::EndpointBuilder;
 use rsipstack::dialog::DialogId;
 use rsipstack::dialog::authenticate::verify_digest;
@@ -256,6 +257,11 @@ pub struct SipConfig {
     pub passwords: Arc<HashMap<String, String>>,
     /// TLS 身份（复用 signal 的证书加载）。
     pub tls_identity: Option<TlsIdentity>,
+    /// SFU 池（会议桥用）：非设备 AoR 的 INVITE 代理到 SFU /start（规范 §4
+    /// 会议语义）。空 = 未配置（会议 INVITE 回 404）。
+    pub sfu_urls: Vec<String>,
+    /// SFU 内部接口 token（可选）。
+    pub sfu_token: Option<String>,
 }
 
 /// 在独立 tokio runtime 上跑 SIP 端点（阻塞当前线程；由调用方 spawn 线程）。
@@ -453,8 +459,28 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
                     .and_then(|a| registrar.lock().unwrap().lookup(a).cloned());
                 match binding {
                     None => {
-                        // AoR 不存在/注册过期 → 404/480（规范 §3 offline）。
-                        let _ = tx.reply(StatusCode::NotFound).await;
+                        let user = callee.clone().unwrap_or_default();
+                        if !user.starts_with("AD-")
+                            && !cfg.sfu_urls.is_empty()
+                            && bridge::sanitize_room(&user)
+                        {
+                            // 会议语义（规范 §4）：非设备 AoR = SFU 房间名——
+                            // 桥接到 SFU /start（offer→answer），200 OK 回 answer。
+                            let offer = tx.original.body.clone();
+                            let urls = cfg.sfu_urls.clone();
+                            let token = cfg.sfu_token.clone();
+                            let dl = dialog_layer.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) =
+                                    conference_bridge(dl, tx, user, offer, urls, token).await
+                                {
+                                    warn!(error=%e, "conference_bridge 失败");
+                                }
+                            });
+                        } else {
+                            // 设备不在线（AD-*）或非法房间名/未配 SFU → 404（规范 §3 offline）。
+                            let _ = tx.reply(StatusCode::NotFound).await;
+                        }
                     }
                     Some(binding) => {
                         let dl = dialog_layer.clone();
@@ -716,6 +742,78 @@ async fn relay(
     }
 }
 
+/// 会议桥（规范 §4）：INVITE 会议 AoR（无设备绑定的合法房间名）→ SFU /start
+/// 代理（offer→answer），200 OK 回 answer body。
+///
+/// 生命周期：BYE 由 dialog 层自动 200+Terminate（SIP 侧）；SFU 会话依赖媒体
+/// 超时回收（无 kick——/start 不返回会话 id，kick 按 room 会误伤同房其他端）。
+/// 会议端 ICE 为内联候选（v1 非 trickle），INFO trickle 不适用。
+async fn conference_bridge(
+    dl: Arc<DialogLayer>,
+    mut tx: Transaction,
+    room: String,
+    offer: Vec<u8>,
+    sfu_urls: Vec<String>,
+    sfu_token: Option<String>,
+) -> Result<(), String> {
+    let offer = String::from_utf8_lossy(&offer).to_string();
+    info!(%room, "SIP 会议 INVITE → SFU 桥");
+    let (state_tx, _state_rx) = dl.new_dialog_state_channel();
+    // A 腿 server dialog：自动 100 Trying/吸收 ACK/BYE（Contact/to-tag 由
+    // dialog 机制生成——裸 reply_with 缺 Contact 客户端建不了 dialog）。
+    let server_dlg = dl
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .map_err(|e| format!("建 server dialog 失败: {e}"))?;
+    {
+        let mut d = server_dlg.clone();
+        tokio::spawn(async move {
+            let _ = d.handle(&mut tx).await;
+        });
+    }
+    let urls = sfu_urls.clone();
+    let token = sfu_token.clone();
+    let room2 = room.clone();
+    let answer = tokio::task::spawn_blocking(move || {
+        sfu_proxy_start(&urls, token.as_deref(), &room2, &offer)
+    })
+    .await
+    .map_err(|e| format!("join task: {e}"))??;
+    let ct = Header::Other("Content-Type".into(), "application/sdp".into());
+    server_dlg
+        .accept(Some(vec![ct]), Some(answer.into_bytes()))
+        .map_err(|e| format!("accept 200: {e}"))
+}
+
+/// SFU /start 代理（viewer 角色；与 main.rs `proxy_to_sfu` 同构，SIP 侧独立
+/// 实现避免依赖 WSS Config）：房间名 FNV 哈希选池内 SFU（与 WSS 侧
+/// `selected_sfu_idx` 语义一致——同房间稳定同 SFU）。
+fn sfu_proxy_start(
+    sfu_urls: &[String],
+    sfu_token: Option<&str>,
+    room: &str,
+    offer: &str,
+) -> Result<String, String> {
+    let idx = fnv1a(room) as usize % sfu_urls.len();
+    let mut url = format!("{}/start?room={room}&role=viewer", sfu_urls[idx]);
+    url.push_str("&dc_ready=1");
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(10))
+        .build();
+    let mut req = agent.post(&url).set("Content-Type", "application/json");
+    if let Some(token) = sfu_token {
+        req = req.set("X-Internal-Token", token);
+    }
+    let resp = req.send_string(offer).map_err(|e| e.to_string())?;
+    resp.into_string().map_err(|e| e.to_string())
+}
+
+/// FNV-1a 房间哈希（SFU 池选路；与 WSS 侧同义）。
+fn fnv1a(s: &str) -> u64 {
+    s.bytes().fold(0xcbf29ce484222325u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -946,6 +1044,8 @@ mod tests {
             udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
             passwords: Arc::new(pw),
             tls_identity: None,
+            sfu_urls: vec![],
+            sfu_token: None,
         };
         let server_cancel = cancel.clone();
         let server = tokio::spawn(async move { serve(cfg, server_cancel).await });
@@ -1052,6 +1152,8 @@ mod tests {
             udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
             passwords: Arc::new(pw),
             tls_identity: None,
+            sfu_urls: vec![],
+            sfu_token: None,
         };
         let sc = cancel.clone();
         let server = tokio::spawn(async move { serve(cfg, sc).await });
@@ -1134,6 +1236,113 @@ mod tests {
         let _ = server.await;
     }
 
+    // -- 端到端 #552 slice 12：会议 AoR INVITE → SFU 桥 --
+
+    /// 非设备 AoR（会议房间名）INVITE → mock SFU /start → answer 端到端透传；
+    /// 离线设备（AD-*）与非法房间名仍 404。
+    #[test]
+    fn end_to_end_conference_invite_bridged_to_sfu() {
+        let _serial = serve_e2e_guard();
+        // mock SFU：接受一次 POST /start，校验 room/role 透传，回固定 answer。
+        let sfu = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let sfu_port = sfu.local_addr().unwrap().port();
+        let mock = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut s, _) = sfu.accept().expect("sfu accept");
+            let mut buf = [0u8; 8192];
+            let n = s.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            assert!(
+                req.contains("/start?room=meet-123&role=viewer"),
+                "room/role 应透传 SFU：{req}"
+            );
+            let body = r#"{"type":"answer","sdp":"v=0\r\nmock-sfu-answer\r\n"}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            s.write_all(resp.as_bytes()).unwrap();
+        });
+
+        let port = free_udp_port();
+        let mut pw = HashMap::new();
+        pw.insert("AD-CALLER".to_string(), "tok-caller".to_string());
+        let cfg = SipConfig {
+            realm: REALM.into(),
+            tls_addr: None,
+            wss_addr: None,
+            udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+            passwords: Arc::new(pw),
+            tls_identity: None,
+            sfu_urls: vec![format!("http://127.0.0.1:{sfu_port}")],
+            sfu_token: None,
+        };
+        let server_cancel = CancellationToken::new();
+        let sc = server_cancel.clone();
+        let server = std::thread::spawn(move || run_sip_endpoint(cfg, sc));
+        std::thread::sleep(Duration::from_millis(400));
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let cancel = CancellationToken::new();
+            let (ep, dl) = build_ua(&cancel).await;
+            ua_register(&ep, port, "AD-CALLER", "tok-caller").await;
+            let (stx, _srx) = dl.new_dialog_state_channel();
+            let sa: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+            let mut proxy_addr = SipAddr::from(sa);
+            proxy_addr.r#type = Some(rsipstack::sip::Transport::Udp);
+            let opt = InviteOption {
+                caller: format!("sip:AD-CALLER@{REALM}").try_into().unwrap(),
+                callee: format!("sip:meet-123@{REALM}").try_into().unwrap(),
+                destination: Some(proxy_addr),
+                content_type: Some("application/sdp".into()),
+                offer: Some(CALLER_SDP.as_bytes().to_vec()),
+                contact: dl.build_local_contact(None, None).unwrap(),
+                call_id: Some("e2e-conf-1".into()),
+                ..Default::default()
+            };
+            let (dlg, resp) = dl.do_invite(opt, stx).await.expect("会议 INVITE 应完成");
+            let resp = resp.expect("应有 final response");
+            assert_eq!(resp.status_code, StatusCode::OK, "会议桥应回 200");
+            assert_eq!(
+                String::from_utf8_lossy(&resp.body),
+                r#"{"type":"answer","sdp":"v=0\r\nmock-sfu-answer\r\n"}"#,
+                "SFU answer 应端到端透传"
+            );
+            dlg.bye().await.ok();
+
+            // 离线设备（AD-* 无绑定）→ 404（规范 §3 offline）。
+            let (stx2, _srx2) = dl.new_dialog_state_channel();
+            let mut proxy_addr2 = SipAddr::from(sa);
+            proxy_addr2.r#type = Some(rsipstack::sip::Transport::Udp);
+            let opt2 = InviteOption {
+                caller: format!("sip:AD-CALLER@{REALM}").try_into().unwrap(),
+                callee: format!("sip:AD-GHOST@{REALM}").try_into().unwrap(),
+                destination: Some(proxy_addr2),
+                content_type: Some("application/sdp".into()),
+                offer: Some(CALLER_SDP.as_bytes().to_vec()),
+                contact: dl.build_local_contact(None, None).unwrap(),
+                call_id: Some("e2e-conf-2".into()),
+                ..Default::default()
+            };
+            let (_, resp2) = dl
+                .do_invite(opt2, stx2)
+                .await
+                .expect("离线 INVITE 应有 final response");
+            let resp2 = resp2.expect("final");
+            assert_eq!(resp2.status_code, StatusCode::NotFound, "离线设备应 404");
+            cancel.cancel();
+        });
+
+        mock.join().expect("mock sfu 线程");
+        server_cancel.cancel();
+        let _ = server.join();
+    }
+
     // -- 端到端 #552 slice 1：SipClient UA（protocol 侧）注册到本服务端 --
 
     #[test]
@@ -1153,6 +1362,8 @@ mod tests {
             udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
             passwords: Arc::new(pw),
             tls_identity: None,
+            sfu_urls: vec![],
+            sfu_token: None,
         };
         let server_cancel = CancellationToken::new();
         let sc = server_cancel.clone();
@@ -1492,6 +1703,8 @@ mod tests {
             udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
             passwords: Arc::new(pw),
             tls_identity: None,
+            sfu_urls: vec![],
+            sfu_token: None,
         };
         let client_cfg = |device: &str| SipClientConfig {
             device_id: device.into(),
@@ -1528,6 +1741,8 @@ mod tests {
             udp_addr: None,
             passwords: Arc::new(pw),
             tls_identity: Some(identity),
+            sfu_urls: vec![],
+            sfu_token: None,
         };
         let ca_pem_cfg = ca_pem.clone();
         let client_cfg = |device: &str| SipClientConfig {
@@ -1578,6 +1793,8 @@ mod tests {
                     udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
                     passwords: Arc::new(pw),
                     tls_identity: None,
+                    sfu_urls: vec![],
+                    sfu_token: None,
                 },
                 sc,
             )
