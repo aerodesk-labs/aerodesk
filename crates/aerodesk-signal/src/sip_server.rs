@@ -824,6 +824,7 @@ async fn conference_bridge(
         // 桥失败必须回 final response（客户端走 Rejected→失败提示）。
         Ok(Err(e)) => {
             warn!(error=%e, "SFU 桥接失败，回 503");
+            eprintln!("conference_bridge: sfu_proxy_start error: {e}");
             let _ = server_dlg.reject(Some(StatusCode::ServiceUnavailable), None);
             return Ok(());
         }
@@ -1308,9 +1309,50 @@ mod tests {
         let mock = std::thread::spawn(move || {
             use std::io::{Read, Write};
             let (mut s, _) = sfu.accept().expect("sfu accept");
-            let mut buf = [0u8; 8192];
-            let n = s.read(&mut buf).unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            s.set_read_timeout(Some(Duration::from_secs(2))).ok();
+            // 读满请求再应答（Content-Length 或对端写完关闭）：单次 read 后立即
+            // 关闭会对仍在写请求体的客户端发 RST——ureq 报连接错误 → 桥 503
+            // （CI 上偶现，#576 run 32636138388）。
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                match s.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&buf);
+                        if let Some(cl) = text
+                            .split(
+                                "
+
+",
+                            )
+                            .next()
+                            .and_then(|head| {
+                                head.lines().find_map(|l| {
+                                    l.strip_prefix("Content-Length:")
+                                        .map(|v| v.trim().to_string())
+                                })
+                            })
+                            .and_then(|v| v.parse::<usize>().ok())
+                            && buf.len()
+                                >= text
+                                    .find(
+                                        "
+
+",
+                                    )
+                                    .map(|i| i + 4)
+                                    .unwrap_or(0)
+                                    + cl
+                        {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let req = String::from_utf8_lossy(&buf).to_string();
             assert!(
                 req.contains("/start?room=meet-123&role=viewer"),
                 "room/role 应透传 SFU：{req}"
@@ -1322,6 +1364,15 @@ mod tests {
                 body
             );
             s.write_all(resp.as_bytes()).unwrap();
+            use std::net::Shutdown;
+            let _ = s.shutdown(Shutdown::Write);
+            let mut drain = [0u8; 512];
+            loop {
+                match s.read(&mut drain) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
         });
 
         let port = free_udp_port();

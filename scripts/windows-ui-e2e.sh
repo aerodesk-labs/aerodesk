@@ -88,6 +88,8 @@ echo "== [3.5/6] seed SIP 配置（desktop 启动即 REGISTER，观看经会议�
 # 隔离 HOME：seed 与 desktop 启动同用 $E2E_DIR（不碰真实配置）。
 export AERO_E2E_HOME="$E2E_DIR"
 python3 - <<'PY'
+import sys
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')  # cp1252 控制台打印中文会崩
 import json, os
 # e2e SIP 链路配置：desktop 启动时读 ~/.aerodesk-settings.json 建 SipCallLink
 # （REGISTER 用 Digest 凭证），观看任意房间经 SIP 会议桥入 SFU。
