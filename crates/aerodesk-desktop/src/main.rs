@@ -1772,11 +1772,23 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
     ) {
         Ok(c) => c,
         Err(e) => {
+            tracing::warn!(
+                "SIP 配置无效：{e}（server_default={:?} sip_transport={:?} sip_port={}）",
+                settings.server_default,
+                settings.sip_transport,
+                settings.sip_port
+            );
             ui.set_signal_status(format!("SIP 配置无效：{e}").into());
             ui.set_signal_online(false);
             return;
         }
     };
+    tracing::info!(
+        "SIP 链路启动：device={} server={} transport={:?}",
+        settings.device_id,
+        server,
+        cfg.transport
+    );
     let link = Arc::new(std::sync::Mutex::new(
         aerodesk_core::sip_link::SipCallLink::new(cfg),
     ));
@@ -4798,8 +4810,11 @@ mod tests {
     }
 }
 
-/// 应用设置（本地持久化）。
+/// 应用设置（本地持久化）。struct 级 `serde(default)`：部分字段配置文件可省略
+/// （与 host ServiceSettings 一致——此前 subset JSON 解析失败被默认值静默吞掉，
+/// e2e seed 踩坑实测）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct AppSettings {
     server_default: String,
     quality: i32,

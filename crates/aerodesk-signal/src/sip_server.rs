@@ -773,11 +773,25 @@ async fn conference_bridge(
     let urls = sfu_urls.clone();
     let token = sfu_token.clone();
     let room2 = room.clone();
-    let answer = tokio::task::spawn_blocking(move || {
+    let answer = match tokio::task::spawn_blocking(move || {
         sfu_proxy_start(&urls, token.as_deref(), &room2, &offer)
     })
     .await
-    .map_err(|e| format!("join task: {e}"))??;
+    {
+        Ok(Ok(answer)) => answer,
+        // 桥失败必须回 final response——否则 INVITE 事务悬死，客户端
+        // 既无 Answered 也无 Rejected，UI 静默卡住（#576 CI 实测）。
+        Ok(Err(e)) => {
+            warn!(%room, error=%e, "SFU 桥接失败，回 503");
+            let _ = server_dlg.reject(Some(StatusCode::ServiceUnavailable), None);
+            return Ok(());
+        }
+        Err(e) => {
+            warn!(%room, error=%e, "SFU 桥接任务失败，回 503");
+            let _ = server_dlg.reject(Some(StatusCode::ServiceUnavailable), None);
+            return Ok(());
+        }
+    };
     let ct = Header::Other("Content-Type".into(), "application/sdp".into());
     server_dlg
         .accept(Some(vec![ct]), Some(answer.into_bytes()))
