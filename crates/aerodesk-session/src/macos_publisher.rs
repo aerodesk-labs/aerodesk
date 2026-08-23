@@ -82,12 +82,116 @@ pub fn start_publisher(cfg: crate::PublisherConfig, on_event: PublisherEventSink
     }
 }
 
+/// #552：SIP 1:1 P2P 被叫发布入口（P2pCall 已建立——accept_offer+accept 由
+/// 调用方完成），SCK 采集/VT 编码/CGEvent 注入与 SFU 路径共用同一泵。
+pub fn start_publisher_peer(
+    p2p: aerodesk_core::p2p_call::P2pCall,
+    video_mid: str0m::media::Mid,
+    room: String,
+    trickle_rx: Option<std::sync::mpsc::Receiver<String>>,
+    on_event: PublisherEventSink,
+) {
+    stop_publisher(on_event.clone());
+    let stop = Arc::new(AtomicBool::new(false));
+    *STOP.lock().unwrap() = Some(stop.clone());
+    on_event(PublisherEvent::Starting);
+    let sink = on_event.clone();
+    if std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || run_publisher_peer(p2p, video_mid, room, sink, trickle_rx, stop))
+        .is_err()
+    {
+        *STOP.lock().unwrap() = None;
+        on_event(PublisherEvent::StartFailed(
+            "被控端启动失败：无法创建线程".into(),
+        ));
+    }
+}
+
 /// 停止 macOS 被控端。
 pub fn stop_publisher(on_event: PublisherEventSink) {
     if let Some(stop) = STOP.lock().unwrap().take() {
         stop.store(true, Ordering::SeqCst);
     }
     on_event(PublisherEvent::Stopped);
+}
+
+/// 媒体通道抽象：SFU（LiveSession）与 P2P（P2pCall）共用采集/编码/注入泵
+/// （与 generic_publisher 的 PublisherTransport 同构；P2P 以首个 ChannelOpen
+/// 为会话就绪——DTLS 完成 ⟺ SRTP 密钥就绪，早写媒体被对端静默丢弃）。
+enum PublisherTransport {
+    Sfu(LiveSession),
+    Peer(aerodesk_core::p2p_call::P2pCall),
+}
+
+impl PublisherTransport {
+    fn pump(&mut self) {
+        use str0m::{Input, Output};
+        match self {
+            Self::Sfu(live) => {
+                live.socket
+                    .set_read_timeout(Some(Duration::from_millis(5)))
+                    .ok();
+                let mut buf = [0u8; 2000];
+                for _ in 0..512 {
+                    match live.socket.recv_from(&mut buf) {
+                        Ok((n, source)) => {
+                            let Ok(contents) = buf[..n].try_into() else {
+                                continue;
+                            };
+                            let input = Input::Receive(
+                                Instant::now(),
+                                str0m::net::Receive {
+                                    proto: str0m::net::Protocol::Udp,
+                                    source,
+                                    destination: live.socket.local_addr().unwrap(),
+                                    contents,
+                                },
+                            );
+                            let _ = live.endpoint.handle_input(input);
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let _ = live.endpoint.handle_timeout(Instant::now());
+                while let Some(output) = live.endpoint.poll_output() {
+                    match output {
+                        Output::Transmit(t) => {
+                            let _ = live.socket.send_to(&t.contents, t.destination);
+                        }
+                        Output::Timeout(_) => break,
+                        Output::Event(_) => {}
+                    }
+                }
+            }
+            Self::Peer(p2p) => {
+                let _ = p2p.poll();
+            }
+        }
+    }
+
+    fn poll_event(&mut self) -> Option<aerodesk_core::endpoint::ClientEvent> {
+        match self {
+            Self::Sfu(live) => live.endpoint.poll_event(),
+            Self::Peer(p2p) => p2p.poll_event(),
+        }
+    }
+
+    fn endpoint(&mut self) -> &mut aerodesk_core::Endpoint {
+        match self {
+            Self::Sfu(live) => &mut live.endpoint,
+            Self::Peer(p2p) => p2p.endpoint(),
+        }
+    }
+
+    /// #552：注入对端后到候选（P2P trickle；SFU 路径 no-op）。
+    fn add_remote_candidate(&mut self, sdp_candidate: &str) {
+        if let Self::Peer(p2p) = self {
+            if let Err(e) = p2p.add_remote_candidate(sdp_candidate) {
+                tracing::warn!("trickle 候选注入失败：{e}");
+            }
+        }
+    }
 }
 
 fn run_publisher(
@@ -100,12 +204,11 @@ fn run_publisher(
     view_only: bool,
     stop: Arc<AtomicBool>,
 ) {
-    let stale = || stop.load(Ordering::SeqCst);
     let auth = Some(token.as_str()).filter(|t| !t.is_empty());
 
     // #487 审查：连接链路在异常网络下可能无限阻塞且无法被 stop 中断——
     // 子线程 + 30s 总超时（正常约 1-5s），超时报错返回，不再静默卡死。
-    let mut live = match connect_live_role_codec_timeout(
+    let live = match connect_live_role_codec_timeout(
         &server,
         &room,
         Role::Publisher,
@@ -125,6 +228,61 @@ fn run_publisher(
         return;
     };
     let audio_mid = live.audio_mid;
+    let connected0 = live.ice_connected;
+    run_publisher_pump(
+        PublisherTransport::Sfu(live),
+        video_mid,
+        audio_mid,
+        connected0,
+        room,
+        on_event,
+        audio,
+        mouse,
+        view_only,
+        None,
+        stop,
+    );
+}
+
+/// #552：SIP 1:1 P2P 被叫发布（P2pCall 已由调用方建立并 accept）。
+fn run_publisher_peer(
+    p2p: aerodesk_core::p2p_call::P2pCall,
+    video_mid: str0m::media::Mid,
+    room: String,
+    on_event: PublisherEventSink,
+    trickle_rx: Option<std::sync::mpsc::Receiver<String>>,
+    stop: Arc<AtomicBool>,
+) {
+    run_publisher_pump(
+        PublisherTransport::Peer(p2p),
+        video_mid,
+        None,
+        false,
+        room,
+        on_event,
+        false,
+        true,
+        false,
+        trickle_rx,
+        stop,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_publisher_pump(
+    mut t: PublisherTransport,
+    video_mid: str0m::media::Mid,
+    audio_mid: Option<str0m::media::Mid>,
+    connected0: bool,
+    room: String,
+    on_event: PublisherEventSink,
+    audio: bool,
+    mouse: bool,
+    view_only: bool,
+    trickle_rx: Option<std::sync::mpsc::Receiver<String>>,
+    stop: Arc<AtomicBool>,
+) {
+    let stale = || stop.load(Ordering::SeqCst);
 
     // SCK 屏幕采集（0,0 = 按显示器原生宽高比缩放，避免拉伸致坐标错位）。
     use aerodesk_platform::macos::capture::ScreenCapture;
@@ -191,7 +349,7 @@ fn run_publisher(
     // #477：connect 建链阶段的 ICE 泵会消费掉首个 IceConnected 事件——必须
     // 用状态标志初始化（generic_publisher/cli 同款），否则经公网/TURN 建链后事件
     // 已被消费、connected 永远为 false，一帧不发（本地直连靠重协商二次事件掩盖）。
-    let mut connected = live.ice_connected;
+    let mut connected = connected0;
     let mut next_frame = Instant::now();
     let mut next_cursor = Instant::now();
     let mut pts: i64 = 0;
@@ -201,24 +359,15 @@ fn run_publisher(
     let mut cursor_source = aerodesk_platform::macos::cursor::MacCursor;
 
     while !stale() {
-        // #211：排空式读取 UDP，保证 SCTP ACK 及时消费，远端输入送达率不塌陷。
-        let wait = Duration::from_millis(5);
-        live.socket.set_read_timeout(Some(wait)).ok();
-        drain_udp_input(&mut live.socket, &mut live.endpoint, 512);
-        let _ = live.endpoint.handle_timeout(Instant::now());
-
-        while let Some(output) = live.endpoint.poll_output() {
-            match output {
-                Output::Transmit(t) => {
-                    let _ = live.socket.send_to(&t.contents, t.destination);
-                }
-                // 关键：Timeout 必须 break，否则 str0m 反复返回同一 Timeout（100% CPU）。
-                Output::Timeout(_) => break,
-                Output::Event(_) => {}
+        // #552：信令面转发的对端后到候选（INFO sdpfrag；无积压时一次空转）。
+        if let Some(rx) = trickle_rx.as_ref() {
+            while let Ok(cand) = rx.try_recv() {
+                t.add_remote_candidate(&cand);
             }
         }
+        t.pump();
 
-        while let Some(ev) = live.endpoint.poll_event() {
+        while let Some(ev) = t.endpoint().poll_event() {
             match ev {
                 ClientEvent::IceConnected => {
                     connected = true;
@@ -236,14 +385,14 @@ fn run_publisher(
                         tracing::warn!("vt capture force keyframe failed: {e}");
                     }
                 }
-                ev => handle_input(&mut live.endpoint, view_only, mouse, ev),
+                ev => handle_input(t.endpoint(), view_only, mouse, ev),
             }
         }
 
         if let Some(amid) = audio_mid
             && let Some(sender) = &mut audio_sender
         {
-            sender.tick(&mut live.endpoint, amid, Instant::now());
+            sender.tick(t.endpoint(), amid, Instant::now());
         }
 
         // 光标 30Hz 上报（静屏无视频帧时 cursor 通道仍常活，观看端能持续绘制）。
@@ -268,8 +417,7 @@ fn run_publisher(
                         // VT 输出 annexb 直接进 RTP 载荷。
                         let annexb = encoder.to_annexb(&frame);
                         let rtp_time = MediaTime::new(pts as u64 * 3000, Frequency::NINETY_KHZ);
-                        if let Err(e) = live.endpoint.send_video_frame(video_mid, annexb, rtp_time)
-                        {
+                        if let Err(e) = t.endpoint().send_video_frame(video_mid, annexb, rtp_time) {
                             tracing::warn!("发送视频帧失败: {e:?}");
                         }
                         pts += 1;
@@ -284,35 +432,6 @@ fn run_publisher(
     }
 
     on_event(PublisherEvent::Status("被控端已停止".into()));
-}
-
-/// #211：网络泵排空式读取，最多 `max_packets` 包。
-fn drain_udp_input(
-    socket: &mut aerodesk_core::media_socket::MediaSocket,
-    endpoint: &mut aerodesk_core::Endpoint,
-    max_packets: usize,
-) {
-    let mut buf = [0u8; 2000];
-    for _ in 0..max_packets {
-        match socket.recv_from(&mut buf) {
-            Ok((n, source)) => {
-                let Ok(contents) = buf[..n].try_into() else {
-                    continue;
-                };
-                let input = str0m::Input::Receive(
-                    Instant::now(),
-                    str0m::net::Receive {
-                        proto: Protocol::Udp,
-                        source,
-                        destination: socket.local_addr().unwrap(),
-                        contents,
-                    },
-                );
-                let _ = endpoint.handle_input(input);
-            }
-            Err(_) => break,
-        }
-    }
 }
 
 /// 被控端输入通道：远端键鼠 → CGEvent 注入；剪贴板文本 → 系统剪贴板。

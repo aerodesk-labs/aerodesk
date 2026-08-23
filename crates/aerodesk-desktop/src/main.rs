@@ -1602,35 +1602,6 @@ fn open_viewer_session(
         &server,
         SERVER_TLS.load(Ordering::SeqCst),
     );
-    #[cfg(target_os = "macos")]
-    std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .spawn(move || {
-            aerodesk_session::macos_media::run_viewer(
-                server_url,
-                room,
-                Some(token),
-                SlintSessionUi::new(weak2.clone(), slot),
-                control_rx,
-                input_rx,
-                cmd_rx,
-                file_cmd_rx,
-                chat_cmd_rx,
-                muted,
-                volume,
-                show_camera,
-                stop,
-                &FILE_TRANSFER_ENABLED,
-                {
-                    let ui2 = weak2.clone();
-                    move |rgba: &[u8], w: usize, h: usize| {
-                        crate::present_frame(&ui2, rgba, w, h, slot)
-                    }
-                },
-            );
-            with_ui(&weak2, |ui| ui.set_connecting(false));
-        })
-        .expect("spawn viewer thread");
     #[cfg(not(target_os = "macos"))]
     {
         // #552 拓扑（1:1 P2P / ≥3 人 SFU）+ 会议桥（slice 12）：SIP 链路在线
@@ -1644,7 +1615,14 @@ fn open_viewer_session(
             .and_then(|h| h.cmd_tx.clone());
         // #552：SIP 1:1 P2P 主叫——presence 线程完成 call→Answered 后回调移交
         // 会话线程（同一 UA，禁止双 UA 同 device_id 注册）。
-        let _ = (&(&token, &control_rx, &server_url));
+        let _ = (&(
+            &token,
+            &control_rx,
+            &server_url,
+            &muted,
+            &volume,
+            &show_camera,
+        ));
         let Some(cmd_tx) = sip_online else {
             ui.set_connecting(false);
             ui.set_conn_state(0);
