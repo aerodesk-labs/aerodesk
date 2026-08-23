@@ -27,7 +27,7 @@ REC="$(mktemp -d /tmp/bench-rec.XXXX)"
 echo "== 启动 sfu/signal"
 RECORD_DIR="$REC" ./target/release/aerodesk-sfu >"$REPORT_DIR/sfu.log" 2>&1 &
 SFU_PID=$!
-./target/release/aerodesk-signal >"$REPORT_DIR/signal.log" 2>&1 &
+SIP_UDP_PORT=5060 ./target/release/aerodesk-signal >"$REPORT_DIR/signal.log" 2>&1 &
 SIG_PID=$!
 for _ in $(seq 1 50); do
   if nc -z 127.0.0.1 3003 2>/dev/null; then break; fi

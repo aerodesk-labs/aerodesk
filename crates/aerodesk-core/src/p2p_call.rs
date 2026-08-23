@@ -339,6 +339,25 @@ fn media_candidates(bind_addr: SocketAddr, discover_external: bool) -> Vec<IpAdd
     candidates
 }
 
+/// 从 offer JSON 取**第一个音频 m-line** 的 mid（被叫侧发音频用；与
+/// [`offer_video_mid`] 同构）。offer 无音频返回 None。
+pub fn offer_audio_mid(offer_sdp: &str) -> Option<str0m::media::Mid> {
+    let v: serde_json::Value = serde_json::from_str(offer_sdp).ok()?;
+    let sdp = v.get("sdp")?.as_str()?;
+    let mut lines = sdp.lines();
+    while let Some(line) = lines.next() {
+        if line.starts_with("m=audio") {
+            for l in lines.by_ref() {
+                if let Some(mid) = l.strip_prefix("a=mid:") {
+                    return Some(str0m::media::Mid::from(mid));
+                }
+            }
+            return None;
+        }
+    }
+    None
+}
+
 /// 从 offer JSON（`{"type":"offer","sdp":"<SDP 文本>"}`）取**第一个视频 m-line**
 /// 的 mid——Callee 侧发送视频帧用：m-line 的 mid 双侧一致，answer 按方向反演但
 /// 不改 mid。offer 不含视频（纯音频/数据通道）返回 None。

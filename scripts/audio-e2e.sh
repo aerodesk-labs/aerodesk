@@ -18,7 +18,7 @@ REC="$(mktemp -d)"
 echo "== 启动 sfu/signal"
 RECORD_DIR="$REC" ./target/debug/aerodesk-sfu >/tmp/audio-sfu.log 2>&1 &
 SFU_PID=$!
-./target/debug/aerodesk-signal >/tmp/audio-sig.log 2>&1 &
+SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/audio-sig.log 2>&1 &
 SIG_PID=$!
 for _ in $(seq 1 50); do
     if nc -z 127.0.0.1 3003 2>/dev/null; then break; fi
@@ -49,9 +49,20 @@ done
 kill "$A_PID" 2>/dev/null || true
 wait "$A_PID" 2>/dev/null || true
 
+# #552 SIP 1:1：一个 publisher 服务一个呼叫——viewer A 结束后为 viewer B
+# 起新配对（旧 publisher 随 A 呼叫结束，BYE 后不再接新 INVITE）。
+kill "$PUB_PID" 2>/dev/null || true
+wait "$PUB_PID" 2>/dev/null || true
+ROOM_B="${ROOM}-b"
+echo "== publisher B（viewer B 配对）"
+./target/debug/aerodesk-agent --role publisher --audio \
+    --signal ws://127.0.0.1:3003 --room "$ROOM_B" >/tmp/audio-pub-b.log 2>&1 &
+PUB_PID=$!
+sleep 2
+
 echo "== viewer B（--audio --mute-audio，静音丢弃）"
 ./target/debug/aerodesk-agent --role viewer --audio --mute-audio \
-    --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/audio-b.log 2>&1 &
+    --signal ws://127.0.0.1:3003 --room "$ROOM_B" >/tmp/audio-b.log 2>&1 &
 B_PID=$!
 MUTE_OK=0
 DROP_OK=0

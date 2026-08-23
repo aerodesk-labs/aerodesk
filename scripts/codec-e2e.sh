@@ -18,7 +18,7 @@ for codec in h264 h265 vp9 av1; do
   REC="$(mktemp -d)"
   RECORD_DIR="$REC" ./target/debug/aerodesk-sfu >"/tmp/codec-$codec-sfu.log" 2>&1 &
   SFU_PID=$!
-  ./target/debug/aerodesk-signal >"/tmp/codec-$codec-sig.log" 2>&1 &
+  SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >"/tmp/codec-$codec-sig.log" 2>&1 &
   SIG_PID=$!
   for _ in $(seq 1 50); do
     if nc -z 127.0.0.1 3003 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then break; fi

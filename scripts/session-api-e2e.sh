@@ -29,7 +29,7 @@ RECORD_DIR="$REC" RECORD_ON_DEMAND=1 INTERNAL_TOKEN="$TOKEN" \
   ./target/debug/aerodesk-sfu >/tmp/sess-sfu.log 2>&1 &
 SFU=$!
 SIGNAL_PORT=14001 SIGNAL_PLAIN_PORT=14003 SFU_URL=http://127.0.0.1:14002 SFU_TOKEN="$TOKEN" \
-  ./target/debug/aerodesk-signal >/tmp/sess-sig.log 2>&1 &
+  SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/sess-sig.log 2>&1 &
 SIG=$!
 for _ in $(seq 1 50); do
     if nc -z 127.0.0.1 14002 2>/dev/null && nc -z 127.0.0.1 14003 2>/dev/null; then break; fi

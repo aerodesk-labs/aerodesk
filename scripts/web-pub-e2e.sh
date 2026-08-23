@@ -50,7 +50,7 @@ sleep 1
 REC="$(mktemp -d)"
 RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu" >/tmp/webpub-sfu.log 2>&1 &
 SFU=$!
-"$ROOT/target/debug/aerodesk-signal" >/tmp/webpub-sig.log 2>&1 &
+SIP_UDP_PORT=5060 "$ROOT/target/debug/aerodesk-signal" >/tmp/webpub-sig.log 2>&1 &
 SIG=$!
 OK=0
 for _ in $(seq 1 50); do

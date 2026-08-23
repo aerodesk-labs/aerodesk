@@ -259,6 +259,9 @@ pub struct SipConfig {
     /// 为口令——服务器无需逐设备配置即可承接存量 token 客户端；多 token 部署
     /// 用 SIP_DIGEST_USERS 显式覆盖。
     pub token_password: Option<String>,
+    /// 开放注册（开发/e2e）：口令表与 token 均未配置时跳过 Digest 校验——
+    /// 与 WSS join 同姿态（无鉴权源即开放，main.rs auth_ok 语义）。
+    pub open_register: bool,
     /// TLS 身份（复用 signal 的证书加载）。
     pub tls_identity: Option<TlsIdentity>,
     /// SFU 池（会议桥用）：非设备 AoR 的 INVITE 代理到 SFU /start（规范 §4
@@ -403,12 +406,43 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
                 let nonce = make_nonce(&nonce_counter, &nonce_secret);
                 let passwords = cfg.passwords.clone();
                 let token_password = cfg.token_password.clone();
+                let open_register = cfg.open_register;
                 let password_of = move |user: &str| {
+                    if open_register {
+                        // 开放模式：任意口令放行（占位口令使 Digest 校验必然通过
+                        // 不可行——校验按对端口令算哈希；改为跳过校验走捷径分支）。
+                        return Some(String::new());
+                    }
                     passwords
                         .get(user)
                         .cloned()
                         .or_else(|| token_password.clone())
                 };
+                if open_register {
+                    // 开放模式：解析出 AoR 即注册（跳过 Digest），与 WSS 无鉴权
+                    // 源放行同姿态。路由地址提取与 Digest 路径同款（可靠传输复用
+                    // flow；UDP 经 Via received/rport）——开放模式曾传 None 致
+                    // INVITE 路由丢失（agent e2e 实测 B 腿静默死）。
+                    if let Some(aor) = request_aor(req) {
+                        let route = match &tx.connection {
+                            Some(c) if c.is_reliable() => c.get_remote_addr().cloned(),
+                            _ => {
+                                endpoint
+                                    .inner
+                                    .get_destination_from_request(&tx.original)
+                                    .await
+                            }
+                        };
+                        let mut reg = registrar.lock().unwrap();
+                        reg.register(&aor, "open".into(), route, DEFAULT_EXPIRES_SECS);
+                        let n = reg.len();
+                        drop(reg);
+                        metrics.registrations.store(n as u64, Ordering::Relaxed);
+                        info!(%aor, expires = DEFAULT_EXPIRES_SECS, online = n, "SIP 注册（开放模式，未验 Digest）");
+                    }
+                    let _ = tx.reply(StatusCode::OK).await;
+                    continue;
+                }
                 match decide_register(req, &cfg.realm, &nonce, &password_of) {
                     RegisterDecision::Challenge(www) => {
                         let _ = tx
@@ -1105,6 +1139,7 @@ mod tests {
             sfu_urls: vec![],
             sfu_token: None,
             token_password: None,
+            open_register: false,
         };
         let server_cancel = cancel.clone();
         let server = tokio::spawn(async move { serve(cfg, server_cancel).await });
@@ -1214,6 +1249,7 @@ mod tests {
             sfu_urls: vec![],
             sfu_token: None,
             token_password: None,
+            open_register: false,
         };
         let sc = cancel.clone();
         let server = tokio::spawn(async move { serve(cfg, sc).await });
@@ -1388,6 +1424,7 @@ mod tests {
             sfu_urls: vec![format!("http://127.0.0.1:{sfu_port}")],
             sfu_token: None,
             token_password: None,
+            open_register: false,
         };
         let server_cancel = CancellationToken::new();
         let sc = server_cancel.clone();
@@ -1513,6 +1550,7 @@ mod tests {
             sfu_urls: vec![format!("http://127.0.0.1:{sfu_port}")],
             sfu_token: None,
             token_password: None,
+            open_register: false,
         };
         let server_cancel = CancellationToken::new();
         let sc = server_cancel.clone();
@@ -1591,6 +1629,7 @@ mod tests {
             sfu_urls: vec![],
             sfu_token: None,
             token_password: None,
+            open_register: false,
         };
         let server_cancel = CancellationToken::new();
         let sc = server_cancel.clone();
@@ -1933,6 +1972,7 @@ mod tests {
             sfu_urls: vec![],
             sfu_token: None,
             token_password: None,
+            open_register: false,
         };
         let client_cfg = |device: &str| SipClientConfig {
             device_id: device.into(),
@@ -1972,6 +2012,7 @@ mod tests {
             sfu_urls: vec![],
             sfu_token: None,
             token_password: None,
+            open_register: false,
         };
         let ca_pem_cfg = ca_pem.clone();
         let client_cfg = |device: &str| SipClientConfig {
@@ -2025,6 +2066,7 @@ mod tests {
                     sfu_urls: vec![],
                     sfu_token: None,
                     token_password: None,
+                    open_register: false,
                 },
                 sc,
             )
