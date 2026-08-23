@@ -76,6 +76,8 @@ set -e
 sleep 3
 
 echo "== [4.5/7] seed SIP 配置（desktop 启动即 REGISTER，观看经会议桥）"
+# 隔离 HOME：seed 与 desktop 启动同用 $E2E_DIR（不碰真实配置）。
+export AERO_E2E_HOME="$E2E_DIR"
 python3 - <<'PY'
 import json, os
 settings = {
@@ -94,7 +96,6 @@ PY
 
 echo "== [5/7] 启动 Linux UI（Xvfb，自动连接观看）"
 ls -la "$ROOT/target/debug/aerodesk-desktop" || echo "UI BINARY MISSING"
-export AERO_E2E_HOME="$E2E_DIR"
 RUST_LOG=debug DISPLAY=:99 HOME="$E2E_DIR" "$ROOT/target/debug/aerodesk-desktop" \
   -server 127.0.0.1:3003 -room "$ROOM" -autoconnect >/tmp/linuxui-ui.log 2>&1 &
 UI_PID=$!
