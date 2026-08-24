@@ -2207,6 +2207,11 @@ fn viewer(
                     // 丢弃且 sent 标志已置位不再重发（bitrate/display e2e CI 连败
                     // 根因）；control 打开事件必然晚于或等于双向通道就绪。
                     if label == "control" {
+                        // #553：对端（pub/SFU）control 通道可能晚于本端 ~1s 打开
+                        // （macOS vt 环境实测：本端 ChannelOpen(control) 时对端
+                        // SCTP 流未就绪，消息被静默丢弃且 sent 标志已置位不再重发）
+                        // ——发送前短暂等待对端就绪（一次性，消息幂等无副作用）。
+                        std::thread::sleep(std::time::Duration::from_millis(500));
                         // #29：可选显式选层（--layer q|h|f），经 control 通道发 SFU。
                         if !layer_sent {
                             let req = serde_json::json!({ "layer": layer });
