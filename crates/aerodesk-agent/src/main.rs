@@ -2199,45 +2199,45 @@ fn viewer(
                     // 丢弃且 sent 标志已置位不再重发（bitrate/display e2e CI 连败
                     // 根因）；control 打开事件必然晚于或等于双向通道就绪。
                     if label == "control" {
-                    // #29：可选显式选层（--layer q|h|f），经 control 通道发 SFU。
-                    if !layer_sent {
-                        let req = serde_json::json!({ "layer": layer });
-                        let data = serde_json::to_vec(&req).unwrap();
-                        if endpoint.send_channel_data("control", false, &data) {
-                            info!("layer request sent: {layer:?}");
-                            layer_sent = true;
+                        // #29：可选显式选层（--layer q|h|f），经 control 通道发 SFU。
+                        if !layer_sent {
+                            let req = serde_json::json!({ "layer": layer });
+                            let data = serde_json::to_vec(&req).unwrap();
+                            if endpoint.send_channel_data("control", false, &data) {
+                                info!("layer request sent: {layer:?}");
+                                layer_sent = true;
+                            }
                         }
-                    }
-                    // #58 观看端静音：经 control 通道下发一次。
-                    if mute_audio && !mute_sent {
-                        let req = serde_json::json!({ "audio_mute": true });
-                        let data = serde_json::to_vec(&req).unwrap();
-                        if endpoint.send_channel_data("control", false, &data) {
-                            info!("audio mute command sent");
-                            mute_sent = true;
+                        // #58 观看端静音：经 control 通道下发一次。
+                        if mute_audio && !mute_sent {
+                            let req = serde_json::json!({ "audio_mute": true });
+                            let data = serde_json::to_vec(&req).unwrap();
+                            if endpoint.send_channel_data("control", false, &data) {
+                                info!("audio mute command sent");
+                                mute_sent = true;
+                            }
                         }
-                    }
-                    // #58 显示器切换：经 control 通道下发一次（SFU 转发给被控端）。
-                    if let Some(d) = display
-                        && !display_sent
-                    {
-                        let req = serde_json::json!({ "display": d });
-                        let data = serde_json::to_vec(&req).unwrap();
-                        if endpoint.send_channel_data("control", false, &data) {
-                            info!("display switch command sent: {d}");
-                            display_sent = true;
+                        // #58 显示器切换：经 control 通道下发一次（SFU 转发给被控端）。
+                        if let Some(d) = display
+                            && !display_sent
+                        {
+                            let req = serde_json::json!({ "display": d });
+                            let data = serde_json::to_vec(&req).unwrap();
+                            if endpoint.send_channel_data("control", false, &data) {
+                                info!("display switch command sent: {d}");
+                                display_sent = true;
+                            }
                         }
-                    }
-                    // #267 测试/自动化钩子：--send-control '<json>' 经 control 通道下发一次
-                    // （如 {"bitrate":N}，验证码率反馈回路）。
-                    if let Some(ctl) = send_control
-                        && !control_sent
-                    {
-                        if endpoint.send_channel_data("control", false, ctl.as_bytes()) {
-                            info!("control command sent: {ctl}");
-                            control_sent = true;
+                        // #267 测试/自动化钩子：--send-control '<json>' 经 control 通道下发一次
+                        // （如 {"bitrate":N}，验证码率反馈回路）。
+                        if let Some(ctl) = send_control
+                            && !control_sent
+                        {
+                            if endpoint.send_channel_data("control", false, ctl.as_bytes()) {
+                                info!("control command sent: {ctl}");
+                                control_sent = true;
+                            }
                         }
-                    }
                     }
                 }
                 // #109 远程命令：响应打印 stdout/stderr/exit code 后退出（exit code 语义）。
