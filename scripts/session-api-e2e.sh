@@ -6,6 +6,7 @@
 #       断言客户端数回落、/healthz 计数回落、audit.log 含 session/kick。
 set -euo pipefail
 cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
 
 ROOM="sess-$(date +%s)"
 export RUST_LOG="${RUST_LOG:-info}"
@@ -50,14 +51,16 @@ done
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:14002/session/kick?room=x&client=1")
 [ "$CODE" = "403" ] && echo "PASS kick unauthenticated 403" || fail "expected 403 got $CODE"
 
-echo "== 加入 publisher + viewer"
-./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
-    --signal ws://127.0.0.1:14003 --room "$ROOM" >/tmp/sess-pub.log 2>&1 &
-PUB=$!
-sleep 2
+echo "== 加入 2 个 viewer（SIP 会议桥 → SFU）"
+# #552 后原生端 1:1 P2P 不经 SFU——会议桥（无绑定房间 INVITE）是原生端进 SFU
+# 的唯一稳定路径；2 个 CLI viewer 纯 CLI 无浏览器依赖（clients=2 断言保持）。
 ./target/debug/aerodesk-agent --role viewer \
     --signal ws://127.0.0.1:14003 --room "$ROOM" >/tmp/sess-view.log 2>&1 &
 VIEW=$!
+sleep 2
+./target/debug/aerodesk-agent --role viewer \
+    --signal ws://127.0.0.1:14003 --room "$ROOM" >/tmp/sess-view2.log 2>&1 &
+VIEW2=$!
 sleep 5
 
 echo "== 房间列表应包含 $ROOM 且 clients=2"
@@ -71,9 +74,9 @@ CLIENTS=$(curl -s -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/session/
 N=$(echo "$CLIENTS" | jget "len(v['clients'])")
 [ "$N" = "2" ] || fail "expected 2 clients got $N"
 ROLES=$(echo "$CLIENTS" | jget "sorted(c['role'] for c in v['clients'])")
-[ "$ROLES" = "['publisher', 'viewer']" ] || fail "roles 异常: $ROLES"
-PID=$(echo "$CLIENTS" | jget "[c['id'] for c in v['clients'] if c['role']=='publisher'][0]")
-echo "PASS clients=$N roles=$ROLES publisher_id=$PID"
+[ "$ROLES" = "['viewer', 'viewer']" ] || fail "roles 异常: $ROLES"
+PID=$(echo "$CLIENTS" | jget "v['clients'][0]['id']")
+echo "PASS clients=$N roles=$ROLES kick_target_id=$PID"
 
 echo "== 参数/不存在校验"
 # #249：省略 client = room 级踢人（#249）→ 对空房间幂等 200 kicked=0。
@@ -93,7 +96,7 @@ for _ in $(seq 1 30); do
     [ "${CNT:-}" = "1" ] && break
     sleep 0.2
 done
-[ "$CNT" = "1" ] && echo "PASS clients 回落到 1（publisher 已断开）" || fail "kick 后仍有 $CNT 客户端"
+[ "$CNT" = "1" ] && echo "PASS clients 回落到 1（被踢客户端已断开）" || fail "kick 后仍有 $CNT 客户端"
 
 echo "== 幂等：再踢同 id 应 404"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/session/kick?room=$ROOM&client=$PID")
@@ -111,6 +114,6 @@ sleep 6  # 等心跳（5s）刷新 metrics
 H=$(curl -sk "https://127.0.0.1:14000/healthz")
 echo "$H" | grep -q '"clients":1' && echo "PASS healthz clients=1" || { echo "healthz=$H"; fail "healthz 未回落"; }
 
-kill "$VIEW" "$PUB" "$SFU" "$SIG" 2>/dev/null || true
+kill "$VIEW" "$VIEW2" "$SFU" "$SIG" 2>/dev/null || true
 wait 2>/dev/null || true
 echo "== 会话管理 API e2e PASS =="
