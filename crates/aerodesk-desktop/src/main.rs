@@ -1602,35 +1602,6 @@ fn open_viewer_session(
         &server,
         SERVER_TLS.load(Ordering::SeqCst),
     );
-    #[cfg(target_os = "macos")]
-    std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .spawn(move || {
-            aerodesk_session::macos_media::run_viewer(
-                server_url,
-                room,
-                Some(token),
-                SlintSessionUi::new(weak2.clone(), slot),
-                control_rx,
-                input_rx,
-                cmd_rx,
-                file_cmd_rx,
-                chat_cmd_rx,
-                muted,
-                volume,
-                show_camera,
-                stop,
-                &FILE_TRANSFER_ENABLED,
-                {
-                    let ui2 = weak2.clone();
-                    move |rgba: &[u8], w: usize, h: usize| {
-                        crate::present_frame(&ui2, rgba, w, h, slot)
-                    }
-                },
-            );
-            with_ui(&weak2, |ui| ui.set_connecting(false));
-        })
-        .expect("spawn viewer thread");
     #[cfg(not(target_os = "macos"))]
     {
         // #552 拓扑（1:1 P2P / ≥3 人 SFU）+ 会议桥（slice 12）：SIP 链路在线
@@ -1644,7 +1615,14 @@ fn open_viewer_session(
             .and_then(|h| h.cmd_tx.clone());
         // #552：SIP 1:1 P2P 主叫——presence 线程完成 call→Answered 后回调移交
         // 会话线程（同一 UA，禁止双 UA 同 device_id 注册）。
-        let _ = (&(&token, &control_rx, &server_url));
+        let _ = (&(
+            &token,
+            &control_rx,
+            &server_url,
+            &muted,
+            &volume,
+            &show_camera,
+        ));
         let Some(cmd_tx) = sip_online else {
             ui.set_connecting(false);
             ui.set_conn_state(0);
@@ -1824,7 +1802,7 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                     break;
                 }
                 // UI 命令：主叫呼出（P2pCall 已 create_offer，本线程 call 并等 Answered）。
-                while let Ok(cmd) = cmd_rx.try_recv() {
+                'cmd_loop: while let Ok(cmd) = cmd_rx.try_recv() {
                     match cmd {
                         LinkCommand::Call {
                             target,
@@ -1835,6 +1813,31 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                             on_answered,
                             on_failed,
                         } => {
+                            // 等 REGISTER 完成（Online）再 INVITE——UDP 丢包下 SIP
+                            // 层按 RFC 重传（Timer 类 ~32s/次），注册成功可至 ~63s
+                            // （mac e2e VM 实测）——窗口须覆盖两轮重传。
+                            {
+                                let deadline = std::time::Instant::now()
+                                    + std::time::Duration::from_secs(75);
+                                loop {
+                                    let mut lk = link
+                                        .lock()
+                                        .unwrap_or_else(aerodesk_core::util::lock_recover);
+                                    let st = lk.poll();
+                                    drop(lk);
+                                    if st.is_online() {
+                                        break;
+                                    }
+                                    if std::time::Instant::now() >= deadline {
+                                        tracing::warn!(
+                                            "sip call: 75s 未注册完成（{st:?}），放弃呼叫"
+                                        );
+                                        on_failed(format!("SIP 注册未完成：{st:?}"));
+                                        continue 'cmd_loop;
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
+                                }
+                            }
                             // P2pCall + offer 在线程内构建（TURN 建连可能阻塞数秒）。
                             let mut p2p = match P2pCall::new(P2pCallConfig {
                                 role: P2pRole::Caller,

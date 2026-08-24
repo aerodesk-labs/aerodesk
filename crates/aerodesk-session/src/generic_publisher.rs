@@ -50,8 +50,20 @@ pub fn start_publisher_peer(
     imp::start_publisher_peer(p2p, video_mid, room, trickle_rx, on_event);
 }
 
-/// #552：其余平台 P2P 被叫发布未接入（macOS 被控端仍走 SFU，mac slice 后续）。
-#[cfg(not(windows))]
+/// macOS：P2P 被叫发布转发 macos_publisher（SCK/VT/CGEvent 适配，#552 slice 15）。
+#[cfg(target_os = "macos")]
+pub fn start_publisher_peer(
+    p2p: aerodesk_core::p2p_call::P2pCall,
+    video_mid: str0m::media::Mid,
+    room: String,
+    trickle_rx: Option<std::sync::mpsc::Receiver<String>>,
+    on_event: PublisherEventSink,
+) {
+    crate::macos_publisher::start_publisher_peer(p2p, video_mid, room, trickle_rx, on_event);
+}
+
+/// 其余平台（Linux 等）P2P 被叫发布未接入。
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn start_publisher_peer(
     _p2p: aerodesk_core::p2p_call::P2pCall,
     _video_mid: str0m::media::Mid,
@@ -60,7 +72,7 @@ pub fn start_publisher_peer(
     on_event: PublisherEventSink,
 ) {
     on_event(PublisherEvent::StartFailed(
-        "SIP P2P 被控端发布当前仅 Windows 实现".into(),
+        "SIP P2P 被控端发布当前仅 Windows/macOS 实现".into(),
     ));
 }
 
