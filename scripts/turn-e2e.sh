@@ -163,6 +163,21 @@ echo "== 3a) 发布端（TURN_PROTO=${TURN_PROTO}）：allocate + relayed 候选
 "$TARGET_DIR"/aerodesk-agent --role publisher --encoder x264 --noisy \
   --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/turn-e2e-pub.log 2>&1 &
 PUB_PID=$!
+# #552 SIP 1:1：publisher 等 IncomingCall——先等注册就绪，viewer（3b）起后再等 ICE。
+ok=1
+for _ in $(seq 1 30); do grep -q 'SIP registered' /tmp/turn-e2e-pub.log 2>/dev/null && ok=0 && break; sleep 0.3; done
+if [ "$ok" -ne 0 ]; then
+    echo "FAIL 发布端未完成 SIP 注册"; tail -8 /tmp/turn-e2e-pub.log
+    kill "$PUB_PID" 2>/dev/null || true
+    kill "$(cat /tmp/turn-e2e-sfu.pid)" "$(cat /tmp/turn-e2e-sig.pid)" 2>/dev/null || true
+    [ -n "$TURN_PID" ] && kill "$TURN_PID" 2>/dev/null || true
+    exit 1
+fi
+
+echo "== 3b) 观看端（TURN_PROTO=${TURN_PROTO}）：allocate + relayed 候选 + ICE"
+"$TARGET_DIR"/aerodesk-agent --role viewer --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/turn-e2e-view.log 2>&1 &
+VIEW_PID=$!
+# 发布端 ICE（viewer 呼入后建链）——TURN allocation/relayed/SDP/ICE 全断言。
 ok=1
 for _ in $(seq 1 60); do
     if grep -q 'TURN allocation ok' /tmp/turn-e2e-pub.log 2>/dev/null \
@@ -181,9 +196,6 @@ else
     exit 1
 fi
 
-echo "== 3b) 观看端（TURN_PROTO=${TURN_PROTO}）：allocate + relayed 候选 + ICE"
-"$TARGET_DIR"/aerodesk-agent --role viewer --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/turn-e2e-view.log 2>&1 &
-VIEW_PID=$!
 ok=1
 for _ in $(seq 1 60); do
     if grep -q 'TURN allocation ok' /tmp/turn-e2e-view.log 2>/dev/null \
