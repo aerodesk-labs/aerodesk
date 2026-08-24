@@ -1525,7 +1525,13 @@ fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
     match ev {
         // #553 验收诊断：所有通道打开打日志（bitrate/display 的 control 未达
         // 排查——input/file 开而 control 是否在 pub 侧打开需可见）。
-        ClientEvent::ChannelOpen(label, _) if label == "input" || label == "control" || label == "file" || label == "cursor" || label == "cmd" => {
+        ClientEvent::ChannelOpen(label, _)
+            if label == "input"
+                || label == "control"
+                || label == "file"
+                || label == "cursor"
+                || label == "cmd" =>
+        {
             info!("channel open: {label}");
         }
         ClientEvent::ChannelData(cid, _, data) => {
