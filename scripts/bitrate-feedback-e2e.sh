@@ -31,6 +31,18 @@ echo "== 合成发布端（vt，无 TCC）"
 ./target/debug/aerodesk-agent --role publisher --encoder vt --signal ws://127.0.0.1:14003 \
   --room "$ROOM" >/tmp/brf-pub.log 2>&1 &
 PUB=$!
+# #552 SIP 1:1：viewer 须在 publisher 注册完成后才 INVITE（否则 lookup 未命中
+# 走会议桥 SFU——同 linux-native 竞态）——轮询注册就绪（≤15s）。
+OK=0
+for _ in $(seq 1 30); do
+    if grep -q "SIP registered" /tmp/brf-pub.log 2>/dev/null; then OK=1; break; fi
+    sleep 0.5
+done
+if [ "$OK" != "1" ]; then
+    echo "FAIL: publisher 未完成 SIP 注册"; tail -8 /tmp/brf-pub.log
+    kill "$PUB" 2>/dev/null || true
+    exit 1
+fi
 
 echo "== viewer 经 control 下发码率反馈"
 ./target/debug/aerodesk-agent --role viewer --signal ws://127.0.0.1:14003 --room "$ROOM" \
@@ -38,8 +50,8 @@ echo "== viewer 经 control 下发码率反馈"
 VIEW=$!
 sleep 6
 
-# 断言 publisher 收到并解析码率反馈。
-if grep -q "control: bitrate feedback -> 2000000" /tmp/brf-pub.log; then
+# 断言 publisher 收到并解析码率反馈（合成发布端打 "-> "，真实屏幕发布端打 "applied -> "）。
+if grep -qE "control: bitrate feedback( applied)? -> 2000000" /tmp/brf-pub.log; then
   echo "PASS: publisher 收到码率反馈（2000000 bps）"
 else
   echo "FAIL: publisher 未收到码率反馈；日志："
