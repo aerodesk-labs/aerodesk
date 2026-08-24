@@ -48,12 +48,36 @@ BODY=$(curl -s -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/metrics/pro
 echo "$BODY" | grep -q '^aerodesk_sfu_recordings_active 1$' \
   && echo "PASS recordings_active=1" || { echo "FAIL recordings_active"; exit 1; }
 
-echo "== publisher 推流 4s"
-./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
-    --signal ws://127.0.0.1:14003 --room "$ROOM" >/tmp/recapi-pub.log 2>&1 &
+echo "== publisher 推流 4s（#552 后原生端 P2P 不经 SFU——录制需媒体经 SFU，
+Web 发布端（headless Chrome 屏幕共享）走 WSS 房间 → SFU，同 web-pub 模式）"
+E2E_DIR="${WEB_E2E_DIR:-/tmp/record-api-e2e}"
+mkdir -p "$E2E_DIR"
+cd "$E2E_DIR"
+if [ ! -d node_modules/playwright-core ]; then npm init -y >/dev/null 2>&1; npm i playwright-core >/dev/null 2>&1; fi
+cat > e2e-pub.js <<'JS'
+const { chromium } = require('playwright-core');
+const ROOM = process.argv[2];
+(async () => {
+  const browser = await chromium.launch({
+    channel: process.env.BROWSER || 'msedge', headless: true,
+    args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream',
+           '--auto-accept-this-tab-capture', '--enable-usermedia-screen-capturing'],
+  });
+  const page = await browser.newPage();
+  await page.goto(`http://127.0.0.1:14002/?room=${ROOM}&role=publisher&signal=ws://127.0.0.1:14003/ws`);
+  await page.click('#connect');
+  await page.waitForFunction(() => document.getElementById('status').innerText.includes('已连接'), { timeout: 25000 });
+  console.log('PASS web publisher connected');
+  await new Promise(r => setTimeout(r, 8000));
+  await browser.close();
+})().catch(e => { console.error('E2E FAIL:', e.message); process.exit(1); });
+JS
+cd "$ROOT"
+node "$E2E_DIR/e2e-pub.js" "$ROOM" &
 PUB=$!
 sleep 4
 kill "$PUB" 2>/dev/null || true
+wait "$PUB" 2>/dev/null || true
 
 echo "== status 应包含房间"
 curl -s -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/record/status" | grep -q "$ROOM" \
