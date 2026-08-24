@@ -54,8 +54,10 @@ sleep 6
 if grep -qE "control: bitrate feedback( applied)? -> 2000000" /tmp/brf-pub.log; then
   echo "PASS: publisher 收到码率反馈（2000000 bps）"
 else
-  echo "FAIL: publisher 未收到码率反馈；日志："
+  echo "FAIL: publisher 未收到码率反馈；pub 日志："
   tail -5 /tmp/brf-pub.log
+  echo "--- viewer 日志："
+  tail -8 /tmp/brf-view.log
   kill "$PUB" "$VIEW" 2>/dev/null || true
   exit 1
 fi

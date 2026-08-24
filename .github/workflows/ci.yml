@@ -266,9 +266,10 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/tcp-quota-e2e.sh
       # #267 发布端码率反馈回路：viewer --send-control → SFU 透传 → publisher 解析。
+      # 时序敏感（P2P 通道打开顺序偶发差异），按仓库 e2e 惯例限 3 次重试。
       - name: e2e bitrate feedback (#267, macOS only)
         if: runner.os == 'macOS'
-        run: ./scripts/bitrate-feedback-e2e.sh
+        run: bash scripts/ci-retry.sh 3 ./scripts/bitrate-feedback-e2e.sh
 
       # #240 SFU 会话管理 API：房间/客户端列表 + 踢人 + 审计留痕。
       - name: e2e session API (macOS only)
