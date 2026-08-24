@@ -229,9 +229,10 @@ jobs:
         run: ./scripts/opus-e2e.sh
 
       # #58 显示器切换：viewer --display N → SFU control 转发 → publisher（控制链路）。
+      # control 通道时序偶发（同 bitrate-feedback），限 3 次重试。
       - name: e2e display switch control path (macOS only)
         if: runner.os == 'macOS'
-        run: ./scripts/display-e2e.sh
+        run: bash scripts/ci-retry.sh 3 ./scripts/display-e2e.sh
 
       # #146 多 PoP 房间路由：双 PoP 本地验证信令重定向 + 客户端自动跟随。
       # （#148/#159 重构 ci.yml 时曾丢失该 step，多次恢复于 #154/#160 合并）
