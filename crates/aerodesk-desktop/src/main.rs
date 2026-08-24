@@ -1813,11 +1813,12 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                             on_answered,
                             on_failed,
                         } => {
-                            // 等 REGISTER 完成（Online）再 INVITE——注册慢（退避重试）
-                            // 时早发 INVITE 会被 UA 拒（mac e2e 实测 +63s 注册）。
+                            // 等 REGISTER 完成（Online）再 INVITE——UDP 丢包下 SIP
+                            // 层按 RFC 重传（Timer 类 ~32s/次），注册成功可至 ~63s
+                            // （mac e2e VM 实测）——窗口须覆盖两轮重传。
                             {
                                 let deadline = std::time::Instant::now()
-                                    + std::time::Duration::from_secs(15);
+                                    + std::time::Duration::from_secs(75);
                                 loop {
                                     let mut lk = link
                                         .lock()
@@ -1829,7 +1830,7 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                                     }
                                     if std::time::Instant::now() >= deadline {
                                         tracing::warn!(
-                                            "sip call: 15s 未注册完成（{st:?}），放弃呼叫"
+                                            "sip call: 75s 未注册完成（{st:?}），放弃呼叫"
                                         );
                                         on_failed(format!("SIP 注册未完成：{st:?}"));
                                         continue 'cmd_loop;

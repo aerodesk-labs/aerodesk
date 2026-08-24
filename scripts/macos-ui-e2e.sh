@@ -107,7 +107,7 @@ echo "UI alive: yes, log lines: $(wc -l < /tmp/macosui-ui.log 2>/dev/null || ech
 python3 - <<'PY'
 import time, sys
 ok = False
-for i in range(60):  # 最多 60s
+for i in range(150):  # 最多 60s
     try:
         txt = open('/tmp/macosui-ui.log', encoding='utf-8', errors='replace').read()
     except FileNotFoundError:
@@ -123,7 +123,7 @@ for i in range(60):  # 最多 60s
         break
     time.sleep(1)
 if not ok:
-    print("FAIL: 60s 内 ICE 未 Completed；UI 日志尾：")
+    print("FAIL: 150s 内 ICE 未 Completed；UI 日志尾：")
     print(open('/tmp/macosui-ui.log', encoding='utf-8', errors='replace').read()[-1500:])
     sys.exit(1)
 PY
