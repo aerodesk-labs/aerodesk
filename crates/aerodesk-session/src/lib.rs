@@ -10,7 +10,9 @@ pub mod generic_publisher;
 pub mod generic_viewer;
 pub mod keymap;
 
-#[cfg(not(target_os = "macos"))]
+// #553 验收前置：macOS 观看端已并入统一 SIP 路径（#578/#580）——generic_media
+// 的 macOS 门控随 desktop 侧 cfg 移除而拆除（原两侧 cfg 互为"配合"：desktop
+// 不看 macOS、session 不给 macOS 提供泛型观看端，遗留断链）。
 pub mod generic_media;
 #[cfg(target_os = "macos")]
 pub mod macos_media;
