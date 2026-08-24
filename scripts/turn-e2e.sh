@@ -159,6 +159,10 @@ fi
 if [ -z "${TURN_TLS_CA:-}" ]; then
     export TURN_TLS_CA="$PWD/certs/cer.pem"
 fi
+# #552 SIP：TURN 须本地配置（AERO_TURN_*）——REST 凭证（TURN_SECRET）与
+# SFU 内嵌 TURN 一致（username=`<expiry>:<user>`，credential=base64(HMAC-SHA1)）。
+TURN_USER="$(($(date +%s) + 3600)):turn-e2e"
+TURN_CRED="$(python3 -c "import hmac,hashlib,base64; print(base64.b64encode(hmac.new(b'$TURN_SECRET', b'$TURN_USER', hashlib.sha1).digest()).decode())")"
 echo "== 3a) 发布端（TURN_PROTO=${TURN_PROTO}）：allocate + relayed 候选 + ICE"
 "$TARGET_DIR"/aerodesk-agent --role publisher --encoder x264 --noisy \
   --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/turn-e2e-pub.log 2>&1 &
@@ -175,7 +179,7 @@ if [ "$ok" -ne 0 ]; then
 fi
 
 echo "== 3b) 观看端（TURN_PROTO=${TURN_PROTO}）：allocate + relayed 候选 + ICE"
-"$TARGET_DIR"/aerodesk-agent --role viewer --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/turn-e2e-view.log 2>&1 &
+AERO_TURN_URLS="$SIG_TURN_URLS" AERO_TURN_USERNAME="$TURN_USER" AERO_TURN_CREDENTIAL="$TURN_CRED"   "$TARGET_DIR"/aerodesk-agent --role viewer --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/turn-e2e-view.log 2>&1 &
 VIEW_PID=$!
 # 发布端 ICE（viewer 呼入后建链）——TURN allocation/relayed/SDP/ICE 全断言。
 ok=1
@@ -215,11 +219,13 @@ wait "$VIEW_PID" 2>/dev/null || true
 ROOM_FR="${ROOM}-fr"
 
 echo "== 3c) force-relay 观看端：只走 relayed 候选 + 媒体到达（#201）"
-"$TARGET_DIR"/aerodesk-agent --role publisher --encoder x264 --noisy \
+AERO_TURN_URLS="$SIG_TURN_URLS" AERO_TURN_USERNAME="$TURN_USER" AERO_TURN_CREDENTIAL="$TURN_CRED" \
+  "$TARGET_DIR"/aerodesk-agent --role publisher --encoder x264 --noisy \
   --signal ws://127.0.0.1:14503 --room "$ROOM_FR" >/tmp/turn-e2e-pub-fr.log 2>&1 &
 PUB_FR_PID=$!
 sleep 2
-AERODESK_FORCE_RELAY=1 "$TARGET_DIR"/aerodesk-agent --role viewer \
+AERO_TURN_URLS="$SIG_TURN_URLS" AERO_TURN_USERNAME="$TURN_USER" AERO_TURN_CREDENTIAL="$TURN_CRED" AERODESK_FORCE_RELAY=1 \
+  "$TARGET_DIR"/aerodesk-agent --role viewer \
   --signal ws://127.0.0.1:14503 --room "$ROOM_FR" >/tmp/turn-e2e-view-fr.log 2>&1 &
 VIEW_FR_PID=$!
 ok=1
