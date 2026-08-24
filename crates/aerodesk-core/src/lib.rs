@@ -28,16 +28,11 @@ pub mod p2p_call;
 pub mod pcmu;
 pub mod platform;
 pub mod protocol;
-pub mod signal_call;
-pub mod signal_presence;
 pub mod signaling;
 pub mod sip_link;
 pub mod synthetic;
 
 pub use endpoint::{ClientEvent, Endpoint};
-pub use signal_presence::{
-    PresenceConfig, PresenceEvent, PresenceStateMachine, PresenceStatus, SignalPresence,
-};
 pub mod connect;
 
 pub mod turn_client;

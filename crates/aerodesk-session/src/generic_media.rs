@@ -108,40 +108,6 @@ fn decoder_label() -> &'static str {
 ///
 /// `mk_renderer` 由调用方注入（desktop 传 SlintRenderer 工厂）；槽位语义含在
 /// `ui` 实现内。（参数数与 B1 前一致，too_many_arguments 警告维持基线原样。）
-pub fn run_generic_viewer<U, R, RF>(
-    server: String,
-    room: String,
-    token: Option<String>,
-    ui: U,
-    input_rx: std::sync::mpsc::Receiver<String>,
-    cmd_rx: std::sync::mpsc::Receiver<aerodesk_core::protocol::cmd::CmdRequest>,
-    file_cmd_rx: std::sync::mpsc::Receiver<crate::FileCmd>,
-    chat_cmd_rx: std::sync::mpsc::Receiver<crate::ChatCmd>,
-    stop: Arc<AtomicBool>,
-    view_only: Arc<AtomicBool>,
-    mk_renderer: RF,
-) where
-    U: SessionUi,
-    R: aerodesk_core::platform::Renderer + 'static,
-    RF: FnMut() -> R,
-{
-    crate::generic_viewer::run_viewer_generic(
-        server,
-        room,
-        token,
-        ui,
-        input_rx,
-        cmd_rx,
-        file_cmd_rx,
-        chat_cmd_rx,
-        stop,
-        view_only,
-        decoder_label(),
-        mk_viewer_decoder,
-        mk_renderer,
-    );
-}
-
 /// #552：SIP 1:1 P2P 观看入口（P2pCall 已建立——create_offer→call→Answered→
 /// accept_answer 由调用方桌面完成），解码/渲染与 SFU 路径共用 generic_viewer。
 #[allow(clippy::too_many_arguments)]
