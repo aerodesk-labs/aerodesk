@@ -49,13 +49,9 @@ if grep -q "display switch command sent: 1" /tmp/disp-view.log; then
 else
     echo "FAIL viewer display command"; tail -3 /tmp/disp-view.log; fail=1
 fi
-# 2) SFU 收到并转发
-if grep -q "display request: 1" /tmp/disp-sfu.log; then
-    echo "PASS SFU received display request"
-else
-    echo "FAIL SFU display request"; grep -i control /tmp/disp-sfu.log | tail -3; fail=1
-fi
-# 3) publisher 收到转发
+# 2) #552 SIP 1:1：control 通道走 P2P data channel 直达 publisher（SFU 不在环，
+#    无 "display request" 日志——该断言随 WSS 面删除）；见断言 3（publisher 侧）。
+# 3) publisher 收到转发（P2P data channel）
 if grep -q "control: display switch request -> display 1" /tmp/disp-pub.log; then
     echo "PASS publisher received display switch"
 else
