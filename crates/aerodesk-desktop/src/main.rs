@@ -2774,14 +2774,6 @@ fn publisher_config_from_ui(ui: &AppWindow) -> aerodesk_session::PublisherConfig
     }
 }
 
-/// 启动被控端（UI 入口）。
-fn start_publisher_ui(ui: &AppWindow) {
-    aerodesk_session::generic_publisher::start_publisher(
-        publisher_config_from_ui(ui),
-        publisher_event_sink(&ui.as_weak()),
-    );
-}
-
 /// #552：SIP 1:1 被叫接听——P2pCall 已由 presence 线程 accept_offer + link.accept，
 /// 移交 publisher（采集/编码/输入注入与 SFU 路径共用同一泵）。
 fn start_publisher_ui_peer(ui: &AppWindow, p2p: P2pCall, video_mid: str0m::media::Mid) {

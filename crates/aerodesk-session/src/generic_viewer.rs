@@ -11,83 +11,36 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use aerodesk_core::access_unit::AccessUnitAssembler;
-use aerodesk_core::connect::{LiveSession, connect_live_role};
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::p2p_call::P2pCall;
 use aerodesk_core::platform::{Decoder, Renderer};
 use aerodesk_core::protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult};
-use aerodesk_core::protocol::signal::Role;
 use str0m::net::Protocol;
 
 use crate::SessionUi;
 
-/// 观看端传输抽象：SFU（LiveSession）与 P2P（已建立的 P2pCall）共用会话泵。
-/// P2P 模式 `poll_event` 以首个 `ChannelOpen` 为会话就绪（DTLS 完成 ⟺ SRTP
-/// 密钥就绪；ICE connected 早于就绪——早到媒体由接收侧静默丢弃）。
-enum ViewerTransport {
-    Sfu(LiveSession),
-    Peer(P2pCall),
-}
+/// 观看端会话句柄（P2P 呼叫；#552 SFU 臂已随 WSS 客户端面删除）。
+/// `poll_event` 以首个 `ChannelOpen` 为会话就绪（DTLS 完成 ⟺ SRTP 密钥
+/// 就绪；ICE connected 早于就绪——早到媒体由接收侧静默丢弃）。
+struct ViewerTransport(P2pCall);
 
 impl ViewerTransport {
     fn pump(&mut self) {
-        match self {
-            Self::Sfu(live) => {
-                live.socket
-                    .set_read_timeout(Some(Duration::from_millis(10)))
-                    .ok();
-                let mut buf = [0u8; 4096];
-                if let Ok((n, source)) = live.socket.recv_from(&mut buf) {
-                    if let Ok(contents) = buf[..n].try_into() {
-                        let _ = live.endpoint.handle_input(str0m::Input::Receive(
-                            Instant::now(),
-                            str0m::net::Receive {
-                                proto: Protocol::Udp,
-                                source,
-                                destination: live.socket.local_addr().unwrap(),
-                                contents,
-                            },
-                        ));
-                    }
-                }
-                let _ = live.endpoint.handle_timeout(Instant::now());
-                while let Some(output) = live.endpoint.poll_output() {
-                    match output {
-                        str0m::Output::Transmit(t) => {
-                            let _ = live.socket.send_to(&t.contents, t.destination);
-                        }
-                        // 必须 break：sans-IO 的 Timeout 不消费会 100% CPU 死循环（#125 教训）。
-                        str0m::Output::Timeout(_) => break,
-                        str0m::Output::Event(_) => {}
-                    }
-                }
-            }
-            Self::Peer(p2p) => {
-                let _ = p2p.poll();
-            }
-        }
+        let _ = self.0.poll();
     }
 
     fn poll_event(&mut self) -> Option<ClientEvent> {
-        match self {
-            Self::Sfu(live) => live.endpoint.poll_event(),
-            Self::Peer(p2p) => p2p.poll_event(),
-        }
+        self.0.poll_event()
     }
 
     fn endpoint(&mut self) -> &mut aerodesk_core::Endpoint {
-        match self {
-            Self::Sfu(live) => &mut live.endpoint,
-            Self::Peer(p2p) => p2p.endpoint(),
-        }
+        self.0.endpoint()
     }
 
-    /// #552：注入对端后到候选（P2P trickle；SFU 路径 no-op）。
+    /// #552：注入对端后到候选（trickle）。
     fn add_remote_candidate(&mut self, sdp_candidate: &str) {
-        if let Self::Peer(p2p) = self {
-            if let Err(e) = p2p.add_remote_candidate(sdp_candidate) {
-                tracing::warn!("trickle 候选注入失败：{e}");
-            }
+        if let Err(e) = self.0.add_remote_candidate(sdp_candidate) {
+            tracing::warn!("trickle 候选注入失败：{e}");
         }
     }
 }
@@ -181,104 +134,6 @@ pub(crate) fn format_cmd_response(response: &CmdResponse) -> String {
 /// - `mk_decoder`：连接成功后惰性创建解码器（可失败）。
 /// - `mk_renderer`：连接成功后创建渲染器。
 #[allow(clippy::too_many_arguments)]
-pub fn run_viewer_generic<U, D, R, DF, RF>(
-    server: String,
-    room: String,
-    token: Option<String>,
-    ui: U,
-    input_rx: std::sync::mpsc::Receiver<String>,
-    cmd_rx: std::sync::mpsc::Receiver<aerodesk_core::protocol::cmd::CmdRequest>,
-    file_cmd_rx: std::sync::mpsc::Receiver<crate::FileCmd>,
-    chat_cmd_rx: std::sync::mpsc::Receiver<crate::ChatCmd>,
-    stop: Arc<AtomicBool>,
-    view_only: Arc<AtomicBool>,
-    decoder_label: &'static str,
-    mk_decoder: DF,
-    mk_renderer: RF,
-) where
-    U: SessionUi,
-    D: Decoder + 'static,
-    R: Renderer + 'static,
-    DF: FnMut() -> Result<D, String>,
-    RF: FnMut() -> R,
-{
-    // #29 多会话：本会话 stop 置位即退出（断开只关当前活动会话）。
-    let stale = || stop.load(Ordering::SeqCst);
-    let auth = token.as_deref().filter(|t| !t.is_empty());
-    // connect_live_role 在异常环境可能阻塞（如 UDP read_timeout 失效）；
-    // 放子线程 + 20s 超时保护，避免 UI 线程永久挂起。
-    let (tx, rx) = std::sync::mpsc::channel::<Result<_, aerodesk_core::connect::ConnectError>>();
-    let srv = server.clone();
-    let rm = room.clone();
-    let auth2 = auth.map(|s| s.to_string());
-    std::thread::spawn(move || {
-        let r = connect_live_role(&srv, &rm, Role::Viewer, auth2.as_deref());
-        let _ = tx.send(r);
-    });
-    let live = match rx.recv_timeout(Duration::from_secs(20)) {
-        Ok(Ok(l)) => l,
-        Ok(Err(e)) => {
-            let msg = format!("连接失败：{e}");
-            let terminal = msg.clone();
-            if !stale() {
-                ui.set_conn_state(3);
-                ui.set_status(msg);
-            }
-            ui.cleanup(Some(terminal));
-            return;
-        }
-        Err(_) => {
-            if !stale() {
-                ui.set_conn_state(3);
-                ui.set_status("连接超时：请检查服务器 ws://地址:端口 / token / 网络；对方未在线时也会等待媒体流".into());
-            }
-            ui.cleanup(Some(
-                "连接超时：请检查服务器 ws://地址:端口 / token / 网络".into(),
-            ));
-            return;
-        }
-    };
-    if stale() {
-        ui.cleanup(None);
-        return;
-    }
-    let peer = live.peer_id.clone();
-    let ice = live.ice_connected;
-    let room2 = room.clone();
-    let server2 = server.clone();
-    let connected_status = format!("已连接：peer={peer} ice={ice}");
-    ui.set_status(connected_status.clone());
-    ui.set_log(format!(
-        "设备: {room2}\n服务器: {server2}\nSDP 交换: OK\nICE: {}\n\n{decoder_label}渲染。",
-        if ice {
-            "connected"
-        } else {
-            "pending(5s 超时)"
-        }
-    ));
-    ui.add_recent(&room2, &server2);
-    ui.set_conn_state(2);
-    ui.session_status(connected_status);
-    // #438：连上信令只表示设备已连接/可被找到，不进入观察页；
-    // 收到首个渲染帧后才 joined 进入会话视图。
-    run_viewer_impl(
-        ViewerTransport::Sfu(live),
-        room,
-        ui,
-        input_rx,
-        cmd_rx,
-        file_cmd_rx,
-        chat_cmd_rx,
-        stop,
-        view_only,
-        None,
-        mk_decoder,
-        mk_renderer,
-    );
-}
-
-/// #552：SIP 1:1 P2P 观看入口——P2pCall 已建立（create_offer→call→Answered→
-/// accept_answer 由调用方完成），解码/渲染/通道与 SFU 路径共用同一会话泵。
 #[allow(clippy::too_many_arguments)]
 pub fn run_viewer_generic_peer<U, D, R, DF, RF>(
     p2p: aerodesk_core::p2p_call::P2pCall,
@@ -310,7 +165,7 @@ pub fn run_viewer_generic_peer<U, D, R, DF, RF>(
     ui.set_conn_state(2);
     ui.session_status(connected_status);
     run_viewer_impl(
-        ViewerTransport::Peer(p2p),
+        ViewerTransport(p2p),
         room,
         ui,
         input_rx,
