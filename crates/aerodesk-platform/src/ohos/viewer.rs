@@ -10,9 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use aerodesk_core::access_unit::AccessUnitAssembler;
-use aerodesk_core::connect::LiveSession;
 use aerodesk_core::endpoint::ClientEvent;
-use aerodesk_core::protocol::signal::Role;
 use str0m::net::Protocol;
 
 /// 观看会话（NAPI `connectViewer` 返回的 session id 即指向本结构）。
@@ -28,15 +26,18 @@ pub struct ViewerSession {
 impl ViewerSession {
     /// 连接信令并启动收流线程。`token` 为 JWT/静态 token（可选）。
     pub fn connect(server: &str, room: &str, token: Option<&str>) -> Result<ViewerSession, String> {
-        let live = aerodesk_core::connect::connect_live_role(server, room, Role::Viewer, token)
-            .map_err(|e| e.to_string())?;
+        // #552：WSS join → SIP（REGISTER + INVITE；SipViewerSession 看护线程持链）。
+        let (_sip, mut endpoint, socket, _video_mid, _audio_mid, _camera_mid) =
+            aerodesk_core::connect::connect_viewer_sip(
+                server, room, token, false, true, false, None, None,
+            )?;
         let latest = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let (input_tx, input_rx) = mpsc::channel();
         let pump = {
             let latest = latest.clone();
             let stop = stop.clone();
-            thread::spawn(move || pump_media(live, latest, stop, input_rx))
+            thread::spawn(move || pump_media(endpoint, socket, latest, stop, input_rx))
         };
         Ok(ViewerSession {
             latest,
@@ -68,7 +69,8 @@ impl Drop for ViewerSession {
 
 /// 后台收流循环：UDP → endpoint → Media 事件 → 访问单元组装 → 最新帧槽。
 fn pump_media(
-    mut live: LiveSession,
+    mut endpoint: aerodesk_core::Endpoint,
+    socket: aerodesk_core::media_socket::MediaSocket,
     latest: Arc<Mutex<Option<Vec<u8>>>>,
     stop: Arc<AtomicBool>,
     input_rx: mpsc::Receiver<Vec<u8>>,
@@ -78,30 +80,30 @@ fn pump_media(
     while !stop.load(Ordering::SeqCst) {
         // 输入事件：观看端触摸/按键 → input 数据通道 → SFU → 被控端。
         while let Ok(json) = input_rx.try_recv() {
-            live.endpoint.send_channel_data("input", false, &json);
+            endpoint.send_channel_data("input", false, &json);
         }
-        live.socket
+        socket
             .set_read_timeout(Some(Duration::from_millis(10)))
             .ok();
         let mut buf = [0u8; 4096];
-        if let Ok((n, source)) = live.socket.recv_from(&mut buf) {
+        if let Ok((n, source)) = socket.recv_from(&mut buf) {
             if let Ok(contents) = buf[..n].try_into() {
-                let _ = live.endpoint.handle_input(str0m::Input::Receive(
+                let _ = endpoint.handle_input(str0m::Input::Receive(
                     std::time::Instant::now(),
                     str0m::net::Receive {
                         proto: Protocol::Udp,
                         source,
-                        destination: live.socket.local_addr().unwrap(),
+                        destination: socket.local_addr().unwrap(),
                         contents,
                     },
                 ));
             }
         }
-        let _ = live.endpoint.handle_timeout(std::time::Instant::now());
-        while let Some(output) = live.endpoint.poll_output() {
+        let _ = endpoint.handle_timeout(std::time::Instant::now());
+        while let Some(output) = endpoint.poll_output() {
             match output {
                 str0m::Output::Transmit(t) => {
-                    let _ = live.socket.send_to(&t.contents, t.destination);
+                    let _ = socket.send_to(&t.contents, t.destination);
                 }
                 // 关键：遇到 Timeout 必须退出本轮排空，否则 str0m 反复返回
                 // 同一个 Timeout → 100% CPU 死循环，媒体永远不处理。
@@ -109,7 +111,7 @@ fn pump_media(
                 str0m::Output::Event(_) => {}
             }
         }
-        while let Some(ev) = live.endpoint.poll_event() {
+        while let Some(ev) = endpoint.poll_event() {
             match ev {
                 ClientEvent::Media(data) => {
                     // 不能按 video_mid 过滤——SFU 转发时 RTP mid 扩展用 SFU

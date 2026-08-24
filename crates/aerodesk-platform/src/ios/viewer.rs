@@ -9,7 +9,6 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use aerodesk_core::access_unit::AccessUnitAssembler;
-use aerodesk_core::connect::LiveSession;
 use aerodesk_core::endpoint::ClientEvent;
 use apple_cf::cv::CVPixelBuffer;
 use str0m::format::Codec as SCodec;
@@ -62,16 +61,13 @@ pub struct ViewerSession {
 impl ViewerSession {
     /// 连接信令并启动收流解码线程。
     pub fn connect(server: &str, room: &str) -> Result<ViewerSession, String> {
+        // #552：WSS join → SIP（REGISTER + INVITE；SipViewerSession 看护线程持链）。
         // 请求第二路视频轨（摄像头 recvonly）：发布端未开 --camera 时 m-line
         // inactive，不影响屏幕流。
-        let session = aerodesk_core::connect::connect_live_role_with_camera(
-            server,
-            room,
-            aerodesk_core::protocol::signal::Role::Viewer,
-            None,
-            true,
-        )
-        .map_err(|e| e.to_string())?;
+        let (_sip, mut endpoint, socket, _video_mid, _audio_mid, camera_mid) =
+            aerodesk_core::connect::connect_viewer_sip(
+                server, room, None, false, true, true, None, None,
+            )?;
         let latest = Arc::new(Mutex::new(None));
         let latest_camera = Arc::new(Mutex::new(None));
         let show_camera = Arc::new(AtomicBool::new(false));
@@ -87,7 +83,9 @@ impl ViewerSession {
             let stop = stop.clone();
             thread::spawn(move || {
                 pump_media(
-                    session,
+                    endpoint,
+                    socket,
+                    camera_mid,
                     latest,
                     latest_camera,
                     show_camera,
@@ -139,7 +137,9 @@ impl Drop for ViewerSession {
 
 /// 后台收流循环：UDP → endpoint → 事件 → 解码 → 最新帧槽；并转发输入事件。
 fn pump_media(
-    mut session: LiveSession,
+    mut endpoint: aerodesk_core::Endpoint,
+    socket: aerodesk_core::media_socket::MediaSocket,
+    camera_mid: Option<str0m::media::Mid>,
     latest: Arc<Mutex<Option<CVPixelBuffer>>>,
     latest_camera: Arc<Mutex<Option<CVPixelBuffer>>>,
     _show_camera: Arc<AtomicBool>,
@@ -170,13 +170,13 @@ fn pump_media(
     let mut diag_frames = 0u64;
     eprintln!(
         "pump: started, socket local={:?} camera_mid={:?}",
-        session.socket.local_addr(),
-        session.camera_mid
+        socket.local_addr(),
+        camera_mid
     );
     while !stop.load(Ordering::SeqCst) {
         // 输入事件：观看端捕获 → input 数据通道 → SFU → 被控端。
         while let Ok(json) = input_rx.try_recv() {
-            session.endpoint.send_channel_data("input", false, &json);
+            endpoint.send_channel_data("input", false, &json);
         }
 
         session
@@ -184,28 +184,28 @@ fn pump_media(
             .set_read_timeout(Some(Duration::from_millis(10)))
             .ok();
         let mut buf = [0u8; 4096];
-        if let Ok((n, source)) = session.socket.recv_from(&mut buf) {
+        if let Ok((n, source)) = socket.recv_from(&mut buf) {
             diag_pkts += 1;
             if diag_pkts % 200 == 0 {
                 eprintln!("pump: udp={diag_pkts} media={diag_media} frames={diag_frames}");
             }
             if let Ok(contents) = buf[..n].try_into() {
-                let _ = session.endpoint.handle_input(str0m::Input::Receive(
+                let _ = endpoint.handle_input(str0m::Input::Receive(
                     std::time::Instant::now(),
                     str0m::net::Receive {
                         proto: Protocol::Udp,
                         source,
-                        destination: session.socket.local_addr().unwrap(),
+                        destination: socket.local_addr().unwrap(),
                         contents,
                     },
                 ));
             }
         }
-        let _ = session.endpoint.handle_timeout(std::time::Instant::now());
-        while let Some(output) = session.endpoint.poll_output() {
+        let _ = endpoint.handle_timeout(std::time::Instant::now());
+        while let Some(output) = endpoint.poll_output() {
             match output {
                 str0m::Output::Transmit(t) => {
-                    let _ = session.socket.send_to(&t.contents, t.destination);
+                    let _ = socket.send_to(&t.contents, t.destination);
                 }
                 // 同 connect.rs：遇到 Timeout 必须退出本轮排空，否则 str0m
                 // 反复返回同一 Timeout → 100% CPU 死循环，永远轮不到收包。
@@ -213,7 +213,7 @@ fn pump_media(
                 str0m::Output::Event(_) => {}
             }
         }
-        while let Some(ev) = session.endpoint.poll_event() {
+        while let Some(ev) = endpoint.poll_event() {
             match ev {
                 ClientEvent::Media(data) => {
                     diag_media += 1;
@@ -247,7 +247,7 @@ fn pump_media(
                         video_mids.push(data.mid);
                     }
                     let is_camera = {
-                        let send_mids = session.endpoint.remote_send_video_mids();
+                        let send_mids = endpoint.remote_send_video_mids();
                         if send_mids.len() >= 2 {
                             // #340：SFU offer 顺序确定 screen=mids[0]、camera=mids[1]。
                             send_mids.get(1) == Some(&data.mid)

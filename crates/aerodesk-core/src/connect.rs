@@ -526,6 +526,247 @@ fn connect_live_role_impl(
 }
 
 /// 观看端连接：WSS join → SDP 交换 → ICE 泵（5s 超时）。
+/// #552 移动端（iOS/Android/OHOS）观看端 SIP 会话句柄：持有 SipCallLink 的
+/// 看护线程至 Drop（链路存活 → BYE/注销不提前触发）；会话循环只驱动
+/// endpoint/socket。
+pub struct SipViewerSession {
+    #[allow(dead_code)]
+    pub call_id: String,
+}
+
+/// #552 移动端观看端 SIP 连接（agent connect_inner 的 viewer 路径收敛到 core，
+/// 三平台共用）：REGISTER → INVITE 房间 → Answered → ICE 收敛。
+///
+/// - `server`：信令 URL（`ws://`→SIP/UDP 5060，`wss://`→SIP/TLS 5061；
+///   显式 `sip_transport`/`sip_port` 覆盖）；
+/// - `token`：Digest 口令（= 现有 auth token，§8 迁移期同一凭据）；
+/// - `force_relay`：只通告 TURN 候选（#201 NAT/模拟器语义）；
+/// - `with_audio`/`with_camera`：额外 recvonly 轨（未协商侧 m-line inactive）。
+///
+/// 注册等待覆盖两轮 SIP UDP 事务重传（~75s，见 #578 教训）；INVITE 等待 30s。
+/// 探测本机出接口 IP（绑 0.0.0.0 连公共地址后取 local_addr；失败回退 loopback）。
+fn egress_ip(port: u16) -> std::net::SocketAddr {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    if let Ok(probe) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if probe.connect("8.8.8.8:53").is_ok()
+            && let Ok(la) = probe.local_addr()
+            && !la.ip().is_unspecified()
+            && !la.ip().is_loopback()
+        {
+            return SocketAddr::new(la.ip(), port);
+        }
+    }
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+}
+
+pub fn connect_viewer_sip(
+    server: &str,
+    room: &str,
+    token: Option<&str>,
+    force_relay: bool,
+    with_audio: bool,
+    with_camera: bool,
+    sip_transport: Option<&str>,
+    sip_port: Option<u16>,
+) -> Result<
+    (
+        SipViewerSession,
+        crate::Endpoint,
+        crate::media_socket::MediaSocket,
+        str0m::media::Mid,
+        Option<str0m::media::Mid>,
+        Option<str0m::media::Mid>,
+    ),
+    String,
+> {
+    use str0m::net::Protocol;
+
+    let device_id = format!("agent-viewer-{}", std::process::id());
+    // 传输推导：显式参数 > URL scheme（wss=TLS/ws=UDP；无 scheme 按 ws）。
+    let transport = sip_transport.unwrap_or({
+        #[allow(clippy::match_like_matches_macro)]
+        let tls = server.starts_with("wss");
+        if tls { "tls" } else { "udp" }
+    });
+    let mut cfg = crate::sip_link::SipLinkConfig::from_parts(
+        server,
+        &device_id,
+        token.unwrap_or(""),
+        transport,
+        sip_port.unwrap_or(0),
+        "",
+        "",
+    )?;
+    if cfg.transport == crate::protocol::sip_client::SipTransport::Tls && cfg.tls.is_none() {
+        // from_parts 已注系统根；此处仅防御（理论不可达）。
+        cfg.tls = Some(crate::protocol::sip_client::SipTlsConfig {
+            ca_certs: crate::protocol::sip_client::system_ca_pem(),
+            sni_hostname: None,
+            client_cert: None,
+            client_key: None,
+        });
+    }
+    let mut link = crate::sip_link::SipCallLink::new(cfg);
+    link.start();
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(75);
+        loop {
+            let st = link.poll();
+            if st.is_online() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!("SIP 注册未完成（75s）：{st:?}"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    // 媒体 socket + 候选（agent connect_inner 同款；TURN 走 AERO_TURN_* env，
+    // 移动端暂无本地 TURN 配置面——直连/后续切片接平台配置）。
+    let loopback =
+        server.contains("127.0.0.1") || server.contains("localhost") || server.contains("::1");
+    let direct = std::net::UdpSocket::bind(if loopback { "127.0.0.1:0" } else { "0.0.0.0:0" })
+        .map_err(|e| format!("bind udp: {e}"))?;
+    let addr = direct.local_addr().map_err(|e| e.to_string())?;
+    let turn = crate::turn_client::p2p_turn_transport(
+        &std::env::var("AERO_TURN_URLS").unwrap_or_default(),
+        &std::env::var("AERO_TURN_USERNAME").unwrap_or_default(),
+        &std::env::var("AERO_TURN_CREDENTIAL").unwrap_or_default(),
+    );
+    let mut socket = crate::media_socket::MediaSocket::new(direct, turn);
+    let mut endpoint = crate::Endpoint::new();
+    let mut host_candidate = addr;
+    if addr.ip().is_unspecified() {
+        host_candidate = egress_ip(addr.port());
+    }
+    if !force_relay {
+        endpoint
+            .add_local_candidate(host_candidate, Protocol::Udp)
+            .map_err(|e| format!("candidate: {e:?}"))?;
+    }
+    if let Some(tt) = socket.turn() {
+        let relayed = tt.relayed_addr();
+        if let Ok(la) = tt.local_addr() {
+            let local = std::net::SocketAddr::new(host_candidate.ip(), la.port());
+            if let Err(e) = endpoint.add_relay_candidate(relayed, local) {
+                tracing::warn!("relay candidate rejected: {e:?}");
+            }
+        }
+    }
+
+    // 观看端轨：recvonly（含可选音频/摄像头）。
+    endpoint.add_video_recvonly();
+    if with_audio {
+        endpoint.add_audio_recvonly();
+    }
+    if with_camera {
+        endpoint.add_camera_recvonly();
+    }
+    let (offer, pending, video_mid, audio_mid, camera_mid) = endpoint
+        .create_offer()
+        .map_err(|e| format!("offer: {e:?}"))?;
+    let offer_json = serde_json::to_string(&offer).map_err(|e| e.to_string())?;
+    let call_id = format!("c-{}", std::process::id());
+    link.call(room, &call_id, &offer_json)
+        .map_err(|e| format!("SIP INVITE: {e}"))?;
+    let answer_json = {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut got: Result<String, String> = Err("SIP INVITE 无应答（30s）".into());
+        'ans: while std::time::Instant::now() < deadline {
+            let _ = link.poll();
+            for ev in link.take_events() {
+                match ev {
+                    crate::sip_link::SipLinkEvent::Answered { answer_sdp, .. } => {
+                        got = Ok(answer_sdp);
+                        break 'ans;
+                    }
+                    crate::sip_link::SipLinkEvent::Rejected { status, .. } => {
+                        got = Err(format!("SIP 呼叫被拒（{status}）"));
+                        break 'ans;
+                    }
+                    _ => {}
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        got?
+    };
+    let answer: str0m::change::SdpAnswer =
+        serde_json::from_str(&answer_json).map_err(|e| format!("answer parse: {e}"))?;
+    endpoint
+        .accept_answer(pending, answer)
+        .map_err(|e| format!("accept answer: {e:?}"))?;
+
+    // ICE 收敛（TURN 5-12s → 15s 窗口；事件队列留给会话循环）。
+    {
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(if socket.turn().is_some() { 15 } else { 5 });
+        while std::time::Instant::now() < deadline && endpoint.is_alive() {
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_millis(10)))
+                .ok();
+            let mut buf = [0u8; 2048];
+            if let Ok((n, source)) = socket.recv_from(&mut buf)
+                && let Ok(contents) = buf[..n].try_into()
+            {
+                let _ = endpoint.handle_input(str0m::Input::Receive(
+                    std::time::Instant::now(),
+                    str0m::net::Receive {
+                        proto: Protocol::Udp,
+                        source,
+                        destination: socket.local_addr().unwrap_or(source),
+                        contents,
+                    },
+                ));
+            }
+            let _ = endpoint.handle_timeout(std::time::Instant::now());
+            while let Some(out) = endpoint.poll_output() {
+                match out {
+                    str0m::Output::Transmit(t) => {
+                        let _ = socket.send_to(&t.contents, t.destination);
+                    }
+                    str0m::Output::Timeout(_) => break,
+                    str0m::Output::Event(_) => {}
+                }
+            }
+            if endpoint.ice_connected() {
+                break;
+            }
+        }
+        if !endpoint.ice_connected() {
+            return Err("ICE 连接超时（直连 5s / TURN 15s 未建立）".into());
+        }
+    }
+
+    // 信令看护线程：持有 link 至进程退出（Drop 即 BYE/注销——会话循环只驱动
+    // endpoint/socket）；后到 trickle 候选忽略（候选内联）。
+    std::thread::Builder::new()
+        .name("sip-link-watch".into())
+        .spawn(move || {
+            loop {
+                let _ = link.poll();
+                for ev in link.take_events() {
+                    if let crate::sip_link::SipLinkEvent::PeerHangup { call_id, .. } = ev {
+                        tracing::info!("SIP 对端挂断：{call_id}");
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        })
+        .ok();
+
+    let video_mid = video_mid.ok_or("no video mid")?;
+    Ok((
+        SipViewerSession { call_id },
+        endpoint,
+        socket,
+        video_mid,
+        audio_mid,
+        camera_mid,
+    ))
+}
+
 pub fn connect_viewer(server: &str, room: &str) -> Result<ConnectResult, ConnectError> {
     let live = connect_live_role(server, room, Role::Viewer, None)?;
     Ok(ConnectResult {
