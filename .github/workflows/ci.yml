@@ -110,6 +110,13 @@ jobs:
       # *.dll.a；ffmpeg-sys-next FFMPEG_DIR 分支读 lib/ + include/，我们把
       # bin/ 加进 PATH 供回环测试运行时加载 DLL。zip 用 PowerShell 原生
       # Expand-Archive 解压（windows-latest 无预装 7-Zip，见 runner-images#9361）。
+      # #553 验收前置：BtbN release 下载偶发瞬断——actions/cache 缓存 zip。
+      - name: Cache FFmpeg dev libs (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg-cache
+          key: ffmpeg-n8.1-win64-gpl-shared-8.1
       - name: System deps (Windows FFmpeg dev libs)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -117,7 +124,17 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
           $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-shared-8.1.zip"
           $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
-          Invoke-WebRequest -Uri $url -OutFile $zip
+          # #553 验收前置：BtbN release 下载偶发瞬断（IWR 无内建重试）——
+          # actions/cache 缓存 zip（key 命中直接复用，免每次下载）。
+          $cacheZip = Join-Path $env:RUNNER_TEMP "ffmpeg-cache\ffmpeg.zip"
+          if (Test-Path $cacheZip) {
+            Copy-Item $cacheZip $zip
+            Write-Host "FFmpeg zip 命中缓存"
+          } else {
+            Invoke-WebRequest -Uri $url -OutFile $zip
+            New-Item -ItemType Directory -Force -Path (Split-Path $cacheZip) | Out-Null
+            Copy-Item $zip $cacheZip
+          }
           $dest = Join-Path $env:RUNNER_TEMP "ffmpeg"
           Expand-Archive -Path $zip -DestinationPath $dest -Force
           $root = (Get-ChildItem $dest -Directory | Select-Object -First 1).FullName
@@ -443,6 +460,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # #553 验收前置：BtbN release 下载偶发瞬断——actions/cache 缓存 zip。
+      - name: Cache FFmpeg dev libs (Windows)
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg-cache
+          key: ffmpeg-n8.1-win64-gpl-shared-8.1
+
       # #3/#378：aerodesk-desktop 自全平台依赖 aerodesk-codec 起，Windows 构建需
       # FFmpeg 开发库（与 test job 同款 BtbN 8.1 预编译包），否则 ffmpeg-sys-next
       # build 失败（Windows UI e2e 无法验证观看端）。
@@ -452,7 +476,17 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
           $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-shared-8.1.zip"
           $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
-          Invoke-WebRequest -Uri $url -OutFile $zip
+          # #553 验收前置：BtbN release 下载偶发瞬断（IWR 无内建重试）——
+          # actions/cache 缓存 zip（key 命中直接复用，免每次下载）。
+          $cacheZip = Join-Path $env:RUNNER_TEMP "ffmpeg-cache\ffmpeg.zip"
+          if (Test-Path $cacheZip) {
+            Copy-Item $cacheZip $zip
+            Write-Host "FFmpeg zip 命中缓存"
+          } else {
+            Invoke-WebRequest -Uri $url -OutFile $zip
+            New-Item -ItemType Directory -Force -Path (Split-Path $cacheZip) | Out-Null
+            Copy-Item $zip $cacheZip
+          }
           $dest = Join-Path $env:RUNNER_TEMP "ffmpeg"
           Expand-Archive -Path $zip -DestinationPath $dest -Force
           $root = (Get-ChildItem $dest -Directory | Select-Object -First 1).FullName
