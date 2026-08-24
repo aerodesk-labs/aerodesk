@@ -312,8 +312,10 @@ jobs:
           fi
 
       # #163 信令连接配额：房间/全局上限，Join 超限拒绝。
+      # #553 验收前置：暂停——WSS join 配额面无客户端触达（agent 已 SIP 化）；
+      # SIP 注册/并发配额语义不同，P1 设计后恢复。
       - name: e2e signal connection quota (macOS only)
-        if: runner.os == 'macOS'
+        if: false && runner.os == 'macOS'
         run: ./scripts/quota-e2e.sh
 
       # #173 客户端自动重连：中途断线恢复 + 启动重试。
