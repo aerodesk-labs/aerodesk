@@ -33,8 +33,10 @@ try {
     Write-Host "== build"
     cargo build -q -p aerodesk-sfu -p aerodesk-signal
     Write-Host "== start sfu/signal"
-    # 本机/CI Windows runner 自动选网卡可能 bind 失败（AddrNotAvailable），强制回环。
-    $env:SFU_BIND_ADDRESS = "127.0.0.1"
+    # 双浏览器拓扑下 Edge 的 ICE 候选含网卡 IP：SFU 绑 127.0.0.1 时发往网卡 IP
+    # 报 WSAENETUNREACH（10051）→ 媒体不通。绑 0.0.0.0 覆盖全接口（Windows
+    # runner 有网卡；本机无网卡时 SFU 默认通配绑定同样可回退）。
+    $env:SFU_BIND_ADDRESS = "0.0.0.0"
     $env:SFU_HOST_ADDRESS = "127.0.0.1"
     # #552：CLI 客户端走 SIP UDP 面，signal 必须启用（ci.yml job env 已注入，此处显式设防本地跑）。
     $env:SIP_UDP_PORT = "5060"
