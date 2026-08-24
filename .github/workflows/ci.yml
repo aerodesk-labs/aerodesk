@@ -331,8 +331,11 @@ jobs:
         run: bash scripts/ci-retry.sh 3 ./scripts/web-reconnect-e2e.sh
 
       # #180 SFU /start 准入配额：MAX_ROOM_CLIENTS=1 时第 2 个连接被 503。
+      # #553 验收前置：暂停——agent publisher 已 SIP 化（1:1 被叫，不走 SFU
+      # /start，SDP negotiated 仅在呼叫后出现）；SFU /start 配额改由 SIP
+      # 会议桥触发（P1 重设计后恢复）。
       - name: e2e SFU start quota (macOS only)
-        if: runner.os == 'macOS'
+        if: false && runner.os == 'macOS'
         run: ./scripts/sfu-quota-e2e.sh
 
       # #191/#201 TURN relay：内嵌 TURN 分配/互操作 + force-relay 观看端媒体经 relay 到达。
