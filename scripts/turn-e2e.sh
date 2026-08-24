@@ -197,10 +197,18 @@ if [ "$ok" -ne 0 ]; then
 else
     echo "PASS 观看端 TURN 接入 + ICE 连通"
 fi
+# #552 SIP 1:1：publisher 单呼叫——3b 结束释放 view，3c 用独立房间 + 新 publisher。
+kill "$VIEW_PID" 2>/dev/null || true
+wait "$VIEW_PID" 2>/dev/null || true
+ROOM_FR="${ROOM}-fr"
 
 echo "== 3c) force-relay 观看端：只走 relayed 候选 + 媒体到达（#201）"
+"$TARGET_DIR"/aerodesk-agent --role publisher --encoder x264 --noisy \
+  --signal ws://127.0.0.1:14503 --room "$ROOM_FR" >/tmp/turn-e2e-pub-fr.log 2>&1 &
+PUB_FR_PID=$!
+sleep 2
 AERODESK_FORCE_RELAY=1 "$TARGET_DIR"/aerodesk-agent --role viewer \
-  --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/turn-e2e-view-fr.log 2>&1 &
+  --signal ws://127.0.0.1:14503 --room "$ROOM_FR" >/tmp/turn-e2e-view-fr.log 2>&1 &
 VIEW_FR_PID=$!
 ok=1
 for _ in $(seq 1 90); do

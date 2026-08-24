@@ -42,9 +42,17 @@ sleep 2
 fail=0
 
 # 用例执行器：启动 viewer --run-command，等其自行退出（≤30s），断言日志。
+# #552 SIP 1:1：publisher 单呼叫后不接新 INVITE——每个 case 前重启 publisher
+# （独立配对，同 audio/opus-e2e 模式）。
 run_case() {
   local name="$1" cmd="$2" log="$3"
   echo "== case: $name"
+  kill "$PUB_PID" 2>/dev/null || true
+  wait "$PUB_PID" 2>/dev/null || true
+  ./target/debug/aerodesk-agent --role publisher --encoder x264 \
+      --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/cmd-pub.log 2>&1 &
+  PUB_PID=$!
+  sleep 2
   ./target/debug/aerodesk-agent --role viewer --run-command "$cmd" \
       --signal ws://127.0.0.1:3003 --room "$ROOM" >"$log" 2>&1 &
   local vpid=$!
