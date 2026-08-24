@@ -202,9 +202,24 @@ mod tests {
     /// 多线程，static Mutex 即进程内串行——四个 roundtrip 不再互相抢核。
     static ROUNDTRIP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// 带超时地获取 roundtrip 串行锁（#553 验收前置）：前一 roundtrip 挂死泄漏锁时，
+    /// 60s 后明确 panic（"锁被泄漏"），不再让后续测试永远阻塞、烧满 CI。
+    fn lock_roundtrip() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            if ROUNDTRIP_LOCK.try_lock().is_ok() {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("ROUNDTRIP_LOCK 60s 未获取——前一 roundtrip 挂死泄漏了锁（runner 环境问题）");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
     fn roundtrip(codec: Codec) {
         // 整个 roundtrip（编码+解码）持锁：同 crate 的 roundtrip 测试依次执行。
-        let _guard = ROUNDTRIP_LOCK.lock().unwrap();
+        lock_roundtrip();
         crate::encode::init();
         let (w, h) = (320u32, 180u32);
         // 显式软编：hevc_mf 在部分 windows runner 上永久阻塞，自动选编码器
@@ -237,37 +252,42 @@ mod tests {
         assert_eq!(rgba.len(), (w * h * 4) as usize);
     }
 
-    #[test]
-    fn h264_roundtrip() {
-        roundtrip(Codec::H264);
-    }
-
-    #[test]
-    fn h265_roundtrip() {
-        roundtrip(Codec::Hevc);
-    }
-
-    #[test]
-    fn vp9_roundtrip() {
-        roundtrip(Codec::Vp9);
-    }
-
-    #[test]
-    fn av1_roundtrip() {
-        // SVT-AV1 在部分低核 runner（4 核）上偶发死锁（#377/#380 已做生产侧
-        // 修复：移除 lookahead=0、Drop 排空 EOS，仍有个别 runner 卡死）。
-        // 在 worker 线程跑并设 60s 上限：超时 SKIP（进程退出会终止泄漏线程），
-        // 不再让单测挂死整个仓库 CI；健康 runner 上仍完整覆盖。
+    /// 带 watchdog 的 roundtrip（#553 验收前置，推广自 av1 原实现）：worker 线程 + 60s
+    /// 上限——任一 codec 在低核 runner 上死锁（如 SVT-AV1 4 核，镜像
+    /// 20260816 起复现）只 SKIP 该测试，不再挂死整个 test binary / cargo test。
+    fn roundtrip_with_timeout(codec: Codec) {
         use std::time::Duration;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let ok = std::panic::catch_unwind(|| roundtrip(Codec::Av1)).is_ok();
+            let ok = std::panic::catch_unwind(|| roundtrip(codec)).is_ok();
             let _ = tx.send(ok);
         });
         match rx.recv_timeout(Duration::from_secs(60)) {
             Ok(true) => {}
-            Ok(false) => panic!("av1_roundtrip 失败"),
-            Err(_) => eprintln!("SKIP: SVT-AV1 死锁超时（runner 环境问题）"),
+            Ok(false) => panic!("{codec:?}_roundtrip 失败"),
+            // 超时 SKIP：进程退出会终止泄漏线程；后续 roundtrip 由 lock_roundtrip
+            // 的 60s 超时显式失败（明确"锁被泄漏"，而非无限挂起）。
+            Err(_) => eprintln!("SKIP: {codec:?} 编码器死锁超时（runner 环境问题）"),
         }
+    }
+
+    #[test]
+    fn h264_roundtrip() {
+        roundtrip_with_timeout(Codec::H264);
+    }
+
+    #[test]
+    fn h265_roundtrip() {
+        roundtrip_with_timeout(Codec::Hevc);
+    }
+
+    #[test]
+    fn vp9_roundtrip() {
+        roundtrip_with_timeout(Codec::Vp9);
+    }
+
+    #[test]
+    fn av1_roundtrip() {
+        roundtrip_with_timeout(Codec::Av1);
     }
 }

@@ -22,15 +22,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # workspace 里 aerodesk-sfu 的 dev-dep str0m-netem 是路径依赖（../../../str0m），
-      # cargo fmt --all 解析 workspace 时必须能读到（与 test job 同款处理）。
-      - name: Checkout str0m (netem dev-dep)
-        shell: bash
-        run: |
-          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
-            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
-          fi
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -78,27 +69,31 @@ jobs:
             # #4 Wayland/PipeWire 采集是可选 feature（默认关，避免 UI 的
             # slint system-tray→zbus 与 ashpd 的 zbus/tokio 冲突）；CI 显式启用覆盖。
             # #306：aerodesk-agent 纳入 Linux 编译/测试（原生被控端宿主）。
+            # #553 验收前置：ubuntu 4 核 runner 上 SVT-AV1 偶发死锁（codec roundtrip 卡死
+            # 6h，镜像 20260816 起复现）——串行测试从源头消除并行争抢触发。
             skip_crates: --exclude aerodesk-ios
             features: --features aerodesk-platform/pipewire
+            test_threads: "1"
           - os: windows-latest
             # #3：Windows CLI 已跨平台化（DXGI+OpenH264+SendInput），纳入编译/测试；
             # x264 仍排除（MSVC 下 C 库批次）。
             skip_crates: --exclude aerodesk-ios --exclude x264
-            features: 
+            features:
+            test_threads: ""
     runs-on: ${{ matrix.os }}
+    # #553 验收前置：健康 ubuntu 全流程约 25 分钟——job 级兜底超时，防 codec/SVT 类
+    # 挂起烧满 GH Actions 6h 默认上限（08-19 apt 卡 6h、08-21 起 codec 卡 6h 先例）。
+    timeout-minutes: 45
     env:
       CARGO_TERM_COLOR: always
       # #102：SFU 偶发 Abort 定位——panic 时输出完整回溯
       RUST_BACKTRACE: 1
+      # #552：脚本启动的 signal 一律继承此 env——SIP UDP 面（5060）开启，
+      # CLI 客户端（SIP REGISTER/INVITE）才能连接；#577 曾逐脚本补，仍漏
+      # 两个 .ps1，收敛为 job 级注入（脚本内显式设置优先，语义不变）。
+      SIP_UDP_PORT: "5060"
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout str0m (netem dev-dep)
-        shell: bash
-        run: |
-          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
-            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
-          fi
 
       - name: System deps (Linux)
         if: runner.os == 'Linux'
@@ -140,6 +135,11 @@ jobs:
         run: cargo clippy --workspace ${{ matrix.skip_crates }} --all-targets ${{ matrix.features }}
 
       - name: test
+        # #553 验收前置：cargo test step 级超时（挂起点在 codec roundtrip，超时快速失败
+        # 而非烧满 job 时限）；ubuntu 串行（test_threads=1）规避 SVT 死锁。
+        timeout-minutes: 25
+        env:
+          RUST_TEST_THREADS: ${{ matrix.test_threads }}
         run: cargo test --workspace ${{ matrix.skip_crates }} ${{ matrix.features }}
 
       # #470 Windows 服务生命周期冒烟（runner 具管理员权限）：安装→启动→
@@ -182,8 +182,9 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/smoke.sh
 
-      # #58 画质选层端到端：publisher simulcast q/h/f → SFU 按 rid 选层，
-      # 断言 f 层码率显著高于 q 层（release 构建，避免 debug 失真）。
+      # #58 画质选层端到端（SIP 语义版，#552 迁移后重写）：Web 发布端 +
+      # 2×CLI viewer（SIP 会议桥）多播收流 + 选层请求转发断言；simulcast
+      # 三层（q/h/f + f>q 码率）断言待原生端会议发布落地（P2）恢复。
       - name: e2e simulcast layer switching (macOS only)
         if: runner.os == 'macOS'
         run: ./scripts/simulcast-e2e.sh
@@ -367,6 +368,8 @@ jobs:
         run: ./scripts/avsync-e2e.sh
 
       # 客户端自测：Web 主控端（浏览器观看 + 输入回传，SFU 内嵌 web/index.html）。
+      # #552 迁移后改双浏览器拓扑（Web 发布 + Web 观看同 WSS 房间）：CLI publisher
+      # 已是 SIP 1:1 被叫，WSS JSON 面无法对其呼叫（互通缺口待 Web SIP-WSS，P1 后）。
       - name: e2e web viewer (macOS only)
         if: runner.os == 'macOS'
         env:
@@ -382,8 +385,12 @@ jobs:
         run: bash scripts/ci-retry.sh 3 ./scripts/web-pub-e2e.sh
 
       # 客户端自测：Web 主控端文件上传（file 通道 → 被控端落盘 sha256 校验）。
+      # #552 后暂停：Web viewer（WSS）的 file 通道需可达的落盘对端——CLI publisher
+      # 已是 SIP 1:1 被叫（不在 SFU 会议房间），被控端会议接入（发布方向 INVITE
+      # view-AoR）属 P2 完整实现，落地后恢复本 step（文件链路由 CLI↔CLI
+      # file-transfer-e2e 覆盖）。
       - name: e2e web file transfer (macOS only)
-        if: runner.os == 'macOS'
+        if: false && runner.os == 'macOS'
         env:
           BROWSER: chrome
         run: bash scripts/ci-retry.sh 3 ./scripts/web-file-e2e.sh
@@ -428,15 +435,10 @@ jobs:
     runs-on: windows-latest
     env:
       CARGO_TERM_COLOR: always
+      # #552：脚本启动的 signal 需 SIP UDP 面（同 test job env 注释）
+      SIP_UDP_PORT: "5060"
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout str0m (netem dev-dep)
-        shell: bash
-        run: |
-          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
-            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
-          fi
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -468,15 +470,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
+      # #552：脚本启动的 signal 需 SIP UDP 面（同 test job env 注释）
+      SIP_UDP_PORT: "5060"
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout str0m (netem dev-dep)
-        shell: bash
-        run: |
-          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
-            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
-          fi
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -500,15 +497,10 @@ jobs:
     runs-on: macos-latest
     env:
       CARGO_TERM_COLOR: always
+      # #552：脚本启动的 signal 需 SIP UDP 面（同 test job env 注释）
+      SIP_UDP_PORT: "5060"
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout str0m (netem dev-dep)
-        shell: bash
-        run: |
-          if [ ! -d "${{ github.workspace }}/../str0m/.git" ]; then
-            git clone --depth 1 https://github.com/PulseBeamDev/str0m.git "${{ github.workspace }}/../str0m"
-          fi
 
       - uses: dtolnay/rust-toolchain@stable
 

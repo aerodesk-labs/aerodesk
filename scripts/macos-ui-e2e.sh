@@ -48,7 +48,8 @@ REC="$(mktemp -d)"
 RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu" >/tmp/macosui-sfu.log 2>&1 &
 SFU=$!
 # SIP 会议桥链路（WSS 兜底已删 #576——desktop 观看必经 SIP）。
-SIP_UDP_PORT=5060 "$ROOT/target/debug/aerodesk-signal" >/tmp/macosui-sig.log 2>&1 &
+# SIP_DIGEST_USERS：显式配置 Digest 用户（覆盖兼容模式，与 linux/windows 同款）。
+SIP_UDP_PORT=5060 SIP_DIGEST_USERS="AD-E2EUI=e2e-token" "$ROOT/target/debug/aerodesk-signal" >/tmp/macosui-sig.log 2>&1 &
 SIG=$!
 OK=0
 for _ in $(seq 1 80); do

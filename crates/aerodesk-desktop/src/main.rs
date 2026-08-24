@@ -1597,17 +1597,16 @@ fn open_viewer_session(
     }
     let weak2 = ui.as_weak();
     // #504 按设置页 TLS 开关归一化信令 URL（显式带 ws:// / wss:// 的输入不受影响）；
-    // `server` 原样保留用于状态条/最近列表展示。macOS 仍走 SFU 观看（mac slice 后续）。
+    // `server` 原样保留用于状态条/最近列表展示。
     let server_url = aerodesk_core::signaling::normalize_signal_url_with_tls(
         &server,
         SERVER_TLS.load(Ordering::SeqCst),
     );
-    #[cfg(not(target_os = "macos"))]
     {
         // #552 拓扑（1:1 P2P / ≥3 人 SFU）+ 会议桥（slice 12）：SIP 链路在线
         // → 任意房间一律经 SIP（服务端按绑定路由：AD- 设备 = 1:1 透明代理，
         // 其余合法房间名 = SFU 会议桥）；链路未在线 → 明确提示连接信令
-        // （未发布期不留 WSS 兜底，macOS 观看端仍走 SFU 待迁）。
+        // （未发布期不留 WSS 兜底）。macOS 与全平台同一 SIP 观看路径（#578）。
         let sip_online = PRESENCE
             .lock()
             .unwrap_or_else(aerodesk_core::util::lock_recover)

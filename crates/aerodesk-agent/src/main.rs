@@ -31,7 +31,6 @@ use aerodesk_core::protocol::input::{
     ButtonState, INPUT_PROTOCOL_VERSION, InputEvent, InputFrame, Modifiers, MouseButton,
 };
 use aerodesk_core::protocol::signal::Role;
-use aerodesk_core::turn_client::setup_turn;
 use aerodesk_core::{Endpoint, platform::Codec};
 use str0m::media::{Frequency, MediaTime};
 use str0m::net::Protocol;
@@ -147,13 +146,13 @@ fn run() {
                     std::process::exit(1);
                 }
             }
+            return;
         }
         #[cfg(not(windows))]
         {
             eprintln!("--install-autostart 仅 Windows 支持");
             std::process::exit(1);
         }
-        return;
     }
     if args.iter().any(|a| a == "--remove-autostart") {
         #[cfg(windows)]
@@ -166,13 +165,13 @@ fn run() {
                     std::process::exit(1);
                 }
             }
+            return;
         }
         #[cfg(not(windows))]
         {
             eprintln!("--remove-autostart 仅 Windows 支持");
             std::process::exit(1);
         }
-        return;
     }
     if args.iter().any(|a| a == "--autostart-status") {
         #[cfg(windows)]
@@ -185,13 +184,13 @@ fn run() {
                     std::process::exit(1);
                 }
             }
+            return;
         }
         #[cfg(not(windows))]
         {
             eprintln!("--autostart-status 仅 Windows 支持");
             std::process::exit(1);
         }
-        return;
     }
 
     // #470 Windows 系统服务（需管理员）：安装/移除/查询 + 服务运行入口。
@@ -820,17 +819,19 @@ fn connect_inner(
     )?);
     link.start();
     {
-        // 等 Online（10s；口令错/服务器不可达在此显式失败）。
+        // 等 Online（10s；口令错/服务器不可达在此显式失败，回 Err 而非 panic——
+        // 便于脚本诊断"signal 未启 SIP 面/口令错"而非笼统崩溃）。
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let st = link.poll();
             if st.is_online() {
                 break;
             }
-            assert!(
-                Instant::now() < deadline,
-                "SIP 注册未完成（10s）：{st:?}——检查 signal 的 SIP 端口/口令"
-            );
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "SIP 注册未完成（10s）：{st:?}——检查 signal 的 SIP 端口/口令"
+                ));
+            }
             std::thread::sleep(Duration::from_millis(50));
         }
         info!("SIP registered: {device_id}");
