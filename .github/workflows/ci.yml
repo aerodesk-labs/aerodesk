@@ -250,9 +250,12 @@ jobs:
       # #160 SFU 按需录制 API：内部接口 start/stop/status + 403 + 产物断言
       # （#240 扩展：record_api 审计 + recordings_active gauge）。
       # Web 发布端（headless Chrome 屏幕共享）偶发浏览器崩溃（同类 flake 见
-      # web-pub/web-reconnect），按仓库约定限 3 次重试。
+      # web-pub/web-reconnect），按仓库约定限 3 次重试；BROWSER=chrome 与
+      # web-pub 一致（macOS runner 的 msedge headless 屏幕共享不稳定）。
       - name: e2e record API (macOS only)
         if: runner.os == 'macOS'
+        env:
+          BROWSER: chrome
         run: bash scripts/ci-retry.sh 3 ./scripts/record-api-e2e.sh
       # #266 录制转封装：ADREC2 → rec2mp4 按访问单元聚合 → MP4 帧数断言。
       - name: e2e record-mp4 (#266, macOS only)
