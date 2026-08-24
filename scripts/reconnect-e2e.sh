@@ -63,12 +63,15 @@ if [ "$FRAMES" -le 5 ]; then
 else
     echo "PASS A: 初始收帧 $FRAMES"
 fi
-# 杀服务（模拟重启窗口）
+# 杀服务 + publisher（#553 SIP 1:1：P2P 直连不经服务——viewer 只在对端
+# （publisher）死亡时断线，重连语义需连 publisher 一起杀）。
+kill "$PUB" 2>/dev/null || true
+wait "$PUB" 2>/dev/null || true
 stop_services
 sleep 3
 start_sfu; start_signal
 wait_port 14502 && wait_port 14503 || { echo "FAIL A: 重启后服务未就绪"; fail=1; }
-# 重启 publisher（SFU 重启后旧发布端已失效）
+# 重启 publisher（旧发布端已随杀服务窗口终止，viewer 的对端死亡 → 断线重连）
 ./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
     --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/rec-pub2.log 2>&1 &
 PUB2=$!
