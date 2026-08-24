@@ -6,6 +6,7 @@
 #       POST /record/stop?room=rr → 断言 .adrec + meta.json + audit.log。
 set -euo pipefail
 cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
 
 ROOM="rec-api-$(date +%s)"
 export RUST_LOG="${RUST_LOG:-info}"
