@@ -2194,9 +2194,12 @@ fn viewer(
                         info!("input channel open");
                         input_open = true;
                     }
+                    // #553 验收发现：control 类消息只在 control 通道就绪后发送——
+                    // input 先开时对端（pub/SFU）control 通道可能未就绪，消息被
+                    // 丢弃且 sent 标志已置位不再重发（bitrate/display e2e CI 连败
+                    // 根因）；control 打开事件必然晚于或等于双向通道就绪。
+                    if label == "control" {
                     // #29：可选显式选层（--layer q|h|f），经 control 通道发 SFU。
-                    // #66：input 与 control 打开顺序不定——只在 input 打开时发一次，
-                    // 若 control 尚未就绪会静默丢失选层请求；两个通道任一打开都重试。
                     if !layer_sent {
                         let req = serde_json::json!({ "layer": layer });
                         let data = serde_json::to_vec(&req).unwrap();
@@ -2234,6 +2237,7 @@ fn viewer(
                             info!("control command sent: {ctl}");
                             control_sent = true;
                         }
+                    }
                     }
                 }
                 // #109 远程命令：响应打印 stdout/stderr/exit code 后退出（exit code 语义）。
