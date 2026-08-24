@@ -1523,8 +1523,10 @@ fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
     // #109 远程命令：cmd 通道请求交给执行器（后台线程执行，主循环回传响应）。
     cmd_exec::handle_event(&ev, endpoint);
     match ev {
-        ClientEvent::ChannelOpen(label, _) if label == "input" => {
-            info!("input channel open");
+        // #553 验收诊断：所有通道打开打日志（bitrate/display 的 control 未达
+        // 排查——input/file 开而 control 是否在 pub 侧打开需可见）。
+        ClientEvent::ChannelOpen(label, _) if label == "input" || label == "control" || label == "file" || label == "cursor" || label == "cmd" => {
+            info!("channel open: {label}");
         }
         ClientEvent::ChannelData(cid, _, data) => {
             if endpoint.channel_label(cid).as_deref() == Some("input") {
