@@ -1802,7 +1802,7 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                     break;
                 }
                 // UI 命令：主叫呼出（P2pCall 已 create_offer，本线程 call 并等 Answered）。
-                while let Ok(cmd) = cmd_rx.try_recv() {
+                'cmd_loop: while let Ok(cmd) = cmd_rx.try_recv() {
                     match cmd {
                         LinkCommand::Call {
                             target,
@@ -1813,6 +1813,30 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                             on_answered,
                             on_failed,
                         } => {
+                            // 等 REGISTER 完成（Online）再 INVITE——注册慢（退避重试）
+                            // 时早发 INVITE 会被 UA 拒（mac e2e 实测 +63s 注册）。
+                            {
+                                let deadline = std::time::Instant::now()
+                                    + std::time::Duration::from_secs(15);
+                                loop {
+                                    let mut lk = link
+                                        .lock()
+                                        .unwrap_or_else(aerodesk_core::util::lock_recover);
+                                    let st = lk.poll();
+                                    drop(lk);
+                                    if st.is_online() {
+                                        break;
+                                    }
+                                    if std::time::Instant::now() >= deadline {
+                                        tracing::warn!(
+                                            "sip call: 15s 未注册完成（{st:?}），放弃呼叫"
+                                        );
+                                        on_failed(format!("SIP 注册未完成：{st:?}"));
+                                        continue 'cmd_loop;
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
+                                }
+                            }
                             // P2pCall + offer 在线程内构建（TURN 建连可能阻塞数秒）。
                             let mut p2p = match P2pCall::new(P2pCallConfig {
                                 role: P2pRole::Caller,
