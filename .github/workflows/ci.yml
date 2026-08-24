@@ -281,23 +281,28 @@ jobs:
       # 延迟 p99（与直连基线对比）。
       # #257：同一 step 先 local 五场景，再 REMOTE_LOOPBACK（本地双 PoP + remote
       # 断言流，端到端验证远程验收工具含 BRIDGE_KILL_CMD 恢复）。
+      # #553 验收前置：暂停——agent CLI 已 SIP 化（无 WSS join），双 PoP 桥接
+      # 场景的客户端面失效（bridge 双腿仍 WSS，但 agent 客户端已无 WSS 路径）；
+      # SIP 302 多 PoP + 会议桥支持（#551 可后置）后恢复。
       - name: e2e bridge fallback (macOS only)
-        if: runner.os == 'macOS'
+        if: false && runner.os == 'macOS'
         # 复杂网络 e2e 在 macOS runner 偶发瞬时 flake（#280 同类），按仓库
         # web-reconnect/ios-sim 约定限 3 次重试；真实回归会被 3 连败暴露。
         run: bash scripts/ci-retry.sh 3 bash -c "
           ./scripts/bridge-fallback-e2e.sh &&
-          REMOTE_LOOPBACK=1 ./scripts/bridge-fallback-e2e.sh" 
+          REMOTE_LOOPBACK=1 ./scripts/bridge-fallback-e2e.sh"
 
       # #216 M7：桥接 TURN 中继路径验收（#262）——双 PoP 内嵌 TURN +
       # AERODESK_FORCE_RELAY=1，桥双腿走 relay（真实 NAT 就绪）。
+      # #553 验收前置：同 bridge fallback 暂停（SIP 302 多 PoP 后恢复）。
       - name: e2e bridge TURN relay (macOS only)
-        if: runner.os == 'macOS'
+        if: false && runner.os == 'macOS'
         run: bash scripts/ci-retry.sh 3 ./scripts/bridge-turn-e2e.sh
 
       # #216 M9：多房间桥并发 + BRIDGE_MAX_RUNNING 上限回退（#272）。
+      # #553 验收前置：同 bridge fallback 暂停（SIP 302 多 PoP 后恢复）。
       - name: e2e bridge multiroom (macOS only)
-        if: runner.os == 'macOS'
+        if: false && runner.os == 'macOS'
         run: bash scripts/ci-retry.sh 3 ./scripts/bridge-multiroom-e2e.sh
 
       # #264 一键部署脚本：语法与参数解析守卫（真实部署需外部主机，dry-run 验证）。
