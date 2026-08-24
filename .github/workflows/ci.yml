@@ -184,9 +184,11 @@ jobs:
       # #58 画质选层端到端（SIP 语义版，#552 迁移后重写）：Web 发布端 +
       # 2×CLI viewer（SIP 会议桥）多播收流 + 选层请求转发断言；simulcast
       # 三层（q/h/f + f>q 码率）断言待原生端会议发布落地（P2）恢复。
+      # Web 发布端（headless Chrome 屏幕共享）偶发浏览器崩溃（同类 flake 见
+      # web-pub/web-reconnect），按仓库约定限 3 次重试。
       - name: e2e simulcast layer switching (macOS only)
         if: runner.os == 'macOS'
-        run: ./scripts/simulcast-e2e.sh
+        run: bash scripts/ci-retry.sh 3 ./scripts/simulcast-e2e.sh
 
       # #8 高码率（大帧）回归：VT 1080p60 --noisy ~5k pps → viewer 关键帧/解码
       # 正常（防 CLI viewer 单包读取丢关键帧回归；VT 不可用时 SKIP）。
