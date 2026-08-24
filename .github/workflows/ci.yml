@@ -136,11 +136,10 @@ jobs:
 
       - name: test
         # #553 验收前置：cargo test step 级超时（挂起点在 codec roundtrip，超时快速失败
-        # 而非烧满 job 时限）；ubuntu 串行（test_threads=1）规避 SVT 死锁。
+        # 而非烧满 job 时限）；ubuntu 串行（--test-threads=1）规避 SVT 死锁。
+        # （不用 RUST_TEST_THREADS env：空值会让 libtest get_concurrency panic）
         timeout-minutes: 25
-        env:
-          RUST_TEST_THREADS: ${{ matrix.test_threads }}
-        run: cargo test --workspace ${{ matrix.skip_crates }} ${{ matrix.features }}
+        run: cargo test --workspace ${{ matrix.skip_crates }} ${{ matrix.features }} ${{ matrix.test_threads == '1' && '--test-threads=1' || '' }}
 
       # #470 Windows 服务生命周期冒烟（runner 具管理员权限）：安装→启动→
       # 查询→移除→终态。服务体在无配置下安全空转（presence 不启动，仅日志），
