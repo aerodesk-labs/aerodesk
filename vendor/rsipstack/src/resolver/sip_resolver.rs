@@ -1,0 +1,566 @@
+use crate::sip::{Domain, Port, Transport};
+use hickory_resolver::{
+    config::{LookupIpStrategy, NameServerConfig, ResolverConfig},
+    net::runtime::TokioRuntimeProvider,
+    proto::rr::RData,
+    TokioResolver,
+};
+use rand::RngExt;
+use std::net::IpAddr;
+use std::net::SocketAddr;
+use std::str::FromStr;
+use std::sync::Arc;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Target {
+    pub addr: SocketAddr,
+    pub transport: Transport,
+}
+
+#[derive(Debug, Clone)]
+pub struct SipResolver {
+    backend: ResolverBackend,
+}
+
+#[derive(Debug, Clone)]
+enum ResolverBackend {
+    Hickory(Arc<TokioResolver>),
+    System,
+}
+
+impl Default for SipResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SipResolver {
+    pub fn new() -> Self {
+        match Self::try_hickory() {
+            Ok(resolver) => resolver,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to build hickory DNS resolver, falling back to system resolver"
+                );
+                Self::system()
+            }
+        }
+    }
+
+    /// Build a resolver that queries the given nameservers, bypassing the
+    /// system DNS configuration (which may contain unparseable entries such
+    /// as IPv6 link-local addresses with a `%zone` scope suffix).
+    pub fn with_nameservers(nameservers: Vec<IpAddr>) -> Self {
+        let mut config = ResolverConfig::default();
+        for ip in nameservers {
+            config.add_name_server(NameServerConfig::udp_and_tcp(ip));
+        }
+
+        let mut builder =
+            TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
+        builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4thenIpv6;
+
+        match builder.build() {
+            Ok(resolver) => Self {
+                backend: ResolverBackend::Hickory(Arc::new(resolver)),
+            },
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to build hickory DNS resolver with custom nameservers, falling back to system resolver"
+                );
+                Self::system()
+            }
+        }
+    }
+
+    fn system() -> Self {
+        Self {
+            backend: ResolverBackend::System,
+        }
+    }
+
+    fn try_hickory() -> Result<Self, String> {
+        let mut builder = TokioResolver::builder_tokio().map_err(|e| e.to_string())?;
+        builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4thenIpv6;
+
+        let resolver = builder.build().map_err(|e| e.to_string())?;
+        Ok(Self {
+            backend: ResolverBackend::Hickory(Arc::new(resolver)),
+        })
+    }
+
+    /// Main lookup function implementing core of RFC 3263 (SRV + Fallback)
+    pub async fn lookup(
+        &self,
+        domain: &Domain,
+        port: Option<Port>,
+        transport: Option<Transport>,
+        secure: bool,
+    ) -> Result<Vec<Target>, String> {
+        match &self.backend {
+            ResolverBackend::Hickory(resolver) => {
+                let source = HickorySource(resolver.clone());
+                resolve_logic(&source, domain, port, transport, secure).await
+            }
+            ResolverBackend::System => {
+                let source = SystemLookupSource;
+                resolve_logic(&source, domain, port, transport, secure).await
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SrvRecord {
+    pub target: String,
+    pub port: u16,
+    pub priority: u16,
+    pub weight: u16,
+}
+
+#[async_trait::async_trait]
+pub trait LookupSource: Send + Sync {
+    async fn lookup_srv(&self, name: &str) -> Result<Vec<SrvRecord>, String>;
+    async fn lookup_a_aaaa(&self, name: &str) -> Result<Vec<IpAddr>, String>;
+}
+
+struct HickorySource(Arc<TokioResolver>);
+
+#[async_trait::async_trait]
+impl LookupSource for HickorySource {
+    async fn lookup_srv(&self, name: &str) -> Result<Vec<SrvRecord>, String> {
+        match self.0.srv_lookup(name).await {
+            Ok(records) => {
+                let mut res = Vec::new();
+                for r in records.message().all_sections() {
+                    if let RData::SRV(srv) = &r.data {
+                        let target = srv.target.to_string();
+                        // Remove trailing dot
+                        let target = target.trim_end_matches('.').to_string();
+                        res.push(SrvRecord {
+                            target,
+                            port: srv.port,
+                            priority: srv.priority,
+                            weight: srv.weight,
+                        });
+                    }
+                }
+                Ok(res)
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    async fn lookup_a_aaaa(&self, name: &str) -> Result<Vec<IpAddr>, String> {
+        match self.0.lookup_ip(name).await {
+            Ok(records) => Ok(records.iter().collect()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
+/// Fallback lookup source backed by the OS resolver (`getaddrinfo` via
+/// `tokio::net::lookup_host`). Does not support SRV lookups; callers should
+/// fall back to A/AAAA resolution.
+struct SystemLookupSource;
+
+#[async_trait::async_trait]
+impl LookupSource for SystemLookupSource {
+    async fn lookup_srv(&self, name: &str) -> Result<Vec<SrvRecord>, String> {
+        Err(format!(
+            "SRV lookup not supported by system resolver: {}",
+            name
+        ))
+    }
+
+    async fn lookup_a_aaaa(&self, name: &str) -> Result<Vec<IpAddr>, String> {
+        let addr_str = format!("{}:0", name);
+        let result = tokio::net::lookup_host(&addr_str).await;
+        match result {
+            Ok(addrs) => Ok(addrs.map(|a| a.ip()).collect()),
+            Err(e) => Err(format!("DNS resolution failed for {}: {}", name, e)),
+        }
+    }
+}
+
+pub async fn resolve_logic<S: LookupSource + ?Sized>(
+    source: &S,
+    domain: &Domain,
+    port: Option<Port>,
+    transport: Option<Transport>,
+    secure: bool,
+) -> Result<Vec<Target>, String> {
+    let domain_str = domain.to_string();
+
+    if let Ok(ip) = IpAddr::from_str(&domain_str) {
+        let t = transport.unwrap_or(if secure {
+            Transport::Tls
+        } else {
+            Transport::Udp
+        });
+        let p: u16 = port
+            .map(|p| p.into())
+            .unwrap_or_else(|| t.default_port().into());
+        return Ok(vec![Target {
+            addr: SocketAddr::new(ip, p),
+            transport: t,
+        }]);
+    }
+
+    if let Some(p) = port {
+        let t = transport.unwrap_or(if secure {
+            Transport::Tls
+        } else {
+            Transport::Udp
+        });
+        let ips = source.lookup_a_aaaa(&domain_str).await.unwrap_or_default();
+
+        if ips.is_empty() {
+            return Err(format!("Could not resolve IP for {}", domain_str));
+        }
+
+        let p_u16: u16 = p.into();
+        let targets = ips
+            .into_iter()
+            .map(|ip| Target {
+                addr: SocketAddr::new(ip, p_u16),
+                transport: t,
+            })
+            .collect();
+        return Ok(targets);
+    }
+
+    let mut targets = Vec::new();
+    let mut candidates = Vec::new();
+
+    if let Some(t) = transport {
+        candidates.push(t);
+    } else {
+        if secure {
+            candidates.push(Transport::Tls);
+        } else {
+            candidates.push(Transport::Udp);
+            candidates.push(Transport::Tcp);
+        }
+    }
+
+    let mut _srv_found = false;
+
+    for t in candidates.iter() {
+        let prefix = srv_prefix(*t, secure);
+        if prefix.is_empty() {
+            continue;
+        } // Unsupported transport for SRV
+
+        let srv_name = format!("{}.{}", prefix, domain_str);
+
+        if let Ok(records) = source.lookup_srv(&srv_name).await {
+            if !records.is_empty() {
+                _srv_found = true;
+                let ordered = order_srv_records(records);
+
+                for rec in ordered {
+                    // Start sub-query for A/AAAA
+                    if let Ok(ips) = source.lookup_a_aaaa(&rec.target).await {
+                        for ip in ips {
+                            targets.push(Target {
+                                addr: SocketAddr::new(ip, rec.port),
+                                transport: *t,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if targets.is_empty() {
+        let def_transport = transport.unwrap_or(if secure {
+            Transport::Tls
+        } else {
+            Transport::Udp
+        });
+        let def_port = def_transport.default_port();
+
+        match source.lookup_a_aaaa(&domain_str).await {
+            Ok(ips) if !ips.is_empty() => {
+                for ip in ips {
+                    targets.push(Target {
+                        addr: SocketAddr::new(ip, def_port.into()),
+                        transport: def_transport,
+                    });
+                }
+                Ok(targets)
+            }
+            _ => Err(format!("Resolution failed for {}", domain_str)),
+        }
+    } else {
+        Ok(targets)
+    }
+}
+
+fn srv_prefix(transport: Transport, secure: bool) -> &'static str {
+    match (transport, secure) {
+        (Transport::Udp, false) => "_sip._udp",
+        (Transport::Tcp, false) => "_sip._tcp",
+        (Transport::Tls, _) => "_sips._tcp",
+        (Transport::Tcp, true) => "_sips._tcp",
+        (Transport::Wss, true) => "_sips._tcp", // Common practice fallback
+        _ => "",
+    }
+}
+
+fn order_srv_records(mut records: Vec<SrvRecord>) -> Vec<SrvRecord> {
+    records.sort_by_key(|k| k.priority);
+
+    let mut ordered = Vec::new();
+    let mut start_idx = 0;
+
+    while start_idx < records.len() {
+        let current_priority = records[start_idx].priority;
+        let mut end_idx = start_idx;
+
+        // Find range with same priority
+        while end_idx < records.len() && records[end_idx].priority == current_priority {
+            end_idx += 1;
+        }
+
+        // Group of records with same priority
+        let mut group = records[start_idx..end_idx].to_vec();
+
+        // Selection sort based on weights
+        while !group.is_empty() {
+            let total_weight: u32 = group.iter().map(|r| r.weight as u32).sum();
+            let mut rng = rand::rng();
+
+            if total_weight == 0 {
+                // All zero, just pick one (shuffle or first)
+                let idx = rng.random_range(0..group.len()); // 0..len (exclusive) => OK
+                ordered.push(group.remove(idx));
+            } else {
+                let mut r = rng.random_range(0..=total_weight); // 0..=total
+                let mut selected_idx = 0;
+                for (i, rec) in group.iter().enumerate() {
+                    let w = rec.weight as u32;
+                    if r <= w {
+                        selected_idx = i;
+                        break;
+                    }
+                    r -= w;
+                }
+                if selected_idx >= group.len() {
+                    selected_idx = group.len() - 1;
+                }
+
+                ordered.push(group.remove(selected_idx));
+            }
+        }
+
+        start_idx = end_idx;
+    }
+
+    ordered
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::Mutex;
+    use std::collections::HashMap;
+
+    struct MockDns {
+        srv: Mutex<HashMap<String, Vec<SrvRecord>>>,
+        a: Mutex<HashMap<String, Vec<IpAddr>>>,
+    }
+
+    impl MockDns {
+        fn new() -> Self {
+            Self {
+                srv: Mutex::new(HashMap::new()),
+                a: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn add_srv(&self, name: &str, target: &str, port: u16, priority: u16, weight: u16) {
+            let mut map = self.srv.lock();
+            map.entry(name.to_string()).or_default().push(SrvRecord {
+                target: target.to_string(),
+                port,
+                priority,
+                weight,
+            });
+        }
+
+        fn add_a(&self, name: &str, ip: IpAddr) {
+            let mut map = self.a.lock();
+            map.entry(name.to_string()).or_default().push(ip);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LookupSource for MockDns {
+        async fn lookup_srv(&self, name: &str) -> Result<Vec<SrvRecord>, String> {
+            let map = self.srv.lock();
+            if let Some(recs) = map.get(name) {
+                Ok(recs.clone())
+            } else {
+                Err("Not found".to_string())
+            }
+        }
+
+        async fn lookup_a_aaaa(&self, name: &str) -> Result<Vec<IpAddr>, String> {
+            let map = self.a.lock();
+            if let Some(ips) = map.get(name) {
+                Ok(ips.clone())
+            } else {
+                Err("Not found".to_string())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ip_direct() {
+        let mock = MockDns::new();
+        let domain = Domain::from("127.0.0.1".to_string());
+
+        let res = resolve_logic(&mock, &domain, None, None, false)
+            .await
+            .unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].addr.ip().to_string(), "127.0.0.1");
+        assert_eq!(res[0].transport, Transport::Udp); // Default insecure
+    }
+
+    #[tokio::test]
+    async fn test_domain_with_port() {
+        let mock = MockDns::new();
+        mock.add_a("example.com", "1.2.3.4".parse().unwrap());
+
+        let domain = Domain::from("example.com".to_string());
+        let res = resolve_logic(
+            &mock,
+            &domain,
+            Some(5090.into()),
+            Some(Transport::Tcp),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].addr, "1.2.3.4:5090".parse().unwrap());
+        assert_eq!(res[0].transport, Transport::Tcp);
+    }
+
+    #[tokio::test]
+    async fn test_srv_lookup_basic() {
+        let mock = MockDns::new();
+        // Setup SRV
+        mock.add_srv("_sip._udp.example.com", "sip1.example.com", 5060, 10, 100);
+
+        // Setup A
+        mock.add_a("sip1.example.com", "10.0.0.1".parse().unwrap());
+
+        let domain = Domain::from("example.com".to_string());
+        let res = resolve_logic(&mock, &domain, None, Some(Transport::Udp), false)
+            .await
+            .unwrap();
+
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].addr, "10.0.0.1:5060".parse().unwrap());
+        assert_eq!(res[0].transport, Transport::Udp);
+    }
+
+    #[tokio::test]
+    async fn test_srv_priority() {
+        let mock = MockDns::new();
+        // Priority 10 vs 20
+        mock.add_srv("_sip._udp.example.com", "high.example.com", 5060, 10, 100);
+        mock.add_srv("_sip._udp.example.com", "low.example.com", 5060, 20, 100);
+
+        mock.add_a("high.example.com", "1.1.1.1".parse().unwrap());
+        mock.add_a("low.example.com", "2.2.2.2".parse().unwrap());
+
+        let domain = Domain::from("example.com".to_string());
+        let res = resolve_logic(&mock, &domain, None, Some(Transport::Udp), false)
+            .await
+            .unwrap();
+
+        assert_eq!(res.len(), 2);
+        assert_eq!(res[0].addr.ip().to_string(), "1.1.1.1");
+        assert_eq!(res[1].addr.ip().to_string(), "2.2.2.2");
+
+        // Check order
+        let ips: Vec<String> = res.iter().map(|t| t.addr.ip().to_string()).collect();
+        assert_eq!(ips, vec!["1.1.1.1", "2.2.2.2"]);
+    }
+
+    #[tokio::test]
+    async fn test_fallback_to_a() {
+        let mock = MockDns::new();
+        // No SRV records added
+        mock.add_a("example.com", "9.9.9.9".parse().unwrap());
+
+        let domain = Domain::from("example.com".to_string());
+        let res = resolve_logic(&mock, &domain, None, Some(Transport::Udp), false)
+            .await
+            .unwrap();
+
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].addr, "9.9.9.9:5060".parse().unwrap());
+    }
+
+    #[test]
+    fn test_srv_ordering_weight() {
+        let records = vec![
+            SrvRecord {
+                target: "a".into(),
+                port: 1,
+                priority: 1,
+                weight: 10,
+            },
+            SrvRecord {
+                target: "b".into(),
+                port: 1,
+                priority: 1,
+                weight: 90,
+            },
+        ];
+
+        // This is randomized, but checking it runs without panic
+        let ordered = order_srv_records(records);
+        assert_eq!(ordered.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_system_lookup_source_resolves_host() {
+        let source = SystemLookupSource;
+        let ips = source.lookup_a_aaaa("localhost").await.unwrap();
+        assert!(!ips.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_system_backend_resolves_ip() {
+        let resolver = SipResolver {
+            backend: ResolverBackend::System,
+        };
+        let domain = Domain::from("127.0.0.1".to_string());
+        let res = resolver.lookup(&domain, None, None, false).await.unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].addr.ip().to_string(), "127.0.0.1");
+        assert_eq!(res[0].transport, Transport::Udp);
+    }
+
+    #[test]
+    fn test_with_nameservers_builds() {
+        let resolver = SipResolver::with_nameservers(vec!["127.0.0.1".parse().unwrap()]);
+        assert!(matches!(resolver.backend, ResolverBackend::Hickory(_)));
+    }
+
+    #[test]
+    fn test_new_does_not_panic() {
+        let _ = SipResolver::new();
+    }
+}

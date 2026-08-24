@@ -6166,8 +6166,6 @@ dependencies = [
 [[package]]
 name = "rsipstack"
 version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70d36ff94667258eace46bb7a9a5e388bb00abccd09d997335a23ee6073d04b4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6193,6 +6191,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "tungstenite 0.29.0",
 ]
 
 [[package]]
