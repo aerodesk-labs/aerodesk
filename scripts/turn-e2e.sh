@@ -164,7 +164,10 @@ fi
 TURN_USER="$(($(date +%s) + 3600)):turn-e2e"
 TURN_CRED="$(python3 -c "import hmac,hashlib,base64; print(base64.b64encode(hmac.new(b'$TURN_SECRET', b'$TURN_USER', hashlib.sha1).digest()).decode())")"
 echo "== 3a) 发布端（TURN_PROTO=${TURN_PROTO}）：allocate + relayed 候选 + ICE"
-"$TARGET_DIR"/aerodesk-agent --role publisher --encoder x264 --noisy \
+# #584：发布端同样需本地 AERO_TURN_* 配置（#552 SIP 化后 TURN 不随信令自动下发），
+# 否则不发起 allocation，3b 的「发布端 TURN 接入」断言必失败（与 viewer 对称）。
+AERO_TURN_URLS="$SIG_TURN_URLS" AERO_TURN_USERNAME="$TURN_USER" AERO_TURN_CREDENTIAL="$TURN_CRED" \
+  "$TARGET_DIR"/aerodesk-agent --role publisher --encoder x264 --noisy \
   --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/turn-e2e-pub.log 2>&1 &
 PUB_PID=$!
 # #552 SIP 1:1：publisher 等 IncomingCall——先等注册就绪，viewer（3b）起后再等 ICE。
