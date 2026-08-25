@@ -82,8 +82,8 @@ jobs:
             test_threads: ""
     runs-on: ${{ matrix.os }}
     # #553 验收前置：健康 ubuntu 约 25 分钟、macos 步骤最多（30+ e2e 脚本，
-    # 降级 WARN 后全步骤跑完）——job 级兜底超时放宽到 60，防挂起烧满 6h 上限。
-    timeout-minutes: 60
+    # 降级 WARN 后全步骤跑完约 50-60 分钟）——job 级兜底超时 90，防挂起烧满 6h。
+    timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: always
       # #102：SFU 偶发 Abort 定位——panic 时输出完整回溯
@@ -351,8 +351,10 @@ jobs:
         run: ./scripts/sfu-quota-e2e.sh
 
       # #191/#201 TURN relay：内嵌 TURN 分配/互操作 + force-relay 观看端媒体经 relay 到达。
+      # #553：降级 WARN 后 turn 内某步曾卡住拖满 job 时限——step 级超时快速失败。
       - name: e2e TURN relay + force-relay media (macOS only)
         if: runner.os == 'macOS'
+        timeout-minutes: 15
         run: bash scripts/turn-e2e.sh
       # #72 文件传输：publisher --send-file → SFU → viewer --recv-dir，SHA-256 一致。
       # #85：用 release 构建——debug 下 str0m/sctp-proto 高吞吐 data channel
