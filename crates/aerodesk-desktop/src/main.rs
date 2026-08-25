@@ -3248,7 +3248,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 ui.set_status("设备条目缺少房间/服务器".into());
                 return;
             }
-            let alias = if alias.is_empty() { room.clone() } else { alias };
+            let alias = if alias.is_empty() {
+                room.clone()
+            } else {
+                alias
+            };
             let new_entry = format!("{alias} · {room} · {server} · {group}");
             let model = ui.get_addressbook();
             let mut items: Vec<String> = (0..model.row_count())
@@ -4345,9 +4349,7 @@ fn build_device_list(
             group: group.clone(),
             online: true,
             server: server.to_string(),
-            entry: entry.unwrap_or_else(|| {
-                format!("{alias} · {id} · {server} · {group}")
-            }),
+            entry: entry.unwrap_or_else(|| format!("{alias} · {id} · {server} · {group}")),
         });
     }
     // 当前服务器下的地址簿条目不在在线集合 → 补为离线行。
@@ -4855,15 +4857,24 @@ mod tests {
         assert!(nas.online);
         assert_eq!(nas.alias, "NAS");
         assert_eq!(nas.group, "家庭");
-        let live = rows.iter().find(|r| r.id == "AD-LIVE99").expect("LIVE99 在线");
+        let live = rows
+            .iter()
+            .find(|r| r.id == "AD-LIVE99")
+            .expect("LIVE99 在线");
         assert!(live.online);
         assert_eq!(live.alias, "AD-LIVE99");
         assert_eq!(live.group, "未分组");
         // 离线补行：地址簿里的 AD-DESK02 以离线形态出现；其它服务器条目不出现。
-        let desk = rows.iter().find(|r| r.id == "AD-DESK02").expect("DESK02 离线补行");
+        let desk = rows
+            .iter()
+            .find(|r| r.id == "AD-DESK02")
+            .expect("DESK02 离线补行");
         assert!(!desk.online);
         assert_eq!(desk.alias, "台式机");
-        assert!(rows.iter().all(|r| r.id != "AD-FAR03"), "其它服务器条目不应出现");
+        assert!(
+            rows.iter().all(|r| r.id != "AD-FAR03"),
+            "其它服务器条目不应出现"
+        );
         // 排序：在线行在离线行之前。
         let idx = |id: &str| rows.iter().position(|r| r.id == id).unwrap();
         assert!(idx("AD-NAS01") < idx("AD-DESK02"), "在线应排在离线前");

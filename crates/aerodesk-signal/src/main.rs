@@ -2132,7 +2132,10 @@ mod tests {
     #[test]
     fn device_presence_filters_viewer_and_bridge_leg() {
         assert!(is_device_presence(Role::Publisher, false));
-        assert!(!is_device_presence(Role::Viewer, false), "观看端不算设备在线");
+        assert!(
+            !is_device_presence(Role::Viewer, false),
+            "观看端不算设备在线"
+        );
         assert!(
             !is_device_presence(Role::Publisher, true),
             "桥自身 publisher 腿不算设备在线"

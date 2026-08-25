@@ -432,11 +432,21 @@ mod tests {
 
     #[test]
     fn split_host_port_variants() {
-        assert_eq!(split_host_port("127.0.0.1:3003", 80), ("127.0.0.1".into(), 3003));
-        assert_eq!(split_host_port("signal.aerodesk.io", 443), ("signal.aerodesk.io".into(), 443));
+        assert_eq!(
+            split_host_port("127.0.0.1:3003", 80),
+            ("127.0.0.1".into(), 3003)
+        );
+        assert_eq!(
+            split_host_port("signal.aerodesk.io", 443),
+            ("signal.aerodesk.io".into(), 443)
+        );
         assert_eq!(split_host_port("[::1]:3003", 80), ("::1".into(), 3003));
         assert_eq!(split_host_port("[::1]", 443), ("::1".into(), 443));
-        assert_eq!(split_host_port("host:abc", 80), ("host:abc".into(), 80), "非数字端口按默认");
+        assert_eq!(
+            split_host_port("host:abc", 80),
+            ("host:abc".into(), 80),
+            "非数字端口按默认"
+        );
     }
 
     #[test]

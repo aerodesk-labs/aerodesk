@@ -150,7 +150,8 @@ pub struct SipMetrics {
 static SIP_METRICS: std::sync::RwLock<Option<Arc<SipMetrics>>> = std::sync::RwLock::new(None);
 
 /// 当前 SIP 端点的注册表句柄（#503 `/devices` 数据源；与 SIP_METRICS 同替换模式）。
-static SIP_REGISTRAR: std::sync::RwLock<Option<Arc<Mutex<Registrar>>>> = std::sync::RwLock::new(None);
+static SIP_REGISTRAR: std::sync::RwLock<Option<Arc<Mutex<Registrar>>>> =
+    std::sync::RwLock::new(None);
 
 /// 供 main.rs `/devices` 读取在线注册 AoR（未启动 SIP 端点时为 None）。
 pub fn registrar_snapshot() -> Option<Vec<String>> {
