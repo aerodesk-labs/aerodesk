@@ -27,10 +27,10 @@ use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media::{Vp8Frame, parse_vp8_pcap};
 use aerodesk_core::media_socket::MediaSocket;
 use aerodesk_core::platform::SystemWakeLock;
+use aerodesk_core::protocol::cmd::PowerAction;
 use aerodesk_core::protocol::input::{
     ButtonState, INPUT_PROTOCOL_VERSION, InputEvent, InputFrame, Modifiers, MouseButton,
 };
-use aerodesk_core::protocol::cmd::PowerAction;
 use aerodesk_core::protocol::signal::Role;
 use aerodesk_core::{Endpoint, platform::Codec};
 use str0m::media::{Frequency, MediaTime};

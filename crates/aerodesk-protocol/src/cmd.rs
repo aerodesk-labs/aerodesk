@@ -313,12 +313,16 @@ mod tests {
             panic!("wrong action");
         }
         // 其余动作枚举序列化
-        assert!(serde_json::to_string(&PowerAction::Reboot)
-            .unwrap()
-            .contains("reboot"));
-        assert!(serde_json::to_string(&PowerAction::Lock)
-            .unwrap()
-            .contains("lock"));
+        assert!(
+            serde_json::to_string(&PowerAction::Reboot)
+                .unwrap()
+                .contains("reboot")
+        );
+        assert!(
+            serde_json::to_string(&PowerAction::Lock)
+                .unwrap()
+                .contains("lock")
+        );
         // 未知动作拒绝解析（枚举受限，不接受自由参数）
         assert!(serde_json::from_str::<PowerAction>("\"format_disk\"").is_err());
         // 回执 ok 语义

@@ -1152,7 +1152,9 @@ fn wire_control_window(win: &ControlWindow, slot: usize, ui_weak: slint::Weak<Ap
                     let id = CMD_NEXT.fetch_add(1, Ordering::SeqCst);
                     let _ = s.engine.cmd_tx.send(CmdRequest::system_power(id, power));
                     if let Some(win) = win_weak.upgrade() {
-                        win.set_status(format!("已发送{}指令，等待被控端回执…", power.label()).into());
+                        win.set_status(
+                            format!("已发送{}指令，等待被控端回执…", power.label()).into(),
+                        );
                     }
                 }
                 None => {
