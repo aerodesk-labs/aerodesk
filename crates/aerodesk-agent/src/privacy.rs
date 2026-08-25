@@ -184,13 +184,7 @@ fn glyph_bits(ch: char) -> [u8; 8] {
     }
     // 未知字符：空心方块（提示有字但不可读）。
     [
-        0b11111111,
-        0b10000001,
-        0b10000001,
-        0b10000001,
-        0b10000001,
-        0b10000001,
-        0b10000001,
+        0b11111111, 0b10000001, 0b10000001, 0b10000001, 0b10000001, 0b10000001, 0b10000001,
         0b11111111,
     ]
 }
@@ -364,7 +358,9 @@ mod tests {
     /// 打印全部内建字模（cargo test -- --nocapture 可视校对）。
     #[test]
     fn dump_glyphs() {
-        let chars: Vec<char> = "隐私屏已开启关闭请稍候忙碌中远程会话进行静音".chars().collect();
+        let chars: Vec<char> = "隐私屏已开启关闭请稍候忙碌中远程会话进行静音"
+            .chars()
+            .collect();
         for ch in chars {
             println!("== {ch} ==\n{}", glyph_art(ch));
         }
@@ -394,7 +390,14 @@ mod tests {
             assert!(pixels >= 3, "字模 {ch:?} 像素过少: {pixels}");
         }
         // 空格是合法的空白字形。
-        assert_eq!(ascii_5x7(' ').unwrap().iter().map(|r| r.count_ones()).sum::<u32>(), 0);
+        assert_eq!(
+            ascii_5x7(' ')
+                .unwrap()
+                .iter()
+                .map(|r| r.count_ones())
+                .sum::<u32>(),
+            0
+        );
     }
 
     #[test]

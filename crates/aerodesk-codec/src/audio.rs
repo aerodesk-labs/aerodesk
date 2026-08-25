@@ -366,9 +366,6 @@ mod tests {
         ra.tick(&mut endpoint, mid, now + Duration::from_millis(50));
         // PCMU 静音帧性质：全 0 样本编码为全同字节（μ-law 0 → 0xFF）。
         let silence = aerodesk_core::pcmu::pcmu_encode(&[0i16; 160]);
-        assert!(
-            silence.iter().all(|&b| b == 0xFF),
-            "PCMU 静音帧应为全 0xFF"
-        );
+        assert!(silence.iter().all(|&b| b == 0xFF), "PCMU 静音帧应为全 0xFF");
     }
 }
