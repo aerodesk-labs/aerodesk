@@ -81,9 +81,9 @@ jobs:
             features:
             test_threads: ""
     runs-on: ${{ matrix.os }}
-    # #553 验收前置：健康 ubuntu 全流程约 25 分钟——job 级兜底超时，防 codec/SVT 类
-    # 挂起烧满 GH Actions 6h 默认上限（08-19 apt 卡 6h、08-21 起 codec 卡 6h 先例）。
-    timeout-minutes: 45
+    # #553 验收前置：健康 ubuntu 约 25 分钟、macos 步骤最多（30+ e2e 脚本，
+    # 降级 WARN 后全步骤跑完）——job 级兜底超时放宽到 60，防挂起烧满 6h 上限。
+    timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: always
       # #102：SFU 偶发 Abort 定位——panic 时输出完整回溯
