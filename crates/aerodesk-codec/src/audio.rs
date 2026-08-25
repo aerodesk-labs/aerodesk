@@ -183,6 +183,8 @@ pub struct RealAudioSender<C: aerodesk_core::platform::AudioCapturer<Error = Str
     pts8: u64,
     /// 下一帧发送时间（20ms 节拍；一次只发一帧，避免 WriteWithoutPoll 突发）。
     next_send: Instant,
+    /// #503 隐私屏静音：仍按节拍排空采集并发送静音帧（RTP 时序不断，恢复即回）。
+    muted: bool,
 }
 
 impl<C: aerodesk_core::platform::AudioCapturer<Error = String>> RealAudioSender<C> {
@@ -206,7 +208,13 @@ impl<C: aerodesk_core::platform::AudioCapturer<Error = String>> RealAudioSender<
             pts48: 0,
             pts8: 0,
             next_send: Instant::now(),
+            muted: false,
         }
+    }
+
+    /// 设置静音（被控端音频源 mute，#503 隐私屏）：发送静音帧而非真实样本。
+    pub fn set_muted(&mut self, muted: bool) {
+        self.muted = muted;
     }
 
     /// 排空采集样本并按 20ms 节拍补发**一帧**完整音频（防 WriteWithoutPoll 突发）。
@@ -231,7 +239,10 @@ impl<C: aerodesk_core::platform::AudioCapturer<Error = String>> RealAudioSender<
         // Opus（48k）：一次一帧；不足 960 样本时等下一拍。
         if self.opus.is_some() {
             if self.buf48.len() >= 960 {
-                let frame: Vec<i16> = self.buf48.drain(..960).collect();
+                let mut frame: Vec<i16> = self.buf48.drain(..960).collect();
+                if self.muted {
+                    frame.iter_mut().for_each(|s| *s = 0);
+                }
                 let data = self
                     .opus
                     .as_mut()
@@ -262,7 +273,10 @@ impl<C: aerodesk_core::platform::AudioCapturer<Error = String>> RealAudioSender<
         }
         self.buf48.drain(..i);
         if self.buf8.len() >= 160 {
-            let frame: Vec<i16> = self.buf8.drain(..160).collect();
+            let mut frame: Vec<i16> = self.buf8.drain(..160).collect();
+            if self.muted {
+                frame.iter_mut().for_each(|s| *s = 0);
+            }
             let data = aerodesk_core::pcmu::pcmu_encode(&frame);
             let rtp_time =
                 str0m::media::MediaTime::new(self.pts8 * 160, str0m::media::Frequency::EIGHT_KHZ);
@@ -318,5 +332,43 @@ mod tests {
             "解码样本数 {decoded_samples} 过少"
         );
         assert!(non_silent, "解码 PCM 不应全静音");
+    }
+
+    /// #503 隐私屏静音：muted 时仍按节拍排空/发送（不 panic、RTP 时序不断）。
+    struct DummyCap {
+        samples: Vec<f32>,
+    }
+    impl aerodesk_core::platform::AudioCapturer for DummyCap {
+        type Error = String;
+        fn next_samples(&mut self, max: usize) -> Result<Vec<f32>, String> {
+            let n = max.min(self.samples.len());
+            Ok(self.samples.drain(..n).collect())
+        }
+    }
+
+    #[test]
+    fn real_audio_mute_tick() {
+        let cap = DummyCap {
+            samples: vec![0.5f32; 48_000],
+        };
+        let mut ra = RealAudioSender::new(cap, false);
+        let mut endpoint = aerodesk_core::Endpoint::new();
+        let mid = str0m::media::Mid::from_array([0; 16]);
+        let now = std::time::Instant::now();
+        // 静音 tick：正常排空/编码发送静音帧（无媒体协商时 send 返回 Err 仅告警）。
+        ra.set_muted(true);
+        assert!(ra.muted);
+        ra.tick(&mut endpoint, mid, now);
+        ra.tick(&mut endpoint, mid, now + Duration::from_millis(25));
+        // 恢复：状态复位，tick 继续不 panic。
+        ra.set_muted(false);
+        assert!(!ra.muted);
+        ra.tick(&mut endpoint, mid, now + Duration::from_millis(50));
+        // PCMU 静音帧性质：全 0 样本编码为全同字节（μ-law 0 → 0xFF）。
+        let silence = aerodesk_core::pcmu::pcmu_encode(&[0i16; 160]);
+        assert!(
+            silence.iter().all(|&b| b == 0xFF),
+            "PCMU 静音帧应为全 0xFF"
+        );
     }
 }

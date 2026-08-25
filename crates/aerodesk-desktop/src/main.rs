@@ -1130,6 +1130,59 @@ fn wire_control_window(win: &ControlWindow, slot: usize, ui_weak: slint::Weak<Ap
             }
         }
     });
+    // #503 隐私屏：开启 = 被控端黑屏（定制文字）+ 音频源静音；关闭 = 恢复。
+    // 经 control 通道下发（与 CLI viewer --send-control 同通道同语义），
+    // SFU 透明转发 / SIP 1:1 经 data channel 直达被控端。
+    win.on_toggle_privacy({
+        let win_weak = win_weak.clone();
+        let active = Arc::new(AtomicBool::new(false));
+        let active2 = active.clone();
+        move || {
+            let Some(win) = win_weak.upgrade() else { return };
+            let on = !active2.fetch_xor(true, Ordering::SeqCst);
+            win.set_privacy_active(on);
+            let sessions = SESSIONS.lock().unwrap();
+            let Some(s) = sessions.iter().find(|s| s.engine.slot == slot) else {
+                win.set_status("会话已结束".into());
+                return;
+            };
+            if on {
+                let text = win.get_privacy_text().to_string();
+                let text_json = serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".into());
+                let msg = format!(
+                    "{{\"privacy\":{{\"enabled\":true,\"mode\":\"text\",\"text\":{text_json},\"mute\":true}}}}"
+                );
+                let _ = s.engine.control_tx.send(msg);
+                win.set_status("隐私屏已开启（被控端黑屏 + 静音）".into());
+            } else {
+                let _ = s
+                    .engine
+                    .control_tx
+                    .send("{\"privacy\":{\"enabled\":false}}".into());
+                win.set_status("隐私屏已关闭（画面与声音恢复）".into());
+            }
+        }
+    });
+    // 隐私屏开启期间更新定制文字（仅下发文字，保持静音状态）。
+    win.on_apply_privacy_text({
+        let win_weak = win_weak.clone();
+        move || {
+            let Some(win) = win_weak.upgrade() else { return };
+            if !win.get_privacy_active() {
+                win.set_status("隐私屏未开启（先点击工具栏隐私屏按钮）".into());
+                return;
+            }
+            let text = win.get_privacy_text().to_string();
+            let text_json = serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".into());
+            let msg = format!(
+                "{{\"privacy\":{{\"enabled\":true,\"mode\":\"text\",\"text\":{text_json},\"mute\":true}}}}"
+            );
+            let sessions = SESSIONS.lock().unwrap();
+            let Some(s) = sessions.iter().find(|s| s.engine.slot == slot) else { return };
+            let _ = s.engine.control_tx.send(msg);
+            win.set_status("隐私屏文字已更新".into());
+        }
+    });
 }
 
 /// #452 给摄像头独立窗口接上“摄像头/屏幕”切换回调（本地渲染选择，不下发控制指令）。
@@ -1664,6 +1717,8 @@ fn open_viewer_session(
                             chat_cmd_rx,
                             stop,
                             view_only,
+                            // #503 隐私屏/显示器切换：UI → control 通道 → 被控端。
+                            Some(control_rx),
                             Some(rx),
                             {
                                 let ui3 = ui2.clone();
