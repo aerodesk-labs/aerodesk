@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AeroDesk — Web SIP-WSS 观看端（#583）</title>
+<style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { background:#111; color:#eee; font-family: system-ui, sans-serif; margin:0; padding:16px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .sub { color:#888; font-size:12px; margin-bottom:12px; }
+    .bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+    input, select, button { padding:6px 10px; font-size:14px; border-radius:6px; border:1px solid #333; background:#1c1c1c; color:#eee; }
+    button { cursor:pointer; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    button.primary { background:#2ea043; border-color:#2ea043; }
+    #status { font-size:13px; }
+    #ice { font-size:12px; color:#888; }
+    .wrap { position:relative; background:#000; border-radius:8px; overflow:hidden; }
+    video { display:block; width:100%; max-height:70vh; background:#000; }
+    .placeholder { display:flex; align-items:center; justify-content:center; height:200px; color:#555; font-size:14px; }
+    #log { margin-top:10px; background:#0d0d0d; border:1px solid #222; border-radius:6px; padding:8px; font: 11px/1.5 ui-monospace, monospace; max-height:160px; overflow:auto; white-space:pre-wrap; color:#9aa; }
+    @media (max-width: 600px) {
+        body { padding:8px; }
+        input { flex:1; min-width:0; }
+        .bar { flex-direction: column; align-items: stretch; }
+    }
+</style>
+</head>
+<body>
+    <h1>AeroDesk</h1>
+    <div class="sub">Web SIP-WSS 观看端 · 标准 SIP（RFC 7118）直连原生被控端（#583 骨架）</div>
+    <div class="bar">
+        <input id="target" placeholder="被控端设备 ID（被叫 AoR）" value="">
+        <input id="device" placeholder="本端设备 ID（默认自动）" value="">
+        <input id="signal" placeholder="信令（默认 wss://host:3061）" value="">
+        <input id="token" placeholder="Digest 口令（可选）" type="password" value="">
+        <button id="connect" class="primary">连接</button>
+        <button id="disconnect" disabled>断开</button>
+    </div>
+    <div id="status">未连接</div>
+    <div id="ice"></div>
+    <div class="wrap">
+        <video id="video" autoplay playsinline muted></video>
+        <div id="placeholder" class="placeholder">等待媒体流…（键鼠回传在后续阶段接入）</div>
+    </div>
+    <div id="log"></div>
+
+<script>
+'use strict';
+// ---------- 参数（仅用于预填；运行期从输入框取值） ----------
+const params = new URLSearchParams(location.search);
+const byId = (id) => document.getElementById(id);
+const $ = byId;
+
+$('target').value = params.get('target') || '';
+$('device').value = params.get('device') || '';
+$('signal').value = params.get('signal') || '';
+$('token').value = params.get('token') || '';
+
+// ---------- 常量与状态 ----------
+// domain 与原生端默认一致（aerodesk.test）；realm 与 signal SIP 面默认一致（aerodesk）。
+const DOMAIN = 'aerodesk.test';
+let ws = null, rtc = null, callId = null, toTag = null, closed = false;
+let regTimer = null, connecting = false, inviteSeq = 0;
+let phase = 'idle';   // idle | registering | calling | in-call
+const REGISTER_EXPIRES = 120;
+
+function log(msg) {
+    const el = $('log');
+    el.innerText += new Date().toISOString().slice(11, 19) + ' ' + msg + '\n';
+    el.scrollTop = el.scrollHeight;
+}
+function setStatus(s) { $('status').innerText = s; }
+function setIce(s) { $('ice').innerText = 'ICE: ' + s; }
+
+// ---------- 内联 MD5（RFC 1321 参考实现风格；仅用于 SIP Digest） ----------
+const MD5 = (() => {
+    const S = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
+               5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
+               4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,
+               6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21];
+    const K = new Uint32Array(64);
+    for (let i = 0; i < 64; i++) K[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296);
+    function rol(x, c) { return (x << c) | (x >>> (32 - c)); }
+    function utf8(str) {
+        const out = [];
+        for (let i = 0; i < str.length; i++) {
+            let c = str.charCodeAt(i);
+            if (c < 0x80) out.push(c);
+            else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+            else if (c < 0xd800 || c >= 0xe000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+            else { i++; c = 0x10000 + (((c & 0x3ff) << 10) | (str.charCodeAt(i) & 0x3ff));
+                out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 0x3f), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f)); }
+        }
+        return out;
+    }
+    function md5(str) {
+        const bytes = utf8(str);
+        const bitLen = bytes.length * 8;
+        const p = bytes.slice();
+        p.push(0x80);
+        while (p.length % 64 !== 56) p.push(0);
+        // 64 位比特数小端（低 4 字节足够；JS 移位计数取模 32，高 4 字节必须显式 0）
+        for (let i = 0; i < 4; i++) p.push((bitLen >>> (8 * i)) & 0xff);
+        for (let i = 0; i < 4; i++) p.push(0);
+        let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+        for (let off = 0; off < p.length; off += 64) {
+            const M = new Uint32Array(16);
+            for (let i = 0; i < 16; i++) M[i] = p[off + i*4] | (p[off+i*4+1] << 8) | (p[off+i*4+2] << 16) | (p[off+i*4+3] << 24);
+            let A = a0, B = b0, C = c0, D = d0;
+            for (let i = 0; i < 64; i++) {
+                let F, g;
+                if (i < 16) { F = (B & C) | (~B & D); g = i; }
+                else if (i < 32) { F = (D & B) | (~D & C); g = (5*i + 1) % 16; }
+                else if (i < 48) { F = B ^ C ^ D; g = (3*i + 5) % 16; }
+                else { F = C ^ (B | ~D); g = (7*i) % 16; }
+                const tmp = D; D = C; C = B;
+                B = (B + rol((A + F + K[i] + M[g]) >>> 0, S[i])) >>> 0;
+                A = tmp;
+            }
+            a0 = (a0 + A) >>> 0; b0 = (b0 + B) >>> 0; c0 = (c0 + C) >>> 0; d0 = (d0 + D) >>> 0;
+        }
+        // 输出按小端字节序（RFC 1321：摘要 = A/B/C/D 各 4 字节小端拼接）。
+        return [a0, b0, c0, d0].map((w) => {
+            let s = '';
+            for (let i = 0; i < 4; i++) s += ((w >>> (8 * i)) & 0xff).toString(16).padStart(2, '0');
+            return s;
+        }).join('');
+    }
+    return md5;
+})();
+
+// ---------- SIP 报文构造（与 scripts/sip-accept-wss.py 同构，P0 已验证） ----------
+function wsTarget() {
+    // 输入可为空 → 默认 wss://<页面host>:3061
+    const v = $('signal').value.trim();
+    if (v) return v;
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${proto}//${location.hostname}:3061`;
+}
+function wsHostPort() {
+    const u = new URL(wsTarget());
+    return { host: u.hostname, port: u.port || '3061' };
+}
+function deviceId() {
+    if (!$('device').value.trim()) {
+        $('device').value = 'web-viewer-' + Math.random().toString(16).slice(2, 10);
+    }
+    return $('device').value.trim();
+}
+let cseq = 0;
+function branch() { return 'z9hG4bK' + MD5(deviceId() + '-' + cseq).slice(0, 12); }
+function fromTag() { return MD5(deviceId()).slice(0, 8); }
+function baseHeaders(method, callId, toAor, cseqNum, tag) {
+    cseq += 1;
+    const n = cseqNum || cseq;
+    const { host, port } = wsHostPort();
+    const toTag = tag ? `;tag=${tag}` : '';
+    const lines = [
+        `Via: SIP/2.0/WSS ${host}:${port};branch=${branch()}`,
+        'Max-Forwards: 70',
+        `From: <sip:${deviceId()}@${DOMAIN}>;tag=${fromTag()}`,
+        `To: <sip:${toAor || deviceId()}@${DOMAIN}>${toTag}`,
+        `Call-ID: ${callId}`,
+        `CSeq: ${n} ${method}`,
+        `Contact: <sip:${deviceId()}@${host}:${port}>`,
+    ];
+    return lines.join('\r\n') + '\r\n';
+}
+function sendSip(text) { ws.send(text); }
+function byteLen(s) { return new TextEncoder().encode(s).length; }
+function authHeader(nonce, realm, method, uri, user, password) {
+    const ha1 = MD5(`${user}:${realm}:${password}`);
+    const ha2 = MD5(`${method}:${uri}`);
+    const resp = MD5(`${ha1}:${nonce}:${ha2}`);
+    return `Authorization: Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${uri}", response="${resp}", algorithm=MD5\r\n`;
+}
+function parseResponse(text) {
+    // 返回 { statusLine, status, headers: {name: value(小写名)}, body }
+    const idx = text.indexOf('\r\n\r\n');
+    const head = idx >= 0 ? text.slice(0, idx) : text;
+    const body = idx >= 0 ? text.slice(idx + 4) : '';
+    const lines = head.split('\r\n');
+    const headers = {};
+    for (let i = 1; i < lines.length; i++) {
+        const m = lines[i].match(/^([^:]+):\s*(.*)$/);
+        if (m) headers[m[1].toLowerCase()] = m[2];
+    }
+    return { statusLine: lines[0], status: parseInt(lines[0].split(' ')[1], 10), headers, body };
+}
+
+// ---------- WebRTC（非 trickle：#17 同款，候选内联——原生端忽略后到 trickle） ----------
+function setupRtc() {
+    rtc = new RTCPeerConnection();
+    rtc.oniceconnectionstatechange = () => {
+        setIce(rtc.iceConnectionState);
+        if (rtc.iceConnectionState === 'connected' || rtc.iceConnectionState === 'completed') {
+            setStatus('已连接（媒体建立）');
+        }
+        if (rtc.iceConnectionState === 'failed') {
+            setStatus('连接中断（ICE failed）');
+            log('ICE failed');
+        }
+    };
+    rtc.onicecandidate = () => { /* 非 trickle：candidate 内嵌 SDP，等 gathering 完成 */ };
+    // 观看端：recvonly 视频 + input data channel（键鼠回传后续阶段接入）。
+    rtc.addTransceiver('video', { direction: 'recvonly' });
+    const input = rtc.createDataChannel('input');
+    input.onopen = () => log('input channel open（键鼠回传待后续阶段）');
+    rtc.ontrack = (e) => {
+        const video = $('video');
+        video.srcObject = e.streams[0] || new MediaStream([e.track]);
+        video.play().catch(() => {});
+        $('placeholder').style.display = 'none';
+        log('received track: ' + e.track.kind);
+    };
+}
+function waitIceGatheringComplete() {
+    if (rtc.iceGatheringState === 'complete') return Promise.resolve();
+    return new Promise((resolve) => {
+        let done = false;
+        const onState = () => {
+            if (rtc.iceGatheringState === 'complete') { done = true; cleanup(); resolve(); }
+        };
+        // 兜底：10s 后带当前已收集候选继续（非 trickle 的最佳努力）
+        const timer = setTimeout(() => { if (!done) { cleanup(); resolve(); } }, 10000);
+        const cleanup = () => {
+            rtc.removeEventListener('icegatheringstatechange', onState);
+            clearTimeout(timer);
+        };
+        rtc.addEventListener('icegatheringstatechange', onState);
+    });
+}
+
+// ---------- 注册（REGISTER → 401 Digest → REGISTER → 200） ----------
+function register(attempt) {
+    return new Promise((resolve, reject) => {
+        const rid = 'reg-' + deviceId() + '-' + Date.now();
+        const uri = 'sip:' + DOMAIN;
+        sendSip(`REGISTER ${uri} SIP/2.0\r\n` + baseHeaders('REGISTER', rid)
+            + `Expires: ${REGISTER_EXPIRES}\r\nContent-Length: 0\r\n\r\n`);
+        let timer = setTimeout(() => reject(new Error('REGISTER 无响应（10s）')), 10000);
+        const onMsg = (e) => {
+            const r = parseResponse(e.data);
+            if (r.status === 401) {
+                const ww = r.headers['www-authenticate'] || '';
+                const nonce = (ww.match(/nonce="([^"]+)"/) || [])[1];
+                const realm = (ww.match(/realm="([^"]+)"/) || [])[1] || 'aerodesk';
+                if (!nonce || attempt > 1) {
+                    cleanup();
+                    reject(new Error('Digest 质询失败（无 nonce / 口令错）'));
+                    return;
+                }
+                ws.removeEventListener('message', onMsg);
+                clearTimeout(timer);
+                // 第二次 REGISTER 带 Authorization；uri 为 REGISTER 的 Request-URI
+                sendSip(`REGISTER ${uri} SIP/2.0\r\n` + baseHeaders('REGISTER', rid)
+                    + authHeader(nonce, realm, 'REGISTER', uri, deviceId(), $('token').value || '')
+                    + `Expires: ${REGISTER_EXPIRES}\r\nContent-Length: 0\r\n\r\n`);
+                timer = setTimeout(() => reject(new Error('REGISTER 带认证仍无响应（10s）')), 10000);
+                ws.addEventListener('message', onMsg);
+                return;
+            }
+            cleanup();
+            if (r.status === 200) resolve();
+            else reject(new Error('REGISTER 失败: ' + r.statusLine));
+        };
+        const cleanup = () => {
+            ws.removeEventListener('message', onMsg);
+            clearTimeout(timer);
+        };
+        ws.addEventListener('message', onMsg);
+    });
+}
+
+// ---------- 呼叫（INVITE → 100/180 → 200(answer) → ACK） ----------
+function invite() {
+    return new Promise((resolve, reject) => {
+        const target = $('target').value.trim();
+        if (!target) { reject(new Error('请输入被控端设备 ID')); return; }
+        callId = 'call-' + deviceId() + '-' + Date.now();
+        const body = JSON.stringify(rtc.localDescription);
+        const reqUri = 'sip:' + target + '@' + DOMAIN;
+        sendSip(`INVITE ${reqUri} SIP/2.0\r\n` + baseHeaders('INVITE', callId, target)
+            + 'Content-Type: application/sdp\r\n'
+            + `Content-Length: ${byteLen(body)}\r\n\r\n${body}`);
+        inviteSeq = cseq;   // 记录 INVITE 的 CSeq（ACK/BYE 沿用同号）
+        let timer = setTimeout(() => reject(new Error('INVITE 无应答（30s）')), 30000);
+        const onMsg = (e) => {
+            const r = parseResponse(e.data);
+            if (r.status === 100 || r.status === 180) {
+                log('SIP ' + r.statusLine);
+                return;   // 继续等 200
+            }
+            cleanup();
+            if (r.status === 200) {
+                const to = r.headers['to'] || '';
+                toTag = (to.match(/;tag=([^;>]+)/) || [])[1] || null;
+                try {
+                    const answer = JSON.parse(r.body);
+                    resolve(answer);
+                } catch (err) {
+                    reject(new Error('answer 解析失败: ' + err.message));
+                }
+            } else {
+                reject(new Error('INVITE 被拒: ' + r.statusLine));
+            }
+        };
+        const cleanup = () => {
+            ws.removeEventListener('message', onMsg);
+            clearTimeout(timer);
+        };
+        ws.addEventListener('message', onMsg);
+    });
+}
+function sendAck() {
+    const target = $('target').value.trim();
+    const reqUri = 'sip:' + target + '@' + DOMAIN;
+    // ACK 与 INVITE 同 CSeq 号（RFC 3261 §13.2.2.4）；To 带对端 to-tag（200 响应回填）。
+    sendSip(`ACK ${reqUri} SIP/2.0\r\n` + baseHeaders('ACK', callId, target, inviteSeq, toTag)
+        + 'Content-Length: 0\r\n\r\n');
+}
+function sendBye() {
+    if (!callId) return;
+    const target = $('target').value.trim();
+    const reqUri = 'sip:' + target + '@' + DOMAIN;
+    // 对话内 BYE：To 带对端 to-tag（RFC 3261 §12.2）。
+    sendSip(`BYE ${reqUri} SIP/2.0\r\n` + baseHeaders('BYE', callId, target, 0, toTag)
+        + 'Reason: SIP;cause=200;text="web viewer hangup"\r\nContent-Length: 0\r\n\r\n');
+}
+
+// ---------- 连接主流程 ----------
+async function connect() {
+    if (connecting) return;
+    connecting = true;
+    closed = false;
+    $('connect').disabled = true;
+    $('disconnect').disabled = false;
+    setStatus('连接中…');
+    try {
+        const { host, port } = wsHostPort();
+        setStatus('连接信令 wss://' + host + ':' + port + ' …');
+        ws = new WebSocket(`wss://${host}:${port}`, 'sip');
+        await new Promise((resolve, reject) => {
+            ws.onopen = resolve;
+            ws.onerror = () => reject(new Error('信令连接失败: wss://' + host + ':' + port));
+        });
+        ws.onclose = () => {
+            if (!closed && phase === 'in-call') {
+                setStatus('信令断开（媒体可能仍存活，建议重连）');
+                log('signaling closed');
+            }
+        };
+        log('signaling connected: ' + wsTarget());
+
+        setStatus('REGISTER…');
+        await register(1);
+        log('REGISTER → 200 OK（SIP-WSS + Digest 认证成功）');
+        // 60s 后刷新注册（Expires: 120，原生端同款 expires/2 节奏）
+        regTimer = setInterval(() => {
+            register(1).catch((err) => log('注册刷新失败: ' + err.message));
+        }, 60000);
+
+        setStatus('建立媒体连接（等 ICE gathering）…');
+        setupRtc();
+        const offer = await rtc.createOffer();
+        await rtc.setLocalDescription(offer);
+        await waitIceGatheringComplete();
+        const nCand = (rtc.localDescription.sdp.match(/a=candidate:/g) || []).length;
+        log('ICE gathering complete，offer 内联候选 ' + nCand + ' 个，发送 INVITE…');
+
+        phase = 'calling';
+        setStatus('INVITE ' + $('target').value.trim() + ' …');
+        const answer = await invite();
+        await rtc.setRemoteDescription(answer);
+        sendAck();
+        log('SIP 呼叫已接通（200 OK + ACK）');
+
+        phase = 'in-call';
+        setStatus('已连接（等待媒体…）');
+        log('等待媒体流…');
+    } catch (e) {
+        setStatus('连接失败: ' + e.message);
+        log('error: ' + e);
+        cleanupAll();
+    } finally {
+        connecting = false;
+    }
+}
+
+// ---------- 断开 / 清理 ----------
+function cleanupAll() {
+    if (regTimer) { clearInterval(regTimer); regTimer = null; }
+    if (rtc) { try { rtc.close(); } catch (_) {} }
+    rtc = null;
+    if (ws) { try { ws.close(); } catch (_) {} }
+    ws = null;
+    callId = null; toTag = null; phase = 'idle';
+    $('video').srcObject = null;
+    $('placeholder').style.display = 'flex';
+    setIce('');
+}
+function disconnect() {
+    closed = true;
+    if (phase === 'in-call' || phase === 'calling') {
+        try { sendBye(); } catch (_) {}
+        log('BYE 已发送');
+    }
+    cleanupAll();
+    setStatus('已断开');
+    $('connect').disabled = false;
+    $('disconnect').disabled = true;
+}
+
+$('connect').addEventListener('click', connect);
+$('disconnect').addEventListener('click', disconnect);
+$('target').addEventListener('keydown', (e) => { if (e.key === 'Enter') connect(); });
+</script>
+</body>
+</html>
