@@ -3710,7 +3710,11 @@ fn publisher_capture_ffmpeg(
                         if let Some(bps) = v.get("bitrate").and_then(|b| b.as_u64()) {
                             // #267 码率反馈（macOS FFmpeg 采集）：Encoder trait 不在本
                             // 函数 scope，fully qualified 调用（同 publisher_generic）。
-                            aerodesk_core::platform::Encoder::set_bitrate(&mut encoder, bps, FPS as u32);
+                            aerodesk_core::platform::Encoder::set_bitrate(
+                                &mut encoder,
+                                bps,
+                                FPS as u32,
+                            );
                             info!("control: bitrate feedback applied -> {bps} bps");
                         }
                         if privacy::apply_control(&v, &mut privacy) {
