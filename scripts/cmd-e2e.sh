@@ -153,9 +153,13 @@ fi
 PID=$(cat "$DIR/pid" 2>/dev/null || true)
 if [ -z "$PID" ]; then echo "FAIL kill-spawn: 未拿到 pid"; fail=1; fi
 if [ -n "$PID" ]; then
-    # 用 --kill-pid 走协议层结束后台 sleep
+    # #584 SIP 1:1：kill-pid viewer 须呼入存活 publisher——原房间 publisher 在
+    # case1 已被 kill（REGISTER 残留 120s：残留→INVITE 落死 flow 挂起、过期→
+    # 会议桥），均无法执行 kill——独立配对（新房间 + 新 publisher）后呼入。
+    # 后台 sleep 由 c7 publisher 的 sh 派生（sh 已退出，sleep 孤儿化仍在）。
+    ROOM_KILL="${ROOM}-k"; new_pair "$ROOM_KILL"
     ./target/debug/aerodesk-agent --role viewer --kill-pid "$PID" \
-        --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/cmd-view9.log 2>&1 &
+        --signal ws://127.0.0.1:3003 --room "$ROOM_KILL" >/tmp/cmd-view9.log 2>&1 &
     VPID=$!
     for _ in $(seq 1 60); do ! kill -0 "$VPID" 2>/dev/null && break; sleep 0.5; done
     kill "$VPID" 2>/dev/null || true; wait "$VPID" 2>/dev/null || true

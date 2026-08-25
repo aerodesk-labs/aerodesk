@@ -27,14 +27,17 @@ for _ in $(seq 1 50); do
 done
 sleep 0.3
 
-echo "== 预置剪贴板 AAA，启动 viewer + publisher"
+# #584 SIP 1:1：publisher 先注册被叫、viewer 后呼入（viewer 先起时 INVITE 无绑定
+# 走会议桥，双向剪贴板链路建不起来）。
+echo "== 预置剪贴板 AAA，启动 publisher + viewer"
 printf 'AAA' | pbcopy
-./target/debug/aerodesk-agent --role viewer \
-    --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/clip-view.log 2>&1 &
-VIEW_PID=$!
 ./target/debug/aerodesk-agent --role publisher \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/clip-pub.log 2>&1 &
 PUB_PID=$!
+sleep 2
+./target/debug/aerodesk-agent --role viewer \
+    --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/clip-view.log 2>&1 &
+VIEW_PID=$!
 
 # 方向1：viewer 轮询到 AAA → file 通道 → publisher 落地
 dir1=0
