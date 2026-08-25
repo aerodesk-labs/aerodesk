@@ -54,12 +54,7 @@ impl FilePicker for LinuxFilePicker {
             "--separator=\n",
             "--title=AeroDesk 添加文件",
         ];
-        let kdialog_args: &[&str] = &[
-            "--getopenfilename",
-            ".",
-            "--multiple",
-            "--separator=\n",
-        ];
+        let kdialog_args: &[&str] = &["--getopenfilename", ".", "--multiple", "--separator=\n"];
         let candidates: [(&str, &[&str]); 2] = [("zenity", zenity_args), ("kdialog", kdialog_args)];
         for (cmd, args) in candidates {
             match Command::new(cmd).args(args).output() {

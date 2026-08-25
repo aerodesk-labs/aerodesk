@@ -353,14 +353,15 @@ fn run_viewer_impl<U, D, R, DF, RF>(
                 crate::FileCmd::SendFiles(paths) => {
                     // #503 批量入队：逐路径结果；失败（不存在/超限）并入汇总提示。
                     let results = file_transfer.send_files(&paths);
-                    let errs: Vec<String> = results
-                        .into_iter()
-                        .filter_map(|r| r.err())
-                        .collect();
+                    let errs: Vec<String> = results.into_iter().filter_map(|r| r.err()).collect();
                     let ok_count = paths.len() - errs.len();
                     let queued = file_transfer.queue_len();
                     let msg = if ok_count == 0 {
-                        format!("发送文件：{} 个文件全部失败（{}）", paths.len(), errs.join("；"))
+                        format!(
+                            "发送文件：{} 个文件全部失败（{}）",
+                            paths.len(),
+                            errs.join("；")
+                        )
                     } else if queued > 0 {
                         let mut m = format!("已加入发送队列：{} 个文件（排队 {queued}）", ok_count);
                         if !errs.is_empty() {

@@ -252,8 +252,7 @@ impl FileTransfer {
 
     pub fn send_file(&mut self, path: &Path) -> Result<(), String> {
         // 入队前先做轻量校验（存在 + 大小）；SHA-256 计算延迟到真正开始发送时。
-        let meta = std::fs::metadata(path)
-            .map_err(|e| format!("stat {}: {e}", path.display()))?;
+        let meta = std::fs::metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
         let size = meta.len();
         if size == 0 || size > MAX_FILE_SIZE {
             return Err(format!(
@@ -344,15 +343,7 @@ impl FileTransfer {
                 }
                 Err(e) => {
                     tracing::warn!("queued file open failed: {}: {e}", q.name);
-                    self.push_record(
-                        "发送",
-                        &q.id,
-                        &q.name,
-                        q.size,
-                        "失败",
-                        &e,
-                        Some(q.path),
-                    );
+                    self.push_record("发送", &q.id, &q.name, q.size, "失败", &e, Some(q.path));
                     self.message = Some(format!("发送失败：{e}"));
                 }
             }
@@ -628,8 +619,7 @@ impl FileTransfer {
                                 s.name,
                                 s.size
                             );
-                            record =
-                                Some((s.id.clone(), s.name.clone(), s.size, s.path.clone()));
+                            record = Some((s.id.clone(), s.name.clone(), s.size, s.path.clone()));
                             message = Some(format!("已发送：{}", s.name));
                         } else {
                             // 接收端回报失败（ok=false）：进入失败终态。
@@ -942,7 +932,15 @@ impl FileTransfer {
                 r.total_chunks
             );
             // #503 记录留痕。
-            self.push_record("接收", &d.id, &r.name, r.size, "失败", "分片计数错乱，放弃", None);
+            self.push_record(
+                "接收",
+                &d.id,
+                &r.name,
+                r.size,
+                "失败",
+                "分片计数错乱，放弃",
+                None,
+            );
             return;
         }
         tracing::info!(
@@ -1223,7 +1221,11 @@ mod tests {
         assert_eq!(sp.done, 0);
         // 20000B / 8192B 分片 → 3 片
         assert_eq!(sp.total, 3);
-        assert_eq!(sp.path.as_deref(), Some(path.as_path()), "发送任务应记录源路径");
+        assert_eq!(
+            sp.path.as_deref(),
+            Some(path.as_path()),
+            "发送任务应记录源路径"
+        );
         assert!(st.queue.is_empty(), "空闲时不应有排队项");
     }
 
@@ -1474,7 +1476,9 @@ mod tests {
     #[test]
     fn batch_send_files_returns_per_path_results() {
         let a = tmp_file("batch-a.bin", 100);
-        let missing = std::env::temp_dir().join("aerodesk-ft-queue").join("missing.bin");
+        let missing = std::env::temp_dir()
+            .join("aerodesk-ft-queue")
+            .join("missing.bin");
         let mut ft = FileTransfer::new(None);
         let results = ft.send_files(&[a.clone(), missing]);
         assert!(results[0].is_ok());
@@ -1501,14 +1505,25 @@ mod tests {
         ft.handle_data(json.as_bytes(), &mut ep);
         ft.tick(&mut ep);
         let st = ft.status();
-        assert_eq!(st.sending.as_ref().map(|s| s.name.as_str()), Some("adv-b.bin"));
+        assert_eq!(
+            st.sending.as_ref().map(|s| s.name.as_str()),
+            Some("adv-b.bin")
+        );
         assert!(st.queue.is_empty(), "队列应已推进");
         // 历史记录：第一个发送成功。
-        let rec = ft.history().iter().find(|r| r.id == first_id).expect("应有成功记录");
+        let rec = ft
+            .history()
+            .iter()
+            .find(|r| r.id == first_id)
+            .expect("应有成功记录");
         assert_eq!(rec.direction, "发送");
         assert_eq!(rec.state, "成功");
         assert_eq!(rec.size, 100);
-        assert_eq!(rec.path.as_deref(), Some(a.as_path()), "成功记录应保留源路径（重试用）");
+        assert_eq!(
+            rec.path.as_deref(),
+            Some(a.as_path()),
+            "成功记录应保留源路径（重试用）"
+        );
         let _ = std::fs::remove_file(a);
         let _ = std::fs::remove_file(b);
     }
@@ -1525,7 +1540,11 @@ mod tests {
         assert!(ft.cancel_send_id(&queued_id, &mut ep), "排队项应能取消");
         let st = ft.status();
         assert!(st.queue.is_empty(), "排队项应已移除");
-        let rec = ft.history().iter().find(|r| r.id == queued_id).expect("应有取消记录");
+        let rec = ft
+            .history()
+            .iter()
+            .find(|r| r.id == queued_id)
+            .expect("应有取消记录");
         assert_eq!(rec.state, "已取消");
         // 活动发送 id 取消 → 走 cancel_send（无队列可推进）。
         let active_id = st.sending.unwrap().id;
@@ -1547,8 +1566,11 @@ mod tests {
         let mut ep = crate::Endpoint::new();
         ft.cancel_send(&mut ep);
         let st = ft.status();
-        assert_eq!(st.sending.as_ref().map(|s| s.name.as_str()), Some("ca-b.bin"),
-            "取消当前发送后应自动启动队列下一项");
+        assert_eq!(
+            st.sending.as_ref().map(|s| s.name.as_str()),
+            Some("ca-b.bin"),
+            "取消当前发送后应自动启动队列下一项"
+        );
         assert!(st.queue.is_empty());
         let _ = std::fs::remove_file(a);
         let _ = std::fs::remove_file(b);
@@ -1560,7 +1582,9 @@ mod tests {
         let c = tmp_file("fq-c.bin", 200);
         let mut ft = FileTransfer::new(None);
         // 不存在的文件在入队时即报错（不进入队列）。
-        let missing = std::env::temp_dir().join("aerodesk-ft-queue").join("gone.bin");
+        let missing = std::env::temp_dir()
+            .join("aerodesk-ft-queue")
+            .join("gone.bin");
         assert!(ft.send_file(&missing).is_err());
         ft.send_file(&a).unwrap();
         ft.send_file(&c).unwrap();
@@ -1577,10 +1601,15 @@ mod tests {
         ft.handle_data(json.as_bytes(), &mut ep);
         ft.tick(&mut ep);
         let st = ft.status();
-        assert_eq!(st.sending.as_ref().map(|s| s.name.as_str()), Some("fq-c.bin"));
+        assert_eq!(
+            st.sending.as_ref().map(|s| s.name.as_str()),
+            Some("fq-c.bin")
+        );
         // 历史：发送失败记录。
         assert!(
-            ft.history().iter().any(|r| r.state == "失败" && r.name == "fq-a.bin"),
+            ft.history()
+                .iter()
+                .any(|r| r.state == "失败" && r.name == "fq-a.bin"),
             "失败应留痕：{:?}",
             ft.history()
         );
@@ -1617,7 +1646,11 @@ mod tests {
             .as_bytes(),
             &mut ep,
         );
-        let rec = ft.history().iter().find(|r| r.id == "rec1").expect("应有接收成功记录");
+        let rec = ft
+            .history()
+            .iter()
+            .find(|r| r.id == "rec1")
+            .expect("应有接收成功记录");
         assert_eq!(rec.direction, "接收");
         assert_eq!(rec.state, "成功");
         assert_eq!(rec.name, "recv.bin");
@@ -1630,7 +1663,11 @@ mod tests {
         let mut ft = FileTransfer::new(None);
         ft.send_file(&a).unwrap();
         let id = ft.status().sending.unwrap().id;
-        let done = FileControl::Done(FileDone { id, ok: true, error: None });
+        let done = FileControl::Done(FileDone {
+            id,
+            ok: true,
+            error: None,
+        });
         let mut ep = crate::Endpoint::new();
         ft.handle_data(serde_json::to_string(&done).unwrap().as_bytes(), &mut ep);
         assert!(!ft.history().is_empty());
@@ -1648,7 +1685,11 @@ mod tests {
         ft.send_file(&a).unwrap();
         let first_id = ft.status().sending.unwrap().id;
         ft.send_file(&b).unwrap();
-        let done = FileControl::Done(FileDone { id: first_id, ok: true, error: None });
+        let done = FileControl::Done(FileDone {
+            id: first_id,
+            ok: true,
+            error: None,
+        });
         let mut ep = crate::Endpoint::new();
         ft.handle_data(serde_json::to_string(&done).unwrap().as_bytes(), &mut ep);
         ft.tick(&mut ep);

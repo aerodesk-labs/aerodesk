@@ -1253,9 +1253,7 @@ fn pick_files_for_transfer_window(win_weak: slint::Weak<FileTransferWindow>, slo
                     }
                 };
                 if sent {
-                    win.set_status(
-                        format!("已加入发送队列：{} 个文件", paths.len()).into(),
-                    );
+                    win.set_status(format!("已加入发送队列：{} 个文件", paths.len()).into());
                 } else {
                     win.set_status("添加文件：会话已结束".into());
                 }
@@ -2821,12 +2819,12 @@ fn pick_file_and_send(ui: slint::Weak<AppWindow>) {
                 let idx = ui.get_active_session() as usize;
                 let sessions = SESSIONS.lock().unwrap();
                 if let Some(s) = sessions.get(idx) {
-                    let _ = s
-                        .engine
-                        .file_tx
-                        .send(FileCmd::SendFiles(vec![std::path::PathBuf::from(
-                            path.clone(),
-                        )]));
+                    let _ =
+                        s.engine
+                            .file_tx
+                            .send(FileCmd::SendFiles(vec![std::path::PathBuf::from(
+                                path.clone(),
+                            )]));
                     drop(sessions);
                     ui.set_session_status(format!("发送文件：{path}").into());
                 } else {
@@ -4897,10 +4895,7 @@ mod tests {
         std::fs::write(&path, b"hello").unwrap();
         let status = dispatch_dropped_files(Some(&tx), &[path.clone()]);
         assert!(status.contains("发送文件"), "status={status}");
-        assert_eq!(
-            rx.recv().unwrap(),
-            FileCmd::SendFiles(vec![path.clone()])
-        );
+        assert_eq!(rx.recv().unwrap(), FileCmd::SendFiles(vec![path.clone()]));
         // 无会话 → 未连接会话
         assert!(dispatch_dropped_files(None, &[path.clone()]).contains("未连接会话"));
         let _ = std::fs::remove_file(path);
