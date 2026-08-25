@@ -6,6 +6,7 @@
 //! trait 与 [`PublisherEvent`] 回调回传，desktop 用 Slint 适配器实现，
 //! host（B3/B4）将用同一接口接入。
 
+pub mod clipboard_sync;
 pub mod generic_publisher;
 pub mod generic_viewer;
 pub mod keymap;

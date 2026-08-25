@@ -83,7 +83,8 @@ pub fn tick(endpoint: &mut Endpoint) {
         }
         ft.tick(endpoint);
         maybe_poll_clipboard(ft, endpoint);
-        // #72 远端剪贴板落地（publisher/viewer 共用；UI 用 core 状态机自行处理）。
+        // #72/#503-2 远端剪贴板落地（publisher/viewer 共用；UI 用 core 状态机自行处理）。
+        // 图片（PNG，#271 FileKind::ClipboardImage 分片通道）与文本同优先级落地。
         if let Some(text) = ft.take_incoming_clipboard() {
             crate::clipboard::set_cache(text.clone());
             crate::clipboard::write(&text);
@@ -92,8 +93,23 @@ pub fn tick(endpoint: &mut Endpoint) {
                 text.chars().count()
             );
         }
+        if let Some(png) = ft.take_incoming_clipboard_image() {
+            // 防回声：落地内容视为已同步，轮询不再原样发回。
+            *LAST_CLIP_IMG.lock().unwrap() = Some(png.clone());
+            if crate::clipboard::write_image(&png) {
+                tracing::info!(
+                    "clipboard: apply image {} bytes from remote",
+                    png.len()
+                );
+            } else {
+                tracing::warn!("clipboard: apply image failed (write_image)");
+            }
+        }
     }
 }
+
+/// 最近一次已发送/已落地的剪贴板图片字节（防回声，与文本 cached() 同思路）。
+static LAST_CLIP_IMG: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
 
 /// 剪贴板轮询节流（1s）：本地剪贴板变化时经 file 通道同步给远端。
 static LAST_CLIP_POLL: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
@@ -112,6 +128,26 @@ fn maybe_poll_clipboard(
             return;
         }
         *last = Some(Instant::now());
+        // #503-2 图片优先（与 session viewer decide_clipboard_sync 同语义）：
+        // 剪贴板有图片（PNG）时只同步图片，否则同步文本；内容未变化不发。
+        if let Some(png) = crate::clipboard::read_image() {
+            let cached_img = LAST_CLIP_IMG.lock().unwrap().clone();
+            if Some(png.as_slice()) == cached_img.as_deref() {
+                return;
+            }
+            if png.is_empty() {
+                return;
+            }
+            match ft.send_clipboard_image(png.clone()) {
+                Ok(()) => {
+                    tracing::info!("clipboard: sent image {} bytes", png.len());
+                    *LAST_CLIP_IMG.lock().unwrap() = Some(png);
+                }
+                // 发送槽位被文件传输占用等：下一轮重试，不置缓存。
+                Err(e) => tracing::debug!("clipboard image send deferred: {e}"),
+            }
+            return;
+        }
         let Some(text) = crate::clipboard::read() else {
             return;
         };
@@ -128,12 +164,4 @@ fn maybe_poll_clipboard(
     {
         let _ = (ft, endpoint);
     }
-}
-
-/// 取走收到的远端剪贴板文本（调用方写入系统剪贴板）。
-pub fn take_incoming_clipboard() -> Option<String> {
-    FILE_TX
-        .lock()
-        .ok()
-        .and_then(|mut ft| ft.as_mut().and_then(|ft| ft.take_incoming_clipboard()))
 }

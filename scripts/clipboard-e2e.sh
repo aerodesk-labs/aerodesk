@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# #72 剪贴板双向同步端到端（macOS）：viewer 剪贴板 → file 通道 → publisher
-# 落地；publisher 剪贴板变化 → file 通道 → viewer 落地。
+# #72/#503-2 剪贴板双向同步端到端（macOS）：viewer 剪贴板 → file 通道 → publisher
+# 落地；publisher 剪贴板变化 → file 通道 → viewer 落地。文本 + 图片（PNG）双向。
 # 单机测试：两个进程共享系统剪贴板，用日志断言两个方向都真实走通。
+# 图片方向（#503-2）：osascript 写 PNG 到剪贴板（无 AppleEvents 授权时 SKIP）；
+# 两进程各自轮询发送一次、各自落地一次，日志同时出现 sent/apply 即双向通过。
 # 用法: scripts/clipboard-e2e.sh [房间]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -51,20 +53,52 @@ for _ in $(seq 1 50); do
     sleep 0.2
 done
 
+# 方向3/4（#503-2）：图片双向——osascript 写 1x1 红色 PNG 到剪贴板；两端各自
+# 轮询发送一次、各自落地一次（sent 与 apply 日志配对即双向真实走通）。
+# 无 AppleEvents 授权（非交互会话）时 SKIP，不影响文本方向结论。
+dir3=0
+dir4=0
+IMG="$REC/clip-img.png"
+printf '\x89\x50\x4E\x47\x0D\x0A\x1A\x0A\x00\x00\x00\x0D\x49\x48\x44\x52\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90\x77\x53\xDE\x00\x00\x00\x0C\x49\x44\x41\x54\x78\x9C\x62\x00\x01\x00\x00\x05\x00\x01\x0D\x0A\x2D\xB4\x00\x00\x00\x00\x49\x45\x4E\x44\xAE\x42\x60\x82' > "$IMG"
+if osascript -e "set the clipboard to (read (POSIX file \"$IMG\") as «class PNGf»)" >/dev/null 2>&1; then
+    for _ in $(seq 1 50); do
+        if grep -q "clipboard: sent image" /tmp/clip-view.log 2>/dev/null \
+            && grep -q "clipboard: apply image" /tmp/clip-pub.log 2>/dev/null; then dir3=1; break; fi
+        sleep 0.2
+    done
+    for _ in $(seq 1 50); do
+        if grep -q "clipboard: sent image" /tmp/clip-pub.log 2>/dev/null \
+            && grep -q "clipboard: apply image" /tmp/clip-view.log 2>/dev/null; then dir4=1; break; fi
+        sleep 0.2
+    done
+else
+    echo "SKIP 图片方向：osascript 无法写入图片剪贴板（无 AppleEvents 授权）"
+fi
+
 kill "$VIEW_PID" "$PUB_PID" "$SFU_PID" "$SIG_PID" 2>/dev/null || true
 wait 2>/dev/null || true
 
 echo "== 断言"
 fail=0
 if [ "$dir1" = "1" ]; then
-    echo "PASS viewer->publisher clipboard (AAA applied)"
+    echo "PASS viewer->publisher clipboard text (AAA applied)"
 else
-    echo "FAIL viewer->publisher not received"; tail -5 /tmp/clip-pub.log; tail -5 /tmp/clip-view.log; fail=1
+    echo "FAIL viewer->publisher text not received"; tail -5 /tmp/clip-pub.log; tail -5 /tmp/clip-view.log; fail=1
 fi
 if [ "$dir2" = "1" ]; then
-    echo "PASS publisher->viewer clipboard (BBB applied)"
+    echo "PASS publisher->viewer clipboard text (BBB applied)"
 else
-    echo "FAIL publisher->viewer not received"; tail -5 /tmp/clip-pub.log; tail -5 /tmp/clip-view.log; fail=1
+    echo "FAIL publisher->viewer text not received"; tail -5 /tmp/clip-pub.log; tail -5 /tmp/clip-view.log; fail=1
+fi
+if [ "$dir3" = "1" ]; then
+    echo "PASS viewer->publisher clipboard image (sent + applied)"
+else
+    echo "FAIL viewer->publisher image not received"; tail -5 /tmp/clip-pub.log; tail -5 /tmp/clip-view.log; fail=1
+fi
+if [ "$dir4" = "1" ]; then
+    echo "PASS publisher->viewer clipboard image (sent + applied)"
+else
+    echo "FAIL publisher->viewer image not received"; tail -5 /tmp/clip-pub.log; tail -5 /tmp/clip-view.log; fail=1
 fi
 if grep -qiE "panic" /tmp/clip-pub.log /tmp/clip-view.log /tmp/clip-sfu.log; then
     echo "FAIL panic in logs"; fail=1
