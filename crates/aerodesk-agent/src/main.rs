@@ -211,7 +211,11 @@ fn run() {
     let token = arg(&args, "--token");
     // #503-4 主叫授权口令：显式 --call-password > AERO_CALL_PASSWORD > 回退 --token。
     let call_password = arg(&args, "--call-password")
-        .or_else(|| std::env::var("AERO_CALL_PASSWORD").ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            std::env::var("AERO_CALL_PASSWORD")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
         .or_else(|| token.clone().filter(|s| !s.is_empty()));
     if let Some(pw) = &call_password {
         let _ = CALL_PASSWORD.set(pw.clone());
@@ -224,7 +228,9 @@ fn run() {
             .unwrap_or(300);
         match mint_temp_password(&signal, &tp_device, ttl, token.as_deref()) {
             Ok((pw, ttl, expires_at_secs)) => {
-                println!("device={tp_device} password={pw} ttl_secs={ttl} expires_at={expires_at_secs}");
+                println!(
+                    "device={tp_device} password={pw} ttl_secs={ttl} expires_at={expires_at_secs}"
+                );
                 println!("用 `--call-password {pw}` 呼叫 {tp_device}（或把它填到桌面端连接密码）");
             }
             Err(e) => {
@@ -744,9 +750,7 @@ fn mint_temp_password(
         .send_string(&body)
         .map_err(|e| format!("POST {url}: {e}"))?;
     let status = resp.status();
-    let text = resp
-        .into_string()
-        .map_err(|e| format!("读响应失败: {e}"))?;
+    let text = resp.into_string().map_err(|e| format!("读响应失败: {e}"))?;
     if status != 200 {
         return Err(format!("{status}: {text}"));
     }
@@ -1025,8 +1029,13 @@ fn connect_inner(
         info!("video mid: {vm:?} audio mid: {am:?} camera mid: {cm:?}");
         let offer_json = serde_json::to_string(&offer).map_err(|e| e.to_string())?;
         let call_id = format!("c-{}", std::process::id());
-        link.call(room, &call_id, &offer_json, CALL_PASSWORD.get().map(String::as_str))
-            .map_err(|e| format!("SIP INVITE: {e}"))?;
+        link.call(
+            room,
+            &call_id,
+            &offer_json,
+            CALL_PASSWORD.get().map(String::as_str),
+        )
+        .map_err(|e| format!("SIP INVITE: {e}"))?;
         // 等 Answered/Rejected（30s；180 仅记日志）。
         let answer_json = {
             let deadline = Instant::now() + Duration::from_secs(30);

@@ -349,10 +349,8 @@ pub fn decide_invite(
         qop: proxy.qop,
     };
     // 固定口令与临时口令任一匹配即放行（ha1 以报文中 username 为准，两分支独立计算）。
-    let ok = fixed_password
-        .is_some_and(|p| verify_digest(&auth, p, &Method::Invite, &raw))
-        || temp_password
-            .is_some_and(|p| verify_digest(&auth, p, &Method::Invite, &raw));
+    let ok = fixed_password.is_some_and(|p| verify_digest(&auth, p, &Method::Invite, &raw))
+        || temp_password.is_some_and(|p| verify_digest(&auth, p, &Method::Invite, &raw));
     if ok {
         InviteDecision::Allow
     } else {
@@ -2609,7 +2607,9 @@ mod tests {
             })
             .unwrap();
         match recv_until(&caller, "Rejected") {
-            SipEvent::Rejected { call_id, status, .. } => {
+            SipEvent::Rejected {
+                call_id, status, ..
+            } => {
                 assert_eq!(call_id, "c-auth-1");
                 assert_eq!(status, 407, "未带口令应 407 质询拒绝");
             }
@@ -2626,7 +2626,9 @@ mod tests {
             })
             .unwrap();
         match recv_until(&caller, "Rejected") {
-            SipEvent::Rejected { call_id, status, .. } => {
+            SipEvent::Rejected {
+                call_id, status, ..
+            } => {
                 assert_eq!(call_id, "c-auth-2");
                 assert_eq!(status, 403, "口令错应 403");
             }

@@ -1229,10 +1229,15 @@ fn handle(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
 
 /// 管理端点统一鉴权：`Authorization: Bearer <token>`（SIP_ADMIN_TOKEN / 首个 AUTH_TOKEN）。
 /// 未配置管理 token → 503（功能不可用，不静默放行）；无 SIP 端点 → 501。
-fn admin_guard(request: &Request, config: &Config) -> Result<Arc<Mutex<sip_server::TempRegistry>>, Response> {
+fn admin_guard(
+    request: &Request,
+    config: &Config,
+) -> Result<Arc<Mutex<sip_server::TempRegistry>>, Response> {
     let Some(token) = admin_token(config) else {
-        return Err(Response::text("admin token 未配置（SIP_ADMIN_TOKEN 或 AUTH_TOKENS）")
-            .with_status_code(503));
+        return Err(
+            Response::text("admin token 未配置（SIP_ADMIN_TOKEN 或 AUTH_TOKENS）")
+                .with_status_code(503),
+        );
     };
     let auth = request.header("Authorization").unwrap_or_default();
     if !auth.eq_ignore_ascii_case(&format!("Bearer {token}")) {
@@ -1266,7 +1271,9 @@ fn temp_password_issue(request: &Request, config: &Config) -> Response {
     }
     let body: serde_json::Value = match serde_json::from_slice(&raw) {
         Ok(v) => v,
-        Err(e) => return Response::text(format!("请求体 JSON 解析失败：{e}")).with_status_code(400),
+        Err(e) => {
+            return Response::text(format!("请求体 JSON 解析失败：{e}")).with_status_code(400);
+        }
     };
     let device = body
         .get("device_id")
