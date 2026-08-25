@@ -8,7 +8,7 @@
 //!
 //! 背压：通道写失败（返回 false）时暂停，下一轮重试。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -31,9 +31,21 @@ pub const MAX_RECV: usize = 16;
 pub const RECV_TTL: Duration = Duration::from_secs(300);
 /// 已确认接收 id 缓存上限（幂等重发 ack 用）。
 const MAX_COMPLETED: usize = 64;
+/// 发送队列上限（#503 传输中心：批量入队，防无限排队）。
+const MAX_QUEUE: usize = 64;
+/// 传输记录上限（#503 传输中心：记录/重试，防无限增长）。
+const MAX_HISTORY: usize = 200;
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 当前墙钟（unix 毫秒），传输记录时间戳用。
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// 取远端文件名的安全形式：只保留最后一段（拒绝绝对路径/`..`/子目录/空名）。
@@ -62,20 +74,73 @@ fn temp_path_in(dir: &Path, name: &str) -> Option<PathBuf> {
     Some(tmp)
 }
 
+/// 活动发送进度（#503：UI 展示 + 逐项取消/重试定位）。
+#[derive(Debug, Clone, Default)]
+pub struct SendProgress {
+    /// 发送任务 id（取消定位用）。
+    pub id: String,
+    /// 文件名。
+    pub name: String,
+    /// 文件大小（字节）。
+    pub size: u64,
+    /// 已发分片。
+    pub done: u64,
+    /// 总分片。
+    pub total: u64,
+    /// 本地源路径（失败记录/重试用）。
+    pub path: Option<PathBuf>,
+}
+
 /// 当前传输进度（UI 展示用）。
 #[derive(Debug, Clone, Default)]
 pub struct FileTransferStatus {
-    /// 发送中：(文件名, 已发分片, 总分片)
-    pub sending: Option<(String, u64, u64)>,
+    /// 发送中（活动发送任务）。
+    pub sending: Option<SendProgress>,
     /// 接收中：(文件名, 已收分片, 总分片)
     pub receiving: Option<(String, u64, u64)>,
+    /// 排队待发送（#503 批量入队）：(id, 文件名, 大小)
+    pub queue: Vec<(String, String, u64)>,
     /// 一次性事件（完成/失败/取消），消费后清除。
     pub message: Option<String>,
+}
+
+/// 传输记录（#503 传输中心「传输记录/重试」：方向/大小/终态/时间/本地路径）。
+#[derive(Debug, Clone)]
+pub struct TransferRecord {
+    /// 记录 id（发送任务 id / 接收会话 id）。
+    pub id: String,
+    /// 方向："发送" / "接收"。
+    pub direction: String,
+    /// 文件名。
+    pub name: String,
+    /// 文件大小（字节）。
+    pub size: u64,
+    /// 终态："成功" / "失败" / "已取消"。
+    pub state: String,
+    /// 失败原因等细节文案（成功/取消为空）。
+    pub detail: String,
+    /// 完成时刻（unix 毫秒）。
+    pub time_ms: u64,
+    /// 本地路径（发送项；重试用）。接收项为空。
+    pub path: Option<PathBuf>,
+}
+
+/// 排队待发送项（#503 批量入队：发送空闲时立即开始，忙则排队）。
+#[derive(Debug, Clone)]
+struct QueuedSend {
+    id: String,
+    path: PathBuf,
+    name: String,
+    size: u64,
 }
 
 /// 文件传输 + 剪贴板状态机（发送 + 接收）。
 pub struct FileTransfer {
     send: Option<Sender>,
+    /// 发送队列（#503 批量入队：活动发送结束后自动启动下一项）。
+    queue: VecDeque<QueuedSend>,
+    /// 传输记录（#503：成功/失败/取消留痕，UI 展示与重试）。
+    history: Vec<TransferRecord>,
     recv: HashMap<String, Receiver>,
     recv_dir: Option<PathBuf>,
     /// 已确认接收完成的 id（幂等重发 ack，防 ack 丢失导致发送端永久重试）。
@@ -101,6 +166,8 @@ struct Sender {
     kind: FileKind,
     id: String,
     name: String,
+    /// 本地源路径（#503 失败记录/重试用；剪贴板图片为 None）。
+    path: Option<PathBuf>,
     /// 已打开的文件句柄（流式发送，避免整文件进内存；#271 内存数据时为 None）。
     file: Option<std::fs::File>,
     size: u64,
@@ -146,6 +213,8 @@ impl FileTransfer {
     pub fn new(recv_dir: Option<PathBuf>) -> Self {
         Self {
             send: None,
+            queue: VecDeque::new(),
+            history: Vec::new(),
             recv: HashMap::new(),
             recv_dir,
             completed: HashMap::new(),
@@ -169,7 +238,8 @@ impl FileTransfer {
         self.allow_request = allow;
     }
 
-    /// 触发发送一个文件（当前无发送任务时生效）。
+    /// 触发发送一个文件（#503 批量入队）：当前无发送任务时立即开始，
+    /// 忙则加入发送队列（活动发送结束后自动启动下一项）。
     /// 发送是否已被接收端确认（#122：viewer --send-file 模式发送完成判定）。
     pub fn send_complete(&self) -> bool {
         self.send.as_ref().is_some_and(|s| s.confirmed)
@@ -181,11 +251,138 @@ impl FileTransfer {
     }
 
     pub fn send_file(&mut self, path: &Path) -> Result<(), String> {
-        if self.send.as_ref().is_some_and(|s| !s.confirmed) {
-            return Err("已有文件传输进行中".into());
+        // 入队前先做轻量校验（存在 + 大小）；SHA-256 计算延迟到真正开始发送时。
+        let meta = std::fs::metadata(path)
+            .map_err(|e| format!("stat {}: {e}", path.display()))?;
+        let size = meta.len();
+        if size == 0 || size > MAX_FILE_SIZE {
+            return Err(format!(
+                "文件大小 {size} 超出范围（0 < size <= {MAX_FILE_SIZE}）"
+            ));
         }
-        self.send = Some(Sender::open(path)?);
+        if self.send.as_ref().is_some_and(|s| !s.confirmed) {
+            // 发送槽位忙：加入队列（#503 批量发送）。
+            self.push_queue(path, size)
+        } else {
+            self.send = Some(Sender::open(path)?);
+            Ok(())
+        }
+    }
+
+    /// 批量入队发送（#503 传输中心：多选/拖放批量）；逐路径返回结果。
+    pub fn send_files(&mut self, paths: &[PathBuf]) -> Vec<Result<(), String>> {
+        paths.iter().map(|p| self.send_file(p)).collect()
+    }
+
+    /// 当前排队项数量（#503 UI 队列展示/文案用）。
+    pub fn queue_len(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// 传输记录（#503 传输中心「记录/重试」展示）。
+    pub fn history(&self) -> &[TransferRecord] {
+        &self.history
+    }
+
+    /// 清空传输记录（#503 传输中心「清空记录」）。
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+    }
+
+    /// 取消指定发送项（#503 传输中心逐项取消）：id 匹配活动发送 → 取消并启动
+    /// 队列下一项；匹配排队项 → 出队并记「已取消」。未命中返回 false。
+    pub fn cancel_send_id(&mut self, id: &str, endpoint: &mut crate::Endpoint) -> bool {
+        if self.send.as_ref().is_some_and(|s| s.id == id) {
+            self.cancel_send(endpoint);
+            return true;
+        }
+        if let Some(pos) = self.queue.iter().position(|q| q.id == id) {
+            let q = self.queue.remove(pos).unwrap();
+            self.push_record("发送", &q.id, &q.name, q.size, "已取消", "", Some(q.path));
+            self.message = Some(format!("已取消排队：{}", q.name));
+            tracing::info!("file queued send cancelled: {}", q.name);
+            return true;
+        }
+        false
+    }
+
+    /// 入队一个待发送文件（id 在入队时分配，供取消定位）。
+    fn push_queue(&mut self, path: &Path, size: u64) -> Result<(), String> {
+        if self.queue.len() >= MAX_QUEUE {
+            return Err("发送队列已满，请等待当前传输完成".into());
+        }
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".into());
+        let seq = SEND_SEQ.fetch_add(1, Ordering::SeqCst);
+        self.queue.push_back(QueuedSend {
+            id: format!("tx{}-q{seq}", std::process::id()),
+            path: path.to_path_buf(),
+            name: name.clone(),
+            size,
+        });
+        tracing::info!("file send queued: {name} (queue {})", self.queue.len());
         Ok(())
+    }
+
+    /// 队列推进：取出队首启动发送；文件打开失败则记「失败」并继续下一项。
+    fn start_next_queued(&mut self) {
+        loop {
+            let Some(q) = self.queue.pop_front() else {
+                break;
+            };
+            match Sender::open(&q.path) {
+                Ok(s) => {
+                    tracing::info!(
+                        "file send start (queued): {} (queue {})",
+                        q.name,
+                        self.queue.len()
+                    );
+                    self.send = Some(s);
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!("queued file open failed: {}: {e}", q.name);
+                    self.push_record(
+                        "发送",
+                        &q.id,
+                        &q.name,
+                        q.size,
+                        "失败",
+                        &e,
+                        Some(q.path),
+                    );
+                    self.message = Some(format!("发送失败：{e}"));
+                }
+            }
+        }
+    }
+
+    /// 写入一条传输记录（有界：超出 MAX_HISTORY 丢弃最旧）。
+    fn push_record(
+        &mut self,
+        direction: &str,
+        id: &str,
+        name: &str,
+        size: u64,
+        state: &str,
+        detail: &str,
+        path: Option<PathBuf>,
+    ) {
+        self.history.push(TransferRecord {
+            id: id.to_string(),
+            direction: direction.to_string(),
+            name: name.to_string(),
+            size,
+            state: state.to_string(),
+            detail: detail.to_string(),
+            time_ms: now_millis(),
+            path,
+        });
+        if self.history.len() > MAX_HISTORY {
+            self.history.drain(..self.history.len() - MAX_HISTORY);
+        }
     }
 
     /// 处理 data channel 事件（仅 label == "file" 生效）。
@@ -214,8 +411,11 @@ impl FileTransfer {
                 .map(|(id, _)| id.clone())
                 .collect();
             for id in expired {
-                tracing::warn!("file receive TTL expired, dropped: {id}");
-                self.recv.remove(&id);
+                if let Some(r) = self.recv.remove(&id) {
+                    // #503 记录留痕：接收超时视为失败。
+                    self.push_record("接收", &id, &r.name, r.size, "失败", "接收超时未完成", None);
+                    tracing::warn!("file receive TTL expired, dropped: {id}");
+                }
             }
         }
         // 幂等 ack 缓存 TTL（1 小时）清理。
@@ -230,15 +430,30 @@ impl FileTransfer {
                 self.completed.remove(&id);
             }
         }
-        let failed = if let Some(s) = &mut self.send {
+        // 发送推进：tick + 失败上报 + #503 队列推进（成功/失败/本地失败后自动下一项）。
+        let mut failed: Option<(String, String, u64, Option<PathBuf>, String)> = None;
+        if let Some(s) = &mut self.send {
             s.tick(endpoint);
-            s.failed.take()
-        } else {
-            None
-        };
-        if let Some(f) = failed {
-            self.message = Some(f);
+            if let Some(reason) = &s.failed {
+                failed = Some((
+                    s.id.clone(),
+                    s.name.clone(),
+                    s.size,
+                    s.path.clone(),
+                    reason.clone(),
+                ));
+            }
+        }
+        if let Some((id, name, size, path, reason)) = failed {
+            self.push_record("发送", &id, &name, size, "失败", &reason, path);
+            self.message = Some(reason);
             self.send = None;
+            self.start_next_queued();
+        } else if self.send.as_ref().is_some_and(|s| s.confirmed) && !self.queue.is_empty() {
+            // 成功确认且队列非空：启动下一项（队列为空时保留 confirmed 发送者，
+            // 供 send_complete() 判定——CLI --send-file 模式依赖它退出）。
+            self.send = None;
+            self.start_next_queued();
         }
         // #72 剪贴板补发：首包可能被 SFU 丢弃，1s 后重发（幂等，最多 8 次）。
         if let Some(text) = self.clipboard_pending.clone() {
@@ -287,15 +502,28 @@ impl FileTransfer {
             .send
             .as_ref()
             .filter(|s| !s.confirmed)
-            .map(|s| (s.name.clone(), s.next_chunk, s.total_chunks));
+            .map(|s| SendProgress {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                size: s.size,
+                done: s.next_chunk,
+                total: s.total_chunks,
+                path: s.path.clone(),
+            });
         let receiving = self
             .recv
             .values()
             .next()
             .map(|r| (r.name.clone(), r.received, r.total_chunks));
+        let queue = self
+            .queue
+            .iter()
+            .map(|q| (q.id.clone(), q.name.clone(), q.size))
+            .collect();
         FileTransferStatus {
             sending,
             receiving,
+            queue,
             message: self.message.take(),
         }
     }
@@ -311,6 +539,7 @@ impl FileTransfer {
 
     /// 取消当前发送：向接收端下发 FileCancel 并清空发送状态（#72 回归：
     /// 接收端 on_cancel 移除接收器，不落盘，无残留临时文件）。
+    /// #503：取消后自动启动队列下一项。
     pub fn cancel_send(&mut self, endpoint: &mut crate::Endpoint) {
         let Some(s) = self.send.take() else {
             return;
@@ -319,8 +548,10 @@ impl FileTransfer {
         if let Ok(json) = serde_json::to_string(&cancel) {
             let _ = endpoint.send_channel_data("file", false, json.as_bytes());
         }
+        self.push_record("发送", &s.id, &s.name, s.size, "已取消", "", s.path.clone());
         self.message = Some(format!("已取消发送：{}", s.name));
         tracing::info!("file send cancelled: {}", s.name);
+        self.start_next_queued();
     }
 
     /// 发送剪贴板文本到远端（同一 file 通道）；进入补发队列（1s 幂等重试，
@@ -386,6 +617,9 @@ impl FileTransfer {
             FileControl::Done(d) => {
                 // 发送端收到 Done = 接收端 ack（已完整落盘）；接收端收到 = 发送端完成。
                 if self.send.as_ref().map(|s| s.id == d.id).unwrap_or(false) {
+                    // 借用外写历史/消息（#503 传输记录留痕；失败记录在 tick 中写入）。
+                    let mut record: Option<(String, String, u64, Option<PathBuf>)> = None;
+                    let mut message: Option<String> = None;
                     if let Some(s) = &mut self.send {
                         if d.ok {
                             s.confirmed = true;
@@ -394,13 +628,21 @@ impl FileTransfer {
                                 s.name,
                                 s.size
                             );
-                            self.message = Some(format!("已发送：{}", s.name));
+                            record =
+                                Some((s.id.clone(), s.name.clone(), s.size, s.path.clone()));
+                            message = Some(format!("已发送：{}", s.name));
                         } else {
                             // 接收端回报失败（ok=false）：进入失败终态。
                             let reason = d.error.unwrap_or_else(|| "接收端拒绝".to_string());
                             s.failed = Some(format!("{}：发送失败（{reason}）", s.name));
                             s.confirmed = true;
                         }
+                    }
+                    if let Some((id, name, size, path)) = record {
+                        self.push_record("发送", &id, &name, size, "成功", "", path);
+                    }
+                    if let Some(msg) = message {
+                        self.message = Some(msg);
                     }
                 } else {
                     self.on_done(d, endpoint);
@@ -436,13 +678,12 @@ impl FileTransfer {
                 // #122：控制端请求被控端发送文件（大文件下载）。
                 // 安全：默认拒绝（allow_request=false），仅被控端显式开启，
                 // 防房间内任意对端读取本机任意文件（审查 #255 Critical）。
+                // #503：发送忙时入队，请求不再被忽略。
                 if !self.allow_request {
                     tracing::warn!("file request rejected (allow_request=false): {path}");
-                } else if self.send.is_some() {
-                    tracing::warn!("file request ignored: 已有发送任务（{path}）");
                 } else {
                     match self.send_file(std::path::Path::new(&path)) {
-                        Ok(()) => tracing::info!("file request: 开始发送 {path}"),
+                        Ok(()) => tracing::info!("file request: 开始发送/排队 {path}"),
                         Err(e) => tracing::warn!("file request failed: {e}"),
                     }
                 }
@@ -608,6 +849,7 @@ impl FileTransfer {
             }
         }
         // #271 剪贴板图片：完整接收后交内存队列（不落盘），由调用方写入系统剪贴板。
+        // 剪贴板图片不入传输记录（#503：记录只留文件传输条目，避免剪贴板噪音）。
         if r.kind == FileKind::ClipboardImage {
             tracing::info!("clipboard image receive complete: {} bytes", r.buf.len());
             self.incoming_clipboard_image = Some(r.buf);
@@ -657,6 +899,8 @@ impl FileTransfer {
             r.name,
             final_path.display()
         );
+        // #503 传输记录留痕。
+        self.push_record("接收", &d.id, &r.name, r.size, "成功", "", None);
         self.message = Some(format!("已接收：{}", final_path.display()));
         // 幂等 ack 缓存（有界）。
         self.completed.insert(d.id.clone(), Instant::now());
@@ -697,6 +941,8 @@ impl FileTransfer {
                 r.received,
                 r.total_chunks
             );
+            // #503 记录留痕。
+            self.push_record("接收", &d.id, &r.name, r.size, "失败", "分片计数错乱，放弃", None);
             return;
         }
         tracing::info!(
@@ -716,9 +962,11 @@ impl FileTransfer {
     }
 
     fn on_cancel(&mut self, c: FileCancel) {
-        if self.recv.remove(&c.id).is_some() {
+        if let Some(r) = self.recv.remove(&c.id) {
             tracing::info!("file {} cancelled", c.id);
-            self.message = Some(format!("已取消：{}", c.id));
+            // #503 记录留痕。
+            self.push_record("接收", &c.id, &r.name, r.size, "已取消", "", None);
+            self.message = Some(format!("已取消接收：{}", r.name));
         }
     }
 }
@@ -763,6 +1011,7 @@ impl Sender {
             kind: FileKind::File,
             id: format!("tx{}-{seq}", std::process::id()),
             name,
+            path: Some(path.to_path_buf()),
             size,
             hash,
             total_chunks,
@@ -794,6 +1043,7 @@ impl Sender {
         Ok(Self {
             id: format!("tx{}-{seq}", std::process::id()),
             name,
+            path: None,
             data: Some(data),
             file: None,
             kind,
@@ -968,11 +1218,13 @@ mod tests {
         let mut ft = FileTransfer::new(None);
         ft.send_file(&path).unwrap();
         let st = ft.status();
-        let (name, done, total) = st.sending.expect("sending should be Some");
-        assert_eq!(name, "sample.bin");
-        assert_eq!(done, 0);
+        let sp = st.sending.expect("sending should be Some");
+        assert_eq!(sp.name, "sample.bin");
+        assert_eq!(sp.done, 0);
         // 20000B / 8192B 分片 → 3 片
-        assert_eq!(total, 3);
+        assert_eq!(sp.total, 3);
+        assert_eq!(sp.path.as_deref(), Some(path.as_path()), "发送任务应记录源路径");
+        assert!(st.queue.is_empty(), "空闲时不应有排队项");
     }
 
     #[test]
@@ -1189,5 +1441,219 @@ mod tests {
             ft.send_clipboard_image(vec![2u8; 10]).is_err(),
             "发送槽位忙时剪贴板图片应拒绝"
         );
+    }
+
+    // ---- #503 传输中心：队列 + 记录 ----
+
+    fn tmp_file(name: &str, bytes: usize) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("aerodesk-ft-queue");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, vec![3u8; bytes]).unwrap();
+        path
+    }
+
+    #[test]
+    fn busy_send_queues_and_status_reports_queue() {
+        let a = tmp_file("q-a.bin", 100);
+        let b = tmp_file("q-b.bin", 200);
+        let mut ft = FileTransfer::new(None);
+        // 空闲：立即开始发送 a。
+        ft.send_file(&a).unwrap();
+        assert!(ft.status().sending.is_some());
+        // 忙：b 入队。
+        ft.send_file(&b).unwrap();
+        let st = ft.status();
+        assert_eq!(st.queue.len(), 1);
+        assert_eq!(st.queue[0].1, "q-b.bin");
+        assert_eq!(ft.queue_len(), 1);
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(b);
+    }
+
+    #[test]
+    fn batch_send_files_returns_per_path_results() {
+        let a = tmp_file("batch-a.bin", 100);
+        let missing = std::env::temp_dir().join("aerodesk-ft-queue").join("missing.bin");
+        let mut ft = FileTransfer::new(None);
+        let results = ft.send_files(&[a.clone(), missing]);
+        assert!(results[0].is_ok());
+        assert!(results[1].is_err(), "不存在的文件应报错");
+        let _ = std::fs::remove_file(a);
+    }
+
+    #[test]
+    fn confirmed_send_advances_queue_and_records_history() {
+        let a = tmp_file("adv-a.bin", 100);
+        let b = tmp_file("adv-b.bin", 200);
+        let mut ft = FileTransfer::new(None);
+        ft.send_file(&a).unwrap();
+        let first_id = ft.status().sending.unwrap().id;
+        ft.send_file(&b).unwrap();
+        // 模拟接收端 ack：确认第一个发送 → tick 应启动队列中的 b。
+        let done = FileControl::Done(FileDone {
+            id: first_id.clone(),
+            ok: true,
+            error: None,
+        });
+        let json = serde_json::to_string(&done).unwrap();
+        let mut ep = crate::Endpoint::new();
+        ft.handle_data(json.as_bytes(), &mut ep);
+        ft.tick(&mut ep);
+        let st = ft.status();
+        assert_eq!(st.sending.as_ref().map(|s| s.name.as_str()), Some("adv-b.bin"));
+        assert!(st.queue.is_empty(), "队列应已推进");
+        // 历史记录：第一个发送成功。
+        let rec = ft.history().iter().find(|r| r.id == first_id).expect("应有成功记录");
+        assert_eq!(rec.direction, "发送");
+        assert_eq!(rec.state, "成功");
+        assert_eq!(rec.size, 100);
+        assert_eq!(rec.path.as_deref(), Some(a.as_path()), "成功记录应保留源路径（重试用）");
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(b);
+    }
+
+    #[test]
+    fn cancel_send_id_removes_queued_item_and_records() {
+        let a = tmp_file("cq-a.bin", 100);
+        let b = tmp_file("cq-b.bin", 200);
+        let mut ft = FileTransfer::new(None);
+        ft.send_file(&a).unwrap();
+        ft.send_file(&b).unwrap();
+        let queued_id = ft.status().queue[0].0.clone();
+        let mut ep = crate::Endpoint::new();
+        assert!(ft.cancel_send_id(&queued_id, &mut ep), "排队项应能取消");
+        let st = ft.status();
+        assert!(st.queue.is_empty(), "排队项应已移除");
+        let rec = ft.history().iter().find(|r| r.id == queued_id).expect("应有取消记录");
+        assert_eq!(rec.state, "已取消");
+        // 活动发送 id 取消 → 走 cancel_send（无队列可推进）。
+        let active_id = st.sending.unwrap().id;
+        assert!(ft.cancel_send_id(&active_id, &mut ep));
+        assert!(ft.status().sending.is_none());
+        // 未命中 id → false。
+        assert!(!ft.cancel_send_id("nonexistent", &mut ep));
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(b);
+    }
+
+    #[test]
+    fn cancel_active_send_advances_queue() {
+        let a = tmp_file("ca-a.bin", 100);
+        let b = tmp_file("ca-b.bin", 200);
+        let mut ft = FileTransfer::new(None);
+        ft.send_file(&a).unwrap();
+        ft.send_file(&b).unwrap();
+        let mut ep = crate::Endpoint::new();
+        ft.cancel_send(&mut ep);
+        let st = ft.status();
+        assert_eq!(st.sending.as_ref().map(|s| s.name.as_str()), Some("ca-b.bin"),
+            "取消当前发送后应自动启动队列下一项");
+        assert!(st.queue.is_empty());
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(b);
+    }
+
+    #[test]
+    fn failed_queued_item_skips_and_starts_next() {
+        let a = tmp_file("fq-a.bin", 100);
+        let c = tmp_file("fq-c.bin", 200);
+        let mut ft = FileTransfer::new(None);
+        // 不存在的文件在入队时即报错（不进入队列）。
+        let missing = std::env::temp_dir().join("aerodesk-ft-queue").join("gone.bin");
+        assert!(ft.send_file(&missing).is_err());
+        ft.send_file(&a).unwrap();
+        ft.send_file(&c).unwrap();
+        assert_eq!(ft.queue_len(), 1);
+        // 模拟当前发送失败：tick 应启动队列中的 c。
+        let id = ft.status().sending.unwrap().id;
+        let done = FileControl::Done(FileDone {
+            id,
+            ok: false,
+            error: Some("disk full".into()),
+        });
+        let json = serde_json::to_string(&done).unwrap();
+        let mut ep = crate::Endpoint::new();
+        ft.handle_data(json.as_bytes(), &mut ep);
+        ft.tick(&mut ep);
+        let st = ft.status();
+        assert_eq!(st.sending.as_ref().map(|s| s.name.as_str()), Some("fq-c.bin"));
+        // 历史：发送失败记录。
+        assert!(
+            ft.history().iter().any(|r| r.state == "失败" && r.name == "fq-a.bin"),
+            "失败应留痕：{:?}",
+            ft.history()
+        );
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(c);
+    }
+
+    #[test]
+    fn receive_complete_records_history() {
+        let dir = std::env::temp_dir().join("aerodesk-ft-rec-rec");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ft = FileTransfer::new(Some(dir));
+        let data: Vec<u8> = vec![5u8; 100];
+        let chunks = data.len().div_ceil(CHUNK_SIZE) as u64;
+        let hash = hex(&Sha256::digest(&data));
+        let meta = FileControl::Meta(FileMeta {
+            id: "rec1".into(),
+            name: "recv.bin".into(),
+            size: data.len() as u64,
+            chunks,
+            hash: Some(hash),
+            kind: FileKind::File,
+        });
+        let mut ep = crate::Endpoint::new();
+        ft.handle_data(serde_json::to_string(&meta).unwrap().as_bytes(), &mut ep);
+        ft.handle_data(&file::encode_chunk("rec1", 0, &data), &mut ep);
+        ft.handle_data(
+            serde_json::to_string(&FileControl::Done(FileDone {
+                id: "rec1".into(),
+                ok: true,
+                error: None,
+            }))
+            .unwrap()
+            .as_bytes(),
+            &mut ep,
+        );
+        let rec = ft.history().iter().find(|r| r.id == "rec1").expect("应有接收成功记录");
+        assert_eq!(rec.direction, "接收");
+        assert_eq!(rec.state, "成功");
+        assert_eq!(rec.name, "recv.bin");
+        assert!(rec.path.is_none(), "接收记录无本地源路径");
+    }
+
+    #[test]
+    fn clear_history_empties_records() {
+        let a = tmp_file("ch-a.bin", 100);
+        let mut ft = FileTransfer::new(None);
+        ft.send_file(&a).unwrap();
+        let id = ft.status().sending.unwrap().id;
+        let done = FileControl::Done(FileDone { id, ok: true, error: None });
+        let mut ep = crate::Endpoint::new();
+        ft.handle_data(serde_json::to_string(&done).unwrap().as_bytes(), &mut ep);
+        assert!(!ft.history().is_empty());
+        ft.clear_history();
+        assert!(ft.history().is_empty());
+        let _ = std::fs::remove_file(a);
+    }
+
+    #[test]
+    fn send_complete_false_after_queue_advance() {
+        // #503 队列推进后：send_complete() 反映当前（下一项）发送状态。
+        let a = tmp_file("sc-a.bin", 100);
+        let b = tmp_file("sc-b.bin", 200);
+        let mut ft = FileTransfer::new(None);
+        ft.send_file(&a).unwrap();
+        let first_id = ft.status().sending.unwrap().id;
+        ft.send_file(&b).unwrap();
+        let done = FileControl::Done(FileDone { id: first_id, ok: true, error: None });
+        let mut ep = crate::Endpoint::new();
+        ft.handle_data(serde_json::to_string(&done).unwrap().as_bytes(), &mut ep);
+        ft.tick(&mut ep);
+        assert!(!ft.send_complete(), "推进到下一项后不应再报完成");
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(b);
     }
 }

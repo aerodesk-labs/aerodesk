@@ -30,7 +30,8 @@ const DEMO_H: u32 = 180;
 /// #508 B1：FileCmd/ChatCmd 定义已迁入 aerodesk-session；re-export 保持调用点不变。
 pub use aerodesk_session::{ChatCmd, FileCmd};
 
-/// #72 拖放发送纯路由（可单测）：把文件交给会话 file 通道，返回状态文案。
+/// #72/#503 拖放发送纯路由（可单测）：把文件交给会话 file 通道（批量入队），
+/// 返回状态文案。
 pub fn dispatch_dropped_files(
     tx: Option<&std::sync::mpsc::Sender<FileCmd>>,
     paths: &[std::path::PathBuf],
@@ -46,16 +47,12 @@ pub fn dispatch_dropped_files(
     if files.is_empty() {
         return format!("发送文件：{} 不是文件", paths[0].display());
     }
-    // 当前一次只传一个文件（FileTransfer 单发送任务）：只发第一个，其余提示逐个发送。
-    let _ = tx.send(FileCmd::SendFile(files[0].clone()));
+    // #503 批量入队：全部交给传输中心队列（空闲立即发送，忙则排队）。
+    let _ = tx.send(FileCmd::SendFiles(files.clone()));
     if files.len() == 1 {
-        format!("发送文件：{}", files[0].display())
+        format!("发送文件：{}（已加入传输队列）", files[0].display())
     } else {
-        format!(
-            "发送文件：{}（一次一个，其余 {} 个文件请等待完成后再发）",
-            files[0].display(),
-            files.len() - 1
-        )
+        format!("发送文件：{} 个文件已加入传输队列", files.len())
     }
 }
 
@@ -567,30 +564,65 @@ pub fn set_message_window_status(slot: usize, status: String) {
     });
 }
 
-/// 会话线程更新文件传输独立窗口的进度/文案（无窗口时 no-op）。
-pub fn update_file_window_progress(slot: usize, progress: f32, label: String, status: String) {
+/// 会话线程更新文件传输独立窗口的状态文案（#503：进度改由传输列表展示）。
+pub fn update_file_window_progress(slot: usize, _progress: f32, _label: String, status: String) {
     let Some(weak) = file_window_weak_for_slot(slot) else {
         return;
     };
     let _ = weak.upgrade_in_event_loop(move |win| {
-        win.set_progress(progress);
-        win.set_progress_label(label.into());
         win.set_status(status.into());
     });
 }
 
-/// 会话线程清除文件传输独立窗口进度（传输结束/取消/失败后调用）。
+/// 会话线程清除文件传输独立窗口状态（传输结束/取消/失败后调用）。
 pub fn clear_file_window_progress(slot: usize, status: Option<String>) {
     let Some(weak) = file_window_weak_for_slot(slot) else {
         return;
     };
     let _ = weak.upgrade_in_event_loop(move |win| {
-        win.set_progress(-1.0);
-        win.set_progress_label("".into());
         if let Some(status) = status {
             win.set_status(status.into());
         }
     });
+}
+
+/// #503 会话线程推送传输中心列表（队列 + 活动 + 记录）到独立窗口（无窗口时 no-op）。
+pub fn update_file_window_transfers(slot: usize, entries: Vec<aerodesk_session::TransferUiEntry>) {
+    let Some(weak) = file_window_weak_for_slot(slot) else {
+        return;
+    };
+    let _ = weak.upgrade_in_event_loop(move |win| {
+        let model = slint::VecModel::<TransferEntry>::default();
+        for e in entries {
+            model.push(TransferEntry {
+                id: e.id.into(),
+                name: e.name.into(),
+                direction: e.direction.into(),
+                size: format_file_size(e.size).into(),
+                progress: e.progress,
+                state: e.state.into(),
+                detail: e.detail.into(),
+                path: e.path.into(),
+            });
+        }
+        win.set_transfer_list(slint::ModelRc::from(std::rc::Rc::new(model)));
+    });
+}
+
+/// 文件大小格式化（传输中心列表展示用）：B / KB / MB / GB。
+fn format_file_size(size: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if size >= GB {
+        format!("{:.1} GB", size as f64 / GB as f64)
+    } else if size >= MB {
+        format!("{:.1} MB", size as f64 / MB as f64)
+    } else if size >= KB {
+        format!("{:.1} KB", size as f64 / KB as f64)
+    } else {
+        format!("{size} B")
+    }
 }
 
 /// 会话线程向终端独立窗口追加输出（无窗口时 no-op）。
@@ -1019,6 +1051,9 @@ impl aerodesk_session::SessionUi for SlintSessionUi {
     fn clear_file_window_progress(&self, status: Option<String>) {
         clear_file_window_progress(self.slot, status);
     }
+    fn update_file_transfers(&self, entries: Vec<aerodesk_session::TransferUiEntry>) {
+        update_file_window_transfers(self.slot, entries);
+    }
     fn main_session_status(&self, msg: String) {
         with_ui(&self.ui, move |ui| ui.set_session_status(msg.into()));
     }
@@ -1199,14 +1234,31 @@ fn open_session_window(
     }
 }
 
-/// #452 在后台线程选择文件并写回文件传输独立窗口。
-fn pick_file_for_transfer_window(win_weak: slint::Weak<FileTransferWindow>) {
+/// #503 在后台线程选择文件（多选）并把全部路径入队发送到传输中心。
+fn pick_files_for_transfer_window(win_weak: slint::Weak<FileTransferWindow>, slot: usize) {
     std::thread::spawn(move || {
-        let picked = pick_file();
+        let picked = pick_files();
         let _ = win_weak.upgrade_in_event_loop(move |win| match picked {
-            Ok(Some(path)) => {
-                win.set_selected_file(path.clone().into());
-                win.set_status(format!("已选择文件：{path}").into());
+            Ok(Some(paths)) => {
+                let sent = {
+                    let sessions = SESSIONS.lock().unwrap();
+                    match sessions.iter().find(|s| s.engine.slot == slot) {
+                        Some(s) => {
+                            let _ = s.engine.file_tx.send(FileCmd::SendFiles(
+                                paths.iter().map(std::path::PathBuf::from).collect(),
+                            ));
+                            true
+                        }
+                        None => false,
+                    }
+                };
+                if sent {
+                    win.set_status(
+                        format!("已加入发送队列：{} 个文件", paths.len()).into(),
+                    );
+                } else {
+                    win.set_status("添加文件：会话已结束".into());
+                }
             }
             Ok(None) => win.set_status("已取消选择文件".into()),
             Err(e) => win.set_status(format!("无法打开文件选择器：{e}").into()),
@@ -1214,12 +1266,40 @@ fn pick_file_for_transfer_window(win_weak: slint::Weak<FileTransferWindow>) {
     });
 }
 
-/// #452 把文件传输窗口当前选中文件发送到其关联会话。
-fn send_selected_file_from_window(win_weak: slint::Weak<FileTransferWindow>, slot: usize) {
+/// #503 取消传输中心指定条目（活动发送/排队项）。
+fn cancel_file_item_from_window(
+    win_weak: slint::Weak<FileTransferWindow>,
+    slot: usize,
+    id: String,
+) {
     let _ = win_weak.upgrade_in_event_loop(move |win| {
-        let path = win.get_selected_file().to_string();
+        let sent = {
+            let sessions = SESSIONS.lock().unwrap();
+            match sessions.iter().find(|s| s.engine.slot == slot) {
+                Some(s) => {
+                    let _ = s.engine.file_tx.send(FileCmd::CancelSend(id));
+                    true
+                }
+                None => false,
+            }
+        };
+        if sent {
+            win.set_status("正在取消传输…".into());
+        } else {
+            win.set_status("取消传输：会话已结束".into());
+        }
+    });
+}
+
+/// #503 重试失败项：把传输记录中的本地路径重新入队。
+fn retry_file_item_from_window(
+    win_weak: slint::Weak<FileTransferWindow>,
+    slot: usize,
+    path: String,
+) {
+    let _ = win_weak.upgrade_in_event_loop(move |win| {
         if path.trim().is_empty() {
-            win.set_status("未选择文件".into());
+            win.set_status("重试：缺少文件路径".into());
             return;
         }
         let sent = {
@@ -1229,47 +1309,42 @@ fn send_selected_file_from_window(win_weak: slint::Weak<FileTransferWindow>, slo
                     let _ = s
                         .engine
                         .file_tx
-                        .send(FileCmd::SendFile(path.clone().into()));
+                        .send(FileCmd::SendFiles(vec![std::path::PathBuf::from(path)]));
                     true
                 }
                 None => false,
             }
         };
         if sent {
-            win.set_status(format!("开始发送文件：{path}").into());
-            // 先显示 0% 并禁用发送按钮，实际进度由 viewer 线程随后回写。
-            win.set_progress(0.0);
-            win.set_progress_label("等待文件通道建立…".into());
+            win.set_status("已重新加入发送队列".into());
         } else {
-            win.set_status("文件传输：会话已结束".into());
+            win.set_status("重试：会话已结束".into());
         }
     });
 }
 
-/// #452 取消文件传输窗口关联会话的当前发送任务。
-fn cancel_file_from_window(win_weak: slint::Weak<FileTransferWindow>, slot: usize) {
+/// #503 清空传输记录。
+fn clear_done_records_from_window(win_weak: slint::Weak<FileTransferWindow>, slot: usize) {
     let _ = win_weak.upgrade_in_event_loop(move |win| {
         let sent = {
             let sessions = SESSIONS.lock().unwrap();
             match sessions.iter().find(|s| s.engine.slot == slot) {
                 Some(s) => {
-                    let _ = s.engine.file_tx.send(FileCmd::Cancel);
+                    let _ = s.engine.file_tx.send(FileCmd::ClearHistory);
                     true
                 }
                 None => false,
             }
         };
         if sent {
-            win.set_status("正在取消文件发送…".into());
+            win.set_status("已清空传输记录".into());
         } else {
-            win.set_status("取消发送：会话已结束".into());
+            win.set_status("清空记录：会话已结束".into());
         }
-        win.set_progress(-1.0);
-        win.set_progress_label("".into());
     });
 }
 
-/// #452 打开文件传输独立窗口并绑定到当前活动会话。
+/// #503 打开文件传输中心独立窗口并绑定到当前活动会话。
 fn open_file_transfer_window(ui: &AppWindow) {
     let Some(slot) = active_session_slot(ui) else {
         ui.set_status("文件传输：未连接会话".into());
@@ -1282,39 +1357,42 @@ fn open_file_transfer_window(ui: &AppWindow) {
             return;
         }
     };
-    win.set_status("请选择要发送的文件".into());
-    win.set_selected_file("".into());
-    win.set_progress(-1.0);
-    win.set_progress_label("".into());
+    win.set_status("传输中心：拖拽文件到主窗口或点「添加文件」批量入队".into());
     register_file_window(slot, win.as_weak());
     ui.set_file_open(true);
 
     let win_weak = win.as_weak();
-    win.on_choose_file({
+    win.on_add_files({
         let win_weak = win_weak.clone();
-        move || pick_file_for_transfer_window(win_weak.clone())
+        move || pick_files_for_transfer_window(win_weak.clone(), slot)
     });
-    win.on_send_file({
+    win.on_cancel_item({
         let win_weak = win_weak.clone();
-        move || send_selected_file_from_window(win_weak.clone(), slot)
+        move |id| cancel_file_item_from_window(win_weak.clone(), slot, id.to_string())
     });
-    win.on_cancel_file({
+    win.on_retry_item({
         let win_weak = win_weak.clone();
-        move || cancel_file_from_window(win_weak.clone(), slot)
+        move |path| retry_file_item_from_window(win_weak.clone(), slot, path.to_string())
+    });
+    win.on_clear_done({
+        let win_weak = win_weak.clone();
+        move || clear_done_records_from_window(win_weak.clone(), slot)
     });
 
     let ui_weak = ui.as_weak();
     win.window().on_close_requested({
-        let win_weak = win_weak.clone();
+        let ui_weak = ui_weak.clone();
         move || {
-            // 关闭文件窗口只取消当前传输、恢复主按钮；不断开远程会话。
-            cancel_file_from_window(win_weak.clone(), slot);
+            // 关闭传输中心窗口：取消当前发送、恢复主按钮；不断开远程会话。
+            {
+                let sessions = SESSIONS.lock().unwrap();
+                if let Some(s) = sessions.iter().find(|s| s.engine.slot == slot) {
+                    let _ = s.engine.file_tx.send(FileCmd::Cancel);
+                }
+            }
             unregister_file_window(slot);
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_file_open(false);
-            }
-            if let Some(win) = win_weak.upgrade() {
-                let _ = win.hide();
             }
             slint::CloseRequestResponse::HideWindow
         }
@@ -2685,6 +2763,54 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     }
 }
 
+/// #503 平台文件选择器（多选）：macOS 原生 / Linux zenity-kdialog /
+/// Windows PowerShell + WinForms 对话框（UI crate 不新增系统依赖）。
+fn pick_files() -> Result<Option<Vec<String>>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        return aerodesk_platform::macos::file_picker::MacFilePicker.pick_files();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return aerodesk_platform::linux::file_picker::LinuxFilePicker.pick_files();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // -NoProfile 避免加载用户 profile；OpenFileDialog 在 STA 单线程单元中运行。
+        // 多选路径经 stdout 逐行回传，避免把 WinForms 依赖拉进 UI crate。
+        let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$dlg = New-Object System.Windows.Forms.OpenFileDialog
+$dlg.Title = 'AeroDesk 添加文件'
+$dlg.Multiselect = $true
+$dlg.Filter = '所有文件 (*.*)|*.*'
+if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    $dlg.FileNames | ForEach-Object { [Console]::Out.WriteLine($_) }
+}
+"#;
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-STA", "-Command", script])
+            .output()
+            .map_err(|e| format!("无法启动 PowerShell：{e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "PowerShell 文件选择器退出失败：{}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let paths: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        return Ok(if paths.is_empty() { None } else { Some(paths) });
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Err("发送文件仅 macOS/Linux/Windows 支持".into())
+    }
+}
+
 /// #277 后台线程选择文件并发送到被控端（选择器阻塞，避免卡 UI 事件循环）。
 fn pick_file_and_send(ui: slint::Weak<AppWindow>) {
     std::thread::spawn(move || {
@@ -2698,7 +2824,9 @@ fn pick_file_and_send(ui: slint::Weak<AppWindow>) {
                     let _ = s
                         .engine
                         .file_tx
-                        .send(FileCmd::SendFile(path.clone().into()));
+                        .send(FileCmd::SendFiles(vec![std::path::PathBuf::from(
+                            path.clone(),
+                        )]));
                     drop(sessions);
                     ui.set_session_status(format!("发送文件：{path}").into());
                 } else {
@@ -4769,7 +4897,10 @@ mod tests {
         std::fs::write(&path, b"hello").unwrap();
         let status = dispatch_dropped_files(Some(&tx), &[path.clone()]);
         assert!(status.contains("发送文件"), "status={status}");
-        assert_eq!(rx.recv().unwrap(), FileCmd::SendFile(path.clone()));
+        assert_eq!(
+            rx.recv().unwrap(),
+            FileCmd::SendFiles(vec![path.clone()])
+        );
         // 无会话 → 未连接会话
         assert!(dispatch_dropped_files(None, &[path.clone()]).contains("未连接会话"));
         let _ = std::fs::remove_file(path);
@@ -4787,8 +4918,8 @@ mod tests {
     }
 
     #[test]
-    fn multiple_dropped_files_first_sent_rest_queued_notice() {
-        // 一次一个：多文件拖放只发第一个，状态文案提示其余逐个发送。
+    fn multiple_dropped_files_all_batched() {
+        // #503 批量入队：多文件拖放一次全部交给传输中心队列。
         let (tx, rx) = std::sync::mpsc::channel();
         let dir = std::env::temp_dir();
         let p1 = dir.join("aerodesk-desktop-drop-batch-1.txt");
@@ -4796,13 +4927,11 @@ mod tests {
         std::fs::write(&p1, b"1").unwrap();
         std::fs::write(&p2, b"2").unwrap();
         let status = dispatch_dropped_files(Some(&tx), &[p1.clone(), p2.clone()]);
-        assert!(status.contains("一次一个"), "status={status}");
-        assert!(status.contains("其余 1 个文件"), "status={status}");
-        let mut got = Vec::new();
-        while let Ok(cmd) = rx.try_recv() {
-            got.push(cmd);
-        }
-        assert_eq!(got, vec![FileCmd::SendFile(p1.clone())]);
+        assert!(status.contains("2 个文件"), "status={status}");
+        assert!(status.contains("已加入传输队列"), "status={status}");
+        let got = rx.recv().unwrap();
+        assert_eq!(got, FileCmd::SendFiles(vec![p1.clone(), p2.clone()]));
+        assert!(rx.try_recv().is_err(), "应只有一条批量命令");
         let _ = std::fs::remove_file(p1);
         let _ = std::fs::remove_file(p2);
     }

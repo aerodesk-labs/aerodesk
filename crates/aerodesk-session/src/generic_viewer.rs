@@ -51,6 +51,80 @@ fn cursor_pos(data: &[u8]) -> Option<aerodesk_core::protocol::cursor::CursorPos>
     serde_json::from_slice::<aerodesk_core::protocol::cursor::CursorPos>(data).ok()
 }
 
+/// #503 传输中心列表映射：活动发送/接收 + 排队项 + 传输记录 → UI 条目。
+/// 排序：活动 → 排队 → 历史（新 → 旧）。
+fn file_transfer_ui_entries(
+    st: &aerodesk_core::file_transfer::FileTransferStatus,
+    ft: &aerodesk_core::file_transfer::FileTransfer,
+) -> Vec<crate::TransferUiEntry> {
+    let mut items: Vec<crate::TransferUiEntry> = Vec::new();
+    if let Some(sp) = &st.sending {
+        items.push(crate::TransferUiEntry {
+            id: sp.id.clone(),
+            name: sp.name.clone(),
+            direction: "发送".into(),
+            size: sp.size,
+            progress: if sp.total > 0 {
+                sp.done as f32 / sp.total as f32
+            } else {
+                0.0
+            },
+            state: "发送中".into(),
+            detail: String::new(),
+            path: sp
+                .path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+        });
+    }
+    if let Some((name, done, total)) = &st.receiving {
+        items.push(crate::TransferUiEntry {
+            id: "recv-active".into(),
+            name: name.clone(),
+            direction: "接收".into(),
+            size: 0,
+            progress: if *total > 0 {
+                *done as f32 / *total as f32
+            } else {
+                0.0
+            },
+            state: "接收中".into(),
+            detail: String::new(),
+            path: String::new(),
+        });
+    }
+    for (id, name, size) in &st.queue {
+        items.push(crate::TransferUiEntry {
+            id: id.clone(),
+            name: name.clone(),
+            direction: "发送".into(),
+            size: *size,
+            progress: -1.0,
+            state: "排队中".into(),
+            detail: String::new(),
+            path: String::new(),
+        });
+    }
+    for r in ft.history().iter().rev() {
+        items.push(crate::TransferUiEntry {
+            id: r.id.clone(),
+            name: r.name.clone(),
+            direction: r.direction.clone(),
+            size: r.size,
+            progress: -1.0,
+            state: r.state.clone(),
+            detail: r.detail.clone(),
+            path: r
+                .path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+        });
+    }
+    items
+}
+
 /// 把终端命令响应格式化为窗口可读文本（stdout/stderr/错误/截断提示）。
 pub(crate) fn format_cmd_response(response: &CmdResponse) -> String {
     match &response.result {
@@ -272,19 +346,32 @@ fn run_viewer_impl<U, D, R, DF, RF>(
                 }
             }
         }
-        // #72/#271 文件/剪贴板命令（UI 工具栏）：发送文件/剪贴板文本/图片、取消。
+        // #72/#271/#503 文件/剪贴板命令（UI 工具栏/传输中心）：发送（批量入队）、
+        // 剪贴板文本/图片、取消（当前/指定项）、清空记录。
         while let Ok(cmd) = file_cmd_rx.try_recv() {
             match cmd {
-                crate::FileCmd::SendFile(path) => match file_transfer.send_file(&path) {
-                    Ok(()) => {
-                        let msg = format!("开始发送文件：{}", path.display());
-                        ui.session_status(msg);
-                    }
-                    Err(e) => {
-                        let msg = format!("发送失败：{e}");
-                        ui.session_status(msg);
-                    }
-                },
+                crate::FileCmd::SendFiles(paths) => {
+                    // #503 批量入队：逐路径结果；失败（不存在/超限）并入汇总提示。
+                    let results = file_transfer.send_files(&paths);
+                    let errs: Vec<String> = results
+                        .into_iter()
+                        .filter_map(|r| r.err())
+                        .collect();
+                    let ok_count = paths.len() - errs.len();
+                    let queued = file_transfer.queue_len();
+                    let msg = if ok_count == 0 {
+                        format!("发送文件：{} 个文件全部失败（{}）", paths.len(), errs.join("；"))
+                    } else if queued > 0 {
+                        let mut m = format!("已加入发送队列：{} 个文件（排队 {queued}）", ok_count);
+                        if !errs.is_empty() {
+                            m.push_str(&format!("；失败：{}", errs.join("；")));
+                        }
+                        m
+                    } else {
+                        format!("开始发送文件：{} 个", ok_count)
+                    };
+                    ui.session_status(msg);
+                }
                 crate::FileCmd::SendClipboard(text) => {
                     aerodesk_core::clipboard::set_cache(text.clone());
                     let sent = file_transfer.send_clipboard(&text, t.endpoint());
@@ -309,6 +396,16 @@ fn run_viewer_impl<U, D, R, DF, RF>(
                 }
                 crate::FileCmd::Cancel => {
                     file_transfer.cancel_send(t.endpoint());
+                }
+                crate::FileCmd::CancelSend(id) => {
+                    // #503 逐项取消：活动发送/排队项；未命中时提示。
+                    let ok = file_transfer.cancel_send_id(&id, t.endpoint());
+                    if !ok {
+                        ui.session_status(format!("取消失败：找不到传输项 {id}"));
+                    }
+                }
+                crate::FileCmd::ClearHistory => {
+                    file_transfer.clear_history();
                 }
             }
         }
@@ -515,24 +612,27 @@ fn run_viewer_impl<U, D, R, DF, RF>(
             };
             ui.session_status(msg);
         }
-        // #452 文件传输进度：500ms 节流同步到会话状态和独立文件窗口。
+        // #452/#503 文件传输进度 + 传输中心列表：500ms 节流同步到会话状态和独立窗口。
         if last_file_status.elapsed() >= Duration::from_millis(500) {
             last_file_status = Instant::now();
-            let st = file_transfer.status();
-            if let Some(msg) = st.message {
+            let mut st = file_transfer.status();
+            if let Some(msg) = st.message.take() {
                 ui.session_status(msg.clone());
                 ui.clear_file_window_progress(Some(msg));
-            } else if let Some((name, done, total)) = st.sending {
-                let pct = done as f64 * 100.0 / total.max(1) as f64;
-                let label = format!("发送 {name} {pct:.0}%");
-                ui.session_status(format!("发送文件：{name} {done}/{total} ({pct:.0}%)"));
+            } else if let Some(sp) = &st.sending {
+                let pct = sp.done as f64 * 100.0 / sp.total.max(1) as f64;
+                let label = format!("发送 {} {pct:.0}%", sp.name);
+                ui.session_status(format!(
+                    "发送文件：{} {}/{} ({pct:.0}%)",
+                    sp.name, sp.done, sp.total
+                ));
                 ui.update_file_window_progress(
                     (pct / 100.0) as f32,
                     label,
-                    format!("正在发送：{name}"),
+                    format!("正在发送：{}", sp.name),
                 );
-            } else if let Some((name, done, total)) = st.receiving {
-                let pct = done as f64 * 100.0 / total.max(1) as f64;
+            } else if let Some((name, done, total)) = st.receiving.as_ref() {
+                let pct = *done as f64 * 100.0 / (*total).max(1) as f64;
                 let label = format!("接收 {name} {pct:.0}%");
                 ui.session_status(format!("接收文件：{name} {done}/{total} ({pct:.0}%)"));
                 ui.update_file_window_progress(
@@ -543,6 +643,8 @@ fn run_viewer_impl<U, D, R, DF, RF>(
             } else {
                 ui.clear_file_window_progress(None);
             }
+            // #503 传输中心列表：活动 + 排队 + 传输记录 → UI 条目。
+            ui.update_file_transfers(file_transfer_ui_entries(&st, &file_transfer));
         }
         // #271 剪贴板自动同步（1s 节流）：图片优先，否则文本；变化才发，防回声。
         if last_clip_poll

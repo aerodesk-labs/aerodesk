@@ -45,6 +45,52 @@ impl FilePicker for LinuxFilePicker {
         }
         Err("没有可用的文件选择器（请安装 zenity 或 kdialog）".into())
     }
+
+    /// #503 多选：zenity --multiple / kdialog --multiple，路径以换行分隔（每行一个）。
+    fn pick_files(&self) -> Result<Option<Vec<String>>, String> {
+        let zenity_args: &[&str] = &[
+            "--file-selection",
+            "--multiple",
+            "--separator=\n",
+            "--title=AeroDesk 添加文件",
+        ];
+        let kdialog_args: &[&str] = &[
+            "--getopenfilename",
+            ".",
+            "--multiple",
+            "--separator=\n",
+        ];
+        let candidates: [(&str, &[&str]); 2] = [("zenity", zenity_args), ("kdialog", kdialog_args)];
+        for (cmd, args) in candidates {
+            match Command::new(cmd).args(args).output() {
+                Ok(out) => {
+                    if let Some(r) = parse_picked_multi(&out) {
+                        return r;
+                    }
+                    // 命令存在但异常退出：尝试下一个前端。
+                }
+                Err(_) => continue, // 未安装 → 尝试下一个
+            }
+        }
+        Err("没有可用的文件选择器（请安装 zenity 或 kdialog）".into())
+    }
+}
+
+/// 多选结果解析：成功→路径列表；取消（退出码 1/空输出）→ None。
+fn parse_picked_multi(out: &Output) -> Option<Result<Option<Vec<String>>, String>> {
+    if out.status.success() {
+        let paths: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        return Some(Ok(if paths.is_empty() { None } else { Some(paths) }));
+    }
+    // 常见取消语义：zenity/kdialog 用户取消都返回退出码 1 且无输出。
+    if out.status.code() == Some(1) {
+        return Some(Ok(None));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -92,5 +138,32 @@ mod tests {
             stderr: vec![],
         };
         assert_eq!(parse_picked(&out), None);
+    }
+
+    #[test]
+    fn multi_success_parses_lines() {
+        // #503 多选：每行一个路径；空行过滤。
+        let out = Output {
+            status: status(0),
+            stdout: b"/home/u/a.txt\n/home/u/b dir/b.txt\n\n".to_vec(),
+            stderr: vec![],
+        };
+        assert_eq!(
+            parse_picked_multi(&out),
+            Some(Ok(Some(vec![
+                "/home/u/a.txt".to_string(),
+                "/home/u/b dir/b.txt".to_string()
+            ])))
+        );
+    }
+
+    #[test]
+    fn multi_cancel_maps_to_none() {
+        let out = Output {
+            status: status(1),
+            stdout: vec![],
+            stderr: vec![],
+        };
+        assert_eq!(parse_picked_multi(&out), Some(Ok(None)));
     }
 }
