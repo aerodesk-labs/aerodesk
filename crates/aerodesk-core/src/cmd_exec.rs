@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::protocol::cmd::{ProcessInfo, decode_b64, encode_b64};
+use crate::protocol::cmd::{PowerAction, ProcessInfo, decode_b64, encode_b64};
 
 use crate::platform::CommandExecutor;
 
@@ -567,6 +567,58 @@ pub fn run_command(
     allowlist: &[String],
 ) -> CmdOutput {
     run_command_with(command, cwd, timeout_ms, allowlist, audit_path().as_deref())
+}
+
+/// #503 电源动作的固定平台命令（仅内部构造，无用户输入进入 shell）：
+/// - Windows：`shutdown /s|/r /t 0`；锁屏 `rundll32.exe user32.dll,LockWorkStation`
+/// - macOS：osascript System Events shut down / restart / Ctrl+Cmd+Q（锁屏）
+/// - Linux：systemctl poweroff / reboot；锁屏 loginctl lock-session
+/// 动作已枚举校验；返回值供执行与审计记录共用（审计显示实际执行的平台命令）。
+pub fn power_command_line(action: PowerAction) -> String {
+    match action {
+        #[cfg(windows)]
+        PowerAction::Shutdown => "shutdown /s /t 0".to_string(),
+        #[cfg(windows)]
+        PowerAction::Reboot => "shutdown /r /t 0".to_string(),
+        #[cfg(windows)]
+        PowerAction::Lock => "rundll32.exe user32.dll,LockWorkStation".to_string(),
+        #[cfg(target_os = "macos")]
+        PowerAction::Shutdown => {
+            "osascript -e 'tell application \"System Events\" to shut down'".to_string()
+        }
+        #[cfg(target_os = "macos")]
+        PowerAction::Reboot => {
+            "osascript -e 'tell application \"System Events\" to restart'".to_string()
+        }
+        #[cfg(target_os = "macos")]
+        PowerAction::Lock => {
+            // Ctrl+Cmd+Q 锁屏（System Events 快捷键）；key code 12 = 'q'。
+            "osascript -e 'tell application \"System Events\" to key code 12 using {control down, command down}'".to_string()
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        PowerAction::Shutdown => "systemctl poweroff".to_string(),
+        #[cfg(all(unix, not(target_os = "macos")))]
+        PowerAction::Reboot => "systemctl reboot".to_string(),
+        #[cfg(all(unix, not(target_os = "macos")))]
+        PowerAction::Lock => "loginctl lock-session".to_string(),
+    }
+}
+
+/// #503 系统电源命令（关机/重启/锁屏）：内置安全命令，动作枚举受限（不接受
+/// 自由参数，比裸 `run_command` 更可控）。执行前/后写入 cmd 审计（与现有审计
+/// 体系打通：`$AERODESK_CMD_AUDIT` 或 `~/AeroDesk/cmd-audit.jsonl`，JSONL 记录
+/// 实际执行的平台命令与退出码/错误）。`audit` 为 None 时不审计（测试用）。
+pub fn system_power_with(action: PowerAction, audit: Option<&Path>) -> CmdOutput {
+    // 命令由平台侧固定构造，不经危险命令拦截（动作本身受限；裸 `shutdown`
+    // 走 run_command 会被 is_dangerous 拦截——本内置命令是受控替代路径）。
+    let out = DefaultCommandExecutor.power_command(action);
+    audit_opt(audit, &power_command_line(action), None, &out);
+    out
+}
+
+/// 执行电源命令（审计写入默认路径）。
+pub fn system_power(action: PowerAction) -> CmdOutput {
+    system_power_with(action, audit_path().as_deref())
 }
 
 /// 追加审计记录（JSONL）：时间/命令/工作目录/退出码/错误/输出字节数。
@@ -1154,6 +1206,56 @@ mod tests {
             .read_file(path.to_str().unwrap(), None)
             .unwrap();
         assert_eq!(got, payload);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #503：电源命令构造断言（参数层，**不真实执行**——本机不得触发关机/锁屏）。
+    #[test]
+    fn power_command_line_shapes() {
+        let shutdown = power_command_line(PowerAction::Shutdown);
+        let reboot = power_command_line(PowerAction::Reboot);
+        let lock = power_command_line(PowerAction::Lock);
+        #[cfg(windows)]
+        {
+            assert_eq!(shutdown, "shutdown /s /t 0");
+            assert_eq!(reboot, "shutdown /r /t 0");
+            assert_eq!(lock, "rundll32.exe user32.dll,LockWorkStation");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert!(shutdown.contains("System Events"));
+            assert!(reboot.contains("restart"));
+            assert!(lock.contains("key code 12"));
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            assert_eq!(shutdown, "systemctl poweroff");
+            assert_eq!(reboot, "systemctl reboot");
+            assert_eq!(lock, "loginctl lock-session");
+        }
+    }
+
+    /// #503：电源审计与命令构造同构（JSONL 记录实际平台命令 + 回执字段）。
+    /// 不真实执行电源命令（只验证审计写入路径与命令构造联动）。
+    #[test]
+    fn power_audit_records_platform_command() {
+        let dir = std::env::temp_dir().join(format!("aerodesk-cmd-power-{}", std::process::id()));
+        let audit = dir.join("audit.jsonl");
+        let out = CmdOutput {
+            error: Some("not executed (test)".into()),
+            code: Some("test".into()),
+            exit_code: None,
+            ..Default::default()
+        };
+        audit_at(&audit, &power_command_line(PowerAction::Reboot), None, &out);
+        let text = std::fs::read_to_string(&audit).expect("audit file");
+        assert!(text.contains("not executed (test)"));
+        // 审计命令字段 = 平台固定命令（Windows 为 shutdown /r /t 0）。
+        assert!(
+            text.contains("shutdown /r /t 0")
+                || text.contains("osascript")
+                || text.contains("systemctl reboot")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

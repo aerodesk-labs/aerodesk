@@ -33,6 +33,7 @@ export AERODESK_AGENT_BIN="$PWD/target/release/aerodesk-agent"
 | `run_command` | 执行 shell 命令（危险命令默认拦截；白名单可放行） |
 | `read_file` / `write_file` | 读写远程文件（写敏感路径默认禁止） |
 | `list_processes` / `kill_process` | 进程管理（pid 0/1 禁止） |
+| `system_power` | 远程关机/重启/锁屏（#503 内置安全命令，动作枚举受限，执行写 cmd 审计） |
 | `mouse_move` / `mouse_click` | 归一化坐标移动/点击（左/右/中键） |
 | `type_text` | 逐字符输入（US 布局，自动 Shift） |
 | `download_file` / `upload_file` | 大文件双向传输（走 file 通道，无 4MB 上限；upload 需被控端 publisher 以 `--recv-dir` 启动） |
