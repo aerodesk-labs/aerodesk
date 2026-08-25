@@ -85,7 +85,8 @@ pub fn error_code_to_status(code: &str) -> u16 {
 
 /// SIP 响应码 → error_code。404 与 480 同归 offline（AoR 不存在/注册过期）；
 /// 487（CANCEL 后 Request Terminated）归 timeout——主叫视角取消与超时同态。
-/// 非拒绝类响应码（2xx/1xx 等）返回 None。
+/// 407（#503-4 INVITE 授权质询）归 auth_required——被叫设备有口令而主叫未带
+/// 或口令错误（未带凭据时栈按质询失败收尾）。非拒绝类响应码（2xx/1xx 等）返回 None。
 pub fn status_to_error_code(status: u16) -> Option<&'static str> {
     match status {
         603 => Some("user_rejected"),
@@ -93,6 +94,7 @@ pub fn status_to_error_code(status: u16) -> Option<&'static str> {
         480 | 404 => Some("offline"),
         408 | 487 => Some("timeout"),
         403 => Some("control_disabled"),
+        407 => Some("auth_required"),
         _ => None,
     }
 }

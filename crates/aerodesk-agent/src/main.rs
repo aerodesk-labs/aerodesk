@@ -77,6 +77,11 @@ fn main() {
     handle.join().expect("main thread join");
 }
 
+/// #503-4 主叫授权口令（--call-password / AERO_CALL_PASSWORD / 回退 --token）：
+/// 主叫 INVITE 经 signal 407 Proxy-Authorization 质询时，以被叫设备口令（无人值守
+/// 固定/临时密码）应答。回退 --token 保持单 token 部署/e2e 旧行为（同凭据互通）。
+static CALL_PASSWORD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 /// --probe-audio：验证 macOS 系统音频采集（audio-only SCStream）。
 fn probe_audio() {
     #[cfg(target_os = "macos")]
@@ -204,6 +209,31 @@ fn run() {
     };
     let room = arg(&args, "--room").unwrap_or_else(|| "demo".into());
     let token = arg(&args, "--token");
+    // #503-4 主叫授权口令：显式 --call-password > AERO_CALL_PASSWORD > 回退 --token。
+    let call_password = arg(&args, "--call-password")
+        .or_else(|| std::env::var("AERO_CALL_PASSWORD").ok().filter(|s| !s.is_empty()))
+        .or_else(|| token.clone().filter(|s| !s.is_empty()));
+    if let Some(pw) = &call_password {
+        let _ = CALL_PASSWORD.set(pw.clone());
+    }
+    // #503-4 临时密码（主控端发起、带有效期）：经 signal 管理端点签发后打印，
+    // 随即退出——拿到的密码供本次呼叫作 --call-password 使用。
+    if let Some(tp_device) = arg(&args, "--temp-password") {
+        let ttl: u64 = arg(&args, "--ttl")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+        match mint_temp_password(&signal, &tp_device, ttl, token.as_deref()) {
+            Ok((pw, ttl, expires_at_secs)) => {
+                println!("device={tp_device} password={pw} ttl_secs={ttl} expires_at={expires_at_secs}");
+                println!("用 `--call-password {pw}` 呼叫 {tp_device}（或把它填到桌面端连接密码）");
+            }
+            Err(e) => {
+                eprintln!("临时密码获取失败: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     // #173 自动重连：会话结束/连接失败时指数退避重试（--reconnect 开启）。
     let reconnect = args.iter().any(|a| a == "--reconnect");
     let reconnect_max: u32 = arg(&args, "--reconnect-max")
@@ -681,6 +711,60 @@ fn sip_env_cfg(
     )
 }
 
+/// #503-4 临时密码签发（主控端发起）：POST signal 管理端点
+/// `/admin/temp-password`（Bearer 管理 token = --token）。返回
+/// （password, ttl_secs, expires_at_secs）。端点须与 --signal 同 host:port
+/// （signal 的 /ws 与 /admin/* 同一 rouille 服务）。
+fn mint_temp_password(
+    signal_url: &str,
+    device: &str,
+    ttl: u64,
+    token: Option<&str>,
+) -> Result<(String, u64, u64), String> {
+    // ws://host[:port]/ws（或 wss://…）→ http(s)://host[:port]。
+    let (scheme, rest) = signal_url
+        .split_once("://")
+        .ok_or_else(|| format!("signal URL 非法：{signal_url}"))?;
+    let http_scheme = if scheme.eq_ignore_ascii_case("wss") {
+        "https"
+    } else {
+        "http"
+    };
+    let host_port = rest.split('/').next().unwrap_or_default();
+    if host_port.is_empty() {
+        return Err(format!("signal URL 无 host：{signal_url}"));
+    }
+    let url = format!("{http_scheme}://{host_port}/admin/temp-password");
+    let body = serde_json::json!({ "device_id": device, "ttl_secs": ttl }).to_string();
+    let mut req = ureq::post(&url).set("Content-Type", "application/json");
+    if let Some(t) = token.filter(|t| !t.is_empty()) {
+        req = req.set("Authorization", &format!("Bearer {t}"));
+    }
+    let resp = req
+        .send_string(&body)
+        .map_err(|e| format!("POST {url}: {e}"))?;
+    let status = resp.status();
+    let text = resp
+        .into_string()
+        .map_err(|e| format!("读响应失败: {e}"))?;
+    if status != 200 {
+        return Err(format!("{status}: {text}"));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("响应解析失败: {e}"))?;
+    let pw = v
+        .get("password")
+        .and_then(|x| x.as_str())
+        .ok_or("响应缺 password")?
+        .to_string();
+    let ttl = v.get("ttl_secs").and_then(|x| x.as_u64()).unwrap_or(ttl);
+    let expires = v
+        .get("expires_at_secs")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    Ok((pw, ttl, expires))
+}
+
 /// 探测本机出接口 IP（绑 0.0.0.0 连公共地址后取 local_addr；失败回退 loopback）。
 fn discover_egress_ip(port: u16) -> std::net::SocketAddr {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -941,7 +1025,7 @@ fn connect_inner(
         info!("video mid: {vm:?} audio mid: {am:?} camera mid: {cm:?}");
         let offer_json = serde_json::to_string(&offer).map_err(|e| e.to_string())?;
         let call_id = format!("c-{}", std::process::id());
-        link.call(room, &call_id, &offer_json)
+        link.call(room, &call_id, &offer_json, CALL_PASSWORD.get().map(String::as_str))
             .map_err(|e| format!("SIP INVITE: {e}"))?;
         // 等 Answered/Rejected（30s；180 仅记日志）。
         let answer_json = {

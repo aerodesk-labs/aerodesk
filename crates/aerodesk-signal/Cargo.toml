@@ -12,6 +12,9 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 ureq = { version = "2", features = ["tls"] }
+# #503-4 临时密码 CSPRNG（与桌面端 generate_one_time_password 同源，拒绝采样；
+# 访问口令不能用时间/进程态弱随机，见桌面端该函数注释）。
+getrandom = "0.2"
 # #10：仅依赖协议 crate，不再被迫链接客户端引擎重依赖。
 aerodesk-protocol = { path = "../aerodesk-protocol" }
 rsipstack = "0.6.4"

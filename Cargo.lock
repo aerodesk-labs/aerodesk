@@ -56,6 +56,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tungstenite 0.30.0",
+ "ureq",
  "videotoolbox",
 ]
 
@@ -283,6 +284,7 @@ version = "0.1.0"
 dependencies = [
  "aerodesk-core",
  "aerodesk-protocol",
+ "getrandom 0.2.17",
  "libc",
  "rcgen",
  "rouille",

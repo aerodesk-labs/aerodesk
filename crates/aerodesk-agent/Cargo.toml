@@ -36,6 +36,9 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 pcap-file = "2.0.0"
+# #503-4 --temp-password：signal 管理端点签发临时密码（HTTP 客户端；signal
+# 同款 ureq，工作区已有锁版本，非新增传输依赖）。
+ureq = { version = "2", features = ["tls"] }
 # viewer 诊断：AERODESK_DUMP_FRAME 把解码出的屏幕帧落盘成 PNG（端到端可视验证）。
 png = "0.17"
 

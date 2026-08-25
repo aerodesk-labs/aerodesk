@@ -14,6 +14,9 @@
 //!   见 proxy_call 备注）；CANCEL/BYE 级联、INFO（trickle-ice-sdpfrag）双向透传；
 //!   被叫离线/未注册 → 404（规范 §3 offline）；
 //! - `OPTIONS` 保活/能力探测（200 + Allow）；
+//! - **INVITE 授权（#503-4）**：被叫设备有口令（固定密码/临时密码）时要求
+//!   `Proxy-Authorization`——407 质询（Digest，与 REGISTER 同款）→ 客户端以
+//!   被叫口令应答 → 校验通过放行、口令错 403；无口令设备不设卡（旧行为）；
 //! - 严格子集（规范 §6）：SUBSCRIBE/NOTIFY/REFER/UPDATE/… 一律 501（ACK/CANCEL 由
 //!   rsipstack 事务层吸收，不进分发循环）；
 //! - 指标 `sip_registrations`/`sip_calls_established`/`sip_calls_terminated`（/metrics）。
@@ -122,6 +125,59 @@ impl Registrar {
         let now = Instant::now();
         self.bindings.retain(|_, b| b.expires_at > now);
         self.bindings.len()
+    }
+}
+
+/// 临时口令条目（#503-4：主控端发起、带有效期，用于无人值守访问）。
+#[derive(Debug, Clone)]
+pub struct TempPassword {
+    pub password: String,
+    pub expires_at: Instant,
+}
+
+/// 临时口令注册表（纯数据、可单测）：设备 ID → 有效期内一次性口令。
+/// 生效域 = INVITE 授权（[`decide_invite`] 临时口令分支），不参与 REGISTER。
+#[derive(Debug, Default)]
+pub struct TempRegistry {
+    entries: HashMap<String, TempPassword>,
+}
+
+impl TempRegistry {
+    /// 签发：覆盖同设备旧临时口令，返回过期时刻。
+    pub fn issue(&mut self, device: &str, password: String, ttl: Duration) -> Instant {
+        let expires_at = Instant::now() + ttl;
+        self.entries.insert(
+            device.to_string(),
+            TempPassword {
+                password,
+                expires_at,
+            },
+        );
+        expires_at
+    }
+
+    /// 查询有效临时口令（惰性剔除过期）。无/已过期 → None。
+    pub fn lookup(&mut self, device: &str) -> Option<String> {
+        if self
+            .entries
+            .get(device)
+            .map(|e| e.expires_at <= Instant::now())
+            .unwrap_or(false)
+        {
+            self.entries.remove(device);
+        }
+        self.entries.get(device).map(|e| e.password.clone())
+    }
+
+    /// 撤销（主控端主动作废，未到期即失效）。
+    pub fn revoke(&mut self, device: &str) -> bool {
+        self.entries.remove(device).is_some()
+    }
+
+    pub fn len(&mut self) -> usize {
+        let now = Instant::now();
+        self.entries.retain(|_, e| e.expires_at > now);
+        self.entries.len()
     }
 }
 
@@ -244,6 +300,86 @@ pub fn decide_register(
     }
 }
 
+/// INVITE 授权决策结果（#503-4：无人值守固定密码 + 临时密码）。
+#[derive(Debug, PartialEq, Eq)]
+pub enum InviteDecision {
+    /// 放行（目标无任何口令配置 → 与旧行为一致）。
+    Allow,
+    /// 407 质询（值 = Proxy-Authenticate 头；客户端应以被叫口令应答）。
+    Challenge(String),
+    /// 已带 Proxy-Authorization 但口令错误 → 403。
+    Forbidden,
+}
+
+/// INVITE 授权核心判定（与传输无关，可单测）。
+///
+/// `fixed_password`：被叫设备的固定口令（设备表显式配置或共享 token；None = 未配置）；
+/// `temp_password`：该设备当前有效的临时口令（None = 无）。
+/// 任一匹配即放行——临时口令在有效期内等效固定口令。407 质询与 REGISTER 同款
+/// Digest（realm/nonce/algorithm/qop），客户端 rsipstack 原生处理
+/// Proxy-Authorization（`handle_client_authenticate`）。
+pub fn decide_invite(
+    req: &Request,
+    realm: &str,
+    nonce: &str,
+    fixed_password: Option<&str>,
+    temp_password: Option<&str>,
+) -> InviteDecision {
+    if fixed_password.is_none() && temp_password.is_none() {
+        // 目标无任何口令：不设卡（开放部署/未配置口令的设备，保持旧行为）。
+        return InviteDecision::Allow;
+    }
+    let Some(raw) = raw_proxy_authorization(req) else {
+        return InviteDecision::Challenge(www_authenticate_value(realm, nonce));
+    };
+    let Ok(proxy) = rsipstack::sip::typed::ProxyAuthorization::parse(&raw) else {
+        // 无法解析按质询处理（客户端会带齐参数重试）。
+        return InviteDecision::Challenge(www_authenticate_value(realm, nonce));
+    };
+    // ProxyAuthorization 与 Authorization 字段同构：转成后者复用 verify_digest。
+    let auth = rsipstack::sip::typed::Authorization {
+        scheme: proxy.scheme,
+        username: proxy.username,
+        realm: proxy.realm,
+        nonce: proxy.nonce,
+        uri: proxy.uri,
+        response: proxy.response,
+        algorithm: proxy.algorithm,
+        opaque: proxy.opaque,
+        qop: proxy.qop,
+    };
+    // 固定口令与临时口令任一匹配即放行（ha1 以报文中 username 为准，两分支独立计算）。
+    let ok = fixed_password
+        .is_some_and(|p| verify_digest(&auth, p, &Method::Invite, &raw))
+        || temp_password
+            .is_some_and(|p| verify_digest(&auth, p, &Method::Invite, &raw));
+    if ok {
+        InviteDecision::Allow
+    } else {
+        InviteDecision::Forbidden
+    }
+}
+
+/// 从请求里取 Proxy-Authorization 头原始值（Digest 计算需保留原文大小写）。
+fn raw_proxy_authorization(req: &Request) -> Option<String> {
+    req.headers
+        .iter()
+        .find(|h| h.name().eq_ignore_ascii_case("Proxy-Authorization"))
+        .map(|h| h.value().to_string())
+}
+
+/// 被叫设备的固定口令（#503-4）：设备表显式配置优先，未列设备回退共享 token
+/// （与 REGISTER 路径 password_of 同口径）；开放注册模式无口令（不设卡）。
+fn callee_fixed_password(cfg: &SipConfig, device: &str) -> Option<String> {
+    if cfg.open_register {
+        return None;
+    }
+    cfg.passwords
+        .get(device)
+        .cloned()
+        .or_else(|| cfg.token_password.clone())
+}
+
 /// SIP 端点配置。
 pub struct SipConfig {
     pub realm: String,
@@ -262,6 +398,9 @@ pub struct SipConfig {
     /// 开放注册（开发/e2e）：口令表与 token 均未配置时跳过 Digest 校验——
     /// 与 WSS join 同姿态（无鉴权源即开放，main.rs auth_ok 语义）。
     pub open_register: bool,
+    /// 临时口令注册表（#503-4：主控端经 /admin/temp-password 签发、带有效期；
+    /// INVITE 授权时与固定口令并列校验）。main.rs 与 HTTP 管理端点共享。
+    pub temp_passwords: Arc<Mutex<TempRegistry>>,
     /// TLS 身份（复用 signal 的证书加载）。
     pub tls_identity: Option<TlsIdentity>,
     /// SFU 池（会议桥用）：非设备 AoR 的 INVITE 代理到 SFU /start（规范 §4
@@ -527,14 +666,47 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
                         }
                     }
                     Some(binding) => {
-                        let dl = dialog_layer.clone();
-                        let m = metrics.clone();
-                        let br = bye_reasons.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = proxy_call(dl, tx, binding, m, br).await {
-                                warn!(error=%e, "proxy_call 失败");
+                        // #503-4 无人值守口令授权：被叫设备有口令（固定/临时）时
+                        // 要求 Proxy-Authorization——407 质询 → 客户端以被叫口令应答
+                        // → 校验通过放行；口令错 403。无口令设备不设卡（旧行为）。
+                        let nonce = make_nonce(&nonce_counter, &nonce_secret);
+                        let fixed = callee
+                            .as_deref()
+                            .and_then(|c| callee_fixed_password(&cfg, c));
+                        let temp = callee
+                            .as_deref()
+                            .and_then(|c| cfg.temp_passwords.lock().unwrap().lookup(c));
+                        match decide_invite(
+                            req,
+                            &cfg.realm,
+                            &nonce,
+                            fixed.as_deref(),
+                            temp.as_deref(),
+                        ) {
+                            InviteDecision::Allow => {
+                                let dl = dialog_layer.clone();
+                                let m = metrics.clone();
+                                let br = bye_reasons.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = proxy_call(dl, tx, binding, m, br).await {
+                                        warn!(error=%e, "proxy_call 失败");
+                                    }
+                                });
                             }
-                        });
+                            InviteDecision::Challenge(pa) => {
+                                let _ = tx
+                                    .reply_with(
+                                        StatusCode::ProxyAuthenticationRequired,
+                                        vec![Header::Other("Proxy-Authenticate".into(), pa)],
+                                        None,
+                                    )
+                                    .await;
+                            }
+                            InviteDecision::Forbidden => {
+                                warn!(callee = %callee.clone().unwrap_or_default(), "INVITE 授权失败（口令错）");
+                                let _ = tx.reply(StatusCode::Forbidden).await;
+                            }
+                        }
                     }
                 }
             }
@@ -1071,6 +1243,134 @@ mod tests {
         assert_eq!(a.realm, "r");
     }
 
+    // -- #503-4 无人值守口令授权：decide_invite 纯逻辑 --
+
+    /// 构造带/不带 Proxy-Authorization 的 INVITE 请求（URI 与 REGISTER 同款）。
+    fn invite_request(proxy_auth: Option<&str>) -> Request {
+        let auth_line = match proxy_auth {
+            Some(a) => format!("Proxy-Authorization: {a}\r\n"),
+            None => String::new(),
+        };
+        let text = format!(
+            "INVITE sip:AD-CALLEE@{REALM} SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-t\r\n\
+             From: <sip:AD-CALLER@{REALM}>;tag=f1\r\n\
+             To: <sip:AD-CALLEE@{REALM}>\r\n\
+             Call-ID: invite-1\r\n\
+             CSeq: 1 INVITE\r\n\
+             {auth_line}\
+             Content-Type: application/sdp\r\n\
+             Content-Length: 0\r\n\r\n"
+        );
+        Request::try_from(text).expect("parse INVITE")
+    }
+
+    /// 计算 Proxy-Authorization 的 Digest 响应（username = 被叫设备 ID，口令 = 被叫口令）。
+    fn invite_digest(username: &str, password: &str) -> String {
+        rsipstack::dialog::authenticate::compute_digest(
+            username,
+            password,
+            REALM,
+            NONCE,
+            &Method::Invite,
+            &format!("sip:{REALM}"),
+            rsipstack::sip::headers::auth::Algorithm::Md5,
+            None,
+        )
+    }
+
+    #[test]
+    fn invite_no_password_allows() {
+        // 目标无口令（开放部署/未配置设备）→ 直接放行，不设卡。
+        let req = invite_request(None);
+        assert_eq!(
+            decide_invite(&req, REALM, NONCE, None, None),
+            InviteDecision::Allow
+        );
+    }
+
+    #[test]
+    fn invite_without_auth_challenges() {
+        // 目标有固定口令但 INVITE 未带 Proxy-Authorization → 407 质询。
+        let req = invite_request(None);
+        match decide_invite(&req, REALM, NONCE, Some("tok-callee"), None) {
+            InviteDecision::Challenge(pa) => {
+                assert!(pa.contains("Digest realm=\"aerodesk.test\""));
+                assert!(pa.contains("nonce=\"testnonce123\""));
+            }
+            other => panic!("应 407 质询，得 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invite_fixed_password_gates_call() {
+        // 正确固定口令 → Allow。
+        let resp = invite_digest("AD-CALLEE", "tok-callee");
+        let auth_hdr = format!(
+            "Digest username=\"AD-CALLEE\", realm=\"{REALM}\", nonce=\"{NONCE}\", uri=\"sip:{REALM}\", response=\"{resp}\", algorithm=MD5"
+        );
+        let req = invite_request(Some(&auth_hdr));
+        assert_eq!(
+            decide_invite(&req, REALM, NONCE, Some("tok-callee"), None),
+            InviteDecision::Allow
+        );
+        // 口令错 → Forbidden。
+        let bad = invite_digest("AD-CALLEE", "WRONG");
+        let auth_hdr = format!(
+            "Digest username=\"AD-CALLEE\", realm=\"{REALM}\", nonce=\"{NONCE}\", uri=\"sip:{REALM}\", response=\"{bad}\", algorithm=MD5"
+        );
+        let req = invite_request(Some(&auth_hdr));
+        assert_eq!(
+            decide_invite(&req, REALM, NONCE, Some("tok-callee"), None),
+            InviteDecision::Forbidden
+        );
+        // 固定口令错、临时口令对 → 临时口令放行（有效期等效固定口令）。
+        let req = invite_request(Some(&auth_hdr));
+        assert_eq!(
+            decide_invite(&req, REALM, NONCE, Some("tok-callee"), Some("temp-9X2")),
+            InviteDecision::Forbidden,
+            "两个都错才 403"
+        );
+        let temp_ok = invite_digest("AD-CALLEE", "temp-9X2");
+        let auth_hdr = format!(
+            "Digest username=\"AD-CALLEE\", realm=\"{REALM}\", nonce=\"{NONCE}\", uri=\"sip:{REALM}\", response=\"{temp_ok}\", algorithm=MD5"
+        );
+        let req = invite_request(Some(&auth_hdr));
+        assert_eq!(
+            decide_invite(&req, REALM, NONCE, Some("tok-callee"), Some("temp-9X2")),
+            InviteDecision::Allow,
+            "临时口令匹配即放行"
+        );
+    }
+
+    #[test]
+    fn invite_unparseable_auth_challenges() {
+        let req = invite_request(Some("Digest garbage"));
+        assert!(matches!(
+            decide_invite(&req, REALM, NONCE, Some("tok-callee"), None),
+            InviteDecision::Challenge(_)
+        ));
+    }
+
+    #[test]
+    fn temp_registry_issue_lookup_revoke_expire() {
+        let mut r = TempRegistry::default();
+        r.issue("AD-DEV1", "temp-1".into(), Duration::from_secs(60));
+        assert_eq!(r.lookup("AD-DEV1").as_deref(), Some("temp-1"));
+        assert_eq!(r.len(), 1);
+        // 重新签发覆盖旧值。
+        r.issue("AD-DEV1", "temp-2".into(), Duration::from_secs(60));
+        assert_eq!(r.lookup("AD-DEV1").as_deref(), Some("temp-2"));
+        // 撤销。
+        assert!(r.revoke("AD-DEV1"));
+        assert_eq!(r.lookup("AD-DEV1"), None);
+        assert!(!r.revoke("AD-DEV1"));
+        // 过期剔除。
+        r.issue("AD-DEV2", "temp-3".into(), Duration::ZERO);
+        assert_eq!(r.lookup("AD-DEV2"), None, "ttl=0 立即过期");
+        assert_eq!(r.len(), 0);
+    }
+
     // -- 端到端：rsipstack 客户端经 UDP 完成 REGISTER→401→REGISTER→200 --
 
     fn free_udp_port() -> u16 {
@@ -1140,6 +1440,7 @@ mod tests {
             sfu_token: None,
             token_password: None,
             open_register: false,
+            temp_passwords: Arc::default(),
         };
         let server_cancel = cancel.clone();
         let server = tokio::spawn(async move { serve(cfg, server_cancel).await });
@@ -1250,6 +1551,7 @@ mod tests {
             sfu_token: None,
             token_password: None,
             open_register: false,
+            temp_passwords: Arc::default(),
         };
         let sc = cancel.clone();
         let server = tokio::spawn(async move { serve(cfg, sc).await });
@@ -1306,6 +1608,12 @@ mod tests {
             offer: Some(CALLER_SDP.as_bytes().to_vec()),
             contact: caller_dl.build_local_contact(None, None).unwrap(),
             call_id: Some("e2e-call-1".into()),
+            // #503-4：被叫有固定口令 → 407 质询时以被叫口令应答（否则 407 拒绝）。
+            credential: Some(rsipstack::dialog::authenticate::Credential {
+                username: "AD-CALLEE".into(),
+                password: "tok-callee".into(),
+                realm: Some(REALM.into()),
+            }),
             ..Default::default()
         };
         let (dlg, resp) = caller_dl.do_invite(opt, stx).await.expect("invite 应完成");
@@ -1425,6 +1733,7 @@ mod tests {
             sfu_token: None,
             token_password: None,
             open_register: false,
+            temp_passwords: Arc::default(),
         };
         let server_cancel = CancellationToken::new();
         let sc = server_cancel.clone();
@@ -1551,6 +1860,7 @@ mod tests {
             sfu_token: None,
             token_password: None,
             open_register: false,
+            temp_passwords: Arc::default(),
         };
         let server_cancel = CancellationToken::new();
         let sc = server_cancel.clone();
@@ -1630,6 +1940,7 @@ mod tests {
             sfu_token: None,
             token_password: None,
             open_register: false,
+            temp_passwords: Arc::default(),
         };
         let server_cancel = CancellationToken::new();
         let sc = server_cancel.clone();
@@ -1792,6 +2103,7 @@ mod tests {
                 target_device: "AD-CALLEE".into(),
                 call_id: "c-1".into(),
                 offer_sdp: CALLER_SDP.into(),
+                call_password: Some("tok-callee".into()),
             })
             .unwrap();
         match recv_until(&callee, "IncomingCall") {
@@ -1869,6 +2181,7 @@ mod tests {
                 target_device: "AD-CALLEE".into(),
                 call_id: "c-2".into(),
                 offer_sdp: CALLER_SDP.into(),
+                call_password: Some("tok-callee".into()),
             })
             .unwrap();
         let _ = recv_until(&callee, "IncomingCall");
@@ -1897,6 +2210,7 @@ mod tests {
                 target_device: "AD-CALLEE".into(),
                 call_id: "c-3".into(),
                 offer_sdp: CALLER_SDP.into(),
+                call_password: Some("tok-callee".into()),
             })
             .unwrap();
         let _ = recv_until(&callee, "IncomingCall");
@@ -1919,6 +2233,7 @@ mod tests {
                 target_device: "AD-CALLEE".into(),
                 call_id: "c-4".into(),
                 offer_sdp: CALLER_SDP.into(),
+                call_password: Some("tok-callee".into()),
             })
             .unwrap();
         let _ = recv_until(&callee, "IncomingCall");
@@ -1976,6 +2291,7 @@ mod tests {
             sfu_token: None,
             token_password: None,
             open_register: false,
+            temp_passwords: Arc::default(),
         };
         let client_cfg = |device: &str| SipClientConfig {
             device_id: device.into(),
@@ -2016,6 +2332,7 @@ mod tests {
             sfu_token: None,
             token_password: None,
             open_register: false,
+            temp_passwords: Arc::default(),
         };
         let ca_pem_cfg = ca_pem.clone();
         let client_cfg = |device: &str| SipClientConfig {
@@ -2070,6 +2387,7 @@ mod tests {
                     sfu_token: None,
                     token_password: None,
                     open_register: false,
+                    temp_passwords: Arc::default(),
                 },
                 sc,
             )
@@ -2119,6 +2437,7 @@ mod tests {
                 target_device: "AD-CALLEE".into(),
                 call_id: "c-p2p".into(),
                 offer_sdp: offer.sdp.clone(),
+                call_password: Some("tok-callee".into()),
             })
             .unwrap();
         // 被叫收到 offer（端到端字节一致），出 answer。
@@ -2209,6 +2528,142 @@ mod tests {
             }
         }
         assert!(got_media, "主叫应收到被叫的 PCMU 媒体事件");
+
+        caller.shutdown();
+        callee.shutdown();
+        server_cancel.cancel();
+        server
+            .join()
+            .expect("server 线程应退出")
+            .expect("server 应正常退出");
+    }
+
+    /// #503-4 INVITE 授权 e2e：被叫有固定口令时——不带口令 → 407 拒绝；
+    /// 错口令 → 403；临时口令 → 放行并完成呼叫。
+    #[test]
+    fn end_to_end_invite_authorization() {
+        let _serial = serve_e2e_guard();
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
+        use aerodesk_protocol::sip_client::{
+            SipClientConfig, SipCommand, SipEvent, SipTransport, start_sip_client,
+        };
+
+        let port = free_udp_port();
+        let mut pw = HashMap::new();
+        pw.insert("AD-CALLER".to_string(), "tok-caller".to_string());
+        pw.insert("AD-CALLEE".to_string(), "tok-callee".to_string());
+        let temps = Arc::new(Mutex::new(TempRegistry::default()));
+        let server_cancel = CancellationToken::new();
+        let sc = server_cancel.clone();
+        let temps2 = temps.clone();
+        let server = std::thread::spawn(move || {
+            run_sip_endpoint(
+                SipConfig {
+                    realm: REALM.into(),
+                    tls_addr: None,
+                    wss_addr: None,
+                    udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+                    passwords: Arc::new(pw),
+                    tls_identity: None,
+                    sfu_urls: vec![],
+                    sfu_token: None,
+                    token_password: None,
+                    open_register: false,
+                    temp_passwords: temps2,
+                },
+                sc,
+            )
+        });
+        std::thread::sleep(Duration::from_millis(400));
+
+        let client_cfg = |device: &str| SipClientConfig {
+            device_id: device.into(),
+            domain: REALM.into(),
+            password: format!("tok-{}", device.trim_start_matches("AD-").to_lowercase()),
+            server: format!("127.0.0.1:{port}").parse().unwrap(),
+            transport: SipTransport::Udp,
+            tls: None,
+            register_expires: 60,
+        };
+        let caller = start_sip_client(client_cfg("AD-CALLER")).expect("caller 启动");
+        let callee = start_sip_client(client_cfg("AD-CALLEE")).expect("callee 启动");
+        assert!(matches!(
+            recv_until(&caller, "Registered"),
+            SipEvent::Registered { .. }
+        ));
+        assert!(matches!(
+            recv_until(&callee, "Registered"),
+            SipEvent::Registered { .. }
+        ));
+
+        // 1) 未带口令 → 407 拒绝。
+        caller
+            .send(SipCommand::Call {
+                target_device: "AD-CALLEE".into(),
+                call_id: "c-auth-1".into(),
+                offer_sdp: CALLER_SDP.into(),
+                call_password: None,
+            })
+            .unwrap();
+        match recv_until(&caller, "Rejected") {
+            SipEvent::Rejected { call_id, status, .. } => {
+                assert_eq!(call_id, "c-auth-1");
+                assert_eq!(status, 407, "未带口令应 407 质询拒绝");
+            }
+            other => panic!("应 Rejected(407)，得 {other:?}"),
+        }
+
+        // 2) 错口令 → 403。
+        caller
+            .send(SipCommand::Call {
+                target_device: "AD-CALLEE".into(),
+                call_id: "c-auth-2".into(),
+                offer_sdp: CALLER_SDP.into(),
+                call_password: Some("WRONG".into()),
+            })
+            .unwrap();
+        match recv_until(&caller, "Rejected") {
+            SipEvent::Rejected { call_id, status, .. } => {
+                assert_eq!(call_id, "c-auth-2");
+                assert_eq!(status, 403, "口令错应 403");
+            }
+            other => panic!("应 Rejected(403)，得 {other:?}"),
+        }
+
+        // 3) 临时口令（有效期 60s）→ 放行并完成呼叫。
+        temps
+            .lock()
+            .unwrap()
+            .issue("AD-CALLEE", "temp-abc".into(), Duration::from_secs(60));
+        caller
+            .send(SipCommand::Call {
+                target_device: "AD-CALLEE".into(),
+                call_id: "c-auth-3".into(),
+                offer_sdp: CALLER_SDP.into(),
+                call_password: Some("temp-abc".into()),
+            })
+            .unwrap();
+        let _ = recv_until(&callee, "IncomingCall");
+        callee
+            .send(SipCommand::Accept {
+                call_id: "c-auth-3".into(),
+                answer_sdp: CALLEE_SDP.into(),
+            })
+            .unwrap();
+        match recv_until(&caller, "Answered") {
+            SipEvent::Answered { call_id, .. } => assert_eq!(call_id, "c-auth-3"),
+            other => panic!("临时口令应放行，得 {other:?}"),
+        }
+        callee
+            .send(SipCommand::Hangup {
+                call_id: "c-auth-3".into(),
+                reason: None,
+            })
+            .unwrap();
+        let _ = recv_until(&caller, "PeerHangup");
 
         caller.shutdown();
         callee.shutdown();

@@ -379,6 +379,11 @@ enum LinkCommand {
         turn_urls: String,
         turn_username: String,
         turn_credential: String,
+        /// #503-4 呼叫授权口令（被叫设备无人值守固定/临时密码）：signal 对
+        /// INVITE 407 质询时以该口令应答；空 = 不附凭据。当前取本机访问凭证
+        /// （token_default，单 token 部署即被叫口令）；逐设备连接密码 UI 为
+        /// 后续项。
+        call_password: Option<String>,
         /// Answered（answer 接受成功）后调用：线程内 spawn 会话。
         on_answered: Box<dyn FnOnce(P2pCall) + Send>,
         /// 被拒/取消/失败：传提示文本（UI 侧复位 + 清理）。
@@ -1693,6 +1698,9 @@ fn open_viewer_session(
             turn_urls: std::mem::take(&mut turn_cfg.turn_urls),
             turn_username: std::mem::take(&mut turn_cfg.turn_username),
             turn_credential: std::mem::take(&mut turn_cfg.turn_credential),
+            // #503-4：以本机访问凭证（token_default）作呼叫授权口令——单 token
+            // 部署下即被叫设备口令；未配置则不附凭据（开放部署）。
+            call_password: if token.is_empty() { None } else { Some(token) },
             on_answered: Box::new(on_answered),
             on_failed: Box::new(on_failed),
         }) {
@@ -1809,6 +1817,7 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                             turn_urls,
                             turn_username,
                             turn_credential,
+                            call_password,
                             on_answered,
                             on_failed,
                         } => {
@@ -1869,7 +1878,7 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                             let res = link
                                 .lock()
                                 .unwrap_or_else(aerodesk_core::util::lock_recover)
-                                .call(&target, &call_id, &offer.sdp);
+                                .call(&target, &call_id, &offer.sdp, call_password.as_deref());
                             if let Err(e) = res {
                                 tracing::warn!("sip call failed: {e}");
                                 on_failed(format!("呼叫发起失败：{e}"));
