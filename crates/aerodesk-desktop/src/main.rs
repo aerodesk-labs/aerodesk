@@ -2904,6 +2904,10 @@ fn main() -> Result<(), slint::PlatformError> {
     // 误修为「inc_enabled=true 启动即自动发布」——开关语义是「允许被呼叫时
     // 接听」而非「启动即采集」，已撤销。
     spawn_signal_presence(&ui, &settings);
+    // #503 设备列表：启动即拉取一次在线设备（后台线程，不影响首屏）。
+    if !settings.server_default.is_empty() {
+        ui.invoke_refresh_devices();
+    }
     if !settings.server_default.is_empty() {
         ui.set_server_input(server_display.into());
     }
@@ -3197,6 +3201,105 @@ fn main() -> Result<(), slint::PlatformError> {
         move |t| {
             let ui = ui.unwrap();
             ui.set_peer_tab(t);
+            // #503：切到「设备列表」页时自动拉取一次在线设备。
+            if t == 5 {
+                refresh_device_list(&ui);
+            }
+        }
+    });
+
+    // #503 设备列表：刷新（拉取信令在线设备 + 合并地址簿）。
+    ui.on_refresh_devices({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            refresh_device_list(&ui);
+        }
+    });
+
+    // #503 设备列表：选中设备行 → 别名/分组输入框回填（编辑前先选中）。
+    ui.on_select_device({
+        let ui = ui.as_weak();
+        move |entry: slint::SharedString| {
+            let ui = ui.unwrap();
+            let (alias, room, _, group) = parse_addressbook(entry.as_str());
+            ui.set_dev_selected(entry.clone());
+            ui.set_dev_alias(alias.into());
+            ui.set_dev_group(group.into());
+            ui.set_status(format!("已选择设备 {room}，可修改别名/分组后保存").into());
+        }
+    });
+
+    // #503 设备列表：保存别名/分组（按 设备+服务器 匹配替换，不产生重复条目），
+    // 落盘本地地址簿并联动「设备组」与「设备列表」两个页。
+    ui.on_save_device_alias({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            let sel = ui.get_dev_selected().to_string();
+            if sel.is_empty() {
+                ui.set_status("请先点击设备行选择要编辑的设备".into());
+                return;
+            }
+            let (_, room, server, _) = parse_addressbook(&sel);
+            let alias = ui.get_dev_alias().to_string().trim().to_string();
+            let group = ui.get_dev_group().to_string().trim().to_string();
+            if room.is_empty() || server.is_empty() {
+                ui.set_status("设备条目缺少房间/服务器".into());
+                return;
+            }
+            let alias = if alias.is_empty() { room.clone() } else { alias };
+            let new_entry = format!("{alias} · {room} · {server} · {group}");
+            let model = ui.get_addressbook();
+            let mut items: Vec<String> = (0..model.row_count())
+                .filter_map(|i| model.row_data(i))
+                .map(|s| s.to_string())
+                .collect();
+            let replaced = items.iter().any(|i| {
+                let (_, r, s, _) = parse_addressbook(i);
+                r == room && s == server
+            });
+            if replaced {
+                items = items
+                    .into_iter()
+                    .map(|i| {
+                        let (_, r, s, _) = parse_addressbook(&i);
+                        if r == room && s == server {
+                            new_entry.clone()
+                        } else {
+                            i
+                        }
+                    })
+                    .collect();
+                ui.set_status("已保存别名/分组".into());
+            } else {
+                items.push(new_entry.clone());
+                ui.set_status("已添加设备到地址簿".into());
+            }
+            let new: Vec<slint::SharedString> = items.iter().map(|s| s.into()).collect();
+            ui.set_addressbook(slint::ModelRc::new(slint::VecModel::from(new.clone())));
+            ui.set_device_groups(slint::ModelRc::new(slint::VecModel::from(
+                build_device_groups(&new),
+            )));
+            save_addressbook(&new);
+            ui.set_dev_selected(new_entry.into());
+            refresh_device_list(&ui);
+        }
+    });
+
+    // #503 设备列表：点击连接（解析 别名·设备·服务器·组）。
+    ui.on_connect_device({
+        let ui = ui.as_weak();
+        move |entry: slint::SharedString| {
+            let ui = ui.unwrap();
+            let (_, room, server, _) = parse_addressbook(entry.as_str());
+            if room.is_empty() || server.is_empty() {
+                ui.set_status("设备条目缺少房间/服务器".into());
+                return;
+            }
+            ui.set_room_input(room.into());
+            ui.set_server_input(server.into());
+            ui.invoke_connect();
         }
     });
 
@@ -3223,7 +3326,7 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
-    // 刷新 Peer 数据（#57）：重新加载最近会话与收藏。
+    // 刷新 Peer 数据（#57）：重新加载最近会话与收藏；#503 同步刷新设备列表。
     ui.on_refresh_peers({
         let ui = ui.as_weak();
         move || {
@@ -3232,6 +3335,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let favorites: Vec<slint::SharedString> = load_favorites();
             ui.set_recents(slint::ModelRc::new(slint::VecModel::from(recents.clone())));
             ui.set_favorites(slint::ModelRc::new(slint::VecModel::from(favorites)));
+            refresh_device_list(&ui);
             ui.set_status(
                 format!(
                     "已刷新：最近 {} 条 / 收藏 {} 条",
@@ -3279,6 +3383,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 build_device_groups(&new),
             )));
             save_addressbook(&new);
+            refresh_device_list(&ui);
         }
     });
 
@@ -3299,6 +3404,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 build_device_groups(&new),
             )));
             save_addressbook(&new);
+            refresh_device_list(&ui);
             ui.set_status("已从地址簿删除".into());
         }
     });
@@ -4185,6 +4291,141 @@ fn parse_addressbook(entry: &str) -> (String, String, String, String) {
     (name, room, server, group)
 }
 
+/// 设备列表行（#503）：在线状态来自信令 /devices，别名/分组来自本地地址簿。
+struct DeviceRow {
+    id: String,
+    alias: String,
+    group: String,
+    online: bool,
+    server: String,
+    /// 完整地址簿条目（别名 · 设备 · 服务器 · 组），选中/连接/保存用。
+    entry: String,
+}
+
+/// 把「在线设备（信令 /devices）+ 地址簿」合并成设备列表行（#503）。
+///
+/// - 在线设备：别名/分组取地址簿中 `(设备, 服务器)` 匹配的条目，无则用设备 ID
+///   与「未分组」；`server` 为当前信令服务器。
+/// - 离线：当前服务器下地址簿里不在线集合中的条目（无人值守入口的完整台账）。
+/// - 排序：在线优先，再按分组、别名。
+fn build_device_list(
+    online: &[String],
+    server: &str,
+    addressbook: &[slint::SharedString],
+) -> Vec<DeviceRow> {
+    const UNGROUPED: &str = "未分组";
+    // 地址簿按 (设备, 服务器) 建索引（首个命中）。
+    let mut by_key: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new();
+    for item in addressbook {
+        let (_, room, srv, _) = parse_addressbook(item.as_str());
+        if !room.is_empty() && !srv.is_empty() {
+            by_key.entry((room, srv)).or_insert(item.to_string());
+        }
+    }
+    let mut rows = Vec::new();
+    for id in online {
+        let entry = by_key.get(&(id.clone(), server.to_string())).cloned();
+        let (alias, group) = match &entry {
+            Some(e) => {
+                let (a, _, _, g) = parse_addressbook(e);
+                (a, g)
+            }
+            None => (id.clone(), UNGROUPED.to_string()),
+        };
+        let alias = if alias.is_empty() { id.clone() } else { alias };
+        let group = if group.is_empty() {
+            UNGROUPED.to_string()
+        } else {
+            group
+        };
+        rows.push(DeviceRow {
+            id: id.clone(),
+            alias: alias.clone(),
+            group: group.clone(),
+            online: true,
+            server: server.to_string(),
+            entry: entry.unwrap_or_else(|| {
+                format!("{alias} · {id} · {server} · {group}")
+            }),
+        });
+    }
+    // 当前服务器下的地址簿条目不在在线集合 → 补为离线行。
+    for item in addressbook {
+        let (alias, room, srv, group) = parse_addressbook(item.as_str());
+        if srv == server && !room.is_empty() && !online.iter().any(|o| o == &room) {
+            rows.push(DeviceRow {
+                id: room.clone(),
+                alias: if alias.is_empty() { room } else { alias },
+                group: if group.is_empty() {
+                    UNGROUPED.to_string()
+                } else {
+                    group
+                },
+                online: false,
+                server: srv,
+                entry: item.to_string(),
+            });
+        }
+    }
+    rows.sort_by(|a, b| {
+        b.online
+            .cmp(&a.online)
+            .then_with(|| a.group.cmp(&b.group))
+            .then_with(|| a.alias.cmp(&b.alias))
+    });
+    rows
+}
+
+/// DeviceRow → Slint DeviceEntry 模型。
+fn device_rows_to_model(rows: Vec<DeviceRow>) -> slint::ModelRc<DeviceEntry> {
+    let items: Vec<DeviceEntry> = rows
+        .into_iter()
+        .map(|r| DeviceEntry {
+            id: r.id.into(),
+            alias: r.alias.into(),
+            group: r.group.into(),
+            online: r.online,
+            server: r.server.into(),
+            entry: r.entry.into(),
+        })
+        .collect();
+    slint::ModelRc::new(slint::VecModel::from(items))
+}
+
+/// 刷新设备列表（#503）：后台线程拉取信令 `/devices`，合并地址簿回填 UI。
+/// 拉取失败不置空——地址簿条目仍以离线形态展示（离线台账照常可用）。
+fn refresh_device_list(ui: &AppWindow) {
+    let server = ui.get_server_default().to_string();
+    let tls = ui.get_server_tls();
+    if server.trim().is_empty() {
+        ui.set_device_list_status("未配置信令服务器".into());
+        return;
+    }
+    ui.set_device_list_status("正在拉取在线设备…".into());
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let result = aerodesk_core::signaling::fetch_online_devices(&server, tls);
+        crate::with_ui(&weak, move |ui| {
+            let ab: Vec<slint::SharedString> = (0..ui.get_addressbook().row_count())
+                .filter_map(|i| ui.get_addressbook().row_data(i))
+                .collect();
+            let (rows, status) = match &result {
+                Ok(online) => (
+                    build_device_list(online, &server, &ab),
+                    format!("在线 {} 台", online.len()),
+                ),
+                Err(e) => (
+                    build_device_list(&[], &server, &ab),
+                    format!("获取在线设备失败：{e}"),
+                ),
+            };
+            ui.set_device_list(device_rows_to_model(rows));
+            ui.set_device_list_status(status.into());
+        });
+    });
+}
+
 /// 按“分组”字段把地址簿聚合成设备组展示行：组标题行 + 组内设备行。
 /// 未分组始终排最前，其余组按组名排序；组内保持地址簿原有顺序。
 fn build_device_groups(items: &[slint::SharedString]) -> Vec<DeviceGroupEntry> {
@@ -4594,6 +4835,38 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(loaded, vec!["NAS · demo · 192.168.1.10:3003 · 家庭"]);
         std::fs::remove_file(&path).ok();
+    }
+
+    /// #503 设备列表合并：在线设备取地址簿别名/分组，未在线的地址簿条目补为离线行。
+    #[test]
+    fn device_list_merges_online_and_addressbook() {
+        let ab: Vec<slint::SharedString> = vec![
+            // 有别名/分组：NAS 在线 + 台式机离线（同一服务器）
+            "NAS · AD-NAS01 · 192.168.1.10:3003 · 家庭".into(),
+            "台式机 · AD-DESK02 · 192.168.1.10:3003 · 办公室".into(),
+            // 其它服务器条目：不属于当前服务器，不应出现在列表中
+            "远端 · AD-FAR03 · other.example:3003 · 云端".into(),
+        ];
+        let online = vec!["AD-NAS01".to_string(), "AD-LIVE99".to_string()];
+        let rows = build_device_list(&online, "192.168.1.10:3003", &ab);
+
+        // 在线优先：AD-NAS01（地址簿别名）与 AD-LIVE99（无地址簿 → ID 当别名）。
+        let nas = rows.iter().find(|r| r.id == "AD-NAS01").expect("NAS 在线");
+        assert!(nas.online);
+        assert_eq!(nas.alias, "NAS");
+        assert_eq!(nas.group, "家庭");
+        let live = rows.iter().find(|r| r.id == "AD-LIVE99").expect("LIVE99 在线");
+        assert!(live.online);
+        assert_eq!(live.alias, "AD-LIVE99");
+        assert_eq!(live.group, "未分组");
+        // 离线补行：地址簿里的 AD-DESK02 以离线形态出现；其它服务器条目不出现。
+        let desk = rows.iter().find(|r| r.id == "AD-DESK02").expect("DESK02 离线补行");
+        assert!(!desk.online);
+        assert_eq!(desk.alias, "台式机");
+        assert!(rows.iter().all(|r| r.id != "AD-FAR03"), "其它服务器条目不应出现");
+        // 排序：在线行在离线行之前。
+        let idx = |id: &str| rows.iter().position(|r| r.id == id).unwrap();
+        assert!(idx("AD-NAS01") < idx("AD-DESK02"), "在线应排在离线前");
     }
 
     fn assert_near(actual: (f32, f32), expect: (f32, f32), eps: f32) {

@@ -7,6 +7,16 @@ export struct DeviceGroupEntry {
     text: string,
     entry: string,
 }
+// #503 设备列表行：在线状态来自信令服务器 /devices，别名/分组来自本地地址簿。
+export struct DeviceEntry {
+    id: string,
+    alias: string,
+    group: string,
+    online: bool,
+    server: string,
+    // 完整地址簿条目（别名 · 设备 · 服务器 · 组），供选中/连接/保存定位。
+    entry: string,
+}
 export struct ChatEntry {
     sender: string,
     text: string,
