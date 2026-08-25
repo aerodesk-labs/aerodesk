@@ -97,10 +97,7 @@ pub fn tick(endpoint: &mut Endpoint) {
             // 防回声：落地内容视为已同步，轮询不再原样发回。
             *LAST_CLIP_IMG.lock().unwrap() = Some(png.clone());
             if crate::clipboard::write_image(&png) {
-                tracing::info!(
-                    "clipboard: apply image {} bytes from remote",
-                    png.len()
-                );
+                tracing::info!("clipboard: apply image {} bytes from remote", png.len());
             } else {
                 tracing::warn!("clipboard: apply image failed (write_image)");
             }

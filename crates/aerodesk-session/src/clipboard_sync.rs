@@ -23,7 +23,11 @@ impl ClipboardPoller {
     }
 
     /// 轮询本地剪贴板并经 file 通道回传给观看端（被控→主控方向）。
-    pub fn poll_and_send(&mut self, ft: &mut aerodesk_core::file_transfer::FileTransfer, endpoint: &mut Endpoint) {
+    pub fn poll_and_send(
+        &mut self,
+        ft: &mut aerodesk_core::file_transfer::FileTransfer,
+        endpoint: &mut Endpoint,
+    ) {
         if self
             .last_poll
             .map(|t| t.elapsed() < Duration::from_secs(1))
