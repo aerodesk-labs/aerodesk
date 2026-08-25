@@ -21,7 +21,10 @@ rustls-pemfile = "0.2"
 ipnet = "2"
 
 [dev-dependencies]
-str0m-netem = { path = "../../../str0m/crates/netem" }
+# #553 验收前置：netem 从路径依赖（../../../str0m，CI clone PulseBeamDev master）改为
+# 同仓库同 rev 的 git 依赖——上游 master 更新（netem 0.4/str0m-proto 0.7）
+# 曾导致 Cargo.lock 漂移 + 双 str0m-proto 版本共存；固定 rev 后 lock 稳定。
+str0m-netem = { git = "https://github.com/aerodesk-labs/str0m.git", rev = "3a35419ba94e6a381643baef5463b1649c6c8434" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

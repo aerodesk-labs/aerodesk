@@ -1,0 +1,560 @@
+use super::authenticate::Credential;
+use super::dialog::{DialogSnapshot, DialogStateSender};
+use super::publication::{ClientPublicationDialog, ServerPublicationDialog};
+use super::subscription::{ClientSubscriptionDialog, ServerSubscriptionDialog};
+use super::{dialog::Dialog, invite_dialog::InviteDialog, DialogId};
+
+use crate::dialog::dialog::{DialogInner, DialogStateReceiver};
+use crate::sip::prelude::HeadersExt;
+use crate::transaction::key::TransactionRole;
+use crate::transaction::make_tag;
+use crate::transaction::transaction::transaction_event_sender_noop;
+use crate::transaction::{endpoint::EndpointInnerRef, transaction::Transaction};
+use crate::Result;
+use dashmap::DashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use tracing::debug;
+
+/// Internal Dialog Layer State
+///
+/// `DialogLayerInner` contains the core state for managing multiple SIP dialogs.
+/// It maintains a registry of active dialogs and tracks sequence numbers for
+/// dialog creation.
+///
+/// # Fields
+///
+/// * `last_seq` - Atomic counter for generating unique sequence numbers
+/// * `dialogs` - Thread-safe map of active dialogs indexed by DialogId
+///
+/// # Thread Safety
+///
+/// This structure is designed to be shared across multiple threads safely:
+/// * `last_seq` uses atomic operations for lock-free increments
+/// * `dialogs` uses RwLock for concurrent read access with exclusive writes
+pub struct DialogLayerInner {
+    pub(super) last_seq: AtomicU32,
+    pub(super) dialogs: DashMap<String, Dialog>,
+}
+pub type DialogLayerInnerRef = Arc<DialogLayerInner>;
+
+/// SIP Dialog Layer
+///
+/// `DialogLayer` provides high-level dialog management functionality for SIP
+/// applications. It handles dialog creation, lookup, and lifecycle management
+/// while coordinating with the transaction layer.
+///
+/// # Key Responsibilities
+///
+/// * Creating and managing SIP dialogs
+/// * Dialog identification and routing
+/// * Dialog state tracking and cleanup
+/// * Integration with transaction layer
+/// * Sequence number management
+///
+/// # Usage Patterns
+///
+/// ## Server-side Dialog Creation
+///
+/// ```rust,no_run
+/// use rsipstack::dialog::dialog_layer::DialogLayer;
+/// use rsipstack::transaction::endpoint::EndpointInner;
+/// use std::sync::Arc;
+///
+/// # fn example() -> rsipstack::Result<()> {
+/// # let endpoint: Arc<EndpointInner> = todo!();
+/// # let transaction = todo!();
+/// # let state_sender = todo!();
+/// # let credential = None;
+/// # let contact_uri = None;
+/// // Create dialog layer
+/// let dialog_layer = DialogLayer::new(endpoint.clone());
+///
+/// // Handle incoming INVITE transaction
+/// let server_dialog = dialog_layer.get_or_create_server_invite(
+///     &transaction,
+///     state_sender,
+///     credential,
+///     contact_uri
+/// )?;
+///
+/// // Accept the call
+/// server_dialog.accept(None, None)?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Dialog Lookup and Routing
+///
+/// ```rust,no_run
+/// # use rsipstack::dialog::dialog_layer::DialogLayer;
+/// # async fn example() -> rsipstack::Result<()> {
+/// # let dialog_layer: DialogLayer = todo!();
+/// # let request = todo!();
+/// # let mut transaction = todo!();
+/// // Find existing dialog for incoming request
+/// if let Some(mut dialog) = dialog_layer.match_dialog(&transaction) {
+///     // Route to existing dialog
+///     dialog.handle(&mut transaction).await?;
+/// } else {
+///     // Create new dialog or reject
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## Dialog Cleanup
+///
+/// ```rust,no_run
+/// # use rsipstack::dialog::dialog_layer::DialogLayer;
+/// # fn example() {
+/// # let dialog_layer: DialogLayer = todo!();
+/// # let dialog_id = todo!();
+/// // Remove completed dialog
+/// dialog_layer.remove_dialog(&dialog_id);
+/// # }
+/// ```
+///
+/// # Dialog Lifecycle
+///
+/// 1. **Creation** - Dialog created from incoming INVITE or outgoing request
+/// 2. **Early State** - Dialog exists but not yet confirmed
+/// 3. **Confirmed** - Dialog established with 2xx response and ACK
+/// 4. **Active** - Dialog can exchange in-dialog requests
+/// 5. **Terminated** - Dialog ended with BYE or error
+/// 6. **Cleanup** - Dialog removed from layer
+///
+/// # Thread Safety
+///
+/// DialogLayer is thread-safe and can be shared across multiple tasks:
+/// * Dialog lookup operations are concurrent
+/// * Dialog creation is serialized when needed
+/// * Automatic cleanup prevents memory leaks
+pub struct DialogLayer {
+    pub endpoint: EndpointInnerRef,
+    pub inner: DialogLayerInnerRef,
+}
+
+impl DialogLayer {
+    pub fn new(endpoint: EndpointInnerRef) -> Self {
+        Self {
+            endpoint,
+            inner: Arc::new(DialogLayerInner {
+                last_seq: AtomicU32::new(0),
+                dialogs: DashMap::new(),
+            }),
+        }
+    }
+
+    pub fn get_or_create_server_invite(
+        &self,
+        tx: &Transaction,
+        state_sender: DialogStateSender,
+        credential: Option<Credential>,
+        local_contact: Option<crate::sip::Uri>,
+    ) -> Result<InviteDialog> {
+        let mut id = DialogId::try_from(tx)?;
+        if !id.local_tag.is_empty() {
+            let dlg = self.inner.dialogs.get(&id.to_string()).map(|d| d.clone());
+            match dlg {
+                Some(Dialog::Invite(dlg)) => return Ok(dlg),
+                _ => {
+                    return Err(crate::Error::DialogError(
+                        "the dialog not found".to_string(),
+                        id,
+                        crate::sip::StatusCode::CallTransactionDoesNotExist,
+                    ));
+                }
+            }
+        }
+        id.local_tag = make_tag().to_string(); // generate to tag
+
+        let mut local_contact = local_contact;
+        if local_contact.is_none() {
+            local_contact = self
+                .build_local_contact(credential.as_ref().map(|cred| cred.username.clone()), None)
+                .ok();
+        }
+
+        let dlg_inner = DialogInner::new(
+            TransactionRole::Server,
+            id.clone(),
+            tx.original.clone(),
+            self.endpoint.clone(),
+            state_sender,
+            credential,
+            local_contact,
+            tx.tu_sender.clone(),
+        )?;
+
+        *dlg_inner.remote_contact.lock() = tx.original.contact_header().ok().cloned();
+
+        if let Some(conn) = &tx.connection {
+            let transport = conn.transport();
+            if !matches!(transport, crate::sip::Transport::Udp) {
+                let mut remote_uri = dlg_inner.remote_uri.lock();
+                if !remote_uri
+                    .params
+                    .iter()
+                    .any(|p| matches!(p, crate::sip::Param::Transport(_)))
+                {
+                    remote_uri
+                        .params
+                        .push(crate::sip::Param::Transport(transport));
+                }
+            }
+        }
+
+        let dialog = InviteDialog::from_inner(Arc::new(dlg_inner));
+        self.inner
+            .dialogs
+            .insert(id.to_string(), Dialog::Invite(dialog.clone()));
+        debug!(%id, "server invite dialog created");
+        Ok(dialog)
+    }
+
+    pub fn get_or_create_server_subscription(
+        &self,
+        tx: &Transaction,
+        state_sender: DialogStateSender,
+        credential: Option<Credential>,
+        local_contact: Option<crate::sip::Uri>,
+    ) -> Result<ServerSubscriptionDialog> {
+        let mut id = DialogId::try_from(tx)?;
+        if !id.local_tag.is_empty() {
+            let dlg = self.inner.dialogs.get(&id.to_string()).map(|d| d.clone());
+            match dlg {
+                Some(Dialog::ServerSubscription(dlg)) => return Ok(dlg),
+                _ => {
+                    return Err(crate::Error::DialogError(
+                        "the dialog not found".to_string(),
+                        id,
+                        crate::sip::StatusCode::CallTransactionDoesNotExist,
+                    ));
+                }
+            }
+        }
+        id.local_tag = make_tag().to_string(); // generate to tag
+
+        let mut local_contact = local_contact;
+        if local_contact.is_none() {
+            local_contact = self
+                .build_local_contact(credential.as_ref().map(|cred| cred.username.clone()), None)
+                .ok();
+        }
+
+        let dlg_inner = DialogInner::new(
+            TransactionRole::Server,
+            id.clone(),
+            tx.original.clone(),
+            self.endpoint.clone(),
+            state_sender,
+            credential,
+            local_contact,
+            tx.tu_sender.clone(),
+        )?;
+
+        *dlg_inner.remote_contact.lock() = tx.original.contact_header().ok().cloned();
+
+        let dialog = ServerSubscriptionDialog {
+            inner: Arc::new(dlg_inner),
+        };
+        self.inner
+            .dialogs
+            .insert(id.to_string(), Dialog::ServerSubscription(dialog.clone()));
+        debug!(%id, "server subscription dialog created");
+        Ok(dialog)
+    }
+
+    pub fn get_or_create_server_publication(
+        &self,
+        tx: &Transaction,
+        state_sender: DialogStateSender,
+        credential: Option<Credential>,
+        local_contact: Option<crate::sip::Uri>,
+    ) -> Result<ServerPublicationDialog> {
+        let mut id = DialogId::try_from(tx)?;
+        if !id.local_tag.is_empty() {
+            let dlg = self.inner.dialogs.get(&id.to_string()).map(|d| d.clone());
+            match dlg {
+                Some(Dialog::ServerPublication(dlg)) => return Ok(dlg),
+                _ => {
+                    return Err(crate::Error::DialogError(
+                        "the dialog not found".to_string(),
+                        id,
+                        crate::sip::StatusCode::CallTransactionDoesNotExist,
+                    ));
+                }
+            }
+        }
+        id.local_tag = make_tag().to_string(); // generate to tag
+
+        let mut local_contact = local_contact;
+        if local_contact.is_none() {
+            local_contact = self
+                .build_local_contact(credential.as_ref().map(|cred| cred.username.clone()), None)
+                .ok();
+        }
+
+        let dlg_inner = DialogInner::new(
+            TransactionRole::Server,
+            id.clone(),
+            tx.original.clone(),
+            self.endpoint.clone(),
+            state_sender,
+            credential,
+            local_contact,
+            tx.tu_sender.clone(),
+        )?;
+
+        *dlg_inner.remote_contact.lock() = tx.original.contact_header().ok().cloned();
+
+        let dialog = ServerPublicationDialog::new(Arc::new(dlg_inner));
+        self.inner
+            .dialogs
+            .insert(id.to_string(), Dialog::ServerPublication(dialog.clone()));
+        debug!(%id, "server publication dialog created");
+        Ok(dialog)
+    }
+
+    pub fn get_or_create_client_publication(
+        &self,
+        call_id: String,
+        from_tag: String,
+        to_tag: String,
+        initial_request: crate::sip::Request,
+        state_sender: DialogStateSender,
+        credential: Option<Credential>,
+        local_contact: Option<crate::sip::Uri>,
+    ) -> Result<ClientPublicationDialog> {
+        let id = DialogId {
+            call_id,
+            local_tag: from_tag,
+            remote_tag: to_tag,
+        };
+
+        if let Some(Dialog::ClientPublication(dlg)) = self.get_dialog(&id) {
+            return Ok(dlg);
+        }
+
+        let mut local_contact = local_contact;
+        if local_contact.is_none() {
+            local_contact = self
+                .build_local_contact(credential.as_ref().map(|cred| cred.username.clone()), None)
+                .ok();
+        }
+
+        let dlg_inner = DialogInner::new(
+            TransactionRole::Client,
+            id.clone(),
+            initial_request,
+            self.endpoint.clone(),
+            state_sender,
+            credential,
+            local_contact,
+            {
+                let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+                tx
+            },
+        )?;
+
+        let dialog = ClientPublicationDialog::new(Arc::new(dlg_inner));
+        self.inner
+            .dialogs
+            .insert(id.to_string(), Dialog::ClientPublication(dialog.clone()));
+        Ok(dialog)
+    }
+
+    pub fn get_or_create_client_subscription(
+        &self,
+        call_id: String,
+        from_tag: String,
+        to_tag: String,
+        initial_request: crate::sip::Request,
+        state_sender: DialogStateSender,
+        credential: Option<Credential>,
+        local_contact: Option<crate::sip::Uri>,
+    ) -> Result<ClientSubscriptionDialog> {
+        let id = DialogId {
+            call_id,
+            local_tag: from_tag,
+            remote_tag: to_tag,
+        };
+
+        if let Some(Dialog::ClientSubscription(dlg)) = self.get_dialog(&id) {
+            return Ok(dlg);
+        }
+
+        let mut local_contact = local_contact;
+        if local_contact.is_none() {
+            local_contact = self
+                .build_local_contact(credential.as_ref().map(|cred| cred.username.clone()), None)
+                .ok();
+        }
+
+        let dlg_inner = DialogInner::new(
+            TransactionRole::Client,
+            id.clone(),
+            initial_request,
+            self.endpoint.clone(),
+            state_sender,
+            credential,
+            local_contact,
+            {
+                let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+                tx
+            },
+        )?;
+
+        let dialog = ClientSubscriptionDialog {
+            inner: Arc::new(dlg_inner),
+        };
+        self.inner
+            .dialogs
+            .insert(id.to_string(), Dialog::ClientSubscription(dialog.clone()));
+        Ok(dialog)
+    }
+
+    pub fn increment_last_seq(&self) -> u32 {
+        self.inner.last_seq.fetch_add(1, Ordering::Relaxed);
+        self.inner.last_seq.load(Ordering::Relaxed)
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.dialogs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.dialogs.is_empty()
+    }
+
+    pub fn all_dialog_ids(&self) -> Vec<String> {
+        self.inner
+            .dialogs
+            .iter()
+            .map(|e| e.key().clone())
+            .collect::<Vec<_>>()
+    }
+
+    pub fn get_dialog(&self, id: &DialogId) -> Option<Dialog> {
+        self.get_dialog_with(&id.to_string())
+    }
+
+    pub fn get_dialog_with(&self, id: &String) -> Option<Dialog> {
+        self.inner.dialogs.get(id).map(|d| d.clone())
+    }
+    /// Returns all client-side INVITE dialogs (UAC) that share the given Call-ID.
+    ///
+    /// In a forking scenario, multiple client dialogs can exist for the same
+    /// Call-ID (same local From-tag, different remote To-tags). This helper
+    /// scans the internal dialog registry and returns all `InviteDialog`
+    /// instances whose `DialogId.call_id` equals the provided `call_id`.
+    ///
+    /// The returned vector may be empty if no matching client dialogs are found.
+    pub fn get_client_dialog_by_call_id(&self, call_id: &str) -> Vec<InviteDialog> {
+        self.inner
+            .dialogs
+            .iter()
+            .filter_map(|e| match e.value() {
+                Dialog::Invite(client_dlg) if client_dlg.id().call_id == call_id => {
+                    Some(client_dlg.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Restore a dialog from persisted snapshot.
+    ///
+    /// Restores only CONFIRMED snapshots.
+    /// Non-confirmed snapshots are ignored (warn inside try_restore_from_snapshot).
+    ///
+    /// Returns:
+    /// - Ok(true)  => restored and inserted
+    /// - Ok(false) => skipped (already exists or not confirmed)
+    pub fn restore_from_snapshot(
+        &self,
+        snapshot: DialogSnapshot,
+        state_sender: DialogStateSender,
+    ) -> crate::Result<bool> {
+        // Already restored?
+        if self.get_dialog(&snapshot.id).is_some() {
+            return Ok(false);
+        }
+
+        let tu_sender = transaction_event_sender_noop();
+
+        let Some(inner) = DialogInner::try_restore_from_snapshot(
+            snapshot,
+            self.endpoint.clone(),
+            state_sender,
+            tu_sender,
+        )?
+        else {
+            // not confirmed -> ignored
+            return Ok(false);
+        };
+
+        let inner = Arc::new(inner);
+        let dialog = Dialog::from_inner(inner.role, inner.clone());
+
+        let key = dialog.id().to_string();
+
+        self.inner.dialogs.insert(key, dialog);
+
+        Ok(true)
+    }
+
+    pub fn remove_dialog(&self, id: &DialogId) {
+        if let Some((_, d)) = self.inner.dialogs.remove(&id.to_string()) {
+            d.on_remove()
+        }
+    }
+
+    pub fn match_dialog(&self, tx: &Transaction) -> Option<Dialog> {
+        let id = DialogId::try_from(tx).ok()?;
+        self.get_dialog(&id)
+    }
+
+    pub fn new_dialog_state_channel(&self) -> (DialogStateSender, DialogStateReceiver) {
+        tokio::sync::mpsc::unbounded_channel()
+    }
+
+    pub fn build_local_contact(
+        &self,
+        username: Option<String>,
+        params: Option<Vec<crate::sip::Param>>,
+    ) -> Result<crate::sip::Uri> {
+        let addr = self
+            .endpoint
+            .transport_layer
+            .get_addrs()
+            .first()
+            .ok_or(crate::Error::EndpointError("not sipaddrs".to_string()))?
+            .clone();
+
+        let scheme = if matches!(addr.r#type, Some(crate::sip::Transport::Tls)) {
+            crate::sip::Scheme::Sips
+        } else {
+            crate::sip::Scheme::Sip
+        };
+
+        let mut params = params.unwrap_or_default();
+        if !matches!(addr.r#type, Some(crate::sip::Transport::Udp) | None) {
+            if let Some(t) = addr.r#type {
+                params.push(crate::sip::Param::Transport(t))
+            }
+        }
+        let auth = username.map(|user| crate::sip::Auth {
+            user,
+            password: None,
+        });
+        Ok(crate::sip::Uri {
+            scheme: Some(scheme),
+            auth,
+            host_with_port: addr.addr.clone(),
+            params,
+            ..Default::default()
+        })
+    }
+}

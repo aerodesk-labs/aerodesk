@@ -47,3 +47,6 @@ lto = "thin"
 [patch.crates-io]
 apple-cf = { path = "vendor/apple-cf" }
 videotoolbox = { path = "vendor/videotoolbox" }
+# #553 验收前置：rsipstack 0.6.4 的 secure WebSocket listener 未做 TLS（WSS 实为
+# 明文 WS）——vendor 修复（vendor/rsipstack/src/transport/websocket.rs）。
+rsipstack = { path = "vendor/rsipstack" }

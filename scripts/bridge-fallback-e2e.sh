@@ -109,7 +109,7 @@ echo "== 构建"
 if [ "$REMOTE" = "1" ] && [ "${REMOTE_LOOPBACK:-}" != "1" ]; then
   cargo build -q -p aerodesk-agent   # 远程验收只需 CLI；SFU/signal/bridge 在 PoP 上
 else
-  cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
+  cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent -p aerodesk-bridge
 fi
 REC_A="$(mktemp -d)"; REC_B="$(mktemp -d)"
 
@@ -119,7 +119,7 @@ if [ "$REMOTE" = "0" ] || [ "${REMOTE_LOOPBACK:-}" = "1" ]; then
     "$TARGET_DIR/aerodesk-sfu" >/tmp/bfb-sfu-a.log 2>&1 &
   SFU_A=$!
   POP_ID=pop-a AUTH_TOKENS="$AUTH" SIGNAL_PORT=14801 SIGNAL_PLAIN_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
-    "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-a.log 2>&1 &
+    SIP_UDP_PORT=5060 "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-a.log 2>&1 &
   SIG_A_PID=$!
   for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_A" 2>/dev/null && break; sleep 0.2; done
   sleep 0.3
@@ -132,12 +132,17 @@ echo "== 场景 0：直连延迟基线（同 PoP-A publisher+viewer）"
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/bfb-direct-pub.log 2>&1 &
 PUB0=$!
+# #552 SIP 1:1：publisher 是 UAS（等 IncomingCall）——无呼叫时无 ICE。先等
+# publisher 注册就绪，再起 viewer（呼 room → P2P），最后等 publisher ICE。
 ok=0
-for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-direct-pub.log 2>/dev/null && ok=1 && break; sleep 0.5; done
-[ "$ok" = "1" ] || fail "场景0：publisher 未连上"
+for _ in $(seq 1 30); do grep -q "SIP registered" /tmp/bfb-direct-pub.log 2>/dev/null && ok=1 && break; sleep 0.5; done
+[ "$ok" = "1" ] || { echo "publisher 未注册："; tail -5 /tmp/bfb-direct-pub.log; fail "场景0：publisher 未注册"; }
 "$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   >/tmp/bfb-direct-view.log 2>&1 &
 VIEW0=$!
+ok=0
+for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-direct-pub.log 2>/dev/null && ok=1 && break; sleep 0.5; done
+[ "$ok" = "1" ] || { echo "publisher 未连上："; tail -5 /tmp/bfb-direct-pub.log; fail "场景0：publisher 未连上"; }
 wait_decoded /tmp/bfb-direct-view.log || fail "场景0：直连 viewer 未解码"
 # 样本不足时最多等两轮（数据通道偶发中断后恢复）。
 for _attempt in 1 2; do
@@ -164,7 +169,7 @@ if [ "$REMOTE" = "0" ] || [ "${REMOTE_LOOPBACK:-}" = "1" ]; then
     BRIDGE_CMD="$BRIDGE_CMD" BRIDGE_READY_TIMEOUT_SECS=20 BRIDGE_AUTH_TOKEN="$AUTH" \
     BRIDGE_MONITOR_INTERVAL_SECS=2 \
     SIGNAL_PORT=14901 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
-    "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b.log 2>&1 &
+    SIP_UDP_PORT= "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b.log 2>&1 &
   SIG_B_PID=$!
   for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break; sleep 0.2; done
   sleep 0.3
@@ -180,9 +185,10 @@ echo "== 场景 1：PoP-A publisher + PoP-B viewer（桥优先，不 Redirect）
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy --audio \
   >/tmp/bfb-pub-a.log 2>&1 &
 PUB_A=$!
+# #552 SIP 1:1：publisher 等 IncomingCall——先等注册就绪，viewer 起后再等 ICE。
 ok=0
-for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-pub-a.log 2>/dev/null && ok=1 && break; sleep 0.5; done
-[ "$ok" = "1" ] || fail "场景1：PoP-A publisher 未连上"; echo "  publisher connected"
+for _ in $(seq 1 30); do grep -q "SIP registered" /tmp/bfb-pub-a.log 2>/dev/null && ok=1 && break; sleep 0.5; done
+[ "$ok" = "1" ] || { echo "publisher 未注册："; tail -5 /tmp/bfb-pub-a.log; fail "场景1：PoP-A publisher 未注册"; }
 
 # 远程模式场景 4（可选 BRIDGE_KILL_CMD）依赖 viewer --reconnect；本地模式场景 3 会
 # 另起带 --reconnect 的 viewer，此处带上也无害。
@@ -192,6 +198,10 @@ RECONNECT_FLAG=""
 "$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" $RECONNECT_FLAG --display 1 \
   >/tmp/bfb-view-b.log 2>&1 &
 VIEW_B=$!
+ok=0
+for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-pub-a.log 2>/dev/null && ok=1 && break; sleep 0.5; done
+[ "$ok" = "1" ] || { echo "publisher 未连上："; tail -5 /tmp/bfb-pub-a.log; fail "场景1：PoP-A publisher 未连上"; }
+echo "  publisher connected"
 wait_decoded /tmp/bfb-view-b.log || fail "场景1：PoP-B viewer 未解码跨 PoP 媒体（见 /tmp/bfb-view-b.log）"
 grep -q "signal redirect" /tmp/bfb-view-b.log && fail "场景1：viewer 不应收到 Redirect（桥优先应本 PoP 接入）"
 if [ "$REMOTE" = "0" ]; then
@@ -342,7 +352,7 @@ sleep 1
 POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=${SIG_A_URL}" \
   BRIDGE_CMD="false" BRIDGE_READY_TIMEOUT_SECS=5 BRIDGE_FAIL_COOLDOWN_SECS=5 \
   SIGNAL_PORT=14901 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
-  "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b2.log 2>&1 &
+  SIP_UDP_PORT= "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b2.log 2>&1 &
 SIG_B_PID=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break; sleep 0.2; done
 # PoP-A publisher 仍在 room（重新起）
@@ -350,13 +360,17 @@ for _ in $(seq 1 50); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break; sleep 
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/bfb-pub-a2.log 2>&1 &
 PUB_A=$!
+# #552 SIP 1:1：先等注册就绪，viewer 起后再等 ICE（同场景 0/1）。
 ok=0
-for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-pub-a2.log 2>/dev/null && ok=1 && break; sleep 0.5; done
-[ "$ok" = "1" ] || fail "场景2：PoP-A publisher 未连上"
+for _ in $(seq 1 30); do grep -q "SIP registered" /tmp/bfb-pub-a2.log 2>/dev/null && ok=1 && break; sleep 0.5; done
+[ "$ok" = "1" ] || { echo "publisher 未注册："; tail -5 /tmp/bfb-pub-a2.log; fail "场景2：PoP-A publisher 未注册"; }
 
 "$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" \
   >/tmp/bfb-view-b2.log 2>&1 &
 VIEW_B=$!
+ok=0
+for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/bfb-pub-a2.log 2>/dev/null && ok=1 && break; sleep 0.5; done
+[ "$ok" = "1" ] || { echo "publisher 未连上："; tail -5 /tmp/bfb-pub-a2.log; fail "场景2：PoP-A publisher 未连上"; }
 wait_log /tmp/bfb-view-b2.log "signal redirect" 240 || fail "场景2：viewer 未收到 Redirect（桥失败应回退 v1）"
 wait_decoded /tmp/bfb-view-b2.log || fail "场景2：viewer 跟随 Redirect 到 pop-a 后未解码"
 grep -q "fallback redirect" /tmp/bfb-sig-b2.log || fail "场景2：PoP-B 信令未记录 fallback redirect"

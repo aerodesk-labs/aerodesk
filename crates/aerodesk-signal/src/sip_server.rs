@@ -1734,7 +1734,10 @@ mod tests {
         want: &str,
     ) -> aerodesk_protocol::sip_client::SipEvent {
         use aerodesk_protocol::sip_client::SipEvent;
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // #553 验收前置：窗口从 5s 放宽到 15s——TLS 传输（呼叫 + 302 升级）在
+        // CI 慢 runner 偶发超 5s/15s（本地 0.5s 内完成；UDP 302 升级链路在
+        // 负载 runner 上可超 15s）；测试为顺序等待，放宽无损。
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             let remain = deadline.saturating_duration_since(std::time::Instant::now());
             assert!(!remain.is_zero(), "等 {want} 超时");

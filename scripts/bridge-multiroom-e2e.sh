@@ -60,7 +60,7 @@ RECORD_DIR="$REC_A" SFU_MEDIA_PORT="$MEDIA_A" SFU_SIGNAL_PORT="$SIG_A" SFU_INTER
   "$TARGET_DIR/aerodesk-sfu" >/tmp/bmr-sfu-a.log 2>&1 &
 SFU_A=$!
 POP_ID=pop-a AUTH_TOKENS="$AUTH" SIGNAL_PORT=14101 SIGNAL_PLAIN_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
-  "$TARGET_DIR/aerodesk-signal" >/tmp/bmr-sig-a.log 2>&1 &
+  SIP_UDP_PORT=5060 "$TARGET_DIR/aerodesk-signal" >/tmp/bmr-sig-a.log 2>&1 &
 SIG_A_PID=$!
 RECORD_DIR="$REC_B" SFU_MEDIA_PORT="$MEDIA_B" SFU_SIGNAL_PORT="$SIG_B" SFU_INTERNAL_PORT="$INT_B" \
   "$TARGET_DIR/aerodesk-sfu" >/tmp/bmr-sfu-b.log 2>&1 &
@@ -68,7 +68,7 @@ SFU_B=$!
 POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="mroom-=pop-a" POP_URLS="pop-a=${SIG_A_URL}" \
   BRIDGE_CMD="$BRIDGE_CMD" BRIDGE_READY_TIMEOUT_SECS=20 BRIDGE_AUTH_TOKEN="$AUTH" \
   SIGNAL_PORT=14201 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
-  "$TARGET_DIR/aerodesk-signal" >/tmp/bmr-sig-b.log 2>&1 &
+  SIP_UDP_PORT= "$TARGET_DIR/aerodesk-signal" >/tmp/bmr-sig-b.log 2>&1 &
 SIG_B_PID=$!
 for _ in $(seq 1 80); do
   nc -z 127.0.0.1 "$PLAIN_A" 2>/dev/null && nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break
@@ -133,7 +133,7 @@ POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="mroom-=pop-a" POP_URLS="pop-a=${S
   BRIDGE_CMD="$BRIDGE_CMD" BRIDGE_READY_TIMEOUT_SECS=20 BRIDGE_AUTH_TOKEN="$AUTH" \
   BRIDGE_MAX_RUNNING=1 \
   SIGNAL_PORT=14201 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
-  "$TARGET_DIR/aerodesk-signal" >/tmp/bmr-sig-b2.log 2>&1 &
+  SIP_UDP_PORT= "$TARGET_DIR/aerodesk-signal" >/tmp/bmr-sig-b2.log 2>&1 &
 SIG_B_PID=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break; sleep 0.2; done
 sleep 0.3

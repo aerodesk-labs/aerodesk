@@ -84,7 +84,7 @@ RECORD_DIR="$REC_A" SFU_MEDIA_PORT="$MEDIA_A" SFU_SIGNAL_PORT="$SIG_A" SFU_INTER
 SFU_A=$!
 POP_ID=pop-a AUTH_TOKENS="$AUTH" SIGNAL_PORT=15001 SIGNAL_PLAIN_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
   TURN_SECRET="$TURN_SECRET" TURN_URLS="turn:127.0.0.1:${TURN_A}?transport=udp" \
-  "$TARGET_DIR/aerodesk-signal" >/tmp/btr-sig-a.log 2>&1 &
+  SIP_UDP_PORT=5060 "$TARGET_DIR/aerodesk-signal" >/tmp/btr-sig-a.log 2>&1 &
 SIG_A_PID=$!
 for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_A" 2>/dev/null && break; sleep 0.2; done
 wait_turn_ready "$INT_A" "PoP-A" /tmp/btr-sfu-a.log || fail "PoP-A 内嵌 TURN 未就绪"
@@ -127,7 +127,7 @@ POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=${
   BRIDGE_CMD="$BRIDGE_CMD" BRIDGE_READY_TIMEOUT_SECS=20 BRIDGE_AUTH_TOKEN="$AUTH" \
   TURN_SECRET="$TURN_SECRET" TURN_URLS="turn:127.0.0.1:${TURN_B}?transport=udp" \
   SIGNAL_PORT=15101 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
-  "$TARGET_DIR/aerodesk-signal" >/tmp/btr-sig-b.log 2>&1 &
+  SIP_UDP_PORT= "$TARGET_DIR/aerodesk-signal" >/tmp/btr-sig-b.log 2>&1 &
 SIG_B_PID=$!
 for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break; sleep 0.2; done
 wait_turn_ready "$INT_B" "PoP-B" /tmp/btr-sfu-b.log || fail "PoP-B 内嵌 TURN 未就绪"

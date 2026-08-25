@@ -40,13 +40,25 @@ PUB_PID=$!
 sleep 2
 
 fail=0
+case_no=1
 
 # 用例执行器：启动 viewer --run-command，等其自行退出（≤30s），断言日志。
+# #552 SIP 1:1：publisher 单呼叫后不接新 INVITE——每个 case 独立配对（新房间 +
+# 新 publisher）；新房间避免旧 publisher 注册残留（kill 后 expires 120s）被
+# 路由竞态命中（旧绑定先于新 REGISTER 覆盖时 INVITE 发往死地址）。
 run_case() {
   local name="$1" cmd="$2" log="$3"
-  echo "== case: $name"
+  local room_case="${ROOM}-c${case_no}"
+  case_no=$((case_no + 1))
+  echo "== case: $name (room=$room_case)"
+  kill "$PUB_PID" 2>/dev/null || true
+  wait "$PUB_PID" 2>/dev/null || true
+  ./target/debug/aerodesk-agent --role publisher --encoder x264 \
+      --signal ws://127.0.0.1:3003 --room "$room_case" >/tmp/cmd-pub.log 2>&1 &
+  PUB_PID=$!
+  sleep 2
   ./target/debug/aerodesk-agent --role viewer --run-command "$cmd" \
-      --signal ws://127.0.0.1:3003 --room "$ROOM" >"$log" 2>&1 &
+      --signal ws://127.0.0.1:3003 --room "$room_case" >"$log" 2>&1 &
   local vpid=$!
   for _ in $(seq 1 60); do
     if ! kill -0 "$vpid" 2>/dev/null; then break; fi
@@ -82,10 +94,23 @@ fi
 
 DIR="/tmp/aerodesk-cmd-e2e-$ROOM"
 rm -rf "$DIR"; mkdir -p "$DIR"
+
+# 独立配对（SIP 1:1 单呼叫）：kill 旧 publisher + 新房间 + 新 publisher。
+new_pair() {
+  local room_new="$1"
+  kill "$PUB_PID" 2>/dev/null || true
+  wait "$PUB_PID" 2>/dev/null || true
+  ./target/debug/aerodesk-agent --role publisher --encoder x264 \
+      --signal ws://127.0.0.1:3003 --room "$room_new" >/tmp/cmd-pub.log 2>&1 &
+  PUB_PID=$!
+  sleep 2
+}
+
 # 4) 写文件 + 读回
 echo "== case: write-file"
+ROOM4="${ROOM}-w"; new_pair "$ROOM4"
 ./target/debug/aerodesk-agent --role viewer --write-file "$DIR/hello.txt" "hello-aerodesk-file" \
-    --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/cmd-view4.log 2>&1 &
+    --signal ws://127.0.0.1:3003 --room "$ROOM4" >/tmp/cmd-view4.log 2>&1 &
 VPID=$!
 for _ in $(seq 1 60); do ! kill -0 "$VPID" 2>/dev/null && break; sleep 0.5; done
 kill "$VPID" 2>/dev/null || true; wait "$VPID" 2>/dev/null || true
@@ -95,8 +120,9 @@ else
     echo "FAIL write-file"; tail -5 /tmp/cmd-view4.log; fail=1
 fi
 echo "== case: read-file"
+ROOM5="${ROOM}-r"; new_pair "$ROOM5"
 ./target/debug/aerodesk-agent --role viewer --read-file "$DIR/hello.txt" \
-    --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/cmd-view5.log 2>&1 &
+    --signal ws://127.0.0.1:3003 --room "$ROOM5" >/tmp/cmd-view5.log 2>&1 &
 VPID=$!
 for _ in $(seq 1 60); do ! kill -0 "$VPID" 2>/dev/null && break; sleep 0.5; done
 kill "$VPID" 2>/dev/null || true; wait "$VPID" 2>/dev/null || true
@@ -107,8 +133,9 @@ else
 fi
 # 5) 进程列表
 echo "== case: list-processes"
+ROOM6="${ROOM}-ps"; new_pair "$ROOM6"
 ./target/debug/aerodesk-agent --role viewer --list-processes \
-    --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/cmd-view6.log 2>&1 &
+    --signal ws://127.0.0.1:3003 --room "$ROOM6" >/tmp/cmd-view6.log 2>&1 &
 VPID=$!
 for _ in $(seq 1 60); do ! kill -0 "$VPID" 2>/dev/null && break; sleep 0.5; done
 kill "$VPID" 2>/dev/null || true; wait "$VPID" 2>/dev/null || true

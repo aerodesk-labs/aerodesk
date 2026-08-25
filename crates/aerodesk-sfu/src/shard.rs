@@ -1223,9 +1223,12 @@ impl Client {
                     .fetch_add(transmit.contents.len() as u64, Ordering::Relaxed);
                 match transmit.proto {
                     Protocol::Udp => {
-                        socket
-                            .send_to(&transmit.contents, transmit.destination)
-                            .expect("sending UDP data");
+                        // #553 验收发现：发送失败（如 SFU 绑 127.0.0.1 而候选为
+                        // 网卡 IP → WSAENETUNREACH 10051）不该 panic 杀 shard 线程
+                        // （房间全挂）——warn 跳过，等 ICE 重协商换可达候选。
+                        if let Err(e) = socket.send_to(&transmit.contents, transmit.destination) {
+                            warn!("发送 UDP 失败（跳过）: {e}");
+                        }
                     }
                     Protocol::Tcp | Protocol::SslTcp => {
                         let mut streams = tcp_streams

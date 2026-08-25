@@ -50,9 +50,20 @@ done
 kill "$A_PID" 2>/dev/null || true
 wait "$A_PID" 2>/dev/null || true
 
+# #552 SIP 1:1：一个 publisher 服务一个呼叫——viewer A 结束后为 viewer B
+# 起新配对（旧 publisher 随 A 呼叫结束，BYE 后不再接新 INVITE）。
+kill "$PUB_PID" 2>/dev/null || true
+wait "$PUB_PID" 2>/dev/null || true
+ROOM_B="${ROOM}-b"
+echo "== publisher B（viewer B 配对，--audio --audio-opus）"
+./target/debug/aerodesk-agent --role publisher --audio --audio-opus \
+    --signal ws://127.0.0.1:3003 --room "$ROOM_B" >/tmp/opus-pub-b.log 2>&1 &
+PUB_PID=$!
+sleep 2
+
 echo "== viewer B（--audio --mute-audio，静音丢弃）"
 ./target/debug/aerodesk-agent --role viewer --audio --mute-audio \
-    --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/opus-b.log 2>&1 &
+    --signal ws://127.0.0.1:3003 --room "$ROOM_B" >/tmp/opus-b.log 2>&1 &
 B_PID=$!
 MUTE_OK=0
 DROP_OK=0
@@ -68,8 +79,8 @@ wait 2>/dev/null || true
 
 echo "== 断言"
 fail=0
-# 1) publisher 走 Opus（libopus 编码器打开）
-if grep -q "opus encoder opened" /tmp/opus-pub.log; then
+# 1) publisher 走 Opus（libopus 编码器打开；A/B 任一路即可）
+if grep -q "opus encoder opened" /tmp/opus-pub.log /tmp/opus-pub-b.log 2>/dev/null; then
     echo "PASS opus encoder opened on publisher"
 else
     echo "FAIL opus encoder"; tail -5 /tmp/opus-pub.log; fail=1

@@ -31,7 +31,6 @@ use aerodesk_core::protocol::input::{
     ButtonState, INPUT_PROTOCOL_VERSION, InputEvent, InputFrame, Modifiers, MouseButton,
 };
 use aerodesk_core::protocol::signal::Role;
-use aerodesk_core::turn_client::setup_turn;
 use aerodesk_core::{Endpoint, platform::Codec};
 use str0m::media::{Frequency, MediaTime};
 use str0m::net::Protocol;
@@ -147,13 +146,13 @@ fn run() {
                     std::process::exit(1);
                 }
             }
+            return;
         }
         #[cfg(not(windows))]
         {
             eprintln!("--install-autostart 仅 Windows 支持");
             std::process::exit(1);
         }
-        return;
     }
     if args.iter().any(|a| a == "--remove-autostart") {
         #[cfg(windows)]
@@ -166,13 +165,13 @@ fn run() {
                     std::process::exit(1);
                 }
             }
+            return;
         }
         #[cfg(not(windows))]
         {
             eprintln!("--remove-autostart 仅 Windows 支持");
             std::process::exit(1);
         }
-        return;
     }
     if args.iter().any(|a| a == "--autostart-status") {
         #[cfg(windows)]
@@ -185,13 +184,13 @@ fn run() {
                     std::process::exit(1);
                 }
             }
+            return;
         }
         #[cfg(not(windows))]
         {
             eprintln!("--autostart-status 仅 Windows 支持");
             std::process::exit(1);
         }
-        return;
     }
 
     // #470 Windows 系统服务（需管理员）：安装/移除/查询 + 服务运行入口。
@@ -820,17 +819,19 @@ fn connect_inner(
     )?);
     link.start();
     {
-        // 等 Online（10s；口令错/服务器不可达在此显式失败）。
+        // 等 Online（10s；口令错/服务器不可达在此显式失败，回 Err 而非 panic——
+        // 便于脚本诊断"signal 未启 SIP 面/口令错"而非笼统崩溃）。
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let st = link.poll();
             if st.is_online() {
                 break;
             }
-            assert!(
-                Instant::now() < deadline,
-                "SIP 注册未完成（10s）：{st:?}——检查 signal 的 SIP 端口/口令"
-            );
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "SIP 注册未完成（10s）：{st:?}——检查 signal 的 SIP 端口/口令"
+                ));
+            }
             std::thread::sleep(Duration::from_millis(50));
         }
         info!("SIP registered: {device_id}");
@@ -1522,8 +1523,16 @@ fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
     // #109 远程命令：cmd 通道请求交给执行器（后台线程执行，主循环回传响应）。
     cmd_exec::handle_event(&ev, endpoint);
     match ev {
-        ClientEvent::ChannelOpen(label, _) if label == "input" => {
-            info!("input channel open");
+        // #553 验收诊断：所有通道打开打日志（bitrate/display 的 control 未达
+        // 排查——input/file 开而 control 是否在 pub 侧打开需可见）。
+        ClientEvent::ChannelOpen(label, _)
+            if label == "input"
+                || label == "control"
+                || label == "file"
+                || label == "cursor"
+                || label == "cmd" =>
+        {
+            info!("channel open: {label}");
         }
         ClientEvent::ChannelData(cid, _, data) => {
             if endpoint.channel_label(cid).as_deref() == Some("input") {
@@ -2193,45 +2202,54 @@ fn viewer(
                         info!("input channel open");
                         input_open = true;
                     }
-                    // #29：可选显式选层（--layer q|h|f），经 control 通道发 SFU。
-                    // #66：input 与 control 打开顺序不定——只在 input 打开时发一次，
-                    // 若 control 尚未就绪会静默丢失选层请求；两个通道任一打开都重试。
-                    if !layer_sent {
-                        let req = serde_json::json!({ "layer": layer });
-                        let data = serde_json::to_vec(&req).unwrap();
-                        if endpoint.send_channel_data("control", false, &data) {
-                            info!("layer request sent: {layer:?}");
-                            layer_sent = true;
+                    // #553 验收发现：control 类消息只在 control 通道就绪后发送——
+                    // input 先开时对端（pub/SFU）control 通道可能未就绪，消息被
+                    // 丢弃且 sent 标志已置位不再重发（bitrate/display e2e CI 连败
+                    // 根因）；control 打开事件必然晚于或等于双向通道就绪。
+                    if label == "control" {
+                        // #553：对端（pub/SFU）control 通道可能晚于本端 ~1s 打开
+                        // （macOS vt 环境实测：本端 ChannelOpen(control) 时对端
+                        // SCTP 流未就绪，消息被静默丢弃且 sent 标志已置位不再重发）
+                        // ——发送前短暂等待对端就绪（一次性，消息幂等无副作用）。
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        // #29：可选显式选层（--layer q|h|f），经 control 通道发 SFU。
+                        if !layer_sent {
+                            let req = serde_json::json!({ "layer": layer });
+                            let data = serde_json::to_vec(&req).unwrap();
+                            if endpoint.send_channel_data("control", false, &data) {
+                                info!("layer request sent: {layer:?}");
+                                layer_sent = true;
+                            }
                         }
-                    }
-                    // #58 观看端静音：经 control 通道下发一次。
-                    if mute_audio && !mute_sent {
-                        let req = serde_json::json!({ "audio_mute": true });
-                        let data = serde_json::to_vec(&req).unwrap();
-                        if endpoint.send_channel_data("control", false, &data) {
-                            info!("audio mute command sent");
-                            mute_sent = true;
+                        // #58 观看端静音：经 control 通道下发一次。
+                        if mute_audio && !mute_sent {
+                            let req = serde_json::json!({ "audio_mute": true });
+                            let data = serde_json::to_vec(&req).unwrap();
+                            if endpoint.send_channel_data("control", false, &data) {
+                                info!("audio mute command sent");
+                                mute_sent = true;
+                            }
                         }
-                    }
-                    // #58 显示器切换：经 control 通道下发一次（SFU 转发给被控端）。
-                    if let Some(d) = display
-                        && !display_sent
-                    {
-                        let req = serde_json::json!({ "display": d });
-                        let data = serde_json::to_vec(&req).unwrap();
-                        if endpoint.send_channel_data("control", false, &data) {
-                            info!("display switch command sent: {d}");
-                            display_sent = true;
+                        // #58 显示器切换：经 control 通道下发一次（SFU 转发给被控端）。
+                        if let Some(d) = display
+                            && !display_sent
+                        {
+                            let req = serde_json::json!({ "display": d });
+                            let data = serde_json::to_vec(&req).unwrap();
+                            if endpoint.send_channel_data("control", false, &data) {
+                                info!("display switch command sent: {d}");
+                                display_sent = true;
+                            }
                         }
-                    }
-                    // #267 测试/自动化钩子：--send-control '<json>' 经 control 通道下发一次
-                    // （如 {"bitrate":N}，验证码率反馈回路）。
-                    if let Some(ctl) = send_control
-                        && !control_sent
-                    {
-                        if endpoint.send_channel_data("control", false, ctl.as_bytes()) {
-                            info!("control command sent: {ctl}");
-                            control_sent = true;
+                        // #267 测试/自动化钩子：--send-control '<json>' 经 control 通道下发一次
+                        // （如 {"bitrate":N}，验证码率反馈回路）。
+                        if let Some(ctl) = send_control
+                            && !control_sent
+                        {
+                            if endpoint.send_channel_data("control", false, ctl.as_bytes()) {
+                                info!("control command sent: {ctl}");
+                                control_sent = true;
+                            }
                         }
                     }
                 }

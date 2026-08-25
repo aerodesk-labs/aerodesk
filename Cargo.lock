@@ -3753,7 +3753,7 @@ source = "git+https://github.com/aerodesk-labs/str0m.git?rev=3a35419ba94e6a38164
 dependencies = [
  "crc",
  "serde",
- "str0m-proto 0.6.0 (git+https://github.com/aerodesk-labs/str0m.git?rev=3a35419ba94e6a381643baef5463b1649c6c8434)",
+ "str0m-proto",
  "subtle",
  "tracing",
 ]
@@ -6166,8 +6166,6 @@ dependencies = [
 [[package]]
 name = "rsipstack"
 version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70d36ff94667258eace46bb7a9a5e388bb00abccd09d997335a23ee6073d04b4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6193,6 +6191,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "tungstenite 0.29.0",
 ]
 
 [[package]]
@@ -7024,7 +7023,7 @@ dependencies = [
  "sctp-proto",
  "serde",
  "str0m-aws-lc-rs",
- "str0m-proto 0.6.0 (git+https://github.com/aerodesk-labs/str0m.git?rev=3a35419ba94e6a381643baef5463b1649c6c8434)",
+ "str0m-proto",
  "str0m-rust-crypto",
  "subtle",
  "time",
@@ -7038,27 +7037,17 @@ source = "git+https://github.com/aerodesk-labs/str0m.git?rev=3a35419ba94e6a38164
 dependencies = [
  "aws-lc-rs",
  "dimpl",
- "str0m-proto 0.6.0 (git+https://github.com/aerodesk-labs/str0m.git?rev=3a35419ba94e6a381643baef5463b1649c6c8434)",
+ "str0m-proto",
  "time",
 ]
 
 [[package]]
 name = "str0m-netem"
 version = "0.3.0"
+source = "git+https://github.com/aerodesk-labs/str0m.git?rev=3a35419ba94e6a381643baef5463b1649c6c8434#3a35419ba94e6a381643baef5463b1649c6c8434"
 dependencies = [
  "fastrand",
- "str0m-proto 0.6.0",
-]
-
-[[package]]
-name = "str0m-proto"
-version = "0.6.0"
-dependencies = [
- "base64ct",
- "fastrand",
- "serde",
- "subtle",
- "time",
+ "str0m-proto",
 ]
 
 [[package]]
@@ -7087,7 +7076,7 @@ dependencies = [
  "p256",
  "sha1 0.10.7",
  "sha2 0.10.9",
- "str0m-proto 0.6.0 (git+https://github.com/aerodesk-labs/str0m.git?rev=3a35419ba94e6a381643baef5463b1649c6c8434)",
+ "str0m-proto",
  "time",
 ]
 

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # web-reconnect-e2e.sh —— Web 端自动重连（#175）：
-#   Playwright 打开观看页 → 初始收流 → 杀 SFU+signal → 重启 → 页面自动重连并恢复 video。
+#   Playwright 双浏览器（发布页 + 观看页，WSS 房间）→ 初始收流 →
+#   杀 SFU+signal → 重启 → 两页自动退避重连 → viewer 恢复 video。
+#   #552 迁移后改双浏览器：CLI publisher 已是 SIP 1:1 被叫，WSS JSON 面无法
+#   对其呼叫；重连逻辑在页面层（#175 不分角色），发布页同样自动重连。
 # 依赖：cargo build、playwright-core、Edge/Chrome（BROWSER 可选，默认 msedge）。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -18,16 +21,31 @@ cat > web-reconnect-run.js <<JS
 const { chromium } = require('playwright-core');
 const ROOM = process.argv[2];
 (async () => {
-  const browser = await chromium.launch({ channel: process.env.BROWSER || 'msedge', headless: true });
-  const page = await browser.newPage();
-  await page.goto('http://127.0.0.1:14502/?room=' + ROOM + '&role=viewer&signal=ws://127.0.0.1:14503/ws');
-  await page.click('#connect');
-  await page.waitForFunction(() => document.getElementById('video').readyState >= 2, { timeout: 40000 });
+  const browser = await chromium.launch({
+    channel: process.env.BROWSER || 'msedge', headless: true,
+    args: [
+      '--use-fake-ui-for-media-stream',
+      '--use-fake-device-for-media-stream',
+      '--auto-accept-this-tab-capture',
+      '--enable-usermedia-screen-capturing',
+    ],
+  });
+  // 发布页（屏幕共享；服务重启后同样自动重连）
+  const pub = await browser.newPage();
+  await pub.goto('http://127.0.0.1:14502/?room=' + ROOM + '&role=publisher&signal=ws://127.0.0.1:14503/ws');
+  await pub.click('#connect');
+  await pub.waitForFunction(() => document.getElementById('status').innerText.includes('已连接'), { timeout: 40000 });
+  console.log('PUBLISHER_OK');
+  // 观看页（初始收流 → 服务重启后自动重连恢复）
+  const view = await browser.newPage();
+  await view.goto('http://127.0.0.1:14502/?room=' + ROOM + '&role=viewer&signal=ws://127.0.0.1:14503/ws');
+  await view.click('#connect');
+  await view.waitForFunction(() => document.getElementById('video').readyState >= 2, { timeout: 40000 });
   console.log('INITIAL_OK');
   // 服务被 bash 重启后，页面应自动重连
-  await page.waitForFunction(() => document.getElementById('log').innerText.includes('重连'), { timeout: 120000 });
-  await page.waitForFunction(() => document.getElementById('status').innerText.includes('已连接'), { timeout: 90000 });
-  await page.waitForFunction(() => document.getElementById('video').readyState >= 2, { timeout: 90000 });
+  await view.waitForFunction(() => document.getElementById('log').innerText.includes('重连'), { timeout: 120000 });
+  await view.waitForFunction(() => document.getElementById('status').innerText.includes('已连接'), { timeout: 90000 });
+  await view.waitForFunction(() => document.getElementById('video').readyState >= 2, { timeout: 90000 });
   console.log('RECONNECT_OK');
   await browser.close();
   console.log('E2E_DONE');
@@ -64,20 +82,17 @@ wait_ports() {
     return 1
 }
 
-echo "== 启动服务 + publisher"
+echo "== 启动服务"
 start_sfu; start_signal
 wait_ports || { echo "FAIL: 服务未就绪"; exit 1; }
-./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
-    --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/webrec-pub.log 2>&1 &
-echo $! > /tmp/webrec-pub.pid
 
-echo "== 启动 Playwright（初始收流 → 观察重连）"
+echo "== 启动 Playwright（发布页 + 观看页：初始收流 → 观察重连）"
 cd "$E2E_DIR"
 BROWSER="${BROWSER:-msedge}" node web-reconnect-run.js "$ROOM" > /tmp/webrec-node.log 2>&1 &
 NODE_PID=$!
 cd "$ROOT"
 
-# 等初始收流
+# 等初始收流（两页均已连接）
 INIT=0
 for _ in $(seq 1 120); do
     grep -q INITIAL_OK /tmp/webrec-node.log 2>/dev/null && { INIT=1; break; }
@@ -95,10 +110,6 @@ stop_services
 sleep 3
 start_sfu; start_signal
 wait_ports || echo "WARN: 重启后服务未就绪"
-kill "$(cat /tmp/webrec-pub.pid)" 2>/dev/null || true
-./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
-    --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/webrec-pub2.log 2>&1 &
-echo $! > /tmp/webrec-pub.pid
 
 echo "== 等页面自动重连"
 OK=0
