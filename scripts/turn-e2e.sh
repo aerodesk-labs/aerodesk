@@ -234,6 +234,9 @@ for _ in $(seq 1 90); do
     sleep 0.3
 done
 kill "$VIEW_FR_PID" 2>/dev/null || true
+# #553：pub-fr（3c 发布端）等 IncomingCall 300s——不 kill 会让末尾 wait 拖满
+# step 超时（15 分钟）——3c 结束即清理。
+kill "$PUB_FR_PID" 2>/dev/null || true
 if [ "$ok" -eq 0 ]; then
     echo "PASS force-relay 观看端媒体经 relay 到达"; grep -m1 'RECEIVED:' /tmp/turn-e2e-view-fr.log
 else
@@ -261,5 +264,5 @@ fi
 kill "$PUB_PID" "$VIEW_PID" 2>/dev/null || true
 kill "$(cat /tmp/turn-e2e-sfu.pid)" "$(cat /tmp/turn-e2e-sig.pid)" 2>/dev/null || true
 [ -n "$TURN_PID" ] && kill "$TURN_PID" 2>/dev/null || true
-wait 2>/dev/null || true
+wait "$VIEW_FR_PID" "$PUB_FR_PID" 2>/dev/null || true
 echo "E2E DONE"
