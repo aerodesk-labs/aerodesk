@@ -750,12 +750,19 @@ impl ClientInviteDialog {
                             }
                             continue;
                         } else {
+                            // 未配置凭据时无法应答质询：407 是终局响应（如
+                            // aerodesk #503-4 无人值守密码授权——被叫设备有口令而
+                            // 主叫未带）。此前 continue 会把事务拖到 Timer J 超时
+                            // （UDP ~32s）后才以 None 收尾，调用方误判为传输错误；
+                            // 改为把 407 作为 final response 立即返回（语义：
+                            // 调用方决定不认证 = 授权失败）。
                             debug!(id=%self.id(),"received 407 response without auth option");
+                            final_response = Some(resp.clone());
                             self.inner.transition(DialogState::Terminated(
                                 self.id(),
                                 TerminatedReason::ProxyAuthRequired,
                             ))?;
-                            continue;
+                            break;
                         }
                     }
                     final_response = Some(resp.clone());

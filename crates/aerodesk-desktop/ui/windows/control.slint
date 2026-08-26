@@ -3,7 +3,7 @@
 //   grayBg #EFEFF2 / accent #0071FF / 主区白底，正文 black87 #212121
 // 2026-08 拆分：本文件仅聚合入口，组件见 structs/common/tray/app_window/windows/*。
 import { ProgressIndicator, ScrollView } from "std-widgets.slint";
-import { IconBtn } from "../common.slint";
+import { IconBtn, RdButton } from "../common.slint";
 export component ControlWindow inherits Window {
     in-out property <image> video-frame: @image-url("");
     in-out property <float> frame-w: 0;
@@ -14,6 +14,8 @@ export component ControlWindow inherits Window {
     // #503 隐私屏：开关状态 + 定制文字（开启后输入框可改，回车/按钮下发）。
     in-out property <bool> privacy-active: false;
     in-out property <string> privacy-text: "隐私屏已开启，请稍候…";
+    // #503 电源命令确认框：非空 = 待确认动作（"关机"/"重启"/"锁屏"）。
+    in-out property <string> power-confirm: "";
 
     callback send-input(int, int, float, float, float, float, float, float);
     callback send-key(int, string, bool, bool, bool, bool) -> bool;
@@ -22,6 +24,7 @@ export component ControlWindow inherits Window {
     callback toggle-privacy();
     callback apply-privacy-text();
     callback disconnect();
+    callback system-power(string);
 
     function cursor-pos(view-w: length, view-h: length, fw: float, fh: float, n: float, vertical: bool) -> length {
         let scale = min(view-w / max(fw * 1px, 1px), view-h / max(fh * 1px, 1px));
@@ -99,7 +102,7 @@ export component ControlWindow inherits Window {
             Rectangle {
                 x: 12px;
                 y: 12px;
-                width: 290px;
+                width: 520px;
                 height: 44px;
                 border-radius: 6px;
                 background: #ffffff;
@@ -115,11 +118,61 @@ export component ControlWindow inherits Window {
                     IconBtn { icon: "\u{e8f4}"; active: root.privacy-active; tooltip: "隐私屏（被控端黑屏+静音）"; clicked => { root.toggle-privacy(); } }
                     IconBtn { icon: "\u{e5cd}"; danger: true; tooltip: "断开"; clicked => { root.disconnect(); } }
                     Rectangle { width: 6px; }
+                    // #503 电源命令（走白名单执行体系的内置安全命令，带确认）
+                    IconBtn { icon: "\u{e8ac}"; danger: true; tooltip: "关机"; clicked => { root.power-confirm = "关机"; } }
+                    IconBtn { icon: "\u{e863}"; tooltip: "重启"; clicked => { root.power-confirm = "重启"; } }
+                    IconBtn { icon: "\u{e897}"; tooltip: "锁屏"; clicked => { root.power-confirm = "锁屏"; } }
+                    Rectangle { width: 10px; }
                     Text {
                         text: root.status;
                         color: #34a853;
                         font-size: 14px;
                         vertical-alignment: center;
+                    }
+                }
+            }
+            // #503 电源命令确认框（覆盖在画面区居中；确认后经 system-power 下发）
+            if root.power-confirm != "" : Rectangle {
+                Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    background: #66000000;
+                    Rectangle {
+                        x: (parent.width - 360px) / 2;
+                        y: (parent.height - 160px) / 2;
+                        width: 360px;
+                        height: 160px;
+                        border-radius: 12px;
+                        background: #ffffff;
+                        VerticalLayout {
+                            padding: 18px;
+                            spacing: 12px;
+                            Text {
+                                text: "确认对被控端执行「" + root.power-confirm + "」？";
+                                font-size: 15px;
+                                font-weight: 600;
+                                color: #212121;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: root.power-confirm == "关机"
+                                    ? "关机后需人工重新开机才能恢复远控。"
+                                    : (root.power-confirm == "重启"
+                                        ? "重启后请等待被控端重新上线。"
+                                        : "锁屏后需被控端解锁才能继续操作。");
+                                font-size: 12px;
+                                color: #7d7d84;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                                vertical-stretch: 1;
+                            }
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 14px;
+                                RdButton { text: "取消"; clicked => { root.power-confirm = ""; } }
+                                RdButton { text: "确认执行"; primary: true; clicked => { root.system-power(root.power-confirm); root.power-confirm = ""; } }
+                            }
+                        }
                     }
                 }
             }

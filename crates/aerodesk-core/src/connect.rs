@@ -668,7 +668,12 @@ pub fn connect_viewer_sip(
         .map_err(|e| format!("offer: {e:?}"))?;
     let offer_json = serde_json::to_string(&offer).map_err(|e| e.to_string())?;
     let call_id = format!("c-{}", std::process::id());
-    link.call(room, &call_id, &offer_json)
+    // #503-4 呼叫授权口令：AERO_CALL_PASSWORD（被叫设备固定/临时密码）——
+    // signal 对 INVITE 做 407 质询时以该口令应答；未配置则不附凭据。
+    let call_password = std::env::var("AERO_CALL_PASSWORD")
+        .ok()
+        .filter(|s| !s.is_empty());
+    link.call(room, &call_id, &offer_json, call_password.as_deref())
         .map_err(|e| format!("SIP INVITE: {e}"))?;
     let answer_json = {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
