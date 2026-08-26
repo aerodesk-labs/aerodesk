@@ -123,6 +123,15 @@ impl Registrar {
         self.bindings.retain(|_, b| b.expires_at > now);
         self.bindings.len()
     }
+
+    /// 当前有效注册的 AoR 列表（惰性剔除过期；#503 设备列表数据源）。
+    pub fn online_aors(&mut self) -> Vec<String> {
+        let now = Instant::now();
+        self.bindings.retain(|_, b| b.expires_at > now);
+        let mut aors: Vec<String> = self.bindings.keys().cloned().collect();
+        aors.sort();
+        aors
+    }
 }
 
 /// SIP 指标（#551 任务清单）：经 `/metrics/prometheus` 暴露。
@@ -139,6 +148,17 @@ pub struct SipMetrics {
 /// 当前 SIP 端点的指标句柄。每次 `serve()` 启动时**替换**（生产进程内仅一个端点，
 /// 语义不变；测试多实例并存时以最新启动者为准——测试侧另有串行锁防交叉）。
 static SIP_METRICS: std::sync::RwLock<Option<Arc<SipMetrics>>> = std::sync::RwLock::new(None);
+
+/// 当前 SIP 端点的注册表句柄（#503 `/devices` 数据源；与 SIP_METRICS 同替换模式）。
+static SIP_REGISTRAR: std::sync::RwLock<Option<Arc<Mutex<Registrar>>>> =
+    std::sync::RwLock::new(None);
+
+/// 供 main.rs `/devices` 读取在线注册 AoR（未启动 SIP 端点时为 None）。
+pub fn registrar_snapshot() -> Option<Vec<String>> {
+    let guard = SIP_REGISTRAR.read().ok()?;
+    let reg = guard.as_ref()?;
+    Some(reg.lock().unwrap().online_aors())
+}
 
 /// 供 main.rs `/metrics/prometheus` 读取（未启动 SIP 端点时为 None）。
 pub fn metrics_snapshot() -> Option<(u64, u64, u64)> {
@@ -360,6 +380,8 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
     }
 
     let registrar = Arc::new(Mutex::new(Registrar::default()));
+    // #503 设备列表：登记注册表句柄供 main.rs `/devices` 读取在线 AoR。
+    let _ = SIP_REGISTRAR.write().unwrap().replace(registrar.clone());
     let nonce_counter = Arc::new(AtomicU64::new(0));
     let nonce_secret =
         format!("{:x}", &cfg.realm as *const _ as usize) + &format!("{:x}", std::process::id());
@@ -949,6 +971,20 @@ mod tests {
         let mut m = HashMap::new();
         m.insert("AD-DEV1".to_string(), "tok-dev1".to_string());
         m
+    }
+
+    #[test]
+    fn registrar_online_aors_lists_valid_bindings_only() {
+        let mut r = Registrar::default();
+        r.register("AD-A", "sip:AD-A@1.2.3.4".into(), None, 60);
+        r.register("AD-B", "sip:AD-B@1.2.3.5".into(), None, 60);
+        // 过期绑定（expires=0）不出现。
+        r.register("AD-C", "c".into(), None, 0);
+        let aors = r.online_aors();
+        assert_eq!(aors, vec!["AD-A".to_string(), "AD-B".to_string()]);
+        // 注销后不再出现。
+        r.unregister("AD-A");
+        assert_eq!(r.online_aors(), vec!["AD-B".to_string()]);
     }
 
     #[test]

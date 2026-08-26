@@ -3,7 +3,7 @@
 //   grayBg #EFEFF2 / accent #0071FF / 主区白底，正文 black87 #212121
 // 2026-08 拆分：本文件仅聚合入口，组件见 structs/common/tray/app_window/windows/*。
 import { CheckBox, ProgressIndicator, ScrollView, Slider, Switch } from "std-widgets.slint";
-import { DeviceGroupEntry, ChatEntry } from "structs.slint";
+import { DeviceGroupEntry, DeviceEntry, ChatEntry } from "structs.slint";
 import { MIcon, RdButton, IconBtn, NavItem, PeerTab, IdentityRow, RdInput, PermissionCard } from "common.slint";
 
 export component AppWindow inherits Window {
@@ -20,10 +20,16 @@ export component AppWindow inherits Window {
     in-out property <[string]> favorites: [];
     in-out property <[string]> addressbook: [];
     in-out property <[DeviceGroupEntry]> device-groups: [];
+    // #503 设备列表（无人值守入口管理）：在线设备（信令 /devices）+ 地址簿离线条目。
+    in-out property <[DeviceEntry]> device-list: [];
+    in-out property <string> dev-alias: "";
+    in-out property <string> dev-group: "";
+    in-out property <string> dev-selected: "";
+    in-out property <string> device-list-status: "";
     in-out property <[string]> discovered: [];
     in-out property <string> ab-alias: "";
     in-out property <string> ab-group: "";
-    in-out property <int> peer-tab: 0;   // 0=最近 1=收藏 2=发现 3=地址簿 4=设备组
+    in-out property <int> peer-tab: 0;   // 0=最近 1=收藏 2=发现 3=地址簿 4=设备组 5=设备列表
     // 本机身份（被控端）
     in-out property <string> device-id: "—";
     in-out property <string> device-pw: "—";
@@ -148,6 +154,11 @@ export component AppWindow inherits Window {
     callback set-peer-tab(int);
     callback toggle-favorite(string);
     callback refresh-peers();
+    // #503 设备列表：刷新（拉取信令在线设备）/ 选中编辑 / 保存别名分组 / 连接。
+    callback refresh-devices();
+    callback select-device(string);
+    callback save-device-alias();
+    callback connect-device(string);
     callback add-addressbook();
     callback remove-addressbook(string);
     callback connect-addressbook(string);
@@ -493,12 +504,13 @@ export component AppWindow inherits Window {
                     PeerTab { icon: "\u{e87a}"; tooltip: "发现"; selected: root.peer-tab == 2; clicked => { root.set-peer-tab(2); } }
                     PeerTab { icon: "\u{e0ba}"; tooltip: "地址簿"; selected: root.peer-tab == 3; clicked => { root.set-peer-tab(3); } }
                     PeerTab { icon: "\u{e7ef}"; tooltip: "设备组"; selected: root.peer-tab == 4; clicked => { root.set-peer-tab(4); } }
+                    PeerTab { icon: "\u{e325}"; tooltip: "设备列表"; selected: root.peer-tab == 5; clicked => { root.set-peer-tab(5); } }
                     Rectangle { width: 0px; horizontal-stretch: 1; }
                     IconBtn { icon: "\u{e5d5}"; tooltip: "刷新"; clicked => { root.refresh-peers(); } }
                 }
                 // 列表标题（跟随标签）
                 Text {
-                    text: root.peer-tab == 0 ? "最近会话" : (root.peer-tab == 1 ? "我的收藏" : (root.peer-tab == 2 ? "发现（局域网）" : (root.peer-tab == 3 ? "地址簿" : "设备组")));
+                    text: root.peer-tab == 0 ? "最近会话" : (root.peer-tab == 1 ? "我的收藏" : (root.peer-tab == 2 ? "发现（局域网）" : (root.peer-tab == 3 ? "地址簿" : (root.peer-tab == 4 ? "设备组" : "设备列表（在线状态）"))));
                     font-size: 14px; color: #7d7d84; height: 18px; vertical-stretch: 0;
                 }
                 if root.peer-tab == 0: ScrollView {
@@ -699,6 +711,71 @@ export component AppWindow inherits Window {
                                 Text { text: item.text; font-size: 13px; color: #212121; vertical-alignment: center; overflow: elide; }
                                 Rectangle { width: 0px; horizontal-stretch: 1; }
                                 IconBtn { icon: "\u{e872}"; danger: true; tooltip: "删除"; clicked => { root.remove-addressbook(item.entry); } }
+                            }
+                        }
+                    }
+                }
+
+                // ---- 设备列表（#503 无人值守入口管理）：在线设备（信令 /devices）
+                // 与地址簿离线条目合并；别名/分组编辑落本地地址簿（~/.aerodesk-addressbook.json）。
+                if root.peer-tab == 5: VerticalLayout {
+                    spacing: 8px;
+                    HorizontalLayout {
+                        cross-axis-alignment: center;
+                        spacing: 10px;
+                        Text { text: "在线设备来自信令服务器；别名与分组保存在本地地址簿"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                        Rectangle { width: 0px; horizontal-stretch: 1; }
+                        Text { text: root.device-list-status; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; overflow: elide; }
+                    }
+                    // 别名/分组编辑区（先点击设备行选中，再保存）
+                    HorizontalLayout {
+                        cross-axis-alignment: center;
+                        spacing: 8px;
+                        Text { text: "别名"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                        Rectangle { width: 110px; height: 34px; border-radius: 8px; background: #efeff2; dti := TextInput { x: 10px; y: 0px; width: parent.width - 20px; height: 100%; text <=> root.dev-alias; color: #212121; font-size: 13px; vertical-alignment: center; single-line: true; } }
+                        Text { text: "分组"; font-size: 13px; color: #7d7d84; height: 18px; vertical-stretch: 0; }
+                        Rectangle { width: 90px; height: 34px; border-radius: 8px; background: #efeff2; dtg := TextInput { x: 10px; y: 0px; width: parent.width - 20px; height: 100%; text <=> root.dev-group; color: #212121; font-size: 13px; vertical-alignment: center; single-line: true; } }
+                        RdButton { text: "保存别名/分组"; width: 110px; enabled: root.dev-selected != ""; clicked => { root.save-device-alias(); } }
+                        RdButton { text: "连接"; width: 64px; enabled: root.dev-selected != ""; clicked => { root.connect-device(root.dev-selected); } }
+                    }
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 2px;
+                            if root.device-list.length == 0: Text { text: "（无设备：点右上「刷新」从信令服务器拉取在线设备；地址簿条目会显示为离线）"; font-size: 13px; color: #9a9aa0; height: 24px; }
+                            for item in root.device-list: Rectangle {
+                                height: 46px;
+                                border-radius: 8px;
+                                background: root.dev-selected == item.entry ? #e3ecfb : (dl.has-hover ? #f2f2f5 : transparent);
+                                dl := TouchArea {
+                                    width: 100%;
+                                    height: 100%;
+                                    mouse-cursor: pointer;
+                                    clicked => { root.select-device(item.entry); }
+                                }
+                                HorizontalLayout {
+                                    cross-axis-alignment: center;
+                                    padding-left: 10px;
+                                    spacing: 10px;
+                                    // 在线状态点：在线绿 / 离线灰
+                                    Rectangle { width: 10px; height: 10px; border-radius: 5px; background: item.online ? #34a853 : #c4c4ca; }
+                                    Text { text: item.alias; font-size: 14px; font-weight: 600; color: item.online ? #212121 : #9a9aa0; vertical-alignment: center; overflow: elide; }
+                                    Text { text: item.id; font-size: 12px; color: #9a9aa0; vertical-alignment: center; overflow: elide; }
+                                    // 分组 tag
+                                    Rectangle {
+                                        height: 20px;
+                                        border-radius: 4px;
+                                        background: #eef0f4;
+                                        HorizontalLayout {
+                                            padding-left: 6px;
+                                            padding-right: 6px;
+                                            Text { text: item.group; font-size: 11px; color: #5f6368; horizontal-alignment: center; vertical-alignment: center; }
+                                        }
+                                    }
+                                    Rectangle { width: 0px; horizontal-stretch: 1; }
+                                    IconBtn { icon: "\u{e3c9}"; tooltip: "编辑别名/分组"; clicked => { root.select-device(item.entry); } }
+                                    IconBtn { icon: "\u{e5c8}"; tooltip: "连接"; clicked => { root.connect-device(item.entry); } }
+                                }
                             }
                         }
                     }
