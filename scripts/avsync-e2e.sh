@@ -27,11 +27,25 @@ for _ in $(seq 1 50); do
 done
 sleep 0.3
 
-echo "== 启动 publisher（视频 + --audio）+ viewer（--audio）"
+echo "== 启动 publisher（视频 + --audio），等 SIP 注册就绪后 viewer（--audio）"
 # 连续视频源（x264 合成，避免 pcap 48 帧发完导致漂移统计假象）
 ./target/debug/aerodesk-agent --role publisher --encoder x264 --audio \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/av-pub.log 2>&1 &
 PUB_PID=$!
+# #552 SIP 1:1：viewer 须在 publisher 注册完成后才 INVITE（否则 lookup 未命中
+# 走会议桥 SFU——同 linux-native 竞态）；同时避免注册期音频 0fps 饥饿被
+# drift 判为"真失同步"（#523 v3 健康窗逻辑对饥饿-突发恢复模式误判，实测
+# 71fps 追赶窗 FAIL）——轮询注册就绪（≤15s）。
+OK=0
+for _ in $(seq 1 30); do
+    if grep -q "SIP registered" /tmp/av-pub.log 2>/dev/null; then OK=1; break; fi
+    sleep 0.5
+done
+if [ "$OK" != "1" ]; then
+    echo "FAIL: publisher 未完成 SIP 注册"; tail -8 /tmp/av-pub.log
+    kill "$PUB_PID" 2>/dev/null || true
+    exit 1
+fi
 ./target/debug/aerodesk-agent --role viewer --audio \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/av-view.log 2>&1 &
 VIEW_PID=$!
