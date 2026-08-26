@@ -176,3 +176,48 @@ protocol crate 暴露与 SignalMessage 同构的**语义事件**（如
 
 - 原生端（SIP/TLS）与 Web 端（SIP-WSS）互呼互通：同一 AoR 体系、跨传输呼叫时序一致
 - P2P 抓包证据：媒体不经服务器；断 UDP→TURN→强制 SFU 回退演练；回退黑屏时长上限
+
+## 11. 无人值守密码（#503-4，v0.4）
+
+**固定密码（无人值守）**：每台设备一个常驻口令，存在 signal 设备表
+（`SIP_DIGEST_USERS`，未逐设备配置时回退首个 `AUTH_TOKEN`）。**INVITE 授权**——
+呼叫设备必须证明知道该设备口令：
+
+```
+观看端(UAC)                    signal(proxy)                      被控端(UAS)
+   | INVITE（无 Proxy-Authorization）|
+   |----------------------------->|
+   |<- 407 Proxy Authentication Required（Digest 质询，同 REGISTER）|
+   | INVITE + Proxy-Authorization（Digest 以「被叫设备 ID + 被叫口令」应答）|
+   |----------------------------->|------- INVITE（透传）---------->|
+   |                              |<---- 200 OK（SDP answer）--------|
+   |<---- 200 OK ----------------|                                  |
+```
+
+- 口令错 / 未知设备 → `403`（不泄露存在性）；目标设备无任何口令配置（开放部署/
+  未配置设备）→ 不设卡，与旧行为一致
+- 未带凭据（旧客户端/无 call_password）→ `407` 终局，客户端映射
+  error_code=`auth_required`——不静默放行
+- 设备侧口令配置入口：agent `--token` / 桌面端「默认访问凭证」（= Digest 口令，
+  与 REGISTER 同凭据，§8 迁移期同一凭据）；主叫侧 agent `--call-password`
+  （或 `AERO_CALL_PASSWORD`，缺省回退自身 `--token`——单 token 部署即被叫口令）
+
+**临时密码（主控端发起、带有效期）**：signal 管理端点签发，有效期等效固定口令：
+
+```
+POST   /admin/temp-password {"device_id":"AD-XX","ttl_secs":300}  → {"device_id","password","ttl_secs","expires_at_secs"}
+DELETE /admin/temp-password/<device>                              → {"device_id","revoked":bool}
+```
+
+- 鉴权：`Authorization: Bearer <SIP_ADMIN_TOKEN>`（缺省回退首个 `AUTH_TOKEN`）；
+  未配置管理 token → 503
+- ttl 钳制 60..86400s（缺省 300s）；签发覆盖同设备旧临时密码；到期自动失效
+- 主控端用法：`aerodesk-agent --temp-password AD-XX --ttl 300 --token <admin>`
+  拿临时密码 → `--call-password <临时密码>` 呼叫（或填到桌面端连接密码）
+- 口令为 8 位 CSPRNG 随机（getrandom 拒绝采样，去易混淆字符），与桌面端
+  「一次性密码」同构
+
+**已覆盖/未覆盖**：临时密码生效域 = INVITE 授权（与固定口令并列校验）；REGISTER
+仍按设备表口令。Web 端（JSON WSS 面）与 SIP 原生端互通为既有 P1 缺口，Web 端呼叫
+配置了口令的设备前需先支持 Proxy-Authorization。桌面端「逐设备连接密码」输入框为
+后续项（当前以本机访问凭证为呼叫口令）。

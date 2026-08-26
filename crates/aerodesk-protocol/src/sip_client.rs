@@ -178,6 +178,10 @@ pub enum SipCommand {
         target_device: String,
         call_id: String,
         offer_sdp: String,
+        /// #503-4 呼叫授权口令（被叫设备固定/临时密码）：signal 对 INVITE 做
+        /// 407 Proxy-Authorization 质询时以该口令应答（Digest username = 被叫
+        /// 设备 ID）；None = 不附凭据（目标无口令的开放部署/未配置设备）。
+        call_password: Option<String>,
     },
     /// 响铃（CallRinging 同构：180；被叫侧弹出确认窗时发）。
     Ring { call_id: String },
@@ -581,6 +585,7 @@ async fn handle_command(cmd: SipCommand, ctx: CmdCtx<'_>) {
             target_device,
             call_id,
             offer_sdp,
+            call_password,
         } => {
             let callee: rsipstack::sip::Uri =
                 match device_aor(&target_device, &cfg.domain).try_into() {
@@ -598,6 +603,14 @@ async fn handle_command(cmd: SipCommand, ctx: CmdCtx<'_>) {
                         return;
                     }
                 };
+            // #503-4：呼叫授权凭据——407 质询时以「被叫设备 ID + 被叫口令」应答
+            // （Digest Proxy-Authorization；realm 由质询回填）。口令即被叫设备的
+            // 固定/临时密码，rsipstack handle_client_authenticate 自动处理往返。
+            let credential = call_password.as_ref().map(|pw| Credential {
+                username: target_device.clone(),
+                password: pw.clone(),
+                realm: None,
+            });
             // 经 signal 透明 Proxy：destination 固定为 signal 监听地址（outbound
             // proxy 语义，报文头域保留 domain）；传输类型随配置（UDP 直发 / TLS
             // 复用注册建立的既有流——lookup 按目标地址命中 connections 表）。
@@ -624,6 +637,7 @@ async fn handle_command(cmd: SipCommand, ctx: CmdCtx<'_>) {
                 offer: Some(offer_sdp.into_bytes()),
                 contact,
                 call_id: Some(call_id.clone()),
+                credential,
                 ..Default::default()
             };
             match dialog_layer.do_invite_async(opt, state_tx.clone()) {
@@ -973,6 +987,17 @@ fn handle_terminated(
             }
             TerminatedReason::UasDecline => {
                 report_final_status(&call_id, &StatusCode::Decline, cfg, dialogs, event_tx);
+            }
+            // #503-4：被叫设备有口令而本端未带/带错——栈按质询失败收尾
+            // （ProxyAuthRequired），与 invite_final 通道的 407/403 终局双通道去重。
+            TerminatedReason::ProxyAuthRequired => {
+                report_final_status(
+                    &call_id,
+                    &StatusCode::ProxyAuthenticationRequired,
+                    cfg,
+                    dialogs,
+                    event_tx,
+                );
             }
             TerminatedReason::Timeout => {
                 if let Some(entry) = dialogs.get_mut(&call_id) {

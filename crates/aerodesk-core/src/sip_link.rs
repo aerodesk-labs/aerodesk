@@ -302,16 +302,21 @@ impl SipCallLink {
     // -- core → UA 命令（与 SignalPresence 的接听/拒接/挂断同形） --
 
     /// 发起呼叫（INVITE + SDP offer；call_id 由上层生成 → Call-ID）。
+    /// `call_password`（#503-4）：被叫设备口令（无人值守固定/临时密码）——
+    /// signal 对 INVITE 做 407 Proxy-Authorization 质询时以该口令应答；
+    /// None = 不附凭据（目标无口令的开放部署）。
     pub fn call(
         &mut self,
         target_device: &str,
         call_id: &str,
         offer_sdp: &str,
+        call_password: Option<&str>,
     ) -> Result<(), String> {
         self.send(SipCommand::Call {
             target_device: target_device.into(),
             call_id: call_id.into(),
             offer_sdp: offer_sdp.into(),
+            call_password: call_password.map(String::from),
         })
     }
 
@@ -551,7 +556,7 @@ mod tests {
     #[test]
     fn command_methods_error_before_start() {
         let mut link = SipCallLink::new(offline_config());
-        assert!(link.call("AD-X", "c-1", "sdp").is_err());
+        assert!(link.call("AD-X", "c-1", "sdp", None).is_err());
         assert!(link.ring("c-1").is_err());
         assert!(link.accept("c-1", "sdp").is_err());
         assert!(link.reject("c-1", "busy").is_err());

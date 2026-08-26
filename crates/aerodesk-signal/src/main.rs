@@ -30,6 +30,12 @@
 //!   SIGNAL_PLAIN_PORT 明文 WS 端口（默认 3003）；设为 off/disabled/none 关闭
 //!                 明文服务器（生产建议关闭或用防火墙限制）
 //!
+//! #503-4 无人值守密码：
+//!   SIP_DIGEST_USERS 设备固定密码表（逗号分隔 user=password，配合 SIP 端点）
+//!   SIP_ADMIN_TOKEN  /admin/temp-password 管理端点鉴权 token（缺省回退首个 AUTH_TOKEN）
+//!   POST   /admin/temp-password {"device_id":"AD-XX","ttl_secs":300}  → 签发临时密码
+//!   DELETE /admin/temp-password/<device>                              → 撤销临时密码
+//!
 //!   POP_ID        本 PoP 标识（默认 local）
 //!   ROOM_POP_MAP  房间前缀=PoP，逗号分隔（如 eu-=pop-eu,us-=pop-us）；最长前缀优先
 //!   POP_URLS      PoP=客户端信令 URL，逗号分隔（如 pop-eu=wss://eu.example.com:443/ws）
@@ -132,6 +138,19 @@ static ROOMS: OnceLock<Rooms> = OnceLock::new();
 static TOTAL_CLIENTS: OnceLock<Arc<AtomicUsize>> = OnceLock::new();
 /// 按用户（JWT sub）在线连接数（#171）。
 static USER_CONNS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+/// #503-4 临时密码注册表句柄：SIP 端点启动时设置；HTTP 管理端点
+/// （/admin/temp-password）读写、SIP INVITE 授权读取（decide_invite 临时口令分支）。
+static TEMP_PASSWORDS: OnceLock<Arc<Mutex<sip_server::TempRegistry>>> = OnceLock::new();
+
+/// 管理端点鉴权 token（SIP_ADMIN_TOKEN，缺省回退首个 AUTH_TOKEN）；None = 未配置
+/// （管理端点返回 503——功能不可用而非静默放行）。
+fn admin_token(config: &Config) -> Option<String> {
+    std::env::var("SIP_ADMIN_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| config.auth_tokens.first().cloned())
+}
 
 /// SFU 池：无状态哈希回退 + 负载感知选路状态（#354 第二步）。
 struct SfuPool {
@@ -650,6 +669,9 @@ fn main() {
                     passwords.insert(u.to_string(), t.to_string());
                 }
             }
+            // #503-4 临时密码注册表：HTTP 管理端点与 SIP INVITE 授权共享。
+            let temp_passwords = Arc::new(Mutex::new(sip_server::TempRegistry::default()));
+            let _ = TEMP_PASSWORDS.set(temp_passwords.clone());
             let bind =
                 |port: Option<u16>| port.map(|p| std::net::SocketAddr::from(([0, 0, 0, 0], p)));
             let sip_cfg = sip_server::SipConfig {
@@ -666,6 +688,7 @@ fn main() {
                     && std::env::var("SIP_DIGEST_USERS")
                         .map(|v| v.trim().is_empty())
                         .unwrap_or(true),
+                temp_passwords,
                 tls_identity: Some(aerodesk_protocol::tls::TlsIdentity {
                     cert: tls.cert.clone(),
                     key: tls.key.clone(),
@@ -1234,10 +1257,135 @@ fn handle(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
             body.into_bytes(),
         );
     }
+    // #503-4 临时密码管理端点（主控端发起、带有效期；SIP 端点开启时可用）。
+    if request.method() == "POST" && request.url() == "/admin/temp-password" {
+        return temp_password_issue(request, &config);
+    }
+    if request.method() == "DELETE" && request.url().starts_with("/admin/temp-password/") {
+        return temp_password_revoke(request, &config);
+    }
     if request.method() == "GET" {
         return Response::text("aerodesk-signal: connect to /ws");
     }
     Response::text("method not allowed").with_status_code(405)
+}
+
+/// 管理端点统一鉴权：`Authorization: Bearer <token>`（SIP_ADMIN_TOKEN / 首个 AUTH_TOKEN）。
+/// 未配置管理 token → 503（功能不可用，不静默放行）；无 SIP 端点 → 501。
+fn admin_guard(
+    request: &Request,
+    config: &Config,
+) -> Result<Arc<Mutex<sip_server::TempRegistry>>, Response> {
+    let Some(token) = admin_token(config) else {
+        return Err(
+            Response::text("admin token 未配置（SIP_ADMIN_TOKEN 或 AUTH_TOKENS）")
+                .with_status_code(503),
+        );
+    };
+    let auth = request.header("Authorization").unwrap_or_default();
+    if !auth.eq_ignore_ascii_case(&format!("Bearer {token}")) {
+        return Err(Response::text("unauthorized").with_status_code(401));
+    }
+    let Some(registry) = TEMP_PASSWORDS.get() else {
+        return Err(Response::text("SIP 端点未开启（SIP_*_PORT 未设置）").with_status_code(501));
+    };
+    Ok(registry.clone())
+}
+
+/// POST /admin/temp-password：为设备签发临时密码（固定密码之外的一次性访问凭证）。
+/// 请求体：`{"device_id":"AD-XX","ttl_secs":300}`（ttl 60..86400，缺省 300）。
+/// 响应：`{"device_id","password","ttl_secs","expires_at_secs"}`。
+fn temp_password_issue(request: &Request, config: &Config) -> Response {
+    let registry = match admin_guard(request, config) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    // rouille 3.6：data() 返回 Option<RequestBody>（Read），整读成 Vec。
+    let mut raw = Vec::new();
+    let body_ok = match request.data() {
+        Some(mut body) => {
+            use std::io::Read;
+            body.read_to_end(&mut raw).is_ok()
+        }
+        None => false,
+    };
+    if !body_ok {
+        return Response::text("缺少请求体").with_status_code(400);
+    }
+    let body: serde_json::Value = match serde_json::from_slice(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response::text(format!("请求体 JSON 解析失败：{e}")).with_status_code(400);
+        }
+    };
+    let device = body
+        .get("device_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && !s.starts_with("view-"));
+    let Some(device) = device else {
+        return Response::text("device_id 缺失或非法").with_status_code(400);
+    };
+    let ttl = body
+        .get("ttl_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(300)
+        .clamp(60, 86400);
+    let password = generate_temp_password();
+    let ttl = Duration::from_secs(ttl);
+    let _expires_at = registry
+        .lock()
+        .unwrap_or_else(aerodesk_protocol::util::lock_recover)
+        .issue(device, password.clone(), ttl);
+    let expires_at_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() + ttl.as_secs())
+        .unwrap_or(0);
+    info!(device, ttl_secs = ttl.as_secs(), "临时密码已签发");
+    Response::json(&serde_json::json!({
+        "device_id": device,
+        "password": password,
+        "ttl_secs": ttl.as_secs(),
+        "expires_at_secs": expires_at_secs,
+    }))
+}
+
+/// DELETE /admin/temp-password/<device>：撤销设备临时密码（未到期即失效）。
+fn temp_password_revoke(request: &Request, config: &Config) -> Response {
+    let registry = match admin_guard(request, config) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let url = request.url();
+    let device = url.trim_start_matches("/admin/temp-password/");
+    let revoked = registry
+        .lock()
+        .unwrap_or_else(aerodesk_protocol::util::lock_recover)
+        .revoke(device);
+    info!(device, revoked, "临时密码已撤销");
+    Response::json(&serde_json::json!({ "device_id": device, "revoked": revoked }))
+}
+
+/// 生成随机临时密码（8 位，去除易混淆字符 0/O/1/I/l）——与桌面端
+/// `generate_one_time_password` 同构（getrandom CSPRNG + 拒绝采样；访问口令
+/// 不能用时间/进程态伪随机，见桌面端该函数注释）。
+fn generate_temp_password() -> String {
+    const CHARS: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz";
+    const ACCEPT: usize = CHARS.len() * 4;
+    let mut buf = [0u8; 8];
+    let mut out = String::with_capacity(8);
+    loop {
+        getrandom::getrandom(&mut buf).expect("OS random source available");
+        for &b in &buf {
+            let idx = b as usize;
+            if idx < ACCEPT {
+                out.push(CHARS[idx % CHARS.len()] as char);
+                if out.len() == 8 {
+                    return out;
+                }
+            }
+        }
+    }
 }
 
 /// 判断一个 peer 是否算「设备在线」presence（#503 `/devices`）：
