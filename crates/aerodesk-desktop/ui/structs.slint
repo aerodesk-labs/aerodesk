@@ -22,3 +22,14 @@ export struct ChatEntry {
     text: string,
     own: bool,
 }
+// #503 文件传输中心条目（队列 + 活动 + 记录；progress < 0 隐藏进度条）。
+export struct TransferEntry {
+    id: string,
+    name: string,
+    direction: string, // 发送 / 接收
+    size: string,      // 格式化大小文案
+    progress: float,   // 0..1；排队中/终态为 -1
+    state: string,     // 排队中/发送中/接收中/成功/失败/已取消
+    detail: string,    // 失败原因等
+    path: string,      // 本地路径（失败项重试用；空 = 不可重试）
+}

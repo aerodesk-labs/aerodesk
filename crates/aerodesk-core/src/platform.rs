@@ -182,6 +182,11 @@ pub trait FilePicker {
     type Error: std::fmt::Display + std::fmt::Debug;
     /// 弹出系统文件选择器；返回所选文件路径（取消返回 None）。
     fn pick_file(&self) -> Result<Option<String>, Self::Error>;
+    /// 弹出系统文件选择器（多选，#503 传输中心批量入队）；返回所选文件路径列表
+    /// （取消返回 None）。默认实现退回单选。
+    fn pick_files(&self) -> Result<Option<Vec<String>>, Self::Error> {
+        Ok(self.pick_file()?.map(|p| vec![p]))
+    }
 }
 
 /// 应用壳层（窗口激活 / Dock-任务栏重开等平台外壳集成）。

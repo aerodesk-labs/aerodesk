@@ -27,14 +27,39 @@ pub mod macos_publisher;
 /// #72 UI → 会话文件/剪贴板命令（经 mpsc 传到会话线程）。
 #[derive(Debug, PartialEq, Eq)]
 pub enum FileCmd {
-    /// 发送一个文件。
-    SendFile(std::path::PathBuf),
+    /// 发送文件（#503 批量入队：空闲立即发送，忙则排队逐个发送）。
+    SendFiles(Vec<std::path::PathBuf>),
     /// 把文本写入被控端剪贴板。
     SendClipboard(String),
     /// 把图片（PNG）写入被控端剪贴板（#271）。
     SendClipboardImage(Vec<u8>),
-    /// 取消当前发送。
+    /// 取消当前发送（#503 自动启动队列下一项）。
     Cancel,
+    /// 取消指定发送项（#503 传输中心逐项取消：活动发送或排队项）。
+    CancelSend(String),
+    /// 清空传输记录（#503 传输中心「清空记录」）。
+    ClearHistory,
+}
+
+/// #503 文件传输中心 UI 条目（会话线程 → UI；desktop 映射为 Slint 模型）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransferUiEntry {
+    /// 条目 id（活动发送/排队项/传输记录 id）。
+    pub id: String,
+    /// 文件名。
+    pub name: String,
+    /// 方向："发送"/"接收"。
+    pub direction: String,
+    /// 大小（字节）。
+    pub size: u64,
+    /// 进度 0..1；排队中/终态为 -1。
+    pub progress: f32,
+    /// 状态："排队中"/"发送中"/"接收中"/"成功"/"失败"/"已取消"。
+    pub state: String,
+    /// 失败原因等细节文案。
+    pub detail: String,
+    /// 本地路径（发送项重试用；接收项/不可重试为空）。
+    pub path: String,
 }
 
 /// #458 UI → 会话聊天命令（经 mpsc 传到会话线程）。
@@ -87,6 +112,8 @@ pub trait SessionUi: Send {
     fn update_file_window_progress(&self, progress: f32, label: String, status: String);
     /// 清除文件传输独立窗口进度。
     fn clear_file_window_progress(&self, status: Option<String>);
+    /// #503 文件传输中心列表快照（队列 + 活动 + 传输记录；500ms 节流推送）。
+    fn update_file_transfers(&self, _entries: Vec<crate::TransferUiEntry>) {}
 
     // ---- 仅 macOS 路径使用（非 macOS 实现方可保持默认空实现）----
     /// 仅主窗口 session_status（macOS 文件/剪贴板/统计文案）。
