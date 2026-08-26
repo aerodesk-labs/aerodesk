@@ -143,6 +143,19 @@ static USER_CONNS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
 /// （/admin/temp-password）读写、SIP INVITE 授权读取（decide_invite 临时口令分支）。
 static TEMP_PASSWORDS: OnceLock<Arc<Mutex<sip_server::TempRegistry>>> = OnceLock::new();
 
+/// 恒定时间字符串比较（防时序侧信道；长度差异直接短路——长度非机密，
+/// 内容逐字节 XOR 折叠，任何差异都走满循环）。令牌比较必须大小写敏感。
+fn constant_time_eq_str(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// 管理端点鉴权 token（SIP_ADMIN_TOKEN，缺省回退首个 AUTH_TOKEN）；None = 未配置
 /// （管理端点返回 503——功能不可用而非静默放行）。
 fn admin_token(config: &Config) -> Option<String> {
@@ -1283,7 +1296,9 @@ fn admin_guard(
         );
     };
     let auth = request.header("Authorization").unwrap_or_default();
-    if !auth.eq_ignore_ascii_case(&format!("Bearer {token}")) {
+    // 恒定时间 + 大小写敏感（此前 eq_ignore_ascii_case：既缩小令牌有效字母表
+    // 又非恒定时间，且与 join/SIP 口令同源的 token 更需严谨比较）。
+    if !constant_time_eq_str(auth, &format!("Bearer {token}")) {
         return Err(Response::text("unauthorized").with_status_code(401));
     }
     let Some(registry) = TEMP_PASSWORDS.get() else {

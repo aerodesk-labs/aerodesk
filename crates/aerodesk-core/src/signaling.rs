@@ -107,9 +107,12 @@ pub fn fetch_online_devices(server: &str, tls: bool) -> Result<Vec<String>, Stri
 
     let default_port = if tls { 443 } else { 80 };
     let (host, port) = split_host_port(server, default_port);
-    let addr = format!("{host}:{port}")
-        .parse::<std::net::SocketAddr>()
-        .map_err(|e| format!("服务器地址无效 {host}:{port}: {e}"))?;
+    // 支持主机名（默认配置 signal.aerodesk.io 等）：ToSocketAddrs 走 DNS 解析，
+    // SocketAddr::parse 只接受 IP 字面量——此前默认服务器名永远报「地址无效」。
+    let addr = std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))
+        .map_err(|e| format!("服务器地址无效 {host}:{port}: {e}"))?
+        .next()
+        .ok_or_else(|| format!("服务器地址解析为空 {host}:{port}"))?;
     // 超时兜底：服务器不可达/无响应时快速失败，不阻塞 UI 后台线程。
     let mut tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
         .map_err(|e| format!("连接信令服务器 {addr} 失败: {e}"))?;

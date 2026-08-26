@@ -241,8 +241,14 @@ impl FileTransfer {
     /// 触发发送一个文件（#503 批量入队）：当前无发送任务时立即开始，
     /// 忙则加入发送队列（活动发送结束后自动启动下一项）。
     /// 发送是否已被接收端确认（#122：viewer --send-file 模式发送完成判定）。
+    /// 剪贴板图片（kind=ClipboardImage）不计入完成：它是常驻双向同步，接收端
+    /// 拒绝（#503 无 recv-dir 显式 Nack）只是"本次同步失败"，不是 --send-file
+    /// 的上传终结——若计入，viewer 会在媒体腿建立前退出（simulcast e2e 回归：
+    /// 剪贴板回声 → Nack → exit(0)，RECEIVED 0 帧）。
     pub fn send_complete(&self) -> bool {
-        self.send.as_ref().is_some_and(|s| s.confirmed)
+        self.send
+            .as_ref()
+            .is_some_and(|s| s.confirmed && s.kind != FileKind::ClipboardImage)
     }
 
     /// 当前接收落盘目录（#122：--request-file 模式轮询落盘判定）。
@@ -259,8 +265,9 @@ impl FileTransfer {
                 "文件大小 {size} 超出范围（0 < size <= {MAX_FILE_SIZE}）"
             ));
         }
-        if self.send.as_ref().is_some_and(|s| !s.confirmed) {
-            // 发送槽位忙：加入队列（#503 批量发送）。
+        if self.send.is_some() {
+            // 发送槽位占用（含已确认但尚未被 tick 推进的旧任务）：一律入队——
+            // 直接替换 confirmed 发送者会让新文件插到队列前面（#503 队列语义回归）。
             self.push_queue(path, size)
         } else {
             self.send = Some(Sender::open(path)?);
@@ -332,7 +339,11 @@ impl FileTransfer {
                 break;
             };
             match Sender::open(&q.path) {
-                Ok(s) => {
+                Ok(mut s) => {
+                    // #503 传输中心：保持排队时的 id（tx{pid}-qN）跨启动稳定——
+                    // 否则启动瞬间 UI 还持有旧 id，逐项取消会「找不到传输项」，
+                    // 且同一文件在记录里出现两个 id。
+                    s.id = q.id.clone();
                     tracing::info!(
                         "file send start (queued): {} (queue {})",
                         q.name,
@@ -798,12 +809,24 @@ impl FileTransfer {
 
     fn on_done(&mut self, d: FileDone, endpoint: &mut crate::Endpoint) {
         let Some(r) = self.recv.remove(&d.id) else {
-            // 幂等 ack：已完成的 id 收到重复 Done（ack 丢失后发送端重传）时重发 ack。
             if self.completed.contains_key(&d.id) && d.ok {
+                // 幂等 ack：已完成的 id 收到重复 Done（ack 丢失后发送端重传）时重发 ack。
                 let ack = FileControl::Done(FileDone {
                     id: d.id,
                     ok: true,
                     error: None,
+                });
+                if let Ok(json) = serde_json::to_string(&ack) {
+                    let _ = endpoint.send_channel_data("file", false, json.as_bytes());
+                }
+            } else if d.ok {
+                // 从未接受过的传输（无接收目录 / Meta 被拒 / 接收器已超时移除）：
+                // 显式回执拒绝，否则发送端每秒重传 Meta/Done、永不失败（#503
+                // 桌面被控端未设 recv-dir 时发送端无限挂起回归）。
+                let ack = FileControl::Done(FileDone {
+                    id: d.id,
+                    ok: false,
+                    error: Some("接收端未开启接收".into()),
                 });
                 if let Ok(json) = serde_json::to_string(&ack) {
                     let _ = endpoint.send_channel_data("file", false, json.as_bytes());
@@ -1696,5 +1719,75 @@ mod tests {
         assert!(!ft.send_complete(), "推进到下一项后不应再报完成");
         let _ = std::fs::remove_file(a);
         let _ = std::fs::remove_file(b);
+    }
+
+    #[test]
+    fn send_complete_false_for_clipboard_image_even_when_nacked() {
+        // #595 回归护栏：剪贴板图片发送被接收端显式拒绝（无 recv-dir Nack）后，
+        // send_complete() 必须仍为 false——它是常驻同步失败，不是 --send-file
+        // 的上传终结。此前 ok=false 的 Done 置 confirmed → viewer 在媒体腿建立前
+        // exit(0)（simulcast e2e 6 连败根因）。
+        let mut ft = FileTransfer::new(None);
+        ft.send_clipboard_image(vec![0x89, b'P', b'N', b'G'])
+            .unwrap();
+        let sending = ft.status().sending.unwrap();
+        assert!(
+            sending.name.starts_with("clipboard-image-"),
+            "剪贴板图片文件名前缀"
+        );
+        let id = sending.id;
+        let done = FileControl::Done(FileDone {
+            id,
+            ok: false,
+            error: Some("接收端未开启接收".into()),
+        });
+        let mut ep = crate::Endpoint::new();
+        ft.handle_data(serde_json::to_string(&done).unwrap().as_bytes(), &mut ep);
+        assert!(
+            !ft.send_complete(),
+            "剪贴板图片被拒不算发送完成（viewer 不得退出）"
+        );
+    }
+
+    #[test]
+    fn send_complete_false_for_clipboard_image_even_when_confirmed() {
+        // #586 环境残留（clipboard sync e2e 往剪贴板写测试图）→ viewer 剪贴板
+        // 轮询捡到 → 上传 → 对端正常接收 ok=true 确认 → 此前 send_complete() 为
+        // true → viewer 在媒体腿建立前 exit(0)。剪贴板同步是常驻功能，确认/拒绝
+        // 都不是 --send-file 的上传终结。
+        let mut ft = FileTransfer::new(None);
+        ft.send_clipboard_image(vec![0x89, b'P', b'N', b'G'])
+            .unwrap();
+        let id = ft.status().sending.unwrap().id;
+        let done = FileControl::Done(FileDone {
+            id,
+            ok: true,
+            error: None,
+        });
+        let mut ep = crate::Endpoint::new();
+        ft.handle_data(serde_json::to_string(&done).unwrap().as_bytes(), &mut ep);
+        assert!(
+            !ft.send_complete(),
+            "剪贴板图片正常确认也不算发送完成（viewer 不得退出）"
+        );
+    }
+
+    #[test]
+    fn send_complete_true_for_regular_file_confirmed() {
+        // --send-file（kind=File）确认后 send_complete() 必须仍为 true（#122
+        // viewer 上传完成后退出，e2e 依赖）。
+        let a = tmp_file("sc-regular.bin", 100);
+        let mut ft = FileTransfer::new(None);
+        ft.send_file(&a).unwrap();
+        let id = ft.status().sending.unwrap().id;
+        let done = FileControl::Done(FileDone {
+            id,
+            ok: true,
+            error: None,
+        });
+        let mut ep = crate::Endpoint::new();
+        ft.handle_data(serde_json::to_string(&done).unwrap().as_bytes(), &mut ep);
+        assert!(ft.send_complete(), "普通文件确认后应报完成");
+        let _ = std::fs::remove_file(a);
     }
 }

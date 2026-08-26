@@ -142,7 +142,7 @@ function wsTarget() {
 }
 function wsHostPort() {
     const u = new URL(wsTarget());
-    return { host: u.hostname, port: u.port || '3061' };
+    return { host: u.hostname, port: u.port || '3061', scheme: u.protocol };
 }
 function deviceId() {
     if (!$('device').value.trim()) {
@@ -176,6 +176,13 @@ function authHeader(nonce, realm, method, uri, user, password) {
     const ha2 = MD5(`${method}:${uri}`);
     const resp = MD5(`${ha1}:${nonce}:${ha2}`);
     return `Authorization: Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${uri}", response="${resp}", algorithm=MD5\r\n`;
+}
+function proxyAuthHeader(nonce, realm, method, uri, user, password) {
+    // 与 authHeader 同款 Digest，仅头部名不同（#503-4 INVITE 407 质询应答）。
+    const ha1 = MD5(`${user}:${realm}:${password}`);
+    const ha2 = MD5(`${method}:${uri}`);
+    const resp = MD5(`${ha1}:${nonce}:${ha2}`);
+    return `Proxy-Authorization: Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${uri}", response="${resp}", algorithm=MD5\r\n`;
 }
 function parseResponse(text) {
     // 返回 { statusLine, status, headers: {name: value(小写名)}, body }
@@ -244,6 +251,8 @@ function register(attempt) {
         let timer = setTimeout(() => reject(new Error('REGISTER 无响应（10s）')), 10000);
         const onMsg = (e) => {
             const r = parseResponse(e.data);
+            // 只处理本 REGISTER 事务的响应（INVITE 等其它 Call-ID 的报文不得干扰）。
+            if (r.headers['call-id'] && r.headers['call-id'] !== rid) return;
             if (r.status === 401) {
                 const ww = r.headers['www-authenticate'] || '';
                 const nonce = (ww.match(/nonce="([^"]+)"/) || [])[1];
@@ -275,7 +284,7 @@ function register(attempt) {
     });
 }
 
-// ---------- 呼叫（INVITE → 100/180 → 200(answer) → ACK） ----------
+// ---------- 呼叫（INVITE → 100/180 → 407(Proxy-Auth) → 200(answer) → ACK） ----------
 function invite() {
     return new Promise((resolve, reject) => {
         const target = $('target').value.trim();
@@ -283,16 +292,44 @@ function invite() {
         callId = 'call-' + deviceId() + '-' + Date.now();
         const body = JSON.stringify(rtc.localDescription);
         const reqUri = 'sip:' + target + '@' + DOMAIN;
-        sendSip(`INVITE ${reqUri} SIP/2.0\r\n` + baseHeaders('INVITE', callId, target)
-            + 'Content-Type: application/sdp\r\n'
-            + `Content-Length: ${byteLen(body)}\r\n\r\n${body}`);
-        inviteSeq = cseq;   // 记录 INVITE 的 CSeq（ACK/BYE 沿用同号）
+        // #503-4：被叫设备有口令时服务器先 407 质询，重试需带 Proxy-Authorization
+        // （Digest，与 REGISTER 401 同款）。未带凭据/口令错时服务器 407/403。
+        let proxyAuth = '';
+        let retried = false;
+        const sendInvite = () => {
+            sendSip(`INVITE ${reqUri} SIP/2.0\r\n` + baseHeaders('INVITE', callId, target)
+                + proxyAuth
+                + 'Content-Type: application/sdp\r\n'
+                + `Content-Length: ${byteLen(body)}\r\n\r\n${body}`);
+            inviteSeq = cseq;   // 记录 INVITE 的 CSeq（ACK/BYE 沿用同号）
+        };
         let timer = setTimeout(() => reject(new Error('INVITE 无应答（30s）')), 30000);
         const onMsg = (e) => {
             const r = parseResponse(e.data);
+            // 只处理本呼叫的响应（60s REGISTER 刷新等其它 Call-ID 的报文不得干扰）。
+            if (r.headers['call-id'] && r.headers['call-id'] !== callId) return;
             if (r.status === 100 || r.status === 180) {
                 log('SIP ' + r.statusLine);
                 return;   // 继续等 200
+            }
+            if (r.status === 407 && !retried) {
+                const pa = r.headers['proxy-authenticate'] || '';
+                const nonce = (pa.match(/nonce="([^"]+)"/) || [])[1];
+                const realm = (pa.match(/realm="([^"]+)"/) || [])[1] || 'aerodesk';
+                if (!nonce) {
+                    cleanup();
+                    reject(new Error('INVITE Digest 质询失败（无 nonce）'));
+                    return;
+                }
+                retried = true;
+                ws.removeEventListener('message', onMsg);
+                clearTimeout(timer);
+                proxyAuth = proxyAuthHeader(nonce, realm, 'INVITE', reqUri,
+                    deviceId(), $('token').value || '');
+                sendInvite();
+                timer = setTimeout(() => reject(new Error('INVITE 带认证仍无应答（30s）')), 30000);
+                ws.addEventListener('message', onMsg);
+                return;
             }
             cleanup();
             if (r.status === 200) {
@@ -313,6 +350,7 @@ function invite() {
             clearTimeout(timer);
         };
         ws.addEventListener('message', onMsg);
+        sendInvite();
     });
 }
 function sendAck() {
@@ -340,14 +378,17 @@ async function connect() {
     $('disconnect').disabled = false;
     setStatus('连接中…');
     try {
-        const { host, port } = wsHostPort();
-        setStatus('连接信令 wss://' + host + ':' + port + ' …');
-        ws = new WebSocket(`wss://${host}:${port}`, 'sip');
+        const { host, port, scheme } = wsHostPort();
+        const wsUrl = `${scheme}//${host}:${port}`;
+        setStatus('连接信令 ' + wsUrl + ' …');
+        ws = new WebSocket(wsUrl, 'sip');
         await new Promise((resolve, reject) => {
             ws.onopen = resolve;
-            ws.onerror = () => reject(new Error('信令连接失败: wss://' + host + ':' + port));
+            ws.onerror = () => reject(new Error('信令连接失败: ' + wsUrl));
         });
         ws.onclose = () => {
+            // 信令断开后停止注册刷新（60s 定时器），避免在已关闭的 socket 上无限重试。
+            if (regTimer) { clearInterval(regTimer); regTimer = null; }
             if (!closed && phase === 'in-call') {
                 setStatus('信令断开（媒体可能仍存活，建议重连）');
                 log('signaling closed');

@@ -119,7 +119,9 @@ export component FileTransferWindow inherits Window {
                                 }
                                 RdButton {
                                     text: "取消";
-                                    visible: entry.state == "发送中" || entry.state == "接收中" || entry.state == "排队中";
+                                    // 接收中无取消语义（核心无 cancel-receive 路径；接收行 id
+                                    // 为 recv-active，cancel_send_id 永远匹配不到——#503 审查修复）。
+                                    visible: entry.state == "发送中" || entry.state == "排队中";
                                     clicked => { root.cancel-item(entry.id); }
                                 }
                                 RdButton {

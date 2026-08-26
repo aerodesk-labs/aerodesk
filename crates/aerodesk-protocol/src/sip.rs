@@ -78,7 +78,8 @@ pub fn error_code_to_status(code: &str) -> u16 {
         "busy" => 486,             // Busy Here
         "offline" => 480,          // Temporarily Unavailable（注册过期不可达）
         "timeout" => 408,          // Request Timeout（proxy 生成）
-        "control_disabled" => 403, // Forbidden（未开启被控，#545 策略拒绝）
+        "auth_required" => 407,    // Proxy Authentication Required（#503-4 口令质询）
+        "control_disabled" => 403, // Forbidden（旧 WSS 语义保留；反向映射仍可用）
         _ => 500,
     }
 }
@@ -86,15 +87,18 @@ pub fn error_code_to_status(code: &str) -> u16 {
 /// SIP 响应码 → error_code。404 与 480 同归 offline（AoR 不存在/注册过期）；
 /// 487（CANCEL 后 Request Terminated）归 timeout——主叫视角取消与超时同态。
 /// 407（#503-4 INVITE 授权质询）归 auth_required——被叫设备有口令而主叫未带
-/// 或口令错误（未带凭据时栈按质询失败收尾）。非拒绝类响应码（2xx/1xx 等）返回 None。
+/// 或口令错误（未带凭据时栈按质询失败收尾）。
+/// 403：服务器对 INVITE/REGISTER 错口令统一回 403（decide_invite，不泄露设备
+/// 存在性），归 auth_required 而非 control_disabled——后者是旧 WSS 语义的
+/// 「未开启被控」，把口令错误误报成策略拒绝会误导排障。非拒绝类响应码
+/// （2xx/1xx 等）返回 None。
 pub fn status_to_error_code(status: u16) -> Option<&'static str> {
     match status {
         603 => Some("user_rejected"),
         486 => Some("busy"),
         480 | 404 => Some("offline"),
         408 | 487 => Some("timeout"),
-        403 => Some("control_disabled"),
-        407 => Some("auth_required"),
+        407 | 403 => Some("auth_required"),
         _ => None,
     }
 }
@@ -294,7 +298,7 @@ mod tests {
             ("busy", 486),
             ("offline", 480),
             ("timeout", 408),
-            ("control_disabled", 403),
+            ("auth_required", 407),
         ];
         for (code, status) in table {
             assert_eq!(error_code_to_status(code), status, "{code}");
@@ -303,6 +307,10 @@ mod tests {
         // 同义码归并
         assert_eq!(status_to_error_code(404), Some("offline"));
         assert_eq!(status_to_error_code(487), Some("timeout"));
+        // 403：服务器对错口令统一 403（decide_invite）→ auth_required；
+        // control_disabled 仅保留反向映射（旧 WSS 语义）。
+        assert_eq!(status_to_error_code(403), Some("auth_required"));
+        assert_eq!(error_code_to_status("control_disabled"), 403);
         // 非拒绝码不映射
         assert_eq!(status_to_error_code(200), None);
         assert_eq!(status_to_error_code(180), None);

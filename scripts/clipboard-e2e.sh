@@ -81,6 +81,11 @@ fi
 kill "$VIEW_PID" "$PUB_PID" "$SFU_PID" "$SIG_PID" 2>/dev/null || true
 wait 2>/dev/null || true
 
+# 清理剪贴板：测试图（1x1 PNG）残留会给同 job 后续 step（simulcast 等的
+# viewer 剪贴板轮询）造成环境污染——viewer 捡到残留图上传并确认后提前退出
+# （#595 回归：simulcast e2e 6 连败，RECEIVED 0 帧）。
+printf '' | pbcopy || true
+
 echo "== 断言"
 fail=0
 if [ "$dir1" = "1" ]; then

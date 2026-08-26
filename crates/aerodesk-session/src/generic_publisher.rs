@@ -26,6 +26,17 @@ pub(crate) fn valid_publisher_room(device_id: &str) -> Option<String> {
     }
 }
 
+/// 桌面被控端文件接收落盘目录默认值（#503 传输中心 desktop→desktop 接收）：
+/// `<用户 Downloads>/AeroDesk` 子目录（Windows/macOS 均适用；无 UI 配置入口，
+/// 固定默认，启动时日志打印实际路径）。
+pub(crate) fn default_recv_dir() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    let base = std::env::var("USERPROFILE").ok();
+    #[cfg(not(windows))]
+    let base = std::env::var("HOME").ok();
+    base.map(|b| std::path::Path::new(&b).join("Downloads").join("AeroDesk"))
+}
+
 /// 启动被控端（外部仅 windows 目标调用；Linux/其他非 macOS 为 no-op 提示）。
 #[cfg(windows)]
 pub fn start_publisher(cfg: PublisherConfig, on_event: PublisherEventSink) {
@@ -107,7 +118,7 @@ pub fn stop_publisher(on_event: PublisherEventSink) {
 /// Windows 被控端实现。独立 cfg 模块避免在 Linux/macOS 引用 `aerodesk-platform`。
 #[cfg(windows)]
 mod imp {
-    use super::{PublisherEventSink, valid_publisher_room};
+    use super::{PublisherEventSink, default_recv_dir, valid_publisher_room};
     use crate::{PublisherConfig, PublisherEvent};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -372,7 +383,17 @@ mod imp {
 
         // #503-2 被控端剪贴板双向：file 通道接收 viewer 发来的文本/图片 + 本地
         // 1s 轮询回传（与 CLI 被控端同语义；图片优先，防回声）。
-        let mut file_transfer = aerodesk_core::file_transfer::FileTransfer::new(None);
+        // #503 传输中心：desktop→desktop 发送的文件落盘 Downloads/AeroDesk
+        // （CLI 用 --recv-dir 显式指定；桌面端无配置入口，固定默认 + 日志可见）。
+        let recv_dir = default_recv_dir();
+        if let Some(dir) = &recv_dir {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                tracing::warn!("创建文件接收目录失败（接收禁用）: {}: {e}", dir.display());
+            } else {
+                tracing::info!("被控端文件接收目录: {}", dir.display());
+            }
+        }
+        let mut file_transfer = aerodesk_core::file_transfer::FileTransfer::new(recv_dir);
         // 被控端允许响应 FileControl::Request 提供文件（#255 审查语义，同 CLI）。
         file_transfer.set_allow_request(true);
         let mut clip_poller = crate::clipboard_sync::ClipboardPoller::new();
@@ -614,13 +635,26 @@ mod imp {
             ClientEvent::ChannelData(cid, _, data) => {
                 if endpoint.channel_label(cid).as_deref() == Some("cmd") {
                     // #458 发消息：被控端收到 Chat 后回 CmdResponse::Chat 给观看端。
-                    if let Ok(req) = serde_json::from_slice::<CmdRequest>(&data)
-                        && let CmdAction::Chat { text, sender, .. } = req.action
-                    {
-                        let resp = CmdResponse {
-                            id: req.id,
-                            result: CmdResult::Chat { sender, text },
+                    // #503 系统电源：与 CLI 被控端同语义——内置安全命令执行 +
+                    // CmdResult::Power 回执（此前 SystemPower 被静默丢弃，关机/重启/
+                    // 锁屏在 desktop→desktop 会话中永远不生效）。
+                    if let Ok(req) = serde_json::from_slice::<CmdRequest>(&data) {
+                        let result = match req.action {
+                            CmdAction::Chat { text, sender, .. } => {
+                                CmdResult::Chat { sender, text }
+                            }
+                            CmdAction::SystemPower { action } => {
+                                let out = aerodesk_core::cmd_exec::system_power(action);
+                                CmdResult::Power {
+                                    action,
+                                    error: out.error,
+                                    code: out.code,
+                                }
+                            }
+                            // 其余动作（Run/ReadFile/…）桌面被控端不执行：与旧行为一致。
+                            _ => return,
                         };
+                        let resp = CmdResponse { id: req.id, result };
                         if let Ok(json) = serde_json::to_string(&resp) {
                             let _ = endpoint.send_channel_data("cmd", false, json.as_bytes());
                         }
