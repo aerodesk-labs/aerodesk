@@ -42,7 +42,7 @@ dependencies = [
 
 [[package]]
 name = "aerodesk-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aerodesk-codec",
  "aerodesk-core",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "aerodesk-android"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aerodesk-core",
  "aerodesk-platform",
@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "aerodesk-codec"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aerodesk-core",
  "ffmpeg-next",
@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "aerodesk-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aerodesk-protocol",
  "arboard",
@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "aerodesk-dashboard"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rouille",
  "serde_json",
@@ -119,7 +119,7 @@ dependencies = [
 
 [[package]]
 name = "aerodesk-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aerodesk-codec",
  "aerodesk-core",
@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "aerodesk-host"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aerodesk-codec",
  "aerodesk-core",
@@ -158,7 +158,7 @@ dependencies = [
 
 [[package]]
 name = "aerodesk-ios"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aerodesk-core",
  "aerodesk-platform",
@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "aerodesk-ipc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -178,14 +178,14 @@ dependencies = [
 
 [[package]]
 name = "aerodesk-ohos"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aerodesk-platform",
 ]
 
 [[package]]
 name = "aerodesk-platform"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aerodesk-codec",
  "aerodesk-core",
@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "aerodesk-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64ct",
  "hmac",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "aerodesk-session"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aerodesk-codec",
  "aerodesk-core",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "aerodesk-sfu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aerodesk-protocol",
  "ctrlc",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "aerodesk-signal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aerodesk-core",
  "aerodesk-protocol",
