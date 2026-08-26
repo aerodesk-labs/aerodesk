@@ -85,6 +85,7 @@ audio_prev=${audio_prev:-0}
 window=0
 max_windows=3
 starved_all=1   # 全部观察窗均处饥饿（到达 <40fps）= 1；任一健康窗即清 0
+first_starved=0 # 首窗饥饿 = 漂移基线已被冻结的音频时间轴污染（见下），drift 本轮不可测
 while true; do
     sleep "$OBS"
     window=$((window + 1))
@@ -94,6 +95,7 @@ while true; do
     rate=$(( (audio_now - audio_prev) / OBS ))
     audio_prev=$audio_now
     if [ "$rate" -ge 40 ]; then starved_all=0; fi
+    if [ "$window" -eq 1 ] && [ "$rate" -lt 40 ]; then first_starved=1; fi
     if [ "$window" -ge "$max_windows" ]; then
         echo "== drift 第 ${window} 窗仍超差（$(sample_drift | tr '\n' ' ')），到达 ${rate}fps，窗口用尽"
         break
@@ -128,13 +130,17 @@ fi
 # v3.1：若所有观察窗音频到达均饥饿（runner 持续满载，实测 33-39fps×18s），
 # drift（接收侧时间戳）必然恶化——此时断言降级为 SKIP 并明示未验证；
 # 任一健康窗漂移超差才 FAIL（映射类真 bug 在健康窗照样显形）。
+# v3.2（#587 实测补充）：首窗 0fps 全停（比 v3.1 预想更极端）会冻结音频时间轴
+# 污染漂移基线，次窗 70fps 突发追赶（假健康）无法在测量窗口内弥合——判别器
+# 在此区间无法区分真失同步与基线污染。首窗饥饿 = 漂移本轮不可测 → SKIP；
+# 首窗健康时判定照旧（相邻变化 ≤500ms 且 |drift|≤3000ms 即 PASS，超差即 FAIL）。
 if drift_stable; then
     DRIFTS=$(sample_drift)
     LAST=$(echo "$DRIFTS" | tail -1)
     PREV=$(echo "$DRIFTS" | tail -2 | head -1)
     echo "PASS drift stable (${PREV} -> ${LAST}ms)"
-elif [ "$starved_all" = "1" ]; then
-    echo "SKIP drift（全部 $max_windows 窗音频到达饥饿，runner 满载，本轮未验证漂移；媒体接收/jitter/panic 断言仍生效）"
+elif [ "$starved_all" = "1" ] || [ "$first_starved" = "1" ]; then
+    echo "SKIP drift（首窗/全窗音频到达饥饿，漂移基线被冻结时间轴污染，本轮未验证漂移；媒体接收/jitter/panic 断言仍生效）"
 else
     echo "FAIL drift unstable: $(sample_drift | tr '\n' ' ')"; tail -3 /tmp/av-view.log; fail=1
 fi
