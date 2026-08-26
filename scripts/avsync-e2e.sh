@@ -48,7 +48,9 @@ sample_drift() {
 }
 # 音频到达计数采样（AUDIO: N frames 的末次值）
 sample_audio_frames() {
-    grep -oE 'AUDIO: [0-9]+ frames' /tmp/av-view.log 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1
+    # 音频帧未打印（慢启动/饥饿）时首个 grep 无匹配返回 1——顶层调用处（audio_prev/
+    # audio_now 赋值）会被 pipefail+set -e 误杀；|| true 兜底，调用方再按 :-0 归一。
+    grep -oE 'AUDIO: [0-9]+ frames' /tmp/av-view.log 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1 || true
 }
 # 漂移判定：有界（±3000ms）且相邻变化 ≤500ms。0=稳定，1=超差/样本不足
 drift_stable() {

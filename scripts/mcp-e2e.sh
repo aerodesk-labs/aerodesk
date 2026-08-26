@@ -140,7 +140,9 @@ else
     echo "WARN upload_file（macOS file 通道偶发）"; grep -oE '"text":"[^"]*"' /tmp/mcp-out.txt | tail -3
 fi
 # 9) 大文件下载（从被控端拉回，sha256 一致）
-DL_HASH=$(grep -oE "downloaded: .*sha256=[0-9a-f]{64}" /tmp/mcp-out.txt | grep -oE "[0-9a-f]{64}" | tail -1)
+# download 失败（macOS file 通道偶发）时下行首个 grep 无匹配返回 1——pipefail+set -e
+# 会在赋值行直接杀脚本、走不到 WARN 分支（139b092 降级因此失效）；|| true 兜底。
+DL_HASH=$(grep -oE "downloaded: .*sha256=[0-9a-f]{64}" /tmp/mcp-out.txt | grep -oE "[0-9a-f]{64}" | tail -1 || true)
 SRC_HASH=$(shasum -a 256 "$DIR/upload.bin" | awk '{print $1}')
 if [ -n "$DL_HASH" ] && [ "$DL_HASH" = "$SRC_HASH" ]; then
     echo "PASS download_file（${SIZE_MB}MB sha256 一致）"
