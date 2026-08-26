@@ -79,6 +79,10 @@ sleep 0.3
 # viewer 的会议桥腿先建（SFU 房间按需创建，control 通道就绪即选层登记），
 # 发布端后加入同房间 → SFU 即开始转发（无"迟到 viewer 等关键帧"问题）。
 echo "== 启动 viewer f/q（SIP 会议桥，先登记选层）"
+# 清空系统剪贴板：同 job 前置 step（clipboard sync 图片测试）残留的测试图会被
+# viewer 剪贴板轮询捡到 → 上传确认 → send_complete 误判 → 媒体腿建立前退出
+# （#595 回归：6 连败 RECEIVED 0 帧；产品侧 send_complete 已排除剪贴板，双保险）。
+printf '' | pbcopy || true
 ./target/debug/aerodesk-agent --role viewer --layer f \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/sim-view-f.log 2>&1 &
 F_PID=$!
