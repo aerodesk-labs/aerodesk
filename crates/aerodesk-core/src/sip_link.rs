@@ -660,7 +660,10 @@ mod tests {
         // tls：默认端口 5061 + 系统根 CA + SNI。
         let cfg2 = SipLinkConfig::from_parts("wss://localhost:443/ws", "D", "p", "tls", 0, "", "")
             .unwrap();
-        assert_eq!(cfg2.server.to_string(), "[::1]:5061");
+        // localhost 解析顺序因系统而异（本机 Windows 先出 127.0.0.1，CI runner
+        // 先出 ::1）——断言环回地址 + TLS 默认端口即可，不绑定地址族。
+        assert_eq!(cfg2.server.port(), 5061, "tls 默认端口");
+        assert!(cfg2.server.ip().is_loopback(), "localhost 应解析为环回地址");
         let tls = cfg2.tls.expect("tls 配置");
         assert!(!tls.ca_certs.is_empty());
         assert_eq!(tls.sni_hostname.as_deref(), Some("localhost"));

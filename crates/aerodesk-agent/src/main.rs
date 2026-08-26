@@ -3866,11 +3866,16 @@ fn publisher_capture_ffmpeg(
         if connected {
             // #503 隐私屏：跳过真实采集，注入黑/文字帧（媒体继续出流）。
             let bgra: Vec<u8> = if privacy.enabled {
+                // 节拍：正常路径由 capture_frame(50ms) 限速；隐私路径无帧源，
+                // 必须等价限速，否则循环满速编码（60~250fps），RTP 时钟远超
+                // 墙钟——CPU/带宽暴涨 + 观看端 A/V 漂移（#503 回归修复）。
+                std::thread::sleep(Duration::from_millis(50));
                 if privacy_buf.len() != (w * h * 4) as usize {
                     privacy_buf = vec![0u8; (w * h * 4) as usize];
                 }
                 privacy::paint(&privacy, &mut privacy_buf, w, h);
-                privacy_buf.clone()
+                // 免每帧整帧 memcpy：paint 已就地填充，这里只移交所有权供编码借用。
+                std::mem::take(&mut privacy_buf)
             } else if let Some(surface) = capture.capture_frame(Duration::from_millis(50)) {
                 // IOSurface（BGRA）→ 行复制到 CPU 缓冲 → FFmpeg 编码。
                 match aerodesk_platform::macos::capture::surface_to_bgra(&surface, w, h) {
@@ -4249,6 +4254,12 @@ fn publisher_capture(
         }
 
         if connected {
+            // #503 隐私屏节拍：隐私路径不调 capture_frame（无帧源），必须等价
+            // 限速，否则三层编码满速空转（RTP 时钟远超墙钟——CPU/带宽暴涨
+            // + 观看端 A/V 漂移，#503 回归修复）。
+            if privacy.enabled {
+                std::thread::sleep(Duration::from_millis(50));
+            }
             // 每层各自采集一帧（simulcast 下 SCK 按层分辨率采集；单层维持原路径）。
             let mut frames = Vec::with_capacity(layers.len());
             let mut captured_any = false;

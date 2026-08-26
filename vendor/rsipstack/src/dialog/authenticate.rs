@@ -558,5 +558,19 @@ pub fn verify_digest(
         auth.qop.as_ref(),
     );
 
-    expected == auth.response
+    // 恒定时间比较（32 位十六进制摘要）：避免按字节提前退出成为时序侧信道
+    // （#503-4 INVITE 407 口令门禁上线后，此比较保护无人值守设备，须严谨）。
+    constant_time_eq(&expected, &auth.response)
+}
+
+/// 恒定时间字符串比较：长度差异直接短路（长度非机密），内容逐字节 XOR 折叠。
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }

@@ -259,8 +259,9 @@ impl FileTransfer {
                 "文件大小 {size} 超出范围（0 < size <= {MAX_FILE_SIZE}）"
             ));
         }
-        if self.send.as_ref().is_some_and(|s| !s.confirmed) {
-            // 发送槽位忙：加入队列（#503 批量发送）。
+        if self.send.is_some() {
+            // 发送槽位占用（含已确认但尚未被 tick 推进的旧任务）：一律入队——
+            // 直接替换 confirmed 发送者会让新文件插到队列前面（#503 队列语义回归）。
             self.push_queue(path, size)
         } else {
             self.send = Some(Sender::open(path)?);
@@ -332,7 +333,11 @@ impl FileTransfer {
                 break;
             };
             match Sender::open(&q.path) {
-                Ok(s) => {
+                Ok(mut s) => {
+                    // #503 传输中心：保持排队时的 id（tx{pid}-qN）跨启动稳定——
+                    // 否则启动瞬间 UI 还持有旧 id，逐项取消会「找不到传输项」，
+                    // 且同一文件在记录里出现两个 id。
+                    s.id = q.id.clone();
                     tracing::info!(
                         "file send start (queued): {} (queue {})",
                         q.name,
@@ -798,12 +803,24 @@ impl FileTransfer {
 
     fn on_done(&mut self, d: FileDone, endpoint: &mut crate::Endpoint) {
         let Some(r) = self.recv.remove(&d.id) else {
-            // 幂等 ack：已完成的 id 收到重复 Done（ack 丢失后发送端重传）时重发 ack。
             if self.completed.contains_key(&d.id) && d.ok {
+                // 幂等 ack：已完成的 id 收到重复 Done（ack 丢失后发送端重传）时重发 ack。
                 let ack = FileControl::Done(FileDone {
                     id: d.id,
                     ok: true,
                     error: None,
+                });
+                if let Ok(json) = serde_json::to_string(&ack) {
+                    let _ = endpoint.send_channel_data("file", false, json.as_bytes());
+                }
+            } else if d.ok {
+                // 从未接受过的传输（无接收目录 / Meta 被拒 / 接收器已超时移除）：
+                // 显式回执拒绝，否则发送端每秒重传 Meta/Done、永不失败（#503
+                // 桌面被控端未设 recv-dir 时发送端无限挂起回归）。
+                let ack = FileControl::Done(FileDone {
+                    id: d.id,
+                    ok: false,
+                    error: Some("接收端未开启接收".into()),
                 });
                 if let Ok(json) = serde_json::to_string(&ack) {
                     let _ = endpoint.send_channel_data("file", false, json.as_bytes());

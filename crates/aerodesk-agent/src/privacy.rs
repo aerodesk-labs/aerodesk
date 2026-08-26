@@ -59,6 +59,13 @@ pub fn apply_control(v: &Value, state: &mut PrivacyState) -> bool {
         return false;
     };
     let mut changed = false;
+    // 先应用显式 mute，再处理 enabled 复位：同一消息同时带
+    // {"enabled":false,"mute":true} 时，按文档契约「enabled=false 同时复位静音」，
+    // mute 字段不得在复位之后又把静音打开（#503 回归修复）。
+    if let Some(m) = p.get("mute").and_then(|m| m.as_bool()) {
+        changed |= state.mute_audio != m;
+        state.mute_audio = m;
+    }
     if let Some(en) = p.get("enabled").and_then(|e| e.as_bool()) {
         changed |= state.enabled != en;
         state.enabled = en;
@@ -80,10 +87,6 @@ pub fn apply_control(v: &Value, state: &mut PrivacyState) -> bool {
     if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
         changed |= state.text != t;
         state.text = t.to_string();
-    }
-    if let Some(m) = p.get("mute").and_then(|m| m.as_bool()) {
-        changed |= state.mute_audio != m;
-        state.mute_audio = m;
     }
     changed
 }

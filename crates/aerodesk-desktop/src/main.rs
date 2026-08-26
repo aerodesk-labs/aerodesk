@@ -3129,10 +3129,6 @@ fn main() -> Result<(), slint::PlatformError> {
     // 误修为「inc_enabled=true 启动即自动发布」——开关语义是「允许被呼叫时
     // 接听」而非「启动即采集」，已撤销。
     spawn_signal_presence(&ui, &settings);
-    // #503 设备列表：启动即拉取一次在线设备（后台线程，不影响首屏）。
-    if !settings.server_default.is_empty() {
-        ui.invoke_refresh_devices();
-    }
     if !settings.server_default.is_empty() {
         ui.set_server_input(server_display.into());
     }
@@ -3441,6 +3437,13 @@ fn main() -> Result<(), slint::PlatformError> {
             refresh_device_list(&ui);
         }
     });
+
+    // #503 设备列表：启动即拉取一次在线设备（后台线程，不影响首屏）。
+    // 必须在 on_refresh_devices 注册之后调用——Slint 对无 handler 的 callback
+    // invoke 是静默 no-op，此前先于注册调用导致首屏设备列表永远为空。
+    if !settings.server_default.is_empty() {
+        ui.invoke_refresh_devices();
+    }
 
     // #503 设备列表：选中设备行 → 别名/分组输入框回填（编辑前先选中）。
     ui.on_select_device({

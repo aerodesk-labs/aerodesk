@@ -695,7 +695,14 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
                             .and_then(|c| callee_fixed_password(&cfg, c));
                         let temp = callee
                             .as_deref()
-                            .and_then(|c| cfg.temp_passwords.lock().unwrap().lookup(c));
+                            // 毒化容忍：Mutex 中毒时取回内部值继续服务——serve 循环内
+                            // panic（如 lock().unwrap() 命中毒化）会拖垮整个 SIP 端点。
+                            .and_then(|c| {
+                                cfg.temp_passwords
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .lookup(c)
+                            });
                         match decide_invite(
                             req,
                             &cfg.realm,
