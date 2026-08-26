@@ -71,10 +71,12 @@ cargo run -p aerodesk-agent -- --role viewer --reconnect
 #       （危险命令默认拦截，白名单 $HOME/AeroDesk/cmd-allowlist.txt，审计 $HOME/AeroDesk/cmd-audit.jsonl）
 #       文件/进程：--read-file <path> / --write-file <path> <content> / --list-processes / --kill-pid <pid>
 #       （写文件敏感路径默认禁止；kill pid 0/1 默认禁止）
+# 电源命令：#503 内置安全命令（动作枚举受限，不经 shell 拼接，执行写 cmd 审计）：
+#       viewer --power shutdown|reboot|lock（桌面远控窗口工具栏也有 关机/重启/锁屏 按钮，带确认）
 #       权限/审计管理（本地）：--cmd-allowlist list|add <prefix>|remove <prefix> / --cmd-audit [n]
 #       （桌面 UI 设置页「AI 远控」也可管理白名单与审计）
 # MCP 工具面：#109 提供 aerodesk-mcp（stdio JSON-RPC）——tools: connect/run_command/
-#       read_file/write_file/list_processes/kill_process，经 aerodesk-agent 桥接操作被控端
+#       read_file/write_file/list_processes/kill_process/system_power，经 aerodesk-agent 桥接操作被控端
 #       （AERODESK_SIGNAL/AERODESK_ROOM/AERODESK_AGENT_BIN 环境变量配置）
 #       键鼠工具：mouse_move / mouse_click / type_text（经 --send-input / --type-text）
 #       大文件：#122 MCP download_file/upload_file（file 通道；viewer --request-file 下载，

@@ -8,10 +8,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use aerodesk_core::cmd_exec::{
-    allowlist, kill_process, list_processes, read_file, run_command, write_file,
+    allowlist, kill_process, list_processes, read_file, run_command, system_power, write_file,
 };
 use aerodesk_core::endpoint::{ClientEvent, Endpoint};
-use aerodesk_core::protocol::cmd::{CmdAction, CmdRequest, CmdResponse, CmdResult, encode_b64};
+use aerodesk_core::protocol::cmd::{
+    CmdAction, CmdRequest, CmdResponse, CmdResult, PowerAction, encode_b64,
+};
 
 static CMD_TX: Mutex<Option<std::sync::mpsc::Sender<CmdResponse>>> = Mutex::new(None);
 static CMD_RX: Mutex<Option<std::sync::mpsc::Receiver<CmdResponse>>> = Mutex::new(None);
@@ -78,6 +80,11 @@ fn busy_result(action: &CmdAction) -> CmdResult {
             sender: String::new(),
             text: String::new(),
         },
+        CmdAction::SystemPower { action } => CmdResult::Power {
+            action: *action,
+            error: Some(busy()),
+            code: Some("busy".into()),
+        },
     }
 }
 
@@ -89,6 +96,8 @@ pub enum Intent {
     Write(String, String),
     Ps,
     Kill(u32),
+    /// #503 系统电源命令（关机/重启/锁屏）。
+    Power(PowerAction),
 }
 
 /// 初始化命令通道（main 调用一次）。
@@ -231,6 +240,16 @@ fn execute(action: &CmdAction) -> CmdResult {
             sender: sender.clone(),
             text: text.clone(),
         },
+        // #503 系统电源命令：内置安全命令（动作枚举受限，不经 shell 拼接），
+        // 由核心 system_power 按平台构造固定命令执行并写 cmd 审计。
+        CmdAction::SystemPower { action } => {
+            let out = system_power(*action);
+            CmdResult::Power {
+                action: *action,
+                error: out.error,
+                code: out.code,
+            }
+        }
     }
 }
 
@@ -278,6 +297,7 @@ pub fn send_intent(endpoint: &mut Endpoint, intent: &Intent) -> bool {
         },
         Intent::Ps => CmdAction::ListProcesses,
         Intent::Kill(pid) => CmdAction::KillProcess { pid: *pid },
+        Intent::Power(action) => CmdAction::SystemPower { action: *action },
     };
     let req = CmdRequest::new(id, action);
     let Ok(json) = serde_json::to_string(&req) else {
@@ -366,6 +386,7 @@ mod tests {
             CmdResult::Killed { error, .. } => error.as_deref().unwrap_or(""),
             // Chat 变体无 error 字段（#458 聊天回执不参与 busy 语义）。
             CmdResult::Chat { .. } => "",
+            CmdResult::Power { error, .. } => error.as_deref().unwrap_or(""),
         }
     }
 
@@ -421,5 +442,18 @@ mod tests {
         let kill = busy_result(&CmdAction::KillProcess { pid: 42 });
         assert!(matches!(kill, CmdResult::Killed { pid: 42, .. }));
         assert!(busy_err(&kill).contains("cmd busy"));
+
+        // #503 电源命令 busy 回执（动作透传，控制端/桌面可见明确错误）。
+        let power = busy_result(&CmdAction::SystemPower {
+            action: PowerAction::Reboot,
+        });
+        assert!(matches!(
+            power,
+            CmdResult::Power {
+                action: PowerAction::Reboot,
+                ..
+            }
+        ));
+        assert!(busy_err(&power).contains("cmd busy"));
     }
 }

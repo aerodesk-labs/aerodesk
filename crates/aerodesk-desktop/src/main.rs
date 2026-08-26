@@ -15,7 +15,7 @@ use slint::Model;
 
 use aerodesk_core::p2p_call::{P2pCall, P2pCallConfig, P2pRole, offer_video_mid};
 use aerodesk_core::platform::{AppShell, FilePicker, Permissions, Renderer};
-use aerodesk_core::protocol::cmd::CmdRequest;
+use aerodesk_core::protocol::cmd::{CmdRequest, PowerAction};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1127,6 +1127,41 @@ fn wire_control_window(win: &ControlWindow, slot: usize, ui_weak: slint::Weak<Ap
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_status("正在断开当前会话…".into());
                 ui.set_input_mode("键鼠已释放".into());
+            }
+        }
+    });
+    // #503 电源命令（关机/重启/锁屏）：确认框确认后下发 cmd 通道，被控端
+    // 按平台执行内置安全命令并写审计；回执经会话线程回显到状态条/终端。
+    win.on_system_power({
+        let win_weak = win_weak.clone();
+        move |action: slint::SharedString| {
+            let power = match action.as_str() {
+                "关机" => PowerAction::Shutdown,
+                "重启" => PowerAction::Reboot,
+                "锁屏" => PowerAction::Lock,
+                _ => {
+                    if let Some(win) = win_weak.upgrade() {
+                        win.set_status(format!("未知电源动作：{action}").into());
+                    }
+                    return;
+                }
+            };
+            let sessions = SESSIONS.lock().unwrap();
+            match sessions.iter().find(|s| s.engine.slot == slot) {
+                Some(s) => {
+                    let id = CMD_NEXT.fetch_add(1, Ordering::SeqCst);
+                    let _ = s.engine.cmd_tx.send(CmdRequest::system_power(id, power));
+                    if let Some(win) = win_weak.upgrade() {
+                        win.set_status(
+                            format!("已发送{}指令，等待被控端回执…", power.label()).into(),
+                        );
+                    }
+                }
+                None => {
+                    if let Some(win) = win_weak.upgrade() {
+                        win.set_status("会话已结束，无法执行电源操作".into());
+                    }
+                }
             }
         }
     });

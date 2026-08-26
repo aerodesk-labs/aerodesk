@@ -7,6 +7,30 @@
 use base64ct::{Base64, Encoding};
 use serde::{Deserialize, Serialize};
 
+/// #503 系统电源动作（关机/重启/锁屏）：内置安全命令，动作枚举受限、
+/// 不接受自由参数（杜绝 shell 注入），由被控端按平台构造固定系统命令执行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PowerAction {
+    /// 关机。
+    Shutdown,
+    /// 重启。
+    Reboot,
+    /// 锁屏。
+    Lock,
+}
+
+impl PowerAction {
+    /// 中文动作名（UI 展示/日志用）。
+    pub fn label(&self) -> &'static str {
+        match self {
+            PowerAction::Shutdown => "关机",
+            PowerAction::Reboot => "重启",
+            PowerAction::Lock => "锁屏",
+        }
+    }
+}
+
 /// 命令/文件/进程请求（控制端 → 被控端）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CmdRequest {
@@ -46,6 +70,9 @@ pub enum CmdAction {
         #[serde(default)]
         timestamp_ms: u64,
     },
+    /// #503 系统电源命令（关机/重启/锁屏）：内置安全命令，动作枚举受限，
+    /// 不经 shell 拼接（比裸 run_command 更可控），被控端执行后写 cmd 审计。
+    SystemPower { action: PowerAction },
 }
 
 /// 命令/文件/进程响应（被控端 → 控制端）。
@@ -104,6 +131,15 @@ pub enum CmdResult {
         sender: String,
         text: String,
     },
+    /// #503 电源命令回执（关机/重启成功后对端可能不再回话，控制端应提示预期）。
+    Power {
+        action: PowerAction,
+        #[serde(default)]
+        error: Option<String>,
+        /// #13 结构化错误码（[`crate::error::ErrorCode`] 的 wire 串；旧对端缺省 None）。
+        #[serde(default)]
+        code: Option<String>,
+    },
 }
 
 /// 进程信息（list_processes 结果项）。
@@ -156,6 +192,11 @@ impl CmdRequest {
     pub fn kill_process(id: u64, pid: u32) -> Self {
         Self::new(id, CmdAction::KillProcess { pid })
     }
+
+    /// #503 系统电源命令（关机/重启/锁屏）。
+    pub fn system_power(id: u64, action: PowerAction) -> Self {
+        Self::new(id, CmdAction::SystemPower { action })
+    }
 }
 
 impl CmdResult {
@@ -169,6 +210,7 @@ impl CmdResult {
             CmdResult::ProcessList { error, .. } => error.is_none(),
             CmdResult::Killed { error, .. } => error.is_none(),
             CmdResult::Chat { .. } => true,
+            CmdResult::Power { error, .. } => error.is_none(),
         }
     }
 }
@@ -254,5 +296,49 @@ mod tests {
             CmdResult::Run { code, .. } => assert_eq!(code.as_deref(), Some("blocked_by_policy")),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// #503：电源命令 wire 格式（snake_case 枚举 + round-trip）。
+    #[test]
+    fn system_power_roundtrip() {
+        let req = CmdRequest::system_power(7, PowerAction::Shutdown);
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"type\":\"system_power\""));
+        assert!(json.contains("\"action\":\"shutdown\""));
+        let back: CmdRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, req);
+        if let CmdAction::SystemPower { action } = &back.action {
+            assert_eq!(*action, PowerAction::Shutdown);
+        } else {
+            panic!("wrong action");
+        }
+        // 其余动作枚举序列化
+        assert!(
+            serde_json::to_string(&PowerAction::Reboot)
+                .unwrap()
+                .contains("reboot")
+        );
+        assert!(
+            serde_json::to_string(&PowerAction::Lock)
+                .unwrap()
+                .contains("lock")
+        );
+        // 未知动作拒绝解析（枚举受限，不接受自由参数）
+        assert!(serde_json::from_str::<PowerAction>("\"format_disk\"").is_err());
+        // 回执 ok 语义
+        let ok = CmdResult::Power {
+            action: PowerAction::Lock,
+            error: None,
+            code: None,
+        };
+        assert!(ok.ok());
+        let err = CmdResult::Power {
+            action: PowerAction::Lock,
+            error: Some("blocked by policy".into()),
+            code: Some("blocked_by_policy".into()),
+        };
+        assert!(!err.ok());
+        // 中文动作名（UI/审计展示）
+        assert_eq!(PowerAction::Reboot.label(), "重启");
     }
 }

@@ -123,6 +123,22 @@ pub(crate) fn format_cmd_response(response: &CmdResponse) -> String {
             }
         }
         CmdResult::Chat { text, .. } => format!("[消息] {text}"),
+        // #503 电源命令回执：成功即返回；关机/重启后对端可能不再回话（状态条可见）。
+        CmdResult::Power {
+            action,
+            error,
+            code: _,
+        } => {
+            if let Some(error) = error {
+                format!("[电源命令 {} 失败] {error}", action.label())
+            } else {
+                format!(
+                    "[电源命令 {} 已执行]（{}后对端可能不再响应远控）",
+                    action.label(),
+                    action.label()
+                )
+            }
+        }
     }
 }
 
@@ -352,7 +368,13 @@ fn run_viewer_impl<U, D, R, DF, RF>(
                 if let CmdResult::Chat { sender, text } = &response.result {
                     ui.append_chat_message(sender.clone(), text.clone(), false);
                 } else {
-                    ui.append_terminal_output(format_cmd_response(&response));
+                    let text = format_cmd_response(&response);
+                    // #503 电源命令结果：除终端回显外同步到会话状态条
+                    // （远控窗口无终端时也可见执行结果）。
+                    if matches!(&response.result, CmdResult::Power { .. }) {
+                        ui.session_status(text.clone());
+                    }
+                    ui.append_terminal_output(text);
                 }
             }
             // #75 远程光标：被控端经 cursor 通道广播位置 → UI 叠加（与 macOS UI 一致）；

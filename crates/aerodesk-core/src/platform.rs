@@ -17,6 +17,8 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use aerodesk_protocol::cmd::PowerAction;
+
 /// 编码输出单元。
 #[derive(Debug, Clone)]
 pub struct EncodedUnit {
@@ -244,7 +246,21 @@ pub trait CommandExecutor {
     ) -> Result<Vec<crate::protocol::cmd::ProcessInfo>, crate::cmd_exec::CmdExecError>;
     /// 结束进程。
     fn kill_process(&self, pid: u32) -> Result<(), crate::cmd_exec::CmdExecError>;
+    /// #503 系统电源命令（关机/重启/锁屏）原始执行。动作经 [`PowerAction`] 枚举
+    /// 校验（不接受自由参数，杜绝 shell 注入）；平台固定命令由
+    /// [`crate::cmd_exec::power_command_line`] 构造（命令本身受限且固定，不经
+    /// 危险命令拦截）。策略（审计）在 [`crate::cmd_exec::system_power`]。
+    /// 默认实现即全平台通用路径（Windows shutdown/rundll32、macOS osascript、
+    /// Linux systemctl/loginctl）；平台适配器可按需覆盖（如 macOS 改用系统 API）。
+    fn power_command(&self, action: PowerAction) -> CmdOutput {
+        let command = crate::cmd_exec::power_command_line(action);
+        self.run_command(&command, None, Some(POWER_COMMAND_TIMEOUT_MS))
+    }
 }
+
+/// 电源命令执行超时（15s）：正常命令秒回；osascript 授权弹窗未点可能挂起，
+/// 超时强杀后以 error 回执（控制端可见明确错误而非无限等待）。
+pub const POWER_COMMAND_TIMEOUT_MS: u64 = 15_000;
 
 /// 唤醒锁句柄：Drop 即释放（平台实现负责 kill 子进程/恢复系统状态）。
 /// `release` 可显式提前释放；默认空实现，平台按需覆盖。

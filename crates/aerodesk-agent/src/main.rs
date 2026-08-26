@@ -27,6 +27,7 @@ use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::media::{Vp8Frame, parse_vp8_pcap};
 use aerodesk_core::media_socket::MediaSocket;
 use aerodesk_core::platform::SystemWakeLock;
+use aerodesk_core::protocol::cmd::PowerAction;
 use aerodesk_core::protocol::input::{
     ButtonState, INPUT_PROTOCOL_VERSION, InputEvent, InputFrame, Modifiers, MouseButton,
 };
@@ -273,6 +274,18 @@ fn run() {
         Some(cmd_exec::Intent::Ps)
     } else if let Some(pid) = arg(&args, "--kill-pid").and_then(|v| v.parse().ok()) {
         Some(cmd_exec::Intent::Kill(pid))
+    } else if let Some(p) = arg(&args, "--power") {
+        // #503 系统电源命令：--power shutdown|reboot|lock（内置安全命令，
+        // 动作枚举受限；参数非法时显式报错而非静默忽略）。
+        match p.as_str() {
+            "shutdown" => Some(cmd_exec::Intent::Power(PowerAction::Shutdown)),
+            "reboot" => Some(cmd_exec::Intent::Power(PowerAction::Reboot)),
+            "lock" => Some(cmd_exec::Intent::Power(PowerAction::Lock)),
+            other => {
+                eprintln!("--power 取值必须是 shutdown|reboot|lock，收到: {other}");
+                std::process::exit(2);
+            }
+        }
     } else {
         None
     };
@@ -1350,6 +1363,18 @@ fn print_cmd_result(resp: &aerodesk_core::protocol::cmd::CmdResponse) {
         }
         CmdResult::Chat { sender, text } => {
             info!("CHAT: {sender}: {text}");
+        }
+        // #503 电源命令回执：动作 + 错误（成功即返回；关机/重启后对端可能不再回话）。
+        CmdResult::Power {
+            action,
+            error,
+            code: _,
+        } => {
+            info!(
+                "CMD_RESULT: ok={} type=power action={} error={error:?}",
+                error.is_none(),
+                action.label()
+            );
         }
     }
 }
