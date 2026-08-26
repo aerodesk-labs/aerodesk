@@ -27,11 +27,25 @@ for _ in $(seq 1 50); do
 done
 sleep 0.3
 
-echo "== 启动 publisher（视频 + --audio）+ viewer（--audio）"
+echo "== 启动 publisher（视频 + --audio），等 SIP 注册就绪后 viewer（--audio）"
 # 连续视频源（x264 合成，避免 pcap 48 帧发完导致漂移统计假象）
 ./target/debug/aerodesk-agent --role publisher --encoder x264 --audio \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/av-pub.log 2>&1 &
 PUB_PID=$!
+# #552 SIP 1:1：viewer 须在 publisher 注册完成后才 INVITE（否则 lookup 未命中
+# 走会议桥 SFU——同 linux-native 竞态）；同时避免注册期音频 0fps 饥饿被
+# drift 判为"真失同步"（#523 v3 健康窗逻辑对饥饿-突发恢复模式误判，实测
+# 71fps 追赶窗 FAIL）——轮询注册就绪（≤15s）。
+OK=0
+for _ in $(seq 1 30); do
+    if grep -q "SIP registered" /tmp/av-pub.log 2>/dev/null; then OK=1; break; fi
+    sleep 0.5
+done
+if [ "$OK" != "1" ]; then
+    echo "FAIL: publisher 未完成 SIP 注册"; tail -8 /tmp/av-pub.log
+    kill "$PUB_PID" 2>/dev/null || true
+    exit 1
+fi
 ./target/debug/aerodesk-agent --role viewer --audio \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/av-view.log 2>&1 &
 VIEW_PID=$!
@@ -48,7 +62,9 @@ sample_drift() {
 }
 # 音频到达计数采样（AUDIO: N frames 的末次值）
 sample_audio_frames() {
-    grep -oE 'AUDIO: [0-9]+ frames' /tmp/av-view.log 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1
+    # 音频帧未打印（慢启动/饥饿）时首个 grep 无匹配返回 1——顶层调用处（audio_prev/
+    # audio_now 赋值）会被 pipefail+set -e 误杀；|| true 兜底，调用方再按 :-0 归一。
+    grep -oE 'AUDIO: [0-9]+ frames' /tmp/av-view.log 2>/dev/null | tail -1 | grep -oE '[0-9]+' | head -1 || true
 }
 # 漂移判定：有界（±3000ms）且相邻变化 ≤500ms。0=稳定，1=超差/样本不足
 drift_stable() {
@@ -69,6 +85,7 @@ audio_prev=${audio_prev:-0}
 window=0
 max_windows=3
 starved_all=1   # 全部观察窗均处饥饿（到达 <40fps）= 1；任一健康窗即清 0
+first_starved=0 # 首窗饥饿 = 漂移基线已被冻结的音频时间轴污染（见下），drift 本轮不可测
 while true; do
     sleep "$OBS"
     window=$((window + 1))
@@ -78,6 +95,7 @@ while true; do
     rate=$(( (audio_now - audio_prev) / OBS ))
     audio_prev=$audio_now
     if [ "$rate" -ge 40 ]; then starved_all=0; fi
+    if [ "$window" -eq 1 ] && [ "$rate" -lt 40 ]; then first_starved=1; fi
     if [ "$window" -ge "$max_windows" ]; then
         echo "== drift 第 ${window} 窗仍超差（$(sample_drift | tr '\n' ' ')），到达 ${rate}fps，窗口用尽"
         break
@@ -112,13 +130,17 @@ fi
 # v3.1：若所有观察窗音频到达均饥饿（runner 持续满载，实测 33-39fps×18s），
 # drift（接收侧时间戳）必然恶化——此时断言降级为 SKIP 并明示未验证；
 # 任一健康窗漂移超差才 FAIL（映射类真 bug 在健康窗照样显形）。
+# v3.2（#587 实测补充）：首窗 0fps 全停（比 v3.1 预想更极端）会冻结音频时间轴
+# 污染漂移基线，次窗 70fps 突发追赶（假健康）无法在测量窗口内弥合——判别器
+# 在此区间无法区分真失同步与基线污染。首窗饥饿 = 漂移本轮不可测 → SKIP；
+# 首窗健康时判定照旧（相邻变化 ≤500ms 且 |drift|≤3000ms 即 PASS，超差即 FAIL）。
 if drift_stable; then
     DRIFTS=$(sample_drift)
     LAST=$(echo "$DRIFTS" | tail -1)
     PREV=$(echo "$DRIFTS" | tail -2 | head -1)
     echo "PASS drift stable (${PREV} -> ${LAST}ms)"
-elif [ "$starved_all" = "1" ]; then
-    echo "SKIP drift（全部 $max_windows 窗音频到达饥饿，runner 满载，本轮未验证漂移；媒体接收/jitter/panic 断言仍生效）"
+elif [ "$starved_all" = "1" ] || [ "$first_starved" = "1" ]; then
+    echo "SKIP drift（首窗/全窗音频到达饥饿，漂移基线被冻结时间轴污染，本轮未验证漂移；媒体接收/jitter/panic 断言仍生效）"
 else
     echo "FAIL drift unstable: $(sample_drift | tr '\n' ' ')"; tail -3 /tmp/av-view.log; fail=1
 fi

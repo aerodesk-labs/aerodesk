@@ -360,53 +360,64 @@ jobs:
       # #85：用 release 构建——debug 下 str0m/sctp-proto 高吞吐 data channel
       # 深调用链会 stack overflow（#102 已知，SFU shard 已 8MB 栈缓解）；
       # 吞吐验收本就需 release（LESSON 性能压测）。
+      # #584 恢复：#553 暂停的 macOS e2e——SIP 1:1 语义核对完成（publisher 先注册
+      # 被叫、viewer 后呼入，媒体/文件走 P2P data channel 不经 SFU）。
       - name: e2e file transfer (macOS only)
-        if: false && runner.os == 'macOS'
+        if: runner.os == 'macOS'
         run: PROFILE=release ./scripts/file-transfer-e2e.sh
 
       # #72 取消回归：publisher --cancel-send-after 中途取消 → viewer 不落盘、无残留。
       # #85：release 构建（debug 深链栈溢出已知限制 #102）。
+      # #584 恢复：SIP 1:1 语义核对——脚本已改为 publisher 先注册、viewer 后呼入
+      # （viewer 先起时 INVITE 无绑定走会议桥，取消回归悬空）。
       - name: e2e file transfer cancel/cleanup (macOS only)
-        if: false && runner.os == 'macOS'
+        if: runner.os == 'macOS'
         run: PROFILE=release ./scripts/file-cancel-e2e.sh
 
       # #72 剪贴板双向同步：viewer→publisher 与 publisher→viewer 两个方向。
+      # #584 恢复：SIP 1:1 语义核对——脚本已改为 publisher 先注册、viewer 后呼入。
       - name: e2e clipboard sync (macOS only)
-        if: false && runner.os == 'macOS'
+        if: runner.os == 'macOS'
         run: ./scripts/clipboard-e2e.sh
 
       # #75 远程光标：publisher 光标通道 → SFU → viewer 收到轨迹。
+      # #584 恢复：SIP 1:1 语义核对——脚本已改为 publisher 先注册、viewer 后呼入。
       - name: e2e remote cursor (macOS only)
-        if: false && runner.os == 'macOS'
+        if: runner.os == 'macOS'
         run: ./scripts/cursor-e2e.sh
 
       # #74 多 codec（H264/H265/VP9/AV1）：--encoder ffmpeg --codec → SFU → viewer 收帧。
       # #166：瞬时 flake（个别 codec 无帧）限 3 次重试；根因归 codec 链路作者修复。
+      # #584 恢复：SIP 1:1 语义核对完成（publisher 先注册被叫、viewer 后呼入）。
       - name: e2e multi-codec (macOS only)
-        if: false && runner.os == 'macOS'
+        if: runner.os == 'macOS'
         run: bash scripts/ci-retry.sh 3 ./scripts/codec-e2e.sh
 
       # #75 输入注入：viewer 输入事件 → SFU → publisher 注入（macOS CGEvent）。
+      # #584 恢复：SIP 1:1 语义核对完成（publisher 先注册被叫、viewer 后呼入）。
       - name: e2e input injection (macOS only)
-        if: false && runner.os == 'macOS'
+        if: runner.os == 'macOS'
         run: ./scripts/input-e2e.sh
 
       # #109 远程命令：viewer --run-command → SFU → publisher 执行 → stdout/stderr/exit。
-      # #553 验收前置：SIP 适配已做（独立配对），kill-process 子用例在 macOS
-      # 环境偶发失败（sleep 后台 + $! 时序）——暂停待 P1 环境差异定位后恢复。
+      # #584 恢复：SIP 1:1 独立配对已覆盖全部 case——kill-process 子用例根因定位
+      # （kill-pid viewer 原呼入已在 case1 被杀 publisher 的房间：绑定残留→INVITE
+      # 落死 flow、过期→会议桥，均无法执行）——改为独立配对（新房间 + 新 publisher）。
       - name: e2e remote command (macOS only)
-        if: false && runner.os == 'macOS'
+        if: runner.os == 'macOS'
         run: ./scripts/cmd-e2e.sh
 
       # #109 MCP 工具面：stdio JSON-RPC 会话 → aerodesk-mcp → CLI 桥 → 被控端执行。
       # #166：瞬时 flake（upload_file 超时）限 3 次重试；根因归 MCP 链路作者修复。
+      # #584 恢复：SIP 1:1 语义核对完成（publisher 先注册、aerodesk-mcp 经 CLI 呼入）。
       - name: e2e mcp tool surface (macOS only)
-        if: false && runner.os == 'macOS'
+        if: runner.os == 'macOS'
         run: bash scripts/ci-retry.sh 3 ./scripts/mcp-e2e.sh
 
       # #73 A/V 同步：连续视频+音频，AVSYNC 漂移/jitter buffer 统计。
+      # #584 恢复：SIP 1:1 语义核对完成（publisher 先注册被叫、viewer 后呼入）。
       - name: e2e av sync (macOS only)
-        if: false && runner.os == 'macOS'
+        if: runner.os == 'macOS'
         run: ./scripts/avsync-e2e.sh
 
       # 客户端自测：Web 主控端（浏览器观看 + 输入回传，SFU 内嵌 web/index.html）。
