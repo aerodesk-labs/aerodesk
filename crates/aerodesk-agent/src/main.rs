@@ -16,6 +16,7 @@ mod cli_video_decoder;
 mod clipboard;
 mod cmd_exec;
 mod file_transfer;
+mod privacy;
 
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
@@ -1256,6 +1257,7 @@ enum AudioCodec {
 }
 
 /// #58/#73 音频节拍器：合成正弦（440Hz）→ PCMU（8kHz）/ Opus（48kHz），20ms/帧。
+/// #503 隐私屏静音：`set_muted` 后仍按原节拍发送静音帧（保持 RTP 时序，恢复即回）。
 struct AudioTicker {
     next: Instant,
     pts: u64,
@@ -1263,6 +1265,8 @@ struct AudioTicker {
     codec: AudioCodec,
     /// Opus 编码器（首次发帧时惰性创建；libopus 缺失时回退 PCMU）。
     opus: Option<aerodesk_codec::audio::OpusEncoder>,
+    /// 静音（隐私屏）：发送全 0 样本帧。
+    muted: bool,
 }
 
 impl AudioTicker {
@@ -1277,7 +1281,13 @@ impl AudioTicker {
                 AudioCodec::Pcmu
             },
             opus: None,
+            muted: false,
         }
+    }
+
+    /// 设置静音（被控端音频源 mute，隐私屏用）。
+    fn set_muted(&mut self, muted: bool) {
+        self.muted = muted;
     }
 
     /// 到点则补发若干 20ms 音频帧（PCMU 160 样本 / Opus 960 样本）。
@@ -1292,10 +1302,12 @@ impl AudioTicker {
             match self.codec {
                 AudioCodec::Pcmu => {
                     let mut samples = [0i16; 160];
-                    for s in &mut samples {
-                        let t = self.phase as f64 / 8000.0;
-                        *s = ((t * 440.0 * std::f64::consts::TAU).sin() * 8000.0) as i16;
-                        self.phase = self.phase.wrapping_add(1);
+                    if !self.muted {
+                        for s in &mut samples {
+                            let t = self.phase as f64 / 8000.0;
+                            *s = ((t * 440.0 * std::f64::consts::TAU).sin() * 8000.0) as i16;
+                            self.phase = self.phase.wrapping_add(1);
+                        }
                     }
                     let data = aerodesk_core::pcmu::pcmu_encode(&samples);
                     let rtp_time = str0m::media::MediaTime::new(
@@ -1320,10 +1332,12 @@ impl AudioTicker {
                         }
                     }
                     let mut samples = [0i16; 960];
-                    for s in &mut samples {
-                        let t = self.phase as f64 / 48_000.0;
-                        *s = ((t * 440.0 * std::f64::consts::TAU).sin() * 8000.0) as i16;
-                        self.phase = self.phase.wrapping_add(1);
+                    if !self.muted {
+                        for s in &mut samples {
+                            let t = self.phase as f64 / 48_000.0;
+                            *s = ((t * 440.0 * std::f64::consts::TAU).sin() * 8000.0) as i16;
+                            self.phase = self.phase.wrapping_add(1);
+                        }
                     }
                     let data = self
                         .opus
@@ -1683,6 +1697,10 @@ fn handle_publisher_input(endpoint: &mut Endpoint, ev: ClientEvent) {
                         // 合成发布端（vt/x264/ffmpeg）无持久编码器句柄：日志验证；
                         // 真实屏幕发布端（publisher_capture）在此处应用 set_bitrate。
                         info!("control: bitrate feedback -> {bps} bps");
+                    }
+                    // #503 隐私屏：pcap 合成发布端无可隐藏画面，仅日志验证链路。
+                    if v.get("privacy").is_some() {
+                        info!("control: privacy message received（pcap 合成发布端：仅日志）");
                     }
                 }
             }
@@ -2988,6 +3006,8 @@ fn publisher_generic<
     // #316：有真实系统音频采集则优先（RealAudioSender），否则合成音 AudioTicker。
     let mut real_audio = audio_cap.map(|cap| RealAudioSender::new(cap, audio_opus));
     let mut audio_ticker = AudioTicker::new(audio_opus);
+    // #503 隐私屏：被控端黑屏/定制文字/静音（viewer 经 control 通道下发）。
+    let mut privacy = privacy::PrivacyState::default();
     // #385：摄像头第二路视频轨（--camera，BGRA → FFmpeg 软编 → camera_mid）。
     let mut camera_cap = camera_cap;
     let mut camera_enc: Option<aerodesk_codec::encode::FfmpegEncoder> = None;
@@ -3082,6 +3102,20 @@ fn publisher_generic<
                             encoder.set_bitrate(bps, fps);
                             info!("control: bitrate feedback applied -> {bps} bps");
                         }
+                        // #503 隐私屏：开启后采集帧被黑/文字帧覆盖（媒体继续出流），
+                        // 关闭即恢复；静音经音频源发送器生效（发送静音帧）。
+                        if privacy::apply_control(&v, &mut privacy) {
+                            info!(
+                                "control: privacy -> enabled={} mode={:?} text={:?} mute={}",
+                                privacy.enabled, privacy.mode, privacy.text, privacy.mute_audio
+                            );
+                            if let Some(ra) = &mut real_audio {
+                                ra.set_muted(privacy.mute_audio);
+                            }
+                            audio_ticker.set_muted(privacy.mute_audio);
+                            // 切换瞬间画面剧变：请求关键帧加速观看端恢复/收敛。
+                            encoder.request_keyframe();
+                        }
                     }
                 }
                 ev => handle_publisher_input(&mut endpoint, ev),
@@ -3119,7 +3153,14 @@ fn publisher_generic<
             // 运行期编码错误降级为丢帧 + 告警：硬件编码器可能瞬时失败（模式切换/
             // 设备丢失），不应 panic 整个发布端（旧实现 expect 一错即崩）。
             match source.next_frame() {
-                Ok(Some(frame)) => {
+                Ok(Some(mut frame)) => {
+                    // #503 隐私屏：黑屏/定制文字覆盖真实画面（媒体继续出流，
+                    // 关闭后下一帧即恢复真实屏幕）。
+                    if privacy.enabled
+                        && let Some(raw) = frame.raw.as_mut()
+                    {
+                        privacy::paint(&privacy, raw, frame.width, frame.height);
+                    }
                     // #477 机制 B：缓存末帧供静态屏心跳重发。
                     if let Some(raw) = frame.raw.as_ref() {
                         last_frame_raw = Some((raw.clone(), frame.width, frame.height));
@@ -3733,6 +3774,9 @@ fn publisher_capture_ffmpeg(
     let mut connected = false;
     let mut audio_ticker = AudioTicker::new(audio_opus);
     let mut pts = 0i64;
+    // #503 隐私屏：被控端黑屏/定制文字/静音（viewer 经 control 通道下发）。
+    let mut privacy = privacy::PrivacyState::default();
+    let mut privacy_buf: Vec<u8> = Vec::new();
     // #75 远程光标：真实光标位置（30Hz）。
     let mut last_cursor = Instant::now();
 
@@ -3775,6 +3819,32 @@ fn publisher_capture_ffmpeg(
                 ClientEvent::KeyframeRequest(_) => {
                     encoder.request_keyframe();
                 }
+                // #58/#267/#503：control 通道（显示器切换/码率/隐私屏）。此路径
+                // （macOS FFmpeg 屏幕采集）显示器切换不支持（保持当前），隐私屏生效。
+                ClientEvent::ChannelData(cid, _, data)
+                    if endpoint.channel_label(cid).as_deref() == Some("control") =>
+                {
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&data) {
+                        if let Some(bps) = v.get("bitrate").and_then(|b| b.as_u64()) {
+                            // #267 码率反馈（macOS FFmpeg 采集）：Encoder trait 不在本
+                            // 函数 scope，fully qualified 调用（同 publisher_generic）。
+                            aerodesk_core::platform::Encoder::set_bitrate(
+                                &mut encoder,
+                                bps,
+                                FPS as u32,
+                            );
+                            info!("control: bitrate feedback applied -> {bps} bps");
+                        }
+                        if privacy::apply_control(&v, &mut privacy) {
+                            info!(
+                                "control: privacy -> enabled={} mode={:?} text={:?} mute={}",
+                                privacy.enabled, privacy.mode, privacy.text, privacy.mute_audio
+                            );
+                            audio_ticker.set_muted(privacy.mute_audio);
+                            encoder.request_keyframe();
+                        }
+                    }
+                }
                 ev => handle_publisher_input(&mut endpoint, ev),
             }
         }
@@ -3793,14 +3863,25 @@ fn publisher_capture_ffmpeg(
             }
         }
 
-        if connected && let Some(surface) = capture.capture_frame(Duration::from_millis(50)) {
-            // IOSurface（BGRA）→ 行复制到 CPU 缓冲 → FFmpeg 编码。
-            let bgra = match aerodesk_platform::macos::capture::surface_to_bgra(&surface, w, h) {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!("surface read failed: {e}");
-                    continue;
+        if connected {
+            // #503 隐私屏：跳过真实采集，注入黑/文字帧（媒体继续出流）。
+            let bgra: Vec<u8> = if privacy.enabled {
+                if privacy_buf.len() != (w * h * 4) as usize {
+                    privacy_buf = vec![0u8; (w * h * 4) as usize];
                 }
+                privacy::paint(&privacy, &mut privacy_buf, w, h);
+                privacy_buf.clone()
+            } else if let Some(surface) = capture.capture_frame(Duration::from_millis(50)) {
+                // IOSurface（BGRA）→ 行复制到 CPU 缓冲 → FFmpeg 编码。
+                match aerodesk_platform::macos::capture::surface_to_bgra(&surface, w, h) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        warn!("surface read failed: {e}");
+                        continue;
+                    }
+                }
+            } else {
+                continue;
             };
             // 运行期编码错误降级为丢帧 + 告警（旧 expect 一错即崩整个发布端）。
             match encoder.encode_bgra(&bgra) {
@@ -4005,6 +4086,10 @@ fn publisher_capture(
     let mut audio_ticker = AudioTicker::new(audio_opus);
     let mut pts = 0i64;
     let pts_inc = 90_000 / FPS as i64;
+    // #503 隐私屏：被控端黑屏/定制文字/静音（viewer 经 control 通道下发）。
+    // 隐私帧按层分辨率生成（simulcast 各层尺寸不同），缓冲按尺寸复用。
+    let mut privacy = privacy::PrivacyState::default();
+    let mut privacy_buf: Option<(u32, u32, Vec<u8>)> = None;
 
     // 摄像头第二路视频轨（--camera）：AVFoundation 采集 + FFmpeg 软编（BGRA）。
     let mut camera_cap: Option<aerodesk_platform::macos::camera::MacCamera> = None;
@@ -4113,6 +4198,24 @@ fn publisher_capture(
                                     aerodesk_core::platform::Encoder::set_bitrate(enc, bps, 30);
                                 }
                             }
+                            // #503 隐私屏：各层跳过真实采集、注入黑/文字帧（媒体继续
+                            // 出流）；静音经真实/合成音频源发送器生效。
+                            if privacy::apply_control(&v, &mut privacy) {
+                                info!(
+                                    "control: privacy -> enabled={} mode={:?} text={:?} mute={}",
+                                    privacy.enabled, privacy.mode, privacy.text, privacy.mute_audio
+                                );
+                                if let Some(sender) = &mut real_audio {
+                                    sender.set_muted(privacy.mute_audio);
+                                }
+                                audio_ticker.set_muted(privacy.mute_audio);
+                                // 切换瞬间画面剧变：各层请求关键帧加速观看端收敛。
+                                for (_, enc, _) in layers.iter_mut() {
+                                    if let Err(e) = enc.force_keyframe() {
+                                        warn!("privacy keyframe failed: {e}");
+                                    }
+                                }
+                            }
                         }
                     } else {
                         handle_publisher_input(
@@ -4150,6 +4253,30 @@ fn publisher_capture(
             let mut frames = Vec::with_capacity(layers.len());
             let mut captured_any = false;
             for (rid, encoder, capture) in &mut layers {
+                // #503 隐私屏：跳过真实采集，注入黑/文字帧（媒体继续出流）。
+                if privacy.enabled {
+                    let (cw, ch) = (capture.width(), capture.height());
+                    // 隐私帧缓冲按尺寸复用（simulcast 各层尺寸固定，避免每帧分配）。
+                    let fits = privacy_buf
+                        .as_ref()
+                        .map(|(bw, bh, _)| *bw == cw && *bh == ch)
+                        .unwrap_or(false);
+                    if !fits {
+                        privacy_buf = Some((cw, ch, vec![0u8; (cw * ch * 4) as usize]));
+                    }
+                    let bgra = &mut privacy_buf.as_mut().expect("just set").2;
+                    privacy::paint(&privacy, bgra, cw, ch);
+                    captured_any = true;
+                    match encoder.encode_bgra(bgra) {
+                        Ok(Some(frame)) => {
+                            let annexb = encoder.to_annexb(&frame);
+                            frames.push((*rid, annexb));
+                        }
+                        Ok(None) => {}
+                        Err(e) => warn!("vt encode (privacy): {e}"),
+                    }
+                    continue;
+                }
                 if let Some(surface) = capture.capture_frame(Duration::from_millis(50)) {
                     captured_any = true;
                     match encoder.encode_surface(&surface) {

@@ -121,6 +121,8 @@ pub fn run_generic_viewer_peer<U, R, RF>(
     chat_cmd_rx: std::sync::mpsc::Receiver<crate::ChatCmd>,
     stop: Arc<AtomicBool>,
     view_only: Arc<AtomicBool>,
+    // #503 控制通道消息（UI 隐私屏/显示器切换 → control data channel → 被控端）。
+    control_rx: Option<std::sync::mpsc::Receiver<String>>,
     trickle_rx: Option<std::sync::mpsc::Receiver<String>>,
     mk_renderer: RF,
 ) where
@@ -138,6 +140,7 @@ pub fn run_generic_viewer_peer<U, R, RF>(
         chat_cmd_rx,
         stop,
         view_only,
+        control_rx,
         decoder_label(),
         trickle_rx,
         mk_viewer_decoder,

@@ -224,7 +224,6 @@ pub(crate) fn format_cmd_response(response: &CmdResponse) -> String {
 /// - `mk_decoder`：连接成功后惰性创建解码器（可失败）。
 /// - `mk_renderer`：连接成功后创建渲染器。
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn run_viewer_generic_peer<U, D, R, DF, RF>(
     p2p: aerodesk_core::p2p_call::P2pCall,
     room: String,
@@ -235,6 +234,8 @@ pub fn run_viewer_generic_peer<U, D, R, DF, RF>(
     chat_cmd_rx: std::sync::mpsc::Receiver<crate::ChatCmd>,
     stop: Arc<AtomicBool>,
     view_only: Arc<AtomicBool>,
+    // #503 控制通道消息（UI 隐私屏/显示器切换 → control data channel → 被控端）。
+    control_rx: Option<std::sync::mpsc::Receiver<String>>,
     decoder_label: &'static str,
     trickle_rx: Option<std::sync::mpsc::Receiver<String>>,
     mk_decoder: DF,
@@ -264,6 +265,7 @@ pub fn run_viewer_generic_peer<U, D, R, DF, RF>(
         chat_cmd_rx,
         stop,
         view_only,
+        control_rx,
         trickle_rx,
         mk_decoder,
         mk_renderer,
@@ -282,6 +284,7 @@ fn run_viewer_impl<U, D, R, DF, RF>(
     chat_cmd_rx: std::sync::mpsc::Receiver<crate::ChatCmd>,
     stop: Arc<AtomicBool>,
     view_only: Arc<AtomicBool>,
+    control_rx: Option<std::sync::mpsc::Receiver<String>>,
     trickle_rx: Option<std::sync::mpsc::Receiver<String>>,
     mut mk_decoder: DF,
     mut mk_renderer: RF,
@@ -359,6 +362,18 @@ fn run_viewer_impl<U, D, R, DF, RF>(
                     .send_channel_data("cmd", false, json.as_bytes());
                 if !sent {
                     ui.append_terminal_output("[错误] cmd 通道未就绪，命令未送达".to_string());
+                }
+            }
+        }
+        // #503 控制消息（UI 隐私屏开关/显示器切换 → control data channel → 被控端；
+        // 与 CLI viewer 的 --display/--send-control 同通道同语义）。
+        if let Some(rx) = control_rx.as_ref() {
+            while let Ok(msg) = rx.try_recv() {
+                let sent = t
+                    .endpoint()
+                    .send_channel_data("control", false, msg.as_bytes());
+                if !sent {
+                    tracing::warn!("control 通道发送失败（通道未建立？）");
                 }
             }
         }
