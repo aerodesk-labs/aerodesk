@@ -370,6 +370,13 @@ mod imp {
     ) {
         let stale = || stop.load(Ordering::SeqCst);
 
+        // #503-2 被控端剪贴板双向：file 通道接收 viewer 发来的文本/图片 + 本地
+        // 1s 轮询回传（与 CLI 被控端同语义；图片优先，防回声）。
+        let mut file_transfer = aerodesk_core::file_transfer::FileTransfer::new(None);
+        // 被控端允许响应 FileControl::Request 提供文件（#255 审查语义，同 CLI）。
+        file_transfer.set_allow_request(true);
+        let mut clip_poller = crate::clipboard_sync::ClipboardPoller::new();
+
         // 屏幕采集链（#514）：WGC 主 → DXGI 备，首帧 GDI 引导内置（#477）。
         // （4K 软编性能不足，默认缩放到 1080p。）
         use aerodesk_platform::windows::capture::ScreenCapturer;
@@ -476,6 +483,8 @@ mod imp {
             t.pump();
 
             while let Some(ev) = t.poll_event() {
+                // #503-2 被控端 file 通道事件交给状态机（非 file 事件为 no-op）。
+                file_transfer.handle_event(&ev, t.endpoint());
                 match ev {
                     ClientEvent::IceConnected => {
                         connected = true;
@@ -499,6 +508,15 @@ mod imp {
                     ClientEvent::KeyframeRequest(_) => encoder.request_keyframe(),
                     ev => handle_input(t.endpoint(), &mut injector, view_only, mouse, ev),
                 }
+            }
+
+            // #503-2 被控端剪贴板：应用 viewer 发来的文本/图片 + 本地轮询回传。
+            if let Some(msg) = crate::clipboard_sync::tick_publisher_clipboard(
+                &mut file_transfer,
+                t.endpoint(),
+                &mut clip_poller,
+            ) {
+                on_event(PublisherEvent::Status(msg));
             }
 
             if let Some(amid) = audio_mid.to_owned()

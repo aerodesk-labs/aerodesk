@@ -22,4 +22,28 @@ impl aerodesk_core::platform::FilePicker for MacFilePicker {
         let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
         Ok(if path.is_empty() { None } else { Some(path) })
     }
+
+    /// #503 多选：`choose file with multiple selections allowed` 返回别名列表，
+    /// 逐项转 POSIX 路径（每行一个）。
+    fn pick_files(&self) -> Result<Option<Vec<String>>, Self::Error> {
+        let script = "set fs to choose file with multiple selections allowed\n\
+                      set out to \"\"\n\
+                      repeat with f in fs\n\
+                          set out to out & (POSIX path of f) & linefeed\n\
+                      end repeat\n\
+                      return out";
+        let out = Command::new("osascript")
+            .args(["-e", script])
+            .output()
+            .map_err(|e| format!("osascript: {e}"))?;
+        if !out.status.success() {
+            return Ok(None); // 用户取消 / 无选择
+        }
+        let paths: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        Ok(if paths.is_empty() { None } else { Some(paths) })
+    }
 }

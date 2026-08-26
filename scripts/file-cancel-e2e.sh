@@ -43,13 +43,16 @@ for _ in $(seq 1 50); do
 done
 sleep 0.3
 
-echo "== 启动 viewer（--recv-dir）+ publisher（--send-file --cancel-send-after 6）"
-"$BIN/aerodesk-agent" --role viewer --recv-dir "$OUT" \
-    --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/ftc-view.log 2>&1 &
-VIEW_PID=$!
+# #584 SIP 1:1：viewer 须在 publisher 注册完成后才 INVITE（先起 viewer 时 INVITE
+# 无绑定→服务端会议桥，取消回归悬空）——publisher 先注册、等 2s、viewer 再呼入。
+echo "== 启动 publisher（--send-file --cancel-send-after 6）+ viewer（--recv-dir）"
 "$BIN/aerodesk-agent" --role publisher --send-file "$SRC" --cancel-send-after 6 \
     --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/ftc-pub.log 2>&1 &
 PUB_PID=$!
+sleep 2
+"$BIN/aerodesk-agent" --role viewer --recv-dir "$OUT" \
+    --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/ftc-view.log 2>&1 &
+VIEW_PID=$!
 
 # 轮询等取消传播（3s 启动延迟 + 发送 + 取消 + 收尾；CI 慢启动时固定 sleep
 # 会误判，最多 ~30s）

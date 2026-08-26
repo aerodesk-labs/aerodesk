@@ -1183,6 +1183,49 @@ fn handle(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
             serde_json::to_vec(&payload).expect("serialize healthz"),
         );
     }
+    // #503 在线设备列表（无人值守入口管理数据源）：合并 WSS 房间 presence 与
+    // SIP Registrar 注册绑定。属 HTTP 管理端点（与 /healthz /metrics 同族），
+    // 不改信令协议面（SIP/JSON /ws）。WSS 侧只统计真实 publisher presence
+    // （观看端也 Join 设备房间，但不算设备在线；桥自身腿亦排除）。
+    if request.method() == "GET" && request.url() == "/devices" {
+        let mut online: std::collections::BTreeMap<String, Vec<&'static str>> =
+            std::collections::BTreeMap::new();
+        {
+            let rooms = rooms
+                .lock()
+                .unwrap_or_else(aerodesk_protocol::util::lock_recover);
+            for (room, peers) in rooms.iter() {
+                if peers
+                    .iter()
+                    .any(|p| is_device_presence(p.role, p.bridge_leg))
+                {
+                    online.entry(room.clone()).or_default().push("wss");
+                }
+            }
+        }
+        if let Some(aors) = sip_server::registrar_snapshot() {
+            for aor in aors {
+                online.entry(aor).or_default().push("sip");
+            }
+        }
+        let devices: Vec<serde_json::Value> = online
+            .into_iter()
+            .map(|(id, via)| {
+                serde_json::json!({
+                    "id": id,
+                    "via": via,
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "devices": devices,
+            "pop": config.pop_id,
+        });
+        return Response::from_data(
+            "application/json",
+            serde_json::to_vec(&payload).expect("serialize devices"),
+        );
+    }
     if request.method() == "GET" && request.url() == "/metrics/prometheus" {
         let clients = total_clients();
         let room_count = rooms
@@ -1343,6 +1386,12 @@ fn generate_temp_password() -> String {
             }
         }
     }
+}
+
+/// 判断一个 peer 是否算「设备在线」presence（#503 `/devices`）：
+/// 真实 publisher（观看端也 Join 设备房间但不代表设备在线），且排除桥自身腿。
+fn is_device_presence(role: Role, bridge_leg: bool) -> bool {
+    role == Role::Publisher && !bridge_leg
 }
 
 /// 当前全局在线客户端数（TOTAL_CLIENTS 未初始化时为 0，测试/异常兜底）。
@@ -2203,6 +2252,42 @@ mod tests {
         // 但新房间会避开下线 SFU，选次闲的 s3。
         let b = pool.select("room-b");
         assert_eq!(b, 2, "新房间应避开下线 SFU 选次闲");
+    }
+
+    #[test]
+    fn devices_endpoint_returns_json_with_empty_rooms() {
+        use std::io::Read;
+        // 注意：不触碰 TOTAL_CLIENTS（进程级 OnceLock，health 测试首个设置；
+        // /devices 端点不读它）。
+        let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
+        let config = Arc::new(cfg("s", None));
+
+        let h = handle(
+            &Request::fake_http("GET", "/devices", vec![], Vec::new()),
+            config,
+            rooms,
+        );
+        assert_eq!(h.status_code, 200);
+        let (mut reader, _size) = h.data.into_reader_and_size();
+        let mut body = String::new();
+        reader.read_to_string(&mut body).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["devices"], serde_json::json!([]), "{body}");
+        assert_eq!(v["pop"], "pop-a");
+    }
+
+    /// #503：设备在线判定——viewer 观看端与桥自身腿都不算设备在线。
+    #[test]
+    fn device_presence_filters_viewer_and_bridge_leg() {
+        assert!(is_device_presence(Role::Publisher, false));
+        assert!(
+            !is_device_presence(Role::Viewer, false),
+            "观看端不算设备在线"
+        );
+        assert!(
+            !is_device_presence(Role::Publisher, true),
+            "桥自身 publisher 腿不算设备在线"
+        );
     }
 
     #[test]

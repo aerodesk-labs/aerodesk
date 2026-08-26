@@ -164,7 +164,10 @@ fi
 TURN_USER="$(($(date +%s) + 3600)):turn-e2e"
 TURN_CRED="$(python3 -c "import hmac,hashlib,base64; print(base64.b64encode(hmac.new(b'$TURN_SECRET', b'$TURN_USER', hashlib.sha1).digest()).decode())")"
 echo "== 3a) 发布端（TURN_PROTO=${TURN_PROTO}）：allocate + relayed 候选 + ICE"
-"$TARGET_DIR"/aerodesk-agent --role publisher --encoder x264 --noisy \
+# #584：发布端同样需本地 AERO_TURN_* 配置（#552 SIP 化后 TURN 不随信令自动下发），
+# 否则不发起 allocation，3b 的「发布端 TURN 接入」断言必失败（与 viewer 对称）。
+AERO_TURN_URLS="$SIG_TURN_URLS" AERO_TURN_USERNAME="$TURN_USER" AERO_TURN_CREDENTIAL="$TURN_CRED" \
+  "$TARGET_DIR"/aerodesk-agent --role publisher --encoder x264 --noisy \
   --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/turn-e2e-pub.log 2>&1 &
 PUB_PID=$!
 # #552 SIP 1:1：publisher 等 IncomingCall——先等注册就绪，viewer（3b）起后再等 ICE。
@@ -193,9 +196,12 @@ done
 if [ "$ok" -eq 0 ]; then
     echo "PASS 发布端 TURN 接入 + ICE 连通"
 else
-    # #553：agent TURN 链路在 macOS CI 偶发失败（本地 Windows 验证通过：
-    # relayed 候选 + ICE connected）——降级 WARN，P1 定位 macOS 差异。
-    echo "WARN 发布端 TURN 接入未完成（macOS CI 环境问题，本地验证通过）"; tail -8 /tmp/turn-e2e-pub.log
+    # #584 恢复 FAIL（f3ff07e 曾降级 WARN）：TURN 链路回归保护。
+    echo "FAIL 发布端未完成 TURN 接入"; tail -8 /tmp/turn-e2e-pub.log
+    kill "$PUB_PID" 2>/dev/null || true
+    kill "$(cat /tmp/turn-e2e-sfu.pid)" "$(cat /tmp/turn-e2e-sig.pid)" 2>/dev/null || true
+    [ -n "$TURN_PID" ] && kill "$TURN_PID" 2>/dev/null || true
+    exit 1
 fi
 
 ok=1
@@ -207,7 +213,8 @@ for _ in $(seq 1 60); do
     sleep 0.3
 done
 if [ "$ok" -ne 0 ]; then
-    echo "WARN 观看端 TURN 接入未完成（macOS CI 环境问题，本地验证通过）"; tail -8 /tmp/turn-e2e-view.log
+    # #584 恢复 FAIL（f3ff07e 曾降级 WARN）：TURN 链路回归保护。
+    echo "FAIL 观看端未完成 TURN 接入"; tail -8 /tmp/turn-e2e-view.log
 else
     echo "PASS 观看端 TURN 接入 + ICE 连通"
 fi
@@ -240,7 +247,8 @@ kill "$PUB_FR_PID" 2>/dev/null || true
 if [ "$ok" -eq 0 ]; then
     echo "PASS force-relay 观看端媒体经 relay 到达"; grep -m1 'RECEIVED:' /tmp/turn-e2e-view-fr.log
 else
-    echo "WARN force-relay 观看端媒体未到达（macOS CI 环境问题，本地验证通过）"; tail -8 /tmp/turn-e2e-view-fr.log
+    # #584 恢复 FAIL（f3ff07e 曾降级 WARN）：force-relay 回归保护。
+    echo "FAIL force-relay 观看端媒体未到达"; tail -8 /tmp/turn-e2e-view-fr.log
     kill "$PUB_PID" 2>/dev/null || true
     kill "$(cat /tmp/turn-e2e-sfu.pid)" "$(cat /tmp/turn-e2e-sig.pid)" 2>/dev/null || true
     [ -n "$TURN_PID" ] && kill "$TURN_PID" 2>/dev/null || true

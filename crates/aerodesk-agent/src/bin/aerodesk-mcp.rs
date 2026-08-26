@@ -145,6 +145,17 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "system_power",
+            "description": "远程关机/重启/锁屏（#503 内置安全命令：动作枚举受限，不经 shell 拼接，被控端执行后写 cmd 审计）。关机/重启成功后对端可能不再响应。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["shutdown", "reboot", "lock"], "description": "shutdown 关机 / reboot 重启 / lock 锁屏"}
+                },
+                "required": ["action"]
+            }
+        }),
+        json!({
             "name": "mouse_move",
             "description": "移动远程鼠标到归一化坐标（0..1）。",
             "inputSchema": {
@@ -249,6 +260,14 @@ fn build_args(state: &State, name: &str, args: &Value) -> Result<Vec<String>, St
                 .ok_or_else(|| "kill_process 缺少 pid".to_string())?;
             cmd.push("--kill-pid".into());
             cmd.push(pid.to_string());
+        }
+        "system_power" => {
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "system_power 缺少 action".to_string())?;
+            cmd.push("--power".into());
+            cmd.push(action.to_string());
         }
         "mouse_move" => {
             let x = args
@@ -586,6 +605,21 @@ fn format_result(resp: &aerodesk_core::protocol::cmd::CmdResponse) -> (String, b
         }
         // #458 Chat 回执：无 error 语义，直接呈现发送者与文本。
         CmdResult::Chat { sender, text } => (format!("[chat] {sender}: {text}"), true),
+        // #503 电源命令回执：成功即返回；关机/重启后对端可能不再回话（已提示）。
+        CmdResult::Power { action, error, .. } => {
+            if let Some(e) = error {
+                (format!("电源命令 {} 失败: {e}", action.label()), false)
+            } else {
+                (
+                    format!(
+                        "电源命令 {} 已执行（{}后对端可能不再响应远控）",
+                        action.label(),
+                        action.label()
+                    ),
+                    true,
+                )
+            }
+        }
     }
 }
 
@@ -618,6 +652,10 @@ mod tests {
         let kill = build_args(&s, "kill_process", &json!({"pid":123})).unwrap();
         assert!(kill.contains(&"--kill-pid".into()));
         assert!(kill.contains(&"123".into()));
+        let power = build_args(&s, "system_power", &json!({"action":"reboot"})).unwrap();
+        assert!(power.contains(&"--power".into()));
+        assert!(power.contains(&"reboot".into()));
+        assert!(build_args(&s, "system_power", &json!({})).is_err());
         let mm = build_args(&s, "mouse_move", &json!({"x":0.25,"y":0.75})).unwrap();
         assert!(mm.contains(&"--send-input".into()));
         let ev = mm
@@ -675,5 +713,34 @@ mod tests {
         };
         let (t, ok) = format_result(&ps);
         assert!(ok && t.contains("42 sh"));
+    }
+
+    /// #503：电源命令回执格式化（成功/失败两态）。
+    #[test]
+    fn format_power_result() {
+        use aerodesk_core::protocol::cmd::PowerAction;
+        let ok = CmdResponse {
+            id: 1,
+            result: CmdResult::Power {
+                action: PowerAction::Lock,
+                error: None,
+                code: None,
+            },
+        };
+        let (t, ok) = format_result(&ok);
+        assert!(ok);
+        assert!(t.contains("锁屏"));
+        let err = CmdResponse {
+            id: 2,
+            result: CmdResult::Power {
+                action: PowerAction::Shutdown,
+                error: Some("spawn failed: x".into()),
+                code: Some("spawn_failed".into()),
+            },
+        };
+        let (t, ok) = format_result(&err);
+        assert!(!ok);
+        assert!(t.contains("关机"));
+        assert!(t.contains("spawn failed"));
     }
 }

@@ -354,6 +354,13 @@ fn run_publisher_pump(
     let mut next_cursor = Instant::now();
     let mut pts: i64 = 0;
 
+    // #503-2 被控端剪贴板双向：file 通道接收 viewer 发来的文本/图片 + 本地
+    // 1s 轮询回传（与 CLI 被控端同语义；图片优先，防回声）。
+    let mut file_transfer = aerodesk_core::file_transfer::FileTransfer::new(None);
+    // 被控端允许响应 FileControl::Request 提供文件（#255 审查语义，同 CLI）。
+    file_transfer.set_allow_request(true);
+    let mut clip_poller = crate::clipboard_sync::ClipboardPoller::new();
+
     // #487 光标列缺口（macOS 侧）：真实光标 30Hz 上报，与 Windows 端 #532
     // 同款线格式（CursorPos + sent_ms）——观看端叠加层据此绘制远端光标。
     let mut cursor_source = aerodesk_platform::macos::cursor::MacCursor;
@@ -368,6 +375,8 @@ fn run_publisher_pump(
         t.pump();
 
         while let Some(ev) = t.endpoint().poll_event() {
+            // #503-2 被控端 file 通道事件交给状态机（非 file 事件为 no-op）。
+            file_transfer.handle_event(&ev, t.endpoint());
             match ev {
                 ClientEvent::IceConnected => {
                     connected = true;
@@ -387,6 +396,15 @@ fn run_publisher_pump(
                 }
                 ev => handle_input(t.endpoint(), view_only, mouse, ev),
             }
+        }
+
+        // #503-2 被控端剪贴板：应用 viewer 发来的文本/图片 + 本地轮询回传。
+        if let Some(msg) = crate::clipboard_sync::tick_publisher_clipboard(
+            &mut file_transfer,
+            t.endpoint(),
+            &mut clip_poller,
+        ) {
+            on_event(PublisherEvent::Status(msg));
         }
 
         if let Some(amid) = audio_mid

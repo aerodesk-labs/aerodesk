@@ -15,7 +15,7 @@ use slint::Model;
 
 use aerodesk_core::p2p_call::{P2pCall, P2pCallConfig, P2pRole, offer_video_mid};
 use aerodesk_core::platform::{AppShell, FilePicker, Permissions, Renderer};
-use aerodesk_core::protocol::cmd::CmdRequest;
+use aerodesk_core::protocol::cmd::{CmdRequest, PowerAction};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,7 +30,8 @@ const DEMO_H: u32 = 180;
 /// #508 B1：FileCmd/ChatCmd 定义已迁入 aerodesk-session；re-export 保持调用点不变。
 pub use aerodesk_session::{ChatCmd, FileCmd};
 
-/// #72 拖放发送纯路由（可单测）：把文件交给会话 file 通道，返回状态文案。
+/// #72/#503 拖放发送纯路由（可单测）：把文件交给会话 file 通道（批量入队），
+/// 返回状态文案。
 pub fn dispatch_dropped_files(
     tx: Option<&std::sync::mpsc::Sender<FileCmd>>,
     paths: &[std::path::PathBuf],
@@ -46,16 +47,12 @@ pub fn dispatch_dropped_files(
     if files.is_empty() {
         return format!("发送文件：{} 不是文件", paths[0].display());
     }
-    // 当前一次只传一个文件（FileTransfer 单发送任务）：只发第一个，其余提示逐个发送。
-    let _ = tx.send(FileCmd::SendFile(files[0].clone()));
+    // #503 批量入队：全部交给传输中心队列（空闲立即发送，忙则排队）。
+    let _ = tx.send(FileCmd::SendFiles(files.clone()));
     if files.len() == 1 {
-        format!("发送文件：{}", files[0].display())
+        format!("发送文件：{}（已加入传输队列）", files[0].display())
     } else {
-        format!(
-            "发送文件：{}（一次一个，其余 {} 个文件请等待完成后再发）",
-            files[0].display(),
-            files.len() - 1
-        )
+        format!("发送文件：{} 个文件已加入传输队列", files.len())
     }
 }
 
@@ -572,30 +569,65 @@ pub fn set_message_window_status(slot: usize, status: String) {
     });
 }
 
-/// 会话线程更新文件传输独立窗口的进度/文案（无窗口时 no-op）。
-pub fn update_file_window_progress(slot: usize, progress: f32, label: String, status: String) {
+/// 会话线程更新文件传输独立窗口的状态文案（#503：进度改由传输列表展示）。
+pub fn update_file_window_progress(slot: usize, _progress: f32, _label: String, status: String) {
     let Some(weak) = file_window_weak_for_slot(slot) else {
         return;
     };
     let _ = weak.upgrade_in_event_loop(move |win| {
-        win.set_progress(progress);
-        win.set_progress_label(label.into());
         win.set_status(status.into());
     });
 }
 
-/// 会话线程清除文件传输独立窗口进度（传输结束/取消/失败后调用）。
+/// 会话线程清除文件传输独立窗口状态（传输结束/取消/失败后调用）。
 pub fn clear_file_window_progress(slot: usize, status: Option<String>) {
     let Some(weak) = file_window_weak_for_slot(slot) else {
         return;
     };
     let _ = weak.upgrade_in_event_loop(move |win| {
-        win.set_progress(-1.0);
-        win.set_progress_label("".into());
         if let Some(status) = status {
             win.set_status(status.into());
         }
     });
+}
+
+/// #503 会话线程推送传输中心列表（队列 + 活动 + 记录）到独立窗口（无窗口时 no-op）。
+pub fn update_file_window_transfers(slot: usize, entries: Vec<aerodesk_session::TransferUiEntry>) {
+    let Some(weak) = file_window_weak_for_slot(slot) else {
+        return;
+    };
+    let _ = weak.upgrade_in_event_loop(move |win| {
+        let model = slint::VecModel::<TransferEntry>::default();
+        for e in entries {
+            model.push(TransferEntry {
+                id: e.id.into(),
+                name: e.name.into(),
+                direction: e.direction.into(),
+                size: format_file_size(e.size).into(),
+                progress: e.progress,
+                state: e.state.into(),
+                detail: e.detail.into(),
+                path: e.path.into(),
+            });
+        }
+        win.set_transfer_list(slint::ModelRc::from(std::rc::Rc::new(model)));
+    });
+}
+
+/// 文件大小格式化（传输中心列表展示用）：B / KB / MB / GB。
+fn format_file_size(size: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if size >= GB {
+        format!("{:.1} GB", size as f64 / GB as f64)
+    } else if size >= MB {
+        format!("{:.1} MB", size as f64 / MB as f64)
+    } else if size >= KB {
+        format!("{:.1} KB", size as f64 / KB as f64)
+    } else {
+        format!("{size} B")
+    }
 }
 
 /// 会话线程向终端独立窗口追加输出（无窗口时 no-op）。
@@ -1024,6 +1056,9 @@ impl aerodesk_session::SessionUi for SlintSessionUi {
     fn clear_file_window_progress(&self, status: Option<String>) {
         clear_file_window_progress(self.slot, status);
     }
+    fn update_file_transfers(&self, entries: Vec<aerodesk_session::TransferUiEntry>) {
+        update_file_window_transfers(self.slot, entries);
+    }
     fn main_session_status(&self, msg: String) {
         with_ui(&self.ui, move |ui| ui.set_session_status(msg.into()));
     }
@@ -1135,6 +1170,41 @@ fn wire_control_window(win: &ControlWindow, slot: usize, ui_weak: slint::Weak<Ap
             }
         }
     });
+    // #503 电源命令（关机/重启/锁屏）：确认框确认后下发 cmd 通道，被控端
+    // 按平台执行内置安全命令并写审计；回执经会话线程回显到状态条/终端。
+    win.on_system_power({
+        let win_weak = win_weak.clone();
+        move |action: slint::SharedString| {
+            let power = match action.as_str() {
+                "关机" => PowerAction::Shutdown,
+                "重启" => PowerAction::Reboot,
+                "锁屏" => PowerAction::Lock,
+                _ => {
+                    if let Some(win) = win_weak.upgrade() {
+                        win.set_status(format!("未知电源动作：{action}").into());
+                    }
+                    return;
+                }
+            };
+            let sessions = SESSIONS.lock().unwrap();
+            match sessions.iter().find(|s| s.engine.slot == slot) {
+                Some(s) => {
+                    let id = CMD_NEXT.fetch_add(1, Ordering::SeqCst);
+                    let _ = s.engine.cmd_tx.send(CmdRequest::system_power(id, power));
+                    if let Some(win) = win_weak.upgrade() {
+                        win.set_status(
+                            format!("已发送{}指令，等待被控端回执…", power.label()).into(),
+                        );
+                    }
+                }
+                None => {
+                    if let Some(win) = win_weak.upgrade() {
+                        win.set_status("会话已结束，无法执行电源操作".into());
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// #452 给摄像头独立窗口接上“摄像头/屏幕”切换回调（本地渲染选择，不下发控制指令）。
@@ -1204,14 +1274,29 @@ fn open_session_window(
     }
 }
 
-/// #452 在后台线程选择文件并写回文件传输独立窗口。
-fn pick_file_for_transfer_window(win_weak: slint::Weak<FileTransferWindow>) {
+/// #503 在后台线程选择文件（多选）并把全部路径入队发送到传输中心。
+fn pick_files_for_transfer_window(win_weak: slint::Weak<FileTransferWindow>, slot: usize) {
     std::thread::spawn(move || {
-        let picked = pick_file();
+        let picked = pick_files();
         let _ = win_weak.upgrade_in_event_loop(move |win| match picked {
-            Ok(Some(path)) => {
-                win.set_selected_file(path.clone().into());
-                win.set_status(format!("已选择文件：{path}").into());
+            Ok(Some(paths)) => {
+                let sent = {
+                    let sessions = SESSIONS.lock().unwrap();
+                    match sessions.iter().find(|s| s.engine.slot == slot) {
+                        Some(s) => {
+                            let _ = s.engine.file_tx.send(FileCmd::SendFiles(
+                                paths.iter().map(std::path::PathBuf::from).collect(),
+                            ));
+                            true
+                        }
+                        None => false,
+                    }
+                };
+                if sent {
+                    win.set_status(format!("已加入发送队列：{} 个文件", paths.len()).into());
+                } else {
+                    win.set_status("添加文件：会话已结束".into());
+                }
             }
             Ok(None) => win.set_status("已取消选择文件".into()),
             Err(e) => win.set_status(format!("无法打开文件选择器：{e}").into()),
@@ -1219,12 +1304,40 @@ fn pick_file_for_transfer_window(win_weak: slint::Weak<FileTransferWindow>) {
     });
 }
 
-/// #452 把文件传输窗口当前选中文件发送到其关联会话。
-fn send_selected_file_from_window(win_weak: slint::Weak<FileTransferWindow>, slot: usize) {
+/// #503 取消传输中心指定条目（活动发送/排队项）。
+fn cancel_file_item_from_window(
+    win_weak: slint::Weak<FileTransferWindow>,
+    slot: usize,
+    id: String,
+) {
     let _ = win_weak.upgrade_in_event_loop(move |win| {
-        let path = win.get_selected_file().to_string();
+        let sent = {
+            let sessions = SESSIONS.lock().unwrap();
+            match sessions.iter().find(|s| s.engine.slot == slot) {
+                Some(s) => {
+                    let _ = s.engine.file_tx.send(FileCmd::CancelSend(id));
+                    true
+                }
+                None => false,
+            }
+        };
+        if sent {
+            win.set_status("正在取消传输…".into());
+        } else {
+            win.set_status("取消传输：会话已结束".into());
+        }
+    });
+}
+
+/// #503 重试失败项：把传输记录中的本地路径重新入队。
+fn retry_file_item_from_window(
+    win_weak: slint::Weak<FileTransferWindow>,
+    slot: usize,
+    path: String,
+) {
+    let _ = win_weak.upgrade_in_event_loop(move |win| {
         if path.trim().is_empty() {
-            win.set_status("未选择文件".into());
+            win.set_status("重试：缺少文件路径".into());
             return;
         }
         let sent = {
@@ -1234,47 +1347,42 @@ fn send_selected_file_from_window(win_weak: slint::Weak<FileTransferWindow>, slo
                     let _ = s
                         .engine
                         .file_tx
-                        .send(FileCmd::SendFile(path.clone().into()));
+                        .send(FileCmd::SendFiles(vec![std::path::PathBuf::from(path)]));
                     true
                 }
                 None => false,
             }
         };
         if sent {
-            win.set_status(format!("开始发送文件：{path}").into());
-            // 先显示 0% 并禁用发送按钮，实际进度由 viewer 线程随后回写。
-            win.set_progress(0.0);
-            win.set_progress_label("等待文件通道建立…".into());
+            win.set_status("已重新加入发送队列".into());
         } else {
-            win.set_status("文件传输：会话已结束".into());
+            win.set_status("重试：会话已结束".into());
         }
     });
 }
 
-/// #452 取消文件传输窗口关联会话的当前发送任务。
-fn cancel_file_from_window(win_weak: slint::Weak<FileTransferWindow>, slot: usize) {
+/// #503 清空传输记录。
+fn clear_done_records_from_window(win_weak: slint::Weak<FileTransferWindow>, slot: usize) {
     let _ = win_weak.upgrade_in_event_loop(move |win| {
         let sent = {
             let sessions = SESSIONS.lock().unwrap();
             match sessions.iter().find(|s| s.engine.slot == slot) {
                 Some(s) => {
-                    let _ = s.engine.file_tx.send(FileCmd::Cancel);
+                    let _ = s.engine.file_tx.send(FileCmd::ClearHistory);
                     true
                 }
                 None => false,
             }
         };
         if sent {
-            win.set_status("正在取消文件发送…".into());
+            win.set_status("已清空传输记录".into());
         } else {
-            win.set_status("取消发送：会话已结束".into());
+            win.set_status("清空记录：会话已结束".into());
         }
-        win.set_progress(-1.0);
-        win.set_progress_label("".into());
     });
 }
 
-/// #452 打开文件传输独立窗口并绑定到当前活动会话。
+/// #503 打开文件传输中心独立窗口并绑定到当前活动会话。
 fn open_file_transfer_window(ui: &AppWindow) {
     let Some(slot) = active_session_slot(ui) else {
         ui.set_status("文件传输：未连接会话".into());
@@ -1287,39 +1395,42 @@ fn open_file_transfer_window(ui: &AppWindow) {
             return;
         }
     };
-    win.set_status("请选择要发送的文件".into());
-    win.set_selected_file("".into());
-    win.set_progress(-1.0);
-    win.set_progress_label("".into());
+    win.set_status("传输中心：拖拽文件到主窗口或点「添加文件」批量入队".into());
     register_file_window(slot, win.as_weak());
     ui.set_file_open(true);
 
     let win_weak = win.as_weak();
-    win.on_choose_file({
+    win.on_add_files({
         let win_weak = win_weak.clone();
-        move || pick_file_for_transfer_window(win_weak.clone())
+        move || pick_files_for_transfer_window(win_weak.clone(), slot)
     });
-    win.on_send_file({
+    win.on_cancel_item({
         let win_weak = win_weak.clone();
-        move || send_selected_file_from_window(win_weak.clone(), slot)
+        move |id| cancel_file_item_from_window(win_weak.clone(), slot, id.to_string())
     });
-    win.on_cancel_file({
+    win.on_retry_item({
         let win_weak = win_weak.clone();
-        move || cancel_file_from_window(win_weak.clone(), slot)
+        move |path| retry_file_item_from_window(win_weak.clone(), slot, path.to_string())
+    });
+    win.on_clear_done({
+        let win_weak = win_weak.clone();
+        move || clear_done_records_from_window(win_weak.clone(), slot)
     });
 
     let ui_weak = ui.as_weak();
     win.window().on_close_requested({
-        let win_weak = win_weak.clone();
+        let ui_weak = ui_weak.clone();
         move || {
-            // 关闭文件窗口只取消当前传输、恢复主按钮；不断开远程会话。
-            cancel_file_from_window(win_weak.clone(), slot);
+            // 关闭传输中心窗口：取消当前发送、恢复主按钮；不断开远程会话。
+            {
+                let sessions = SESSIONS.lock().unwrap();
+                if let Some(s) = sessions.iter().find(|s| s.engine.slot == slot) {
+                    let _ = s.engine.file_tx.send(FileCmd::Cancel);
+                }
+            }
             unregister_file_window(slot);
             if let Some(ui) = ui_weak.upgrade() {
                 ui.set_file_open(false);
-            }
-            if let Some(win) = win_weak.upgrade() {
-                let _ = win.hide();
             }
             slint::CloseRequestResponse::HideWindow
         }
@@ -2694,6 +2805,54 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     }
 }
 
+/// #503 平台文件选择器（多选）：macOS 原生 / Linux zenity-kdialog /
+/// Windows PowerShell + WinForms 对话框（UI crate 不新增系统依赖）。
+fn pick_files() -> Result<Option<Vec<String>>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        return aerodesk_platform::macos::file_picker::MacFilePicker.pick_files();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return aerodesk_platform::linux::file_picker::LinuxFilePicker.pick_files();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // -NoProfile 避免加载用户 profile；OpenFileDialog 在 STA 单线程单元中运行。
+        // 多选路径经 stdout 逐行回传，避免把 WinForms 依赖拉进 UI crate。
+        let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$dlg = New-Object System.Windows.Forms.OpenFileDialog
+$dlg.Title = 'AeroDesk 添加文件'
+$dlg.Multiselect = $true
+$dlg.Filter = '所有文件 (*.*)|*.*'
+if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    $dlg.FileNames | ForEach-Object { [Console]::Out.WriteLine($_) }
+}
+"#;
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-STA", "-Command", script])
+            .output()
+            .map_err(|e| format!("无法启动 PowerShell：{e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "PowerShell 文件选择器退出失败：{}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let paths: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        return Ok(if paths.is_empty() { None } else { Some(paths) });
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Err("发送文件仅 macOS/Linux/Windows 支持".into())
+    }
+}
+
 /// #277 后台线程选择文件并发送到被控端（选择器阻塞，避免卡 UI 事件循环）。
 fn pick_file_and_send(ui: slint::Weak<AppWindow>) {
     std::thread::spawn(move || {
@@ -2704,10 +2863,12 @@ fn pick_file_and_send(ui: slint::Weak<AppWindow>) {
                 let idx = ui.get_active_session() as usize;
                 let sessions = SESSIONS.lock().unwrap();
                 if let Some(s) = sessions.get(idx) {
-                    let _ = s
-                        .engine
-                        .file_tx
-                        .send(FileCmd::SendFile(path.clone().into()));
+                    let _ =
+                        s.engine
+                            .file_tx
+                            .send(FileCmd::SendFiles(vec![std::path::PathBuf::from(
+                                path.clone(),
+                            )]));
                     drop(sessions);
                     ui.set_session_status(format!("发送文件：{path}").into());
                 } else {
@@ -2913,6 +3074,10 @@ fn main() -> Result<(), slint::PlatformError> {
     // 误修为「inc_enabled=true 启动即自动发布」——开关语义是「允许被呼叫时
     // 接听」而非「启动即采集」，已撤销。
     spawn_signal_presence(&ui, &settings);
+    // #503 设备列表：启动即拉取一次在线设备（后台线程，不影响首屏）。
+    if !settings.server_default.is_empty() {
+        ui.invoke_refresh_devices();
+    }
     if !settings.server_default.is_empty() {
         ui.set_server_input(server_display.into());
     }
@@ -3206,6 +3371,109 @@ fn main() -> Result<(), slint::PlatformError> {
         move |t| {
             let ui = ui.unwrap();
             ui.set_peer_tab(t);
+            // #503：切到「设备列表」页时自动拉取一次在线设备。
+            if t == 5 {
+                refresh_device_list(&ui);
+            }
+        }
+    });
+
+    // #503 设备列表：刷新（拉取信令在线设备 + 合并地址簿）。
+    ui.on_refresh_devices({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            refresh_device_list(&ui);
+        }
+    });
+
+    // #503 设备列表：选中设备行 → 别名/分组输入框回填（编辑前先选中）。
+    ui.on_select_device({
+        let ui = ui.as_weak();
+        move |entry: slint::SharedString| {
+            let ui = ui.unwrap();
+            let (alias, room, _, group) = parse_addressbook(entry.as_str());
+            ui.set_dev_selected(entry.clone());
+            ui.set_dev_alias(alias.into());
+            ui.set_dev_group(group.into());
+            ui.set_status(format!("已选择设备 {room}，可修改别名/分组后保存").into());
+        }
+    });
+
+    // #503 设备列表：保存别名/分组（按 设备+服务器 匹配替换，不产生重复条目），
+    // 落盘本地地址簿并联动「设备组」与「设备列表」两个页。
+    ui.on_save_device_alias({
+        let ui = ui.as_weak();
+        move || {
+            let ui = ui.unwrap();
+            let sel = ui.get_dev_selected().to_string();
+            if sel.is_empty() {
+                ui.set_status("请先点击设备行选择要编辑的设备".into());
+                return;
+            }
+            let (_, room, server, _) = parse_addressbook(&sel);
+            let alias = ui.get_dev_alias().to_string().trim().to_string();
+            let group = ui.get_dev_group().to_string().trim().to_string();
+            if room.is_empty() || server.is_empty() {
+                ui.set_status("设备条目缺少房间/服务器".into());
+                return;
+            }
+            let alias = if alias.is_empty() {
+                room.clone()
+            } else {
+                alias
+            };
+            let new_entry = format!("{alias} · {room} · {server} · {group}");
+            let model = ui.get_addressbook();
+            let mut items: Vec<String> = (0..model.row_count())
+                .filter_map(|i| model.row_data(i))
+                .map(|s| s.to_string())
+                .collect();
+            let replaced = items.iter().any(|i| {
+                let (_, r, s, _) = parse_addressbook(i);
+                r == room && s == server
+            });
+            if replaced {
+                items = items
+                    .into_iter()
+                    .map(|i| {
+                        let (_, r, s, _) = parse_addressbook(&i);
+                        if r == room && s == server {
+                            new_entry.clone()
+                        } else {
+                            i
+                        }
+                    })
+                    .collect();
+                ui.set_status("已保存别名/分组".into());
+            } else {
+                items.push(new_entry.clone());
+                ui.set_status("已添加设备到地址簿".into());
+            }
+            let new: Vec<slint::SharedString> = items.iter().map(|s| s.into()).collect();
+            ui.set_addressbook(slint::ModelRc::new(slint::VecModel::from(new.clone())));
+            ui.set_device_groups(slint::ModelRc::new(slint::VecModel::from(
+                build_device_groups(&new),
+            )));
+            save_addressbook(&new);
+            ui.set_dev_selected(new_entry.into());
+            refresh_device_list(&ui);
+        }
+    });
+
+    // #503 设备列表：点击连接（解析 别名·设备·服务器·组）。
+    ui.on_connect_device({
+        let ui = ui.as_weak();
+        move |entry: slint::SharedString| {
+            let ui = ui.unwrap();
+            let (_, room, server, _) = parse_addressbook(entry.as_str());
+            if room.is_empty() || server.is_empty() {
+                ui.set_status("设备条目缺少房间/服务器".into());
+                return;
+            }
+            ui.set_room_input(room.into());
+            ui.set_server_input(server.into());
+            ui.invoke_connect();
         }
     });
 
@@ -3232,7 +3500,7 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
-    // 刷新 Peer 数据（#57）：重新加载最近会话与收藏。
+    // 刷新 Peer 数据（#57）：重新加载最近会话与收藏；#503 同步刷新设备列表。
     ui.on_refresh_peers({
         let ui = ui.as_weak();
         move || {
@@ -3241,6 +3509,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let favorites: Vec<slint::SharedString> = load_favorites();
             ui.set_recents(slint::ModelRc::new(slint::VecModel::from(recents.clone())));
             ui.set_favorites(slint::ModelRc::new(slint::VecModel::from(favorites)));
+            refresh_device_list(&ui);
             ui.set_status(
                 format!(
                     "已刷新：最近 {} 条 / 收藏 {} 条",
@@ -3288,6 +3557,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 build_device_groups(&new),
             )));
             save_addressbook(&new);
+            refresh_device_list(&ui);
         }
     });
 
@@ -3308,6 +3578,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 build_device_groups(&new),
             )));
             save_addressbook(&new);
+            refresh_device_list(&ui);
             ui.set_status("已从地址簿删除".into());
         }
     });
@@ -4194,6 +4465,139 @@ fn parse_addressbook(entry: &str) -> (String, String, String, String) {
     (name, room, server, group)
 }
 
+/// 设备列表行（#503）：在线状态来自信令 /devices，别名/分组来自本地地址簿。
+struct DeviceRow {
+    id: String,
+    alias: String,
+    group: String,
+    online: bool,
+    server: String,
+    /// 完整地址簿条目（别名 · 设备 · 服务器 · 组），选中/连接/保存用。
+    entry: String,
+}
+
+/// 把「在线设备（信令 /devices）+ 地址簿」合并成设备列表行（#503）。
+///
+/// - 在线设备：别名/分组取地址簿中 `(设备, 服务器)` 匹配的条目，无则用设备 ID
+///   与「未分组」；`server` 为当前信令服务器。
+/// - 离线：当前服务器下地址簿里不在线集合中的条目（无人值守入口的完整台账）。
+/// - 排序：在线优先，再按分组、别名。
+fn build_device_list(
+    online: &[String],
+    server: &str,
+    addressbook: &[slint::SharedString],
+) -> Vec<DeviceRow> {
+    const UNGROUPED: &str = "未分组";
+    // 地址簿按 (设备, 服务器) 建索引（首个命中）。
+    let mut by_key: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new();
+    for item in addressbook {
+        let (_, room, srv, _) = parse_addressbook(item.as_str());
+        if !room.is_empty() && !srv.is_empty() {
+            by_key.entry((room, srv)).or_insert(item.to_string());
+        }
+    }
+    let mut rows = Vec::new();
+    for id in online {
+        let entry = by_key.get(&(id.clone(), server.to_string())).cloned();
+        let (alias, group) = match &entry {
+            Some(e) => {
+                let (a, _, _, g) = parse_addressbook(e);
+                (a, g)
+            }
+            None => (id.clone(), UNGROUPED.to_string()),
+        };
+        let alias = if alias.is_empty() { id.clone() } else { alias };
+        let group = if group.is_empty() {
+            UNGROUPED.to_string()
+        } else {
+            group
+        };
+        rows.push(DeviceRow {
+            id: id.clone(),
+            alias: alias.clone(),
+            group: group.clone(),
+            online: true,
+            server: server.to_string(),
+            entry: entry.unwrap_or_else(|| format!("{alias} · {id} · {server} · {group}")),
+        });
+    }
+    // 当前服务器下的地址簿条目不在在线集合 → 补为离线行。
+    for item in addressbook {
+        let (alias, room, srv, group) = parse_addressbook(item.as_str());
+        if srv == server && !room.is_empty() && !online.iter().any(|o| o == &room) {
+            rows.push(DeviceRow {
+                id: room.clone(),
+                alias: if alias.is_empty() { room } else { alias },
+                group: if group.is_empty() {
+                    UNGROUPED.to_string()
+                } else {
+                    group
+                },
+                online: false,
+                server: srv,
+                entry: item.to_string(),
+            });
+        }
+    }
+    rows.sort_by(|a, b| {
+        b.online
+            .cmp(&a.online)
+            .then_with(|| a.group.cmp(&b.group))
+            .then_with(|| a.alias.cmp(&b.alias))
+    });
+    rows
+}
+
+/// DeviceRow → Slint DeviceEntry 模型。
+fn device_rows_to_model(rows: Vec<DeviceRow>) -> slint::ModelRc<DeviceEntry> {
+    let items: Vec<DeviceEntry> = rows
+        .into_iter()
+        .map(|r| DeviceEntry {
+            id: r.id.into(),
+            alias: r.alias.into(),
+            group: r.group.into(),
+            online: r.online,
+            server: r.server.into(),
+            entry: r.entry.into(),
+        })
+        .collect();
+    slint::ModelRc::new(slint::VecModel::from(items))
+}
+
+/// 刷新设备列表（#503）：后台线程拉取信令 `/devices`，合并地址簿回填 UI。
+/// 拉取失败不置空——地址簿条目仍以离线形态展示（离线台账照常可用）。
+fn refresh_device_list(ui: &AppWindow) {
+    let server = ui.get_server_default().to_string();
+    let tls = ui.get_server_tls();
+    if server.trim().is_empty() {
+        ui.set_device_list_status("未配置信令服务器".into());
+        return;
+    }
+    ui.set_device_list_status("正在拉取在线设备…".into());
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let result = aerodesk_core::signaling::fetch_online_devices(&server, tls);
+        crate::with_ui(&weak, move |ui| {
+            let ab: Vec<slint::SharedString> = (0..ui.get_addressbook().row_count())
+                .filter_map(|i| ui.get_addressbook().row_data(i))
+                .collect();
+            let (rows, status) = match &result {
+                Ok(online) => (
+                    build_device_list(online, &server, &ab),
+                    format!("在线 {} 台", online.len()),
+                ),
+                Err(e) => (
+                    build_device_list(&[], &server, &ab),
+                    format!("获取在线设备失败：{e}"),
+                ),
+            };
+            ui.set_device_list(device_rows_to_model(rows));
+            ui.set_device_list_status(status.into());
+        });
+    });
+}
+
 /// 按“分组”字段把地址簿聚合成设备组展示行：组标题行 + 组内设备行。
 /// 未分组始终排最前，其余组按组名排序；组内保持地址簿原有顺序。
 fn build_device_groups(items: &[slint::SharedString]) -> Vec<DeviceGroupEntry> {
@@ -4605,6 +5009,47 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// #503 设备列表合并：在线设备取地址簿别名/分组，未在线的地址簿条目补为离线行。
+    #[test]
+    fn device_list_merges_online_and_addressbook() {
+        let ab: Vec<slint::SharedString> = vec![
+            // 有别名/分组：NAS 在线 + 台式机离线（同一服务器）
+            "NAS · AD-NAS01 · 192.168.1.10:3003 · 家庭".into(),
+            "台式机 · AD-DESK02 · 192.168.1.10:3003 · 办公室".into(),
+            // 其它服务器条目：不属于当前服务器，不应出现在列表中
+            "远端 · AD-FAR03 · other.example:3003 · 云端".into(),
+        ];
+        let online = vec!["AD-NAS01".to_string(), "AD-LIVE99".to_string()];
+        let rows = build_device_list(&online, "192.168.1.10:3003", &ab);
+
+        // 在线优先：AD-NAS01（地址簿别名）与 AD-LIVE99（无地址簿 → ID 当别名）。
+        let nas = rows.iter().find(|r| r.id == "AD-NAS01").expect("NAS 在线");
+        assert!(nas.online);
+        assert_eq!(nas.alias, "NAS");
+        assert_eq!(nas.group, "家庭");
+        let live = rows
+            .iter()
+            .find(|r| r.id == "AD-LIVE99")
+            .expect("LIVE99 在线");
+        assert!(live.online);
+        assert_eq!(live.alias, "AD-LIVE99");
+        assert_eq!(live.group, "未分组");
+        // 离线补行：地址簿里的 AD-DESK02 以离线形态出现；其它服务器条目不出现。
+        let desk = rows
+            .iter()
+            .find(|r| r.id == "AD-DESK02")
+            .expect("DESK02 离线补行");
+        assert!(!desk.online);
+        assert_eq!(desk.alias, "台式机");
+        assert!(
+            rows.iter().all(|r| r.id != "AD-FAR03"),
+            "其它服务器条目不应出现"
+        );
+        // 排序：在线行在离线行之前。
+        let idx = |id: &str| rows.iter().position(|r| r.id == id).unwrap();
+        assert!(idx("AD-NAS01") < idx("AD-DESK02"), "在线应排在离线前");
+    }
+
     fn assert_near(actual: (f32, f32), expect: (f32, f32), eps: f32) {
         assert!(
             (actual.0 - expect.0).abs() <= eps && (actual.1 - expect.1).abs() <= eps,
@@ -4778,7 +5223,7 @@ mod tests {
         std::fs::write(&path, b"hello").unwrap();
         let status = dispatch_dropped_files(Some(&tx), &[path.clone()]);
         assert!(status.contains("发送文件"), "status={status}");
-        assert_eq!(rx.recv().unwrap(), FileCmd::SendFile(path.clone()));
+        assert_eq!(rx.recv().unwrap(), FileCmd::SendFiles(vec![path.clone()]));
         // 无会话 → 未连接会话
         assert!(dispatch_dropped_files(None, &[path.clone()]).contains("未连接会话"));
         let _ = std::fs::remove_file(path);
@@ -4796,8 +5241,8 @@ mod tests {
     }
 
     #[test]
-    fn multiple_dropped_files_first_sent_rest_queued_notice() {
-        // 一次一个：多文件拖放只发第一个，状态文案提示其余逐个发送。
+    fn multiple_dropped_files_all_batched() {
+        // #503 批量入队：多文件拖放一次全部交给传输中心队列。
         let (tx, rx) = std::sync::mpsc::channel();
         let dir = std::env::temp_dir();
         let p1 = dir.join("aerodesk-desktop-drop-batch-1.txt");
@@ -4805,13 +5250,11 @@ mod tests {
         std::fs::write(&p1, b"1").unwrap();
         std::fs::write(&p2, b"2").unwrap();
         let status = dispatch_dropped_files(Some(&tx), &[p1.clone(), p2.clone()]);
-        assert!(status.contains("一次一个"), "status={status}");
-        assert!(status.contains("其余 1 个文件"), "status={status}");
-        let mut got = Vec::new();
-        while let Ok(cmd) = rx.try_recv() {
-            got.push(cmd);
-        }
-        assert_eq!(got, vec![FileCmd::SendFile(p1.clone())]);
+        assert!(status.contains("2 个文件"), "status={status}");
+        assert!(status.contains("已加入传输队列"), "status={status}");
+        let got = rx.recv().unwrap();
+        assert_eq!(got, FileCmd::SendFiles(vec![p1.clone(), p2.clone()]));
+        assert!(rx.try_recv().is_err(), "应只有一条批量命令");
         let _ = std::fs::remove_file(p1);
         let _ = std::fs::remove_file(p2);
     }

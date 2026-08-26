@@ -55,8 +55,8 @@ fi
 if grep -q "control: display switch request -> display 1" /tmp/disp-pub.log; then
     echo "PASS publisher received display switch"
 else
-    # #553：macOS str0m DCEP 偶发丢失 control 通道（本地 Windows 验证正常）——降级 WARN。
-    echo "WARN publisher display switch（macOS str0m DCEP control 通道丢失，本地 Windows 验证正常）"; tail -3 /tmp/disp-pub.log
+    # #584 恢复 FAIL（80936e8 曾降级 WARN）：control 通道回归保护。
+    echo "FAIL publisher display switch"; tail -3 /tmp/disp-pub.log; fail=1
 fi
 # 4) 无 panic
 if grep -qiE "panic" /tmp/disp-pub.log /tmp/disp-view.log /tmp/disp-sfu.log; then
