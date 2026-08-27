@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# web-reconnect-e2e.sh —— Web 端自动重连（#175）：
-#   Playwright 双浏览器（发布页 + 观看页，WSS 房间）→ 初始收流 →
-#   杀 SFU+signal → 重启 → 两页自动退避重连 → viewer 恢复 video。
-#   #552 迁移后改双浏览器：CLI publisher 已是 SIP 1:1 被叫，WSS JSON 面无法
-#   对其呼叫；重连逻辑在页面层（#175 不分角色），发布页同样自动重连。
-# 依赖：cargo build、playwright-core、Edge/Chrome（BROWSER 可选，默认 msedge）。
+# web-reconnect-e2e.sh —— Web 端自动重连（#175，SIP 版 #598 P2a）：
+#   Playwright 双浏览器（sip-publisher.html 被控页 + sip-viewer.html 观看页，
+#   SIP-WSS 1:1）→ 初始收流 → 杀 SFU+signal → 重启 → 两页自动退避重连
+#   （WS close → 1s/2s/4s/8s 退避 → 重新 REGISTER；viewer 重建会话再收流）→
+#   viewer 恢复 video。媒体为 1:1 直连（不经 SFU），服务重启只断信令面——
+#   #175 的信令韧性断言语义保留。
+# 依赖：cargo build、playwright-core、Edge/Chrome（BROWSER 可选，默认 msedge）、
+# python3（静态服务 web/）。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -12,6 +14,7 @@ export RUST_LOG="${RUST_LOG:-info}"
 
 ROOM="webrec-$(date +%s)"
 REC="$(mktemp -d)"
+WEB_SERVE_PORT="${WEB_SERVE_PORT:-38087}"
 
 E2E_DIR="${WEB_E2E_DIR:-/tmp/web-e2e}"
 mkdir -p "$E2E_DIR"; cd "$E2E_DIR"
@@ -28,22 +31,24 @@ const ROOM = process.argv[2];
       '--use-fake-device-for-media-stream',
       '--auto-accept-this-tab-capture',
       '--enable-usermedia-screen-capturing',
+      '--ignore-certificate-errors',      // 3061 为自签 WSS（RFC 7118）
     ],
   });
-  // 发布页（屏幕共享；服务重启后同样自动重连）
+  const SP = process.env.WEB_SERVE_PORT || 38087;
+  // 被控页（UAS；服务重启后同样自动重连）
   const pub = await browser.newPage();
-  await pub.goto('http://127.0.0.1:14502/?room=' + ROOM + '&role=publisher&signal=ws://127.0.0.1:14503/ws');
+  await pub.goto('http://127.0.0.1:' + SP + '/sip-publisher.html?device=' + ROOM + '&signal=wss://127.0.0.1:3061');
   await pub.click('#connect');
-  await pub.waitForFunction(() => document.getElementById('status').innerText.includes('已连接'), { timeout: 40000 });
+  await pub.waitForFunction(() => document.getElementById('status').innerText.includes('等待观看端拨入'), { timeout: 40000 });
   console.log('PUBLISHER_OK');
   // 观看页（初始收流 → 服务重启后自动重连恢复）
   const view = await browser.newPage();
-  await view.goto('http://127.0.0.1:14502/?room=' + ROOM + '&role=viewer&signal=ws://127.0.0.1:14503/ws');
+  await view.goto('http://127.0.0.1:' + SP + '/sip-viewer.html?target=' + ROOM + '&signal=wss://127.0.0.1:3061');
   await view.click('#connect');
   await view.waitForFunction(() => document.getElementById('video').readyState >= 2, { timeout: 40000 });
   console.log('INITIAL_OK');
-  // 服务被 bash 重启后，页面应自动重连
-  await view.waitForFunction(() => document.getElementById('log').innerText.includes('重连'), { timeout: 120000 });
+  // 服务被 bash 重启后，页面应自动重连（退避重连日志含 "重连"）
+  await view.waitForFunction(() => document.getElementById('log').innerText.includes('自动重连'), { timeout: 120000 });
   await view.waitForFunction(() => document.getElementById('status').innerText.includes('已连接'), { timeout: 90000 });
   await view.waitForFunction(() => document.getElementById('video').readyState >= 2, { timeout: 90000 });
   console.log('RECONNECT_OK');
@@ -63,20 +68,23 @@ start_sfu() {
     echo $! > /tmp/webrec-sfu.pid
 }
 start_signal() {
+    # #598 P2a：浏览器信令走 SIP-WSS（3061）；UDP 5060 供 CLI（本脚本不用）。
     SIGNAL_PORT=14501 SIGNAL_PLAIN_PORT=14503 SFU_URL=http://127.0.0.1:14502 \
-      SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/webrec-sig.log 2>&1 &
+      SIP_UDP_PORT=5060 SIP_WSS_PORT=3061 ./target/debug/aerodesk-signal >/tmp/webrec-sig.log 2>&1 &
     echo $! > /tmp/webrec-sig.pid
 }
 stop_services() {
     if [ -f /tmp/webrec-sfu.pid ]; then kill "$(cat /tmp/webrec-sfu.pid)" 2>/dev/null || true; rm -f /tmp/webrec-sfu.pid; fi
     if [ -f /tmp/webrec-sig.pid ]; then kill "$(cat /tmp/webrec-sig.pid)" 2>/dev/null || true; rm -f /tmp/webrec-sig.pid; fi
-    for p in 14578 14502 14503; do
-        for _ in $(seq 1 50); do nc -z 127.0.0.1 "$p" 2>/dev/null || break; sleep 0.2; done
+    for _ in $(seq 1 50); do
+        (exec 3<>/dev/tcp/127.0.0.1/14502) 2>/dev/null || break
+        sleep 0.2
     done
 }
 wait_ports() {
     for _ in $(seq 1 50); do
-        if nc -z 127.0.0.1 14502 2>/dev/null && nc -z 127.0.0.1 14503 2>/dev/null; then return 0; fi
+        if grep -q "SIP/UDP 监听已起" /tmp/webrec-sig.log 2>/dev/null \
+            && (exec 3<>/dev/tcp/127.0.0.1/14502) 2>/dev/null; then return 0; fi
         sleep 0.2
     done
     return 1
@@ -84,11 +92,13 @@ wait_ports() {
 
 echo "== 启动服务"
 start_sfu; start_signal
+(cd "$ROOT/web" && python3 -m http.server "$WEB_SERVE_PORT" >/tmp/webrec-http.log 2>&1) &
+HTTP=$!
 wait_ports || { echo "FAIL: 服务未就绪"; exit 1; }
 
-echo "== 启动 Playwright（发布页 + 观看页：初始收流 → 观察重连）"
+echo "== 启动 Playwright（被控页 + 观看页：初始收流 → 观察重连）"
 cd "$E2E_DIR"
-BROWSER="${BROWSER:-msedge}" node web-reconnect-run.js "$ROOM" > /tmp/webrec-node.log 2>&1 &
+BROWSER="${BROWSER:-msedge}" WEB_SERVE_PORT="$WEB_SERVE_PORT" node web-reconnect-run.js "$ROOM" > /tmp/webrec-node.log 2>&1 &
 NODE_PID=$!
 cd "$ROOT"
 
@@ -123,6 +133,6 @@ if grep -q E2E_FAIL /tmp/webrec-node.log 2>/dev/null; then
 fi
 [ "$OK" = "1" ] && echo "PASS 页面自动重连并恢复 video" || { echo "FAIL: 未重连"; tail -8 /tmp/webrec-node.log; exit 1; }
 
-kill $NODE_PID 2>/dev/null || true
+kill $NODE_PID $HTTP 2>/dev/null || true
 stop_services
 echo "E2E DONE"

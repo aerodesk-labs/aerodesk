@@ -64,7 +64,10 @@ if (params.get('auto') === '0' || params.get('auto') === 'false') $('auto').chec
 const DOMAIN = 'aerodesk.test';
 let ws = null, rtc = null, capture = null, callId = null, toTag = null, closed = false;
 let regTimer = null, connecting = false, phase = 'idle'; // idle | waiting | in-call
+let userDisconnected = false;
+let reconnectAttempts = 0;
 const REGISTER_EXPIRES = 120;
+const MAX_RECONNECT = 5;
 let inputSeq = 0;
 
 function log(msg) {
@@ -404,6 +407,24 @@ function onSignalingMessage(e) {
     }
 }
 
+// ---------- 自动重连（#175：信令断开 → 退避重连，镜像原生 --reconnect） ----------
+function scheduleReconnect() {
+    if (userDisconnected) return;
+    if (reconnectAttempts >= MAX_RECONNECT) {
+        log('重连次数超限（' + MAX_RECONNECT + '），停止');
+        return;
+    }
+    const delay = Math.min(1000 << reconnectAttempts, 8000);
+    reconnectAttempts += 1;
+    log('信令断开，' + (delay / 1000) + 's 后自动重连（' + reconnectAttempts + '/' + MAX_RECONNECT + '）');
+    setTimeout(() => {
+        if (!userDisconnected) {
+            cleanupAll();
+            connect();
+        }
+    }, delay);
+}
+
 // ---------- 连接主流程 ----------
 async function connect() {
     if (connecting) return;
@@ -427,11 +448,13 @@ async function connect() {
                 setStatus('信令断开（媒体可能仍存活，建议重连）');
                 log('signaling closed');
             }
+            scheduleReconnect();
         };
         log('signaling connected: ' + wsTarget());
 
         setStatus('REGISTER…');
         await register(1);
+        reconnectAttempts = 0;   // 注册成功 = 服务恢复，重连计数复位
         log('REGISTER → 200 OK（SIP-WSS + Digest 认证成功）');
         regTimer = setInterval(() => {
             register(1).catch((err) => log('注册刷新失败: ' + err.message));
@@ -495,6 +518,7 @@ function cleanupAll() {
 }
 function disconnect() {
     closed = true;
+    userDisconnected = true;
     if (phase === 'in-call' && callId) {
         // 被叫侧 BYE：To 带对端 to-tag。
         try {

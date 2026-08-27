@@ -447,13 +447,8 @@ jobs:
       # 客户端自测：Web 主控端文件上传（file 通道 → 被控端落盘 sha256 校验）。
       # #552 后暂停：Web viewer（WSS）的 file 通道需可达的落盘对端——CLI publisher
       # 已是 SIP 1:1 被叫（不在 SFU 会议房间），被控端会议接入（发布方向 INVITE
-      # view-AoR）属 P2 完整实现，落地后恢复本 step（文件链路由 CLI↔CLI
-      # file-transfer-e2e 覆盖）。
-      - name: e2e web file transfer (macOS only)
-        if: false && runner.os == 'macOS'
-        env:
-          BROWSER: chrome
-        run: bash scripts/ci-retry.sh 3 ./scripts/web-file-e2e.sh
+      # #72 Web 文件传输通道随 #598 P2a 退役（文件通道非 v0.3 范围；链路
+      # 由 CLI↔CLI file-transfer-e2e 覆盖）。会议桥形态恢复后按 SIP 重写。
 
       - name: windows adapter
         if: runner.os == 'Windows'

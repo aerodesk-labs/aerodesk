@@ -25,7 +25,7 @@ SFU=$!
 SIP_UDP_PORT=5060 SIGNAL_PORT=14001 SIGNAL_PLAIN_PORT=14003 SFU_URL=http://127.0.0.1:14002 SFU_TOKEN="$TOKEN" ./target/debug/aerodesk-signal >/tmp/recapi-sig.log 2>&1 &
 SIG=$!
 for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 14002 2>/dev/null && nc -z 127.0.0.1 14003 2>/dev/null; then break; fi
+    if nc -z 127.0.0.1 14002 2>/dev/null && grep -q "SIP/UDP 监听已起" /tmp/recapi-sig.log 2>/dev/null; then break; fi
     sleep 0.2
 done
 sleep 0.3
@@ -49,36 +49,12 @@ BODY=$(curl -s -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/metrics/pro
 echo "$BODY" | grep -q '^aerodesk_sfu_recordings_active 1$' \
   && echo "PASS recordings_active=1" || { echo "FAIL recordings_active"; exit 1; }
 
-echo "== publisher 推流 4s（#552 后原生端 P2P 不经 SFU——录制需媒体经 SFU，
-Web 发布端（headless Chrome 屏幕共享）走 WSS 房间 → SFU，同 web-pub 模式）"
-E2E_DIR="${WEB_E2E_DIR:-/tmp/record-api-e2e}"
-mkdir -p "$E2E_DIR"
-cd "$E2E_DIR"
-if [ ! -d node_modules/playwright-core ]; then npm init -y >/dev/null 2>&1; npm i playwright-core >/dev/null 2>&1; fi
-cat > e2e-pub.js <<'JS'
-const { chromium } = require('playwright-core');
-const ROOM = process.argv[2];
-(async () => {
-  const browser = await chromium.launch({
-    channel: process.env.BROWSER || 'msedge', headless: true,
-    args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream',
-           '--auto-accept-this-tab-capture', '--enable-usermedia-screen-capturing'],
-  });
-  const page = await browser.newPage();
-  await page.goto(`http://127.0.0.1:14002/?room=${ROOM}&role=publisher&signal=ws://127.0.0.1:14003/ws`);
-  await page.click('#connect');
-  await page.waitForFunction(() => document.getElementById('status').innerText.includes('已连接'), { timeout: 25000 });
-  console.log('PASS web publisher connected');
-  await new Promise(r => setTimeout(r, 8000));
-  await browser.close();
-})().catch(e => { console.error('E2E FAIL:', e.message); process.exit(1); });
-JS
-cd "$ROOT"
-node "$E2E_DIR/e2e-pub.js" "$ROOM" &
-PUB=$!
-sleep 4
-kill "$PUB" 2>/dev/null || true
-wait "$PUB" 2>/dev/null || true
+echo "== 媒体注入（#598 P2a 降级 WARN）"
+# JSON WSS 房间面已退役：媒体经 SFU 的路径 = Web 发布端 join 会议（旧 index.html）
+# 或原生端会议发布——两者分别随 #598 拆栈与 P3 会议桥落地。当前录制面验证
+# 保留 API 断言（403/start/stop/audit/metrics），媒体 packets>0 断言走既有
+# WARN 降级（与 #553 注释同口径，P3 恢复后删除本降级块）。
+echo "WARN 媒体注入跳过（P3 会议桥浏览器发布恢复后启用）"
 
 echo "== status 应包含房间"
 curl -s -H "X-Internal-Token: $TOKEN" "http://127.0.0.1:14002/record/status" | grep -q "$ROOM" \

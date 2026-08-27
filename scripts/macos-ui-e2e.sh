@@ -27,16 +27,18 @@ const ROOM = process.argv[2];
 (async () => {
   const browser = await chromium.launch({
     channel: 'chrome', headless: true,
-    args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--auto-accept-this-tab-capture', '--enable-usermedia-screen-capturing'],
+    args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream',
+           '--auto-accept-this-tab-capture', '--enable-usermedia-screen-capturing',
+           '--ignore-certificate-errors'],
   });
   const page = await browser.newPage();
-  await page.goto(`http://127.0.0.1:3002/?room=${ROOM}&role=publisher&signal=ws://127.0.0.1:3003/ws`);
+  // #598 P2a：sip-publisher.html（UAS）；token=e2e-token（DIGEST_USERS 含房间）。
+  await page.goto(`http://127.0.0.1:${process.env.WEB_SERVE_PORT || 38084}/sip-publisher.html?device=${ROOM}&token=e2e-token&signal=wss://127.0.0.1:3061`);
   await page.click('#connect');
-  await page.waitForFunction(() => document.getElementById('log').innerText.includes('屏幕共享已授权'), { timeout: 20000 });
-  console.log('PASS screen shared');
-  await page.waitForFunction(() => document.getElementById('status').innerText.includes('已连接'), { timeout: 25000 });
-  console.log('PASS publisher connected');
-  await new Promise(r => setTimeout(r, 15000)); // 保持发布（供 UI 收流）
+  await page.waitForFunction(() => document.getElementById('status').innerText.includes('等待观看端拨入'), { timeout: 20000 });
+  console.log('PASS page registered, waiting INVITE');
+  // 保持发布（供 Slint UI 收流）；被拨入后不退出。
+  await new Promise(r => setTimeout(r, 180000)); // 覆盖 UI ICE 断言窗口
   await browser.close();
   console.log('E2E DONE');
 })().catch(e => { console.error('E2E FAIL:', e.message); process.exit(1); });
@@ -48,29 +50,32 @@ REC="$(mktemp -d)"
 RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu" >/tmp/macosui-sfu.log 2>&1 &
 SFU=$!
 # SIP 会议桥链路（WSS 兜底已删 #576——desktop 观看必经 SIP）。
-# SIP_DIGEST_USERS：显式配置 Digest 用户（覆盖兼容模式，与 linux/windows 同款）。
-SIP_UDP_PORT=5060 SIP_DIGEST_USERS="AD-E2EUI=e2e-token" "$ROOT/target/debug/aerodesk-signal" >/tmp/macosui-sig.log 2>&1 &
+# #598 P2a：浏览器被控页走 SIP-WSS（3061）；DIGEST_USERS 含房间（页面 REGISTER）。
+SIP_UDP_PORT=5060 SIP_WSS_PORT=3061 \
+  SIP_DIGEST_USERS="AD-E2EUI=e2e-token,${ROOM}=e2e-token" "$ROOT/target/debug/aerodesk-signal" >/tmp/macosui-sig.log 2>&1 &
 SIG=$!
+(cd "$ROOT/web" && python3 -m http.server "${WEB_SERVE_PORT:-38084}" >/tmp/macosui-http.log 2>&1) &
+HTTP=$!
 OK=0
 for _ in $(seq 1 80); do
-    if nc -z 127.0.0.1 3003 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then OK=1; break; fi
+    if grep -q "SIP/UDP 监听已起" /tmp/macosui-sig.log 2>/dev/null \
+        && (exec 3<>/dev/tcp/127.0.0.1/3002) 2>/dev/null; then OK=1; break; fi
     sleep 0.2
 done
 if [ "$OK" != "1" ]; then echo "FAIL: SFU/signal not ready; logs:"; tail -20 /tmp/macosui-sig.log /tmp/macosui-sfu.log; exit 1; fi
-# SIP/UDP 就绪门：signal 的 SIP 绑定失败是非致命（线程内 error!），TCP 探活会漏。
-OK=0
-for _ in $(seq 1 80); do
-    if grep -q "SIP/UDP 监听已起" /tmp/macosui-sig.log 2>/dev/null; then OK=1; break; fi
-    sleep 0.2
-done
-if [ "$OK" != "1" ]; then echo "FAIL: SIP/UDP 未就绪"; tail -10 /tmp/macosui-sig.log; exit 1; fi
 
-echo "== [4/6] Web 被控端发布（headless Chrome 屏幕共享）"
+echo "== [4/6] Web 被控端发布（headless Chrome 屏幕共享，先注册后 UI 拨入）"
 set +e
-node "$E2E_DIR/e2e-pub.js" "$ROOM" &
+WEB_SERVE_PORT="${WEB_SERVE_PORT:-38084}" node "$E2E_DIR/e2e-pub.js" "$ROOM" >/tmp/macosui-pub.log 2>&1 &
 PUB=$!
 set -e
-sleep 3
+# UAS 时序：页面注册就绪（≤20s）后才起 UI 拨入（先拨会 503）。
+OK=0
+for _ in $(seq 1 40); do
+  grep -q "PASS page registered" /tmp/macosui-pub.log 2>/dev/null && OK=1 && break
+  sleep 0.5
+done
+[ "$OK" = "1" ] || { echo "FAIL 页面未注册就绪"; tail -6 /tmp/macosui-pub.log; exit 1; }
 
 echo "== [4.5/6] seed SIP 配置（desktop 启动即 REGISTER，观看经会议桥）"
 # 隔离 HOME：seed 与 desktop 启动同用 $E2E_DIR（不碰真实配置）。
@@ -133,5 +138,5 @@ echo "== [6/6] 截图留证（best-effort，无 Screen Recording 授权时内容
 screencapture -x /tmp/macosui-e2e.png 2>/dev/null || true
 
 wait "$PUB" 2>/dev/null || true
-kill "$UI_PID" "$SFU" "$SIG" 2>/dev/null || true
+kill "$UI_PID" "$HTTP" "$SFU" "$SIG" 2>/dev/null || true
 echo "E2E DONE"

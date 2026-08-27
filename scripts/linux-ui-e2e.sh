@@ -26,10 +26,10 @@ const ROOM = process.argv[2];
     args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--auto-accept-this-tab-capture', '--enable-usermedia-screen-capturing'],
   });
   const page = await browser.newPage();
-  await page.goto(`http://127.0.0.1:3002/?room=${ROOM}&role=publisher&signal=ws://127.0.0.1:3003/ws`);
+  await page.goto(`http://127.0.0.1:${process.env.WEB_SERVE_PORT || 38085}/sip-publisher.html?device=${ROOM}&token=e2e-token&signal=wss://127.0.0.1:3061`);
   await page.click('#connect');
-  await page.waitForFunction(() => document.getElementById('log').innerText.includes('屏幕共享已授权'), { timeout: 20000 });
-  console.log('PASS screen shared');
+  await page.waitForFunction(() => document.getElementById('status').innerText.includes('等待观看端拨入'), { timeout: 20000 });
+  console.log('PASS page registered, waiting INVITE');
   await page.waitForFunction(() => document.getElementById('status').innerText.includes('已连接'), { timeout: 25000 });
   console.log('PASS publisher connected');
   await new Promise(r => setTimeout(r, 15000)); // 保持发布（供 UI 收流）
@@ -52,12 +52,18 @@ REC="$(mktemp -d)"
 RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu" >/tmp/linuxui-sfu.log 2>&1 &
 SFU=$!
 # SIP 会议桥链路：SIP/UDP 5060 + Digest 凭证（desktop 侧 settings 同步 seed）。
-SIP_UDP_PORT=5060 SIP_DIGEST_USERS="AD-E2EUI=e2e-token" \
+SIP_UDP_PORT=5060 SIP_WSS_PORT=3061 \
+  SIP_DIGEST_USERS="AD-E2EUI=e2e-token,${ROOM}=e2e-token" \
   "$ROOT/target/debug/aerodesk-signal" >/tmp/linuxui-sig.log 2>&1 &
 SIG=$!
+(cd "$ROOT/web" && python3 -m http.server "${WEB_SERVE_PORT:-38085}" >/tmp/linuxui-http.log 2>&1) &
+HTTP=$!
+(cd "$ROOT/web" && python3 -m http.server "${WEB_SERVE_PORT:-38085}" >/tmp/linuxui-http.log 2>&1) &
+HTTP=$!
 OK=0
 for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 3003 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then OK=1; break; fi
+    if grep -q "SIP/UDP 监听已起" /tmp/linuxui-sig.log 2>/dev/null \
+        && (exec 3<>/dev/tcp/127.0.0.1/3002) 2>/dev/null; then OK=1; break; fi
     sleep 0.2
 done
 if [ "$OK" != "1" ]; then echo "FAIL: SFU/signal not ready; logs:"; tail -20 /tmp/linuxui-sig.log /tmp/linuxui-sfu.log; exit 1; fi
@@ -71,10 +77,16 @@ if [ "$OK" != "1" ]; then echo "FAIL: SIP/UDP 未就绪"; tail -10 /tmp/linuxui-
 
 echo "== [4/7] Web 被控端发布（headless Chrome 屏幕共享）"
 set +e
-node "$E2E_DIR/e2e-pub.js" "$ROOM" &
+WEB_SERVE_PORT="${WEB_SERVE_PORT:-38085}" node "$E2E_DIR/e2e-pub.js" "$ROOM" >/tmp/linuxui-pub.log 2>&1 &
 PUB=$!
 set -e
-sleep 3
+# UAS 时序：页面注册就绪（≤20s）后才起 UI 拨入（先拨会 503）。
+OK=0
+for _ in $(seq 1 40); do
+  grep -q "PASS page registered" /tmp/linuxui-pub.log 2>/dev/null && OK=1 && break
+  sleep 0.5
+done
+[ "$OK" = "1" ] || { echo "FAIL 页面未注册就绪"; tail -6 /tmp/linuxui-pub.log; exit 1; }
 
 echo "== [4.5/7] seed SIP 配置（desktop 启动即 REGISTER，观看经会议桥）"
 # 隔离 HOME：seed 与 desktop 启动同用 $E2E_DIR（不碰真实配置）。
@@ -136,5 +148,5 @@ if command -v xwd >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
 fi
 
 wait "$PUB" 2>/dev/null || true
-kill "$UI_PID" "$SFU" "$SIG" "$XVFB" 2>/dev/null || true
+kill "$UI_PID" "$HTTP" "$SFU" "$SIG" "$XVFB" 2>/dev/null || true
 echo "E2E DONE"

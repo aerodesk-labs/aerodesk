@@ -26,7 +26,7 @@ function Stop-AeroDesk {
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
-$sfu = $null; $sig = $null
+$sfu = $null; $sig = $null; $http = $null
 try {
     Stop-AeroDesk
     Start-Sleep -Milliseconds 500
@@ -38,12 +38,18 @@ try {
     # runner 有网卡；本机无网卡时 SFU 默认通配绑定同样可回退）。
     $env:SFU_BIND_ADDRESS = "0.0.0.0"
     $env:SFU_HOST_ADDRESS = "127.0.0.1"
-    # #552：CLI 客户端走 SIP UDP 面，signal 必须启用（ci.yml job env 已注入，此处显式设防本地跑）。
+    # #552：CLI 客户端走 SIP UDP 面；#598 P2a：浏览器信令走 SIP-WSS 面（3061）。
     $env:SIP_UDP_PORT = "5060"
+    $env:SIP_WSS_PORT = "3061"
     $sfu = Start-Process -FilePath ".\target\debug\aerodesk-sfu.exe" -WindowStyle Hidden `
         -RedirectStandardOutput "$logDir\sfu.log" -RedirectStandardError "$logDir\sfu.err" -PassThru
     $sig = Start-Process -FilePath ".\target\debug\aerodesk-signal.exe" -WindowStyle Hidden `
         -RedirectStandardOutput "$logDir\sig.log" -RedirectStandardError "$logDir\sig.err" -PassThru
+    # #598 P2a：静态服务 web/（sip-*.html；SFU 内嵌换页在 P4）。
+    $env:WEB_SERVE_PORT = "38083"
+    $http = Start-Process -FilePath "python" -ArgumentList "-m","http.server","38083" `
+        -WorkingDirectory "$Root\web" -WindowStyle Hidden `
+        -RedirectStandardOutput "$logDir\http.log" -RedirectStandardError "$logDir\http.err" -PassThru
     Start-Sleep -Seconds 3
 
     Write-Host "== playwright-core"
@@ -73,6 +79,7 @@ try {
     exit $fail
 }
 finally {
+    if ($http) { Stop-Process -Id $http.Id -Force -ErrorAction SilentlyContinue }
     if ($sfu) { Stop-Process -Id $sfu.Id -Force -ErrorAction SilentlyContinue }
     if ($sig) { Stop-Process -Id $sig.Id -Force -ErrorAction SilentlyContinue }
     Stop-AeroDesk

@@ -1,20 +1,13 @@
 #!/usr/bin/env bash
-# #58 画质选层端到端（SIP 语义版，#552 迁移后重写 2026-08-24）：
-#   Web 端（headless Chrome 屏幕共享）发布 → SFU → 2 个 CLI viewer（SIP 会议桥）选层收流。
+# #58 画质选层端到端（#598 P2a 起暂停）：Web 发布端（JSON WSS join 入 SFU 会议）
+# + 2×CLI viewer（--layer f/q 会议桥选层登记）多播收流 + 选层请求转发断言。
 #
-# 重写背景：#552 把 agent CLI 信令改为 SIP——publisher 是 1:1 P2P 被叫（无 SFU
-# 会议发布/302 升级，属 P2 项），WSS 客户端面已删（#580）。原生端 simulcast 三层
-# 端到端（rid q/h/f + f>q 码率切换）需原生端会议发布落地后恢复（P2，#553 交接项）。
-# 本脚本维持 #58 的核心护栏：1 发布 → 2 观看的多播 + SFU 选层请求转发 + 无 panic。
-# 发布端用 Web（走 signal 保留的 WSS /ws JSON 面），观看端用 CLI（SIP 会议桥进
-# 同一房间——服务端按房间 FNV 哈希选同一 SFU shard，与 WSS 侧同池）。
-#
-# 断言：
-#   1. 两个 viewer 都收到发布端媒体（RECEIVED > 0）——SFU 多播转发成立
-#   2. SFU 收到 High/Low 两个显式选层请求（--layer f/q 经 control 通道）
-#   3. 无 panic
+# 暂停原因（#598 P2a）：JSON WSS 房间面退役——浏览器发布端入 SFU 会议的路径
+# 依赖旧 join 语义；SIP 世界浏览器为 P2P-UAS（1:1 直连，无 SFU 会议参与）。
+# 恢复条件：P3 会议桥落地后「浏览器/原生发布端入会」路径成形，本脚本按
+# SIP 形态重写（发布端 INVITE 会议 AoR → SFU 会话 → 选层断言），恢复 CI 前
+# 先本地验证。与 bridge 三脚本同暂停机制（ci.yml if: false）。
 # 用法: scripts/simulcast-e2e.sh [房间] [观察秒数]
-# 依赖：cargo、node/playwright-core、Chrome（macOS runner 预装）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"

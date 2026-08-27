@@ -65,7 +65,10 @@ const DOMAIN = 'aerodesk.test';
 let ws = null, rtc = null, callId = null, toTag = null, closed = false;
 let regTimer = null, connecting = false, inviteSeq = 0;
 let phase = 'idle';   // idle | registering | calling | in-call
+let userDisconnected = false;
+let reconnectAttempts = 0;
 const REGISTER_EXPIRES = 120;
+const MAX_RECONNECT = 5;
 
 function log(msg) {
     const el = $('log');
@@ -212,10 +215,11 @@ function setupRtc() {
         }
     };
     rtc.onicecandidate = () => { /* 非 trickle：candidate 内嵌 SDP，等 gathering 完成 */ };
-    // 观看端：recvonly 视频 + input data channel（键鼠回传后续阶段接入）。
+    // 观看端：recvonly 视频 + input data channel（键鼠回传）。
     rtc.addTransceiver('video', { direction: 'recvonly' });
     const input = rtc.createDataChannel('input');
-    input.onopen = () => log('input channel open（键鼠回传待后续阶段）');
+    input.onopen = () => log('input channel open（键鼠回传已接入）');
+    rtc.input = input;
     rtc.ontrack = (e) => {
         const video = $('video');
         video.srcObject = e.streams[0] || new MediaStream([e.track]);
@@ -369,6 +373,52 @@ function sendBye() {
         + 'Reason: SIP;cause=200;text="web viewer hangup"\r\nContent-Length: 0\r\n\r\n');
 }
 
+// ---------- 键鼠回传（InputFrame JSON 经 input 通道；与 MainActivity 同构） ----------
+let inputSeq = 0;
+function sendInput(type, x, y) {
+    const ch = rtc && rtc.input;
+    if (!ch || ch.readyState !== 'open') return;
+    const event = type === 'move'
+        ? { type: 'mouse_move', x, y }
+        : { type: 'mouse_button', button: 'left', state: type, x, y };
+    const frame = JSON.stringify({ version: 1, seq: ++inputSeq, timestamp_ms: Date.now(), event });
+    ch.send(frame);
+}
+function bindInputEvents() {
+    const v = $('video');
+    v.addEventListener('mousemove', (e) => {
+        const r = v.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return;
+        sendInput('move', (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+    });
+    for (const [ev, st] of [['mousedown', 'pressed'], ['mouseup', 'released']]) {
+        v.addEventListener(ev, (e) => {
+            const r = v.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) return;
+            sendInput(st, (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+        });
+    }
+}
+bindInputEvents();
+
+// ---------- 自动重连（#175：信令断开 → 退避重连，镜像原生 --reconnect） ----------
+function scheduleReconnect() {
+    if (userDisconnected) return;
+    if (reconnectAttempts >= MAX_RECONNECT) {
+        log('重连次数超限（' + MAX_RECONNECT + '），停止');
+        return;
+    }
+    const delay = Math.min(1000 << reconnectAttempts, 8000);
+    reconnectAttempts += 1;
+    log('信令断开，' + (delay / 1000) + 's 后自动重连（' + reconnectAttempts + '/' + MAX_RECONNECT + '）');
+    setTimeout(() => {
+        if (!userDisconnected) {
+            cleanupAll();
+            connect();
+        }
+    }, delay);
+}
+
 // ---------- 连接主流程 ----------
 async function connect() {
     if (connecting) return;
@@ -393,11 +443,13 @@ async function connect() {
                 setStatus('信令断开（媒体可能仍存活，建议重连）');
                 log('signaling closed');
             }
+            scheduleReconnect();
         };
         log('signaling connected: ' + wsTarget());
 
         setStatus('REGISTER…');
         await register(1);
+        reconnectAttempts = 0;   // 注册成功 = 服务恢复，重连计数复位
         log('REGISTER → 200 OK（SIP-WSS + Digest 认证成功）');
         // 60s 后刷新注册（Expires: 120，原生端同款 expires/2 节奏）
         regTimer = setInterval(() => {
@@ -445,6 +497,7 @@ function cleanupAll() {
 }
 function disconnect() {
     closed = true;
+    userDisconnected = true;
     if (phase === 'in-call' || phase === 'calling') {
         try { sendBye(); } catch (_) {}
         log('BYE 已发送');

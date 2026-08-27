@@ -307,7 +307,8 @@ struct CmdCtx<'a> {
 /// rsipstack 内部 `ClientConfig::builder()` 直接 panic（本文件 274 行 UA 线程
 /// 就此死于「Could not automatically determine the process-level CryptoProvider」）。
 /// 按 rustls 文档在应用层显式安装（进程级一次性；重复安装返回 Err 忽略）。
-fn ensure_rustls_provider() {
+/// 服务端（signal WSS accept / sfu TLS）同样需要——进程级安装任一方先到即生效。
+pub fn ensure_rustls_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
