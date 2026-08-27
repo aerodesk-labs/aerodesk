@@ -16,13 +16,22 @@ static CANCEL_SEND_AFTER: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::
 static CANCEL_SEND_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// #122：发送是否已确认（viewer --send-file 模式发送完成）。
+/// 闩锁语义（#595 审查修复）：一旦观察到确认即永久为 true——事件循环里
+/// tick()（内含剪贴板轮询，可替换已确认的发送槽位）先于本判定执行，
+/// 无闩锁时残留剪贴板图片会在确认与观察之间顶掉上传记录 → viewer 永不退出。
+static SEND_DONE_LATCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn send_confirmed() -> bool {
-    FILE_TX
+    let confirmed = FILE_TX
         .lock()
         .unwrap()
         .as_ref()
         .map(|f| f.send_complete())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if confirmed {
+        SEND_DONE_LATCH.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    SEND_DONE_LATCH.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// #122：当前接收落盘目录（viewer --request-file 模式轮询落盘）。
@@ -55,6 +64,7 @@ pub fn init(
     *FILE_TX.lock().unwrap() = Some(ft);
     *CANCEL_SEND_AFTER.lock().unwrap() = cancel_send_after.map(|d| Instant::now() + d);
     CANCEL_SEND_DONE.store(false, std::sync::atomic::Ordering::SeqCst);
+    SEND_DONE_LATCH.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// 路由 data channel 事件到状态机（no-op 除非 label == "file"）。

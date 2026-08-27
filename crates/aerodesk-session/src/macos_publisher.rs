@@ -357,15 +357,8 @@ fn run_publisher_pump(
     // #503-2 被控端剪贴板双向：file 通道接收 viewer 发来的文本/图片 + 本地
     // 1s 轮询回传（与 CLI 被控端同语义；图片优先，防回声）。
     // #503 传输中心：desktop→desktop 发送的文件落盘 Downloads/AeroDesk
-    // （与 generic_publisher 同款默认；无 UI 配置入口，固定默认 + 日志可见）。
-    let recv_dir = crate::generic_publisher::default_recv_dir();
-    if let Some(dir) = &recv_dir {
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            tracing::warn!("创建文件接收目录失败（接收禁用）: {}: {e}", dir.display());
-        } else {
-            tracing::info!("被控端文件接收目录: {}", dir.display());
-        }
-    }
+    // （与 generic_publisher 同款默认；创建失败 → None，接收禁用）。
+    let recv_dir = crate::generic_publisher::resolve_recv_dir();
     let mut file_transfer = aerodesk_core::file_transfer::FileTransfer::new(recv_dir);
     // 被控端允许响应 FileControl::Request 提供文件（#255 审查语义，同 CLI）。
     file_transfer.set_allow_request(true);

@@ -439,6 +439,25 @@ mod tests {
         assert_eq!(st.mode, PrivacyMode::Text);
     }
 
+    /// #503 复位顺序（#595 审查补测）：同一消息 {"enabled":false,"mute":true}
+    /// ——先应用显式 mute 再复位，最终静音必须为关闭（复位优先于同消息 mute）。
+    #[test]
+    fn control_off_with_mute_true_resets_mute() {
+        let mut st = PrivacyState::default();
+        assert!(apply_control(
+            &serde_json::json!({"privacy": {"enabled": true, "mute": true}}),
+            &mut st
+        ));
+        assert!(st.mute_audio);
+        // 同消息携带 off+mute：复位胜出（若 mute 后应用则终态错误地保持静音）。
+        apply_control(
+            &serde_json::json!({"privacy": {"enabled": false, "mute": true}}),
+            &mut st,
+        );
+        assert!(!st.enabled);
+        assert!(!st.mute_audio, "enabled=false 的复位不得被同消息 mute 覆盖");
+    }
+
     /// 黑屏：整帧全 0（BGRA）。
     #[test]
     fn paint_black_fills_frame() {
