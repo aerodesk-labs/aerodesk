@@ -42,9 +42,20 @@ pub fn device_aor(device_id: &str, domain: &str) -> String {
 
 /// 设备 ID → SFU 会议 AoR（`sip:view-<device-id>@<domain>`，规范 §4.1）。
 /// 多方升级时参与方据此自行推导重 INVITE 目标，无需额外信令字段——
-/// 302 不带 Contact（rsipstack `reject` 限制）时两端同样收敛。
+/// dialog 层 `reject` 不带 Contact（rsipstack 限制）时两端同样收敛；
+/// 事务层 `reply_with` 可带 Contact（P3 多 PoP 302 即走该路径）。
 pub fn view_aor(device_id: &str, domain: &str) -> String {
     format!("sip:view-{device_id}@{domain}")
+}
+
+/// 房间名安全校验：仅 `[A-Za-z0-9._-]`（原 signal bridge.rs `sanitize_room`，
+/// P3 桥退役后迁协议 crate 供 SIP INVITE 会议分支继续使用）。
+pub fn valid_room_name(room: &str) -> bool {
+    !room.is_empty()
+        && !room.starts_with('-') // 防被当作命令行选项/歧义解析
+        && room
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// 升级 BYE 的 Reason 头值（规范 §4.1；RFC 3326，cause=302 = 呼叫已转移）。
@@ -267,6 +278,22 @@ mod tests {
     use super::*;
     use crate::signal::{PeerInfo, Role, TurnConfig};
     use rsip::HeadersExt;
+
+    // -- 房间名校验（原 signal bridge.rs sanitize_room 测试迁移） --
+
+    #[test]
+    fn valid_room_name_rejects_injection() {
+        assert!(valid_room_name("demo"));
+        assert!(valid_room_name("room-1_a.b"));
+        assert!(!valid_room_name(""));
+        assert!(!valid_room_name("x; touch /tmp/pwned"));
+        assert!(!valid_room_name("$(id)"));
+        assert!(!valid_room_name("a b"));
+        assert!(!valid_room_name("a|b"));
+        // 前导 '-'：会被当作命令行选项（#244 review）。
+        assert!(!valid_room_name("-h"));
+        assert!(!valid_room_name("--help"));
+    }
 
     // -- 寻址 --
 

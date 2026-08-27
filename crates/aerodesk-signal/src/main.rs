@@ -1,96 +1,72 @@
-//! AeroDesk 信令服务（WSS）。
+//! AeroDesk 信令服务（SIP 单栈，P3.1）。
 //!
-//! 职责：认证、房间管理、TURN 凭证下发、WebRTC offer/answer 代理到 SFU。
-//! 协议见 `aerodesk-protocol::signal`。
+//! P3 起本服务为 **SIP 单栈**：REGISTER/INVITE 走 rsipstack 端点（SIP/TLS +
+//! SIP/WSS + SIP/UDP 三传输，默认全开，`off` 显式关闭）；HTTP 仅保留运维面
+//! （/healthz、/devices、/metrics/prometheus、/admin/temp-password）。
+//! 协议见 docs/SIP_SIGNALING.md。
+//!
+//! 随 JSON 信令面（/ws + session_loop）在本提交一并退役（点名）：
+//! - JSON 信令协议面：SignalMessage Join/Description/Call 家族（枚举本体保留于
+//!   aerodesk-protocol::signal，客户端侧退役另分支）；
+//! - 连接配额（#163/#171）：MAX_ROOM_CLIENTS / MAX_TOTAL_CLIENTS /
+//!   SIGNAL_MAX_PREJOIN_CLIENTS 与用户配额；
+//! - prejoin 计数；Origin 白名单（SIGNAL_ALLOWED_ORIGINS）；
+//! - JWT 信令认证（JWT_SECRET / JWT_SECRET_OLD；protocol::jwt 模块同批删除，
+//!   agent --issue-token 一并退役）；
+//! - TURN 凭证下发（TURN_SECRET / TURN_URLS）；
+//! - JSON 面 PoP 重定向（ROOM_POP_MAP / POP_URLS）——多 PoP 改由 SIP INVITE
+//!   302+Contact（POP_SIP_URLS）承接；跨 PoP 桥编排（BRIDGE_CMD 族）随 #601
+//!   桥双腿 SIP 化重建。
 //!
 //! 环境变量：
-//!   SIGNAL_PORT   WSS 端口（默认 3001）
-//!   AUTH_TOKENS   逗号分隔合法 token（JWT_SECRET 未设置时使用；空则不认证）
-//!   JWT_SECRET     HS256 共享密钥；设置后 Join 必须携带合法 JWT（用户/设备/房间/角色授权）
-//!   JWT_SECRET_OLD 旧密钥（轮换宽限期）：新密钥验证失败时回退旧密钥，轮换不中断
+//!   SIGNAL_OPS_PORT  HTTP 运维端口（默认 3001；兼容别名 SIGNAL_PORT）
+//!   AUTH_TOKENS      静态 token（SIP Digest 回退口令 + /admin 鉴权回退）
+//!   SIP_REALM        SIP 域（默认 aerodesk）
+//!   SIP_DIGEST_USERS 设备固定密码表（逗号分隔 user=password）
+//!   SIP_ADMIN_TOKEN  /admin/temp-password 管理端点鉴权 token（缺省回退首个
+//!                    AUTH_TOKEN）
+//!   SIP_TLS_PORT     SIP/TLS 端口（默认 5061；off/disabled/none 关闭）
+//!   SIP_WSS_PORT     SIP/WSS 端口（默认 3061；off 关闭）
+//!   SIP_UDP_PORT     SIP/UDP 端口（默认 5060；off 关闭）
+//!   CERT_FILE/KEY_FILE  TLS 身份（未设置回退内嵌开发证书）
+//!   SFU_URL / SFU_URLS / SFU_TOKEN / SFU_POLL_INTERVAL_SECS /
+//!                    SFU_FAIL_COOLDOWN_SECS / SFU_STICKY_TTL_SECS（SFU 池）
+//!   POP_ID / POP_REGISTRY_FILE / POP_REGISTRY_TTL_SECS（多 PoP 注册表）
+//!   POP_SIP_URLS     PoP=host:port（逗号分隔；他 PoP 房间 INVITE 的 302
+//!                    Contact 载体）
 //!
-//! SIGHUP：重读 TLS 证书并重建 WSS server（无需重启进程）。
-//!   TURN_SECRET   coturn REST secret（空则不下发 TURN）
-//!   TURN_URLS     逗号分隔 TURN URL（默认 127.0.0.1:3478）
-//!   SFU_URL       SFU 内部接口（默认 http://127.0.0.1:3002）
-//!   SFU_URLS      SFU 池（逗号分隔，可选）：设置后按房间无状态哈希选路到其中一个 SFU；
-//!                 未设置回退单值 SFU_URL（向后兼容）
-//!   SFU_TOKEN     SFU 内部接口 token（可选）
-//!   SFU_STICKY_TTL_SECS 房间→SFU 粘性映射空闲淘汰阈值（秒，默认 21600=6h；仅池>1）
-//!
-//! 多 PoP（#146）：
-//! 连接配额（#163）：
-//!   MAX_ROOM_CLIENTS  每房间人数上限（0=不限）；超限 Join 返回 Error("room full")
-//!   MAX_TOTAL_CLIENTS 单实例全局连接上限（0=不限）；超限返回 Error("server full")
-//!   SIGNAL_MAX_PREJOIN_CLIENTS 并发「未 Join」连接上限（默认 256，0=不限）：
-//!                 认证/Join 前的连接同样占线程与 fd 且不受 MAX_TOTAL_CLIENTS
-//!                 约束，超限直接断开（防预认证连接堆积）
-//!   SIGNAL_ALLOWED_ORIGINS /ws Origin 白名单（逗号分隔；未设置不校验，`*` 放行
-//!                 全部）。浏览器必带 Origin；CLI/native 无 Origin 头始终放行
-//!   SIGNAL_PLAIN_PORT 明文 WS 端口（默认 3003）；设为 off/disabled/none 关闭
-//!                 明文服务器（生产建议关闭或用防火墙限制）
+//! SIGHUP：重读 TLS 证书——重建 ops HTTPS server 并重启 SIP 端点（证书轮换
+//! 不丢注册；无需重启进程）。
 //!
 //! #503-4 无人值守密码：
-//!   SIP_DIGEST_USERS 设备固定密码表（逗号分隔 user=password，配合 SIP 端点）
-//!   SIP_ADMIN_TOKEN  /admin/temp-password 管理端点鉴权 token（缺省回退首个 AUTH_TOKEN）
 //!   POST   /admin/temp-password {"device_id":"AD-XX","ttl_secs":300}  → 签发临时密码
 //!   DELETE /admin/temp-password/<device>                              → 撤销临时密码
-//!
-//!   POP_ID        本 PoP 标识（默认 local）
-//!   ROOM_POP_MAP  房间前缀=PoP，逗号分隔（如 eu-=pop-eu,us-=pop-us）；最长前缀优先
-//!   POP_URLS      PoP=客户端信令 URL，逗号分隔（如 pop-eu=wss://eu.example.com:443/ws）
-//!
-//! 跨 PoP 桥接（#216 M3，可选）：
-//!   BRIDGE_CMD                 房间桥命令模板（含 {room} 占位符）。设置后，加入
-//!                              「钉在其它 PoP」房间的 viewer 先经桥在本 PoP 接入，
-//!                              桥失败/超时回退 v1 Redirect
-//!   BRIDGE_READY_TIMEOUT_SECS  桥就绪等待上限（默认 15）
-//!   BRIDGE_FAIL_COOLDOWN_SECS  桥失败冷却（默认 30，期间直接 Redirect 不重试）
-//!   BRIDGE_MAX_RUNNING         并发桥上限（默认 8；防房间名轮换绕过冷却的进程滥用）
-//!   BRIDGE_IDLE_SECS           桥空闲回收阈值（默认 300；房间无真实客户端超时停桥）
-//!   BRIDGE_MONITOR_INTERVAL_SECS 桥 monitor 轮询间隔（默认 15，下限 2；死亡检测/
-//!                              空闲回收粒度，e2e 用 2s 快于客户端 8s watchdog）
 
 #[macro_use]
 extern crate tracing;
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aerodesk_protocol::jwt::Claims;
-use aerodesk_protocol::signal::{PeerInfo, Role, SignalMessage, TurnConfig};
-use bridge::{BridgeManager, BridgeOutcome};
 use pop_registry::PopRegistry;
-use rouille::websocket::{self, Message, Websocket};
 use rouille::{Request, Response};
+use tokio_util::sync::CancellationToken;
 
-mod bridge;
 mod pop_registry;
 mod sip_server;
 
 struct Config {
     auth_tokens: Vec<String>,
-    jwt_secret: Option<String>,
-    /// 旧密钥（轮换宽限期）：`jwt_secret` 验证失败时回退（#143）。
-    jwt_secret_old: Option<String>,
     /// 本 PoP 标识（默认 local）。
     pop_id: String,
-    /// 房间前缀 → PoP（最长前缀优先，静态钉住）。
-    room_pop_map: Vec<(String, String)>,
-    /// 动态注册表（POP_REGISTRY_FILE 开启时存在）：首个加入者登记房间归属（#154）。
+    /// 动态注册表（POP_REGISTRY_FILE 开启时存在）：房间归属由首个 INVITE 登记
+    /// （#154；P3.1 写入点自 JSON Join 迁 SIP INVITE 会议分支）。
     pop_registry: Option<Arc<PopRegistry>>,
-    /// 每房间人数上限（0=不限，#163）。
-    max_room_clients: usize,
-    /// 全局连接上限（0=不限，#163）。
-    max_total_clients: usize,
-    /// PoP → 客户端信令 URL（重定向目标）。
-    pop_urls: HashMap<String, String>,
-    /// TURN REST secret（用于按 Join 现算临时凭证，避免 1h 过期）。
-    turn_secret: Option<String>,
-    turn: Option<TurnConfig>,
+    /// PoP → SIP 目标 host:port（POP_SIP_URLS；302 Contact 载体）。
+    pop_sip_urls: Vec<(String, String)>,
     /// SFU 池（按房间无状态哈希选路；长度 ≥1）。
     sfu_urls: Vec<String>,
     sfu_token: Option<String>,
@@ -100,47 +76,23 @@ struct Config {
     sfu_fail_cooldown_secs: u64,
     /// 房间粘性映射空闲淘汰阈值（秒；仅池 >1 时生效）。
     sfu_sticky_ttl_secs: u64,
-    /// 并发「未 Join」连接上限（0=不限）：Join/认证之前连接同样占线程与 fd，
-    /// 防止绕过 max_total_clients 的连接堆积（#163 只在 Join 后计数）。
-    max_prejoin_clients: usize,
-    /// /ws Origin 白名单（None=不校验，兼容现状；`*` 放行全部）。
-    /// 非浏览器客户端（CLI/native）无 Origin 头，始终放行。
-    allowed_origins: Option<Vec<String>>,
-    /// 跨 PoP 桥接编排（#216 M3）：BRIDGE_CMD 设置时启用；桥失败回退 Redirect。
-    bridge: Option<Arc<BridgeManager>>,
-    /// 桥空闲回收阈值（#246）：房间内无真实客户端超过该时长 → 停止桥。
-    bridge_idle_secs: Duration,
-    /// 桥生命周期 monitor 轮询间隔（#249 review：可配小值让死亡检测快于客户端
-    /// 8s no-media watchdog，e2e 用 2s；默认 15）。
-    bridge_monitor_interval: Duration,
 }
 
-struct Peer {
-    id: String,
-    role: Role,
-    ws: Arc<Mutex<Websocket>>,
-    /// #539 呼叫可靠送达：发送队列。session_loop 常驻阻塞读持有 ws 锁，
-    /// try_lock 会丢呼叫、阻塞 lock 会死锁——经队列投递由本连接循环 drain。
-    tx: std::sync::mpsc::Sender<String>,
-    /// JWT sub（#171 per-user 配额计数用；静态/开发模式为 None）。
-    user: Option<String>,
-    /// 桥自身 publisher 腿（#246）：空闲回收/配额豁免按此区分，不计真实客户端。
-    bridge_leg: bool,
-}
-
-type Rooms = Arc<Mutex<HashMap<String, Vec<Peer>>>>;
-
-/// SIGHUP 触发：重读 TLS 证书并重建 WSS server。
+/// SIGHUP 触发：重读 TLS 证书并重建 ops HTTPS server。
 static RELOAD_TLS: AtomicBool = AtomicBool::new(false);
-static CONFIG: OnceLock<Arc<Config>> = OnceLock::new();
-static ROOMS: OnceLock<Rooms> = OnceLock::new();
-/// 全局在线连接数（#163）。
-static TOTAL_CLIENTS: OnceLock<Arc<AtomicUsize>> = OnceLock::new();
-/// 按用户（JWT sub）在线连接数（#171）。
-static USER_CONNS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+/// SIGHUP 触发：重启 SIP 端点以换用新证书（与 RELOAD_TLS 同一信号双写）。
+/// 消费点：主循环读它 cancel 当前端点；supervisor 在端点返回后 swap 判定
+/// reload/真停机（Ok 返回 + 标志 false 才停机，防止 reload 被误判为停机）。
+static RELOAD_SIP_TLS: AtomicBool = AtomicBool::new(false);
+/// 当前 SIP 端点的 cancel token（SIGHUP reload 臂 cancel 之，supervisor 换代）。
+static CURRENT_SIP_TOKEN: OnceLock<Mutex<CancellationToken>> = OnceLock::new();
+/// SIP 端点是否启用（任一 SIP_*_PORT 非 off）：/healthz `sip` 字段与
+/// /admin/temp-password 的 501 判定共用。
+static SIP_ENDPOINT_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// #503-4 临时密码注册表句柄：SIP 端点启动时设置；HTTP 管理端点
-/// （/admin/temp-password）读写、SIP INVITE 授权读取（decide_invite 临时口令分支）。
+/// #503-4 临时密码注册表句柄：无条件初始化（main 启动即 set）；SIP INVITE
+/// 授权读取（decide_invite 临时口令分支）与 /admin/temp-password 读写共用。
+/// 「SIP 端点可用与否」不看它，看 SIP_ENDPOINT_ENABLED。
 static TEMP_PASSWORDS: OnceLock<Arc<Mutex<sip_server::TempRegistry>>> = OnceLock::new();
 
 /// 恒定时间字符串比较（防时序侧信道；长度差异直接短路——长度非机密，
@@ -231,24 +183,16 @@ impl SfuPool {
         chosen
     }
 
-    /// 淘汰「无活跃 peer 且超过 `ttl_secs` 未使用」的粘性映射（poller 周期调用），
-    /// 返回淘汰数。`alive` 为 rooms 表中有 peer 的房间集合：这些房间的映射一律
-    /// 保留——活跃房间**永不重映射**（粘性保证）；仅当房间已空（peer 清零、
-    /// session_loop 已将其移出 rooms 表）且映射空闲超过 TTL 才淘汰，防无界增长。
-    /// 注意 select 只在 Description/kick 路径被调用，Join 不刷新时间戳，因此
-    /// 不能用「最近 select 时间」判断房间死活，必须看 rooms 表。
-    fn evict_stale(
-        &self,
-        alive: &std::collections::HashSet<String>,
-        ttl_secs: u64,
-        now: u64,
-    ) -> usize {
+    /// 淘汰「空闲超过 `ttl_secs`」的粘性映射（poller 周期调用），返回淘汰数。
+    /// P3.1：last_used 的唯一刷新点是 SIP INVITE 会议分支（sfu_candidates →
+    /// select，裁8）——池的唯一消费路径；零 INVITE 超过 TTL 的房间视为死房间。
+    fn evict_stale(&self, ttl_secs: u64, now: u64) -> usize {
         let mut reg = self
             .room_sfu
             .lock()
             .unwrap_or_else(aerodesk_protocol::util::lock_recover);
         let before = reg.len();
-        reg.retain(|room, (_, t)| alive.contains(room) || now.saturating_sub(*t) < ttl_secs);
+        reg.retain(|_, (_, t)| now.saturating_sub(*t) < ttl_secs);
         before - reg.len()
     }
 }
@@ -311,10 +255,9 @@ fn poll_sfu_load(url: &str, token: Option<&str>) -> Result<u64, PollErr> {
 /// 后台轮询各 SFU 的负载；网络/HTTP 失败按冷却期标记下线，
 /// 401/403 属配置错误（SFU 本身健康），保留上次负载不标记下线（error 日志
 /// 按每 SFU 每 300s 节流，防刷屏）。
-/// 同时淘汰「无活跃 peer 且空闲超时」的房间粘性映射（防 room_sfu 无界增长）。
+/// 同时淘汰空闲超时的房间粘性映射（防 room_sfu 无界增长）。
 fn poll_sfu_pool(
     pool: Arc<SfuPool>,
-    rooms: Rooms,
     interval_secs: u64,
     cooldown_secs: u64,
     token: Option<String>,
@@ -358,105 +301,13 @@ fn poll_sfu_pool(
                 }
             }
         }
-        let alive: std::collections::HashSet<String> = {
-            let rooms = rooms
-                .lock()
-                .unwrap_or_else(aerodesk_protocol::util::lock_recover);
-            rooms.keys().cloned().collect()
-        };
-        let evicted = pool.evict_stale(&alive, sticky_ttl_secs, unix_secs());
+        let evicted = pool.evict_stale(sticky_ttl_secs, unix_secs());
         if evicted > 0 {
             debug!(
                 "sfu pool: evicted {evicted} idle sticky room mappings (ttl {sticky_ttl_secs}s)"
             );
         }
         std::thread::sleep(Duration::from_secs(interval_secs));
-    }
-}
-
-/// 用户配额检查（纯函数）：max=0 不限；已达上限拒绝；通过则计数 +1。
-fn user_quota_take(
-    conns: &mut HashMap<String, usize>,
-    user: &str,
-    max_conns: u32,
-) -> Result<(), &'static str> {
-    if max_conns == 0 {
-        return Ok(());
-    }
-    let n = conns.get(user).copied().unwrap_or(0);
-    if n as u32 >= max_conns {
-        return Err("user quota exceeded");
-    }
-    conns.insert(user.to_string(), n + 1);
-    Ok(())
-}
-
-/// 用户连接释放（断开时 -1）。
-fn user_quota_release(conns: &mut HashMap<String, usize>, user: &str) {
-    if let Some(n) = conns.get_mut(user) {
-        *n = n.saturating_sub(1);
-        if *n == 0 {
-            conns.remove(user);
-        }
-    }
-}
-
-/// 配额检查（纯函数）：房间/全局任一超限返回原因。
-fn quota_ok(
-    room_len: usize,
-    total: usize,
-    room_cap: usize,
-    total_cap: usize,
-) -> Result<(), &'static str> {
-    if room_cap > 0 && room_len >= room_cap {
-        return Err("room full");
-    }
-    if total_cap > 0 && total >= total_cap {
-        return Err("server full");
-    }
-    Ok(())
-}
-
-/// SIGNAL_PLAIN_PORT 解析：未设置 → 默认 3003；off/disabled/none（不区分大小写）
-/// → None（完全关闭明文服务器）；非法值告警并回退 3003（配置笔误不静默改行为）。
-fn parse_plain_port(raw: Option<&str>) -> Option<u16> {
-    const DEFAULT: u16 = 3003;
-    match raw {
-        None => Some(DEFAULT),
-        Some(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "off" | "disabled" | "none" => None,
-            other => match other.parse::<u16>() {
-                Ok(port) => Some(port),
-                Err(_) => {
-                    warn!("invalid SIGNAL_PLAIN_PORT={v:?}; fallback to {DEFAULT}");
-                    Some(DEFAULT)
-                }
-            },
-        },
-    }
-}
-
-/// 预 Join（未认证/未加入）连接计数：MAX_TOTAL_CLIENTS 只在 Join 后计数，
-/// 认证前的连接同样占用线程与 fd，单独设限防连接堆积 DoS。
-static PREJOIN_CLIENTS: AtomicUsize = AtomicUsize::new(0);
-
-/// 预占一个 pre-join 槽位：`None`=超上限拒绝；`Some(counted)`=放行，
-/// `counted` 指示是否实际计数（cap=0 不限时释放须传回原值，防止多减）。
-fn reserve_prejoin(counter: &AtomicUsize, cap: usize) -> Option<bool> {
-    if cap == 0 {
-        return Some(false);
-    }
-    if counter.fetch_add(1, Ordering::Relaxed) >= cap {
-        counter.fetch_sub(1, Ordering::Relaxed);
-        return None;
-    }
-    Some(true)
-}
-
-/// 释放 pre-join 槽位（仅在 `reserve_prejoin` 实际计数时递减）。
-fn release_prejoin(counter: &AtomicUsize, counted: bool) {
-    if counted {
-        counter.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -468,10 +319,40 @@ fn parse_sticky_ttl(raw: Option<&str>) -> u64 {
         .unwrap_or(6 * 3600)
 }
 
+/// SIP_*_PORT 类端口解析（D2 默认翻转）：未设置 → 默认值（Some）；off/disabled/
+/// none（不区分大小写）→ None（关闭该传输）；非法值告警并回退默认（配置笔误
+/// 不静默改行为）。
+fn parse_port_or_off(raw: Option<&str>, env_name: &str, default: u16) -> Option<u16> {
+    match raw {
+        None => Some(default),
+        Some(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "off" | "disabled" | "none" => None,
+            other => match other.parse::<u16>() {
+                Ok(port) => Some(port),
+                Err(_) => {
+                    warn!("invalid {env_name}={v:?}; fallback to {default}");
+                    Some(default)
+                }
+            },
+        },
+    }
+}
+
+/// ops HTTP 端口：SIGNAL_OPS_PORT 优先，兼容别名 SIGNAL_PORT，默认 3001。
+fn signal_ops_port() -> u16 {
+    std::env::var("SIGNAL_OPS_PORT")
+        .or_else(|_| std::env::var("SIGNAL_PORT"))
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3001)
+}
+
 #[cfg(unix)]
 extern "C" fn on_signal(sig: libc::c_int) {
     if sig == libc::SIGHUP {
+        // 双写：ops HTTPS 重建（RELOAD_TLS）+ SIP 端点重启换证书（RELOAD_SIP_TLS）。
         RELOAD_TLS.store(true, Ordering::Relaxed);
+        RELOAD_SIP_TLS.store(true, Ordering::Relaxed);
     }
 }
 
@@ -483,26 +364,25 @@ fn install_signal_handlers() {
     }
 }
 
-/// WSS 处理器（fn 指针，便于 SIGHUP 重建 Server）。
-fn wss_handler(request: &Request) -> Response {
-    let config = CONFIG.get().expect("config initialized").clone();
-    let rooms = ROOMS.get().expect("rooms initialized").clone();
-    handle(request, config, rooms)
-}
+/// ops HTTP 处理器类型（Box<dyn Fn>：闭包捕获 Arc<Config>，无 CONFIG 静态）。
+type OpsHandler = Box<dyn Fn(&Request) -> Response + Send + Sync>;
 
-/// 带重试的 TLS server 绑定：旧 listener 释放后端口可能短暂 EADDRINUSE（macOS 实测），
-/// 重试可自愈；失败返回最后一次错误。
+/// 带重试的 ops HTTPS server 绑定：旧 listener 释放后端口可能短暂 EADDRINUSE
+/// （macOS 实测），重试可自愈；失败返回最后一次错误。
 fn bind_wss_with_retry(
     port: u16,
     cert: &[u8],
     key: &[u8],
+    config: &Arc<Config>,
     attempts: usize,
-) -> Result<rouille::Server<fn(&Request) -> Response>, String> {
+) -> Result<rouille::Server<OpsHandler>, String> {
     let mut last_err = String::new();
     for i in 0..attempts {
+        let config = config.clone();
+        let handler: OpsHandler = Box::new(move |req| ops_router(req, &config));
         match rouille::Server::new_ssl(
             format!("0.0.0.0:{port}"),
-            wss_handler as fn(&Request) -> Response,
+            handler,
             cert.to_vec(),
             key.to_vec(),
         ) {
@@ -518,10 +398,11 @@ fn bind_wss_with_retry(
     Err(last_err)
 }
 
-/// SIGHUP：重读 TLS 身份并重建 WSS server（旧连接不受影响；同证书 no-op）。
+/// SIGHUP：重读 TLS 身份并重建 ops HTTPS server（旧连接不受影响；同证书 no-op）。
 fn reload_tls(
-    server: &mut Option<rouille::Server<fn(&Request) -> Response>>,
+    server: &mut Option<rouille::Server<OpsHandler>>,
     tls: &mut aerodesk_protocol::tls::TlsIdentity,
+    config: &Arc<Config>,
 ) {
     match aerodesk_protocol::tls::TlsIdentity::load() {
         Ok(new_tls) => {
@@ -532,13 +413,10 @@ fn reload_tls(
                 );
                 return;
             }
-            let port: u16 = std::env::var("SIGNAL_PORT")
-                .ok()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(3001);
+            let port = signal_ops_port();
             info!("SIGHUP: reloading TLS identity from {}", new_tls.source);
             server.take();
-            match bind_wss_with_retry(port, &new_tls.cert, &new_tls.key, 20) {
+            match bind_wss_with_retry(port, &new_tls.cert, &new_tls.key, config, 20) {
                 Ok(srv) => {
                     *server = Some(srv);
                     *tls = new_tls;
@@ -546,9 +424,9 @@ fn reload_tls(
                 }
                 Err(e) => {
                     error!("SIGHUP: TLS reload bind failed: {e}; restoring previous identity");
-                    match bind_wss_with_retry(port, &tls.cert, &tls.key, 20) {
+                    match bind_wss_with_retry(port, &tls.cert, &tls.key, config, 20) {
                         Ok(srv) => *server = Some(srv),
-                        Err(e2) => error!("restore failed: {e2}; WSS down until restart"),
+                        Err(e2) => error!("restore failed: {e2}; ops HTTPS down until restart"),
                     }
                 }
             }
@@ -593,21 +471,8 @@ fn sfu_for_room(pool: &[String], room: &str) -> usize {
     best
 }
 
-/// 按 Join 现算 TURN 临时凭证（REST：username=过期时间戳，1h 有效），
-/// 避免启动时一次性生成导致 1 小时后新加入者拿到过期凭证。
-fn fresh_turn(config: &Config) -> Option<TurnConfig> {
-    let urls = config.turn.as_ref()?.urls.clone();
-    let secret = config.turn_secret.as_deref()?;
-    let creds =
-        aerodesk_protocol::turn::generate_turn_credentials(secret, "aerodesk", 3600, unix_secs());
-    Some(TurnConfig {
-        urls,
-        username: creds.username,
-        credential: creds.credential,
-    })
-}
-
 /// 选房间所在 SFU 下标：负载感知（粘性 + 最闲健康）优先；未初始化回退哈希。
+/// 注意：有池时 select 同时刷新该房间 last_used（粘性 TTL 语义，裁8）。
 fn selected_sfu_idx(pool: &[String], room: &str) -> usize {
     SFU_POOL
         .get()
@@ -615,118 +480,164 @@ fn selected_sfu_idx(pool: &[String], room: &str) -> usize {
         .unwrap_or_else(|| sfu_for_room(pool, room))
 }
 
-/// 调 SFU 内部接口踢掉房间全部客户端（#249：桥死亡后触发 viewer --reconnect 恢复）。
-/// 返回是否成功（2xx）；失败由调用方决定重试（#249 review）。
-/// 注意：room 仅来自经过 sanitize_room 校验的房间名（[A-Za-z0-9._-]），
-/// 直接拼进 query 无注入风险——若将来放开调用方需先 URL 编码。
-fn kick_sfu_room(sfu_url: &str, token: Option<&str>, room: &str) -> bool {
-    let url = format!("{sfu_url}/session/kick?room={room}");
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(5))
-        .build();
-    let mut req = agent.post(&url);
-    if let Some(token) = token {
-        req = req.set("X-Internal-Token", token);
+/// 候选次序（D4 有界 failover）：首选在前，其余按「健康优先 + 负载升序」排列
+/// （无池保持原序）。返回全部下标，调用方决定尝试几个。
+fn order_candidates(first: usize, pool: Option<&SfuPool>, len: usize) -> Vec<usize> {
+    let mut rest: Vec<usize> = (0..len).filter(|&i| i != first).collect();
+    if let Some(p) = pool {
+        let now = unix_secs();
+        rest.sort_by(|&a, &b| {
+            // 健康（未下线）优先，再按负载升序。
+            p.is_up(b, now).cmp(&p.is_up(a, now)).then_with(|| {
+                p.loads[a]
+                    .load(Ordering::Relaxed)
+                    .cmp(&p.loads[b].load(Ordering::Relaxed))
+            })
+        });
     }
-    // ureq 2 对 >=400 直接返回 Err(Status)，故 Ok 即成功。
-    match req.call() {
-        Ok(resp) => {
-            info!("bridge monitor: SFU kick room {room} -> {}", resp.status());
-            true
-        }
-        Err(e) => {
-            warn!("bridge monitor: SFU kick room {room} failed: {e}");
-            false
-        }
+    let mut out = vec![first];
+    out.extend(rest);
+    out
+}
+
+/// SFU 候选序列（SIP 会议桥用）：首选粘性/rendezvous 目标（有池时同时刷新
+/// last_used），其余按健康+负载排序。
+pub(crate) fn sfu_candidates(urls: &[String], room: &str) -> Vec<usize> {
+    if urls.len() <= 1 {
+        return (0..urls.len()).collect();
     }
+    let first = selected_sfu_idx(urls, room);
+    order_candidates(first, SFU_POOL.get().map(|p| p.as_ref()), urls.len())
 }
 
 fn main() {
     init_log();
     let config = Arc::new(load_config());
-    let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
-    let port: u16 = std::env::var("SIGNAL_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(3001);
+    let port = signal_ops_port();
     let tls = aerodesk_protocol::tls::TlsIdentity::load().unwrap_or_else(|e| {
         eprintln!("fatal: TLS identity load failed: {e}");
         std::process::exit(1);
     });
     info!("TLS identity source: {}", tls.source);
-    let _ = CONFIG.set(config.clone());
-    let _ = ROOMS.set(rooms.clone());
-    let _ = TOTAL_CLIENTS.set(Arc::new(AtomicUsize::new(0)));
-    let _ = USER_CONNS.set(Mutex::new(HashMap::new()));
 
-    // #551 SIP 信令端点（双栈并存，规范 §8）：任一 SIP_*_PORT 设置即开启，
-    // 默认全关 → 生产 JSON 路径不受影响。Digest 口令表由 SIP_DIGEST_USERS 注入。
-    {
-        // #598 P2a：WSS/TLS accept 需进程级 rustls CryptoProvider——sip_client 的
-        // ensure_rustls_provider 只在客户端 UA 线程调用，服务端进程（rouille 旧
-        // rustls + rsipstack 0.23 并存）无人安装，首个 WSS 握手即 panic
-        // （Could not automatically determine the process-level CryptoProvider）。
-        aerodesk_protocol::sip_client::ensure_rustls_provider();
-        let sip_tls = std::env::var("SIP_TLS_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok());
-        let sip_wss = std::env::var("SIP_WSS_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok());
-        let sip_udp = std::env::var("SIP_UDP_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok());
-        if sip_tls.is_some() || sip_wss.is_some() || sip_udp.is_some() {
-            let realm = std::env::var("SIP_REALM").unwrap_or_else(|_| "aerodesk".into());
-            let mut passwords = HashMap::new();
-            for kv in std::env::var("SIP_DIGEST_USERS")
-                .unwrap_or_default()
-                .split(',')
-            {
-                if let Some((u, t)) = kv.split_once('=').filter(|(u, _)| !u.is_empty()) {
-                    passwords.insert(u.to_string(), t.to_string());
-                }
+    // #503-4 临时密码注册表：无条件初始化（/admin 读写 + SIP INVITE 授权共用）；
+    // 「SIP 端点是否可用」由 SIP_ENDPOINT_ENABLED 决定。
+    let temp_passwords = Arc::new(Mutex::new(sip_server::TempRegistry::default()));
+    let _ = TEMP_PASSWORDS.set(temp_passwords.clone());
+
+    // P3.1 SIP 单栈（D2 默认翻转）：三传输默认全开，off/disabled/none 显式关闭。
+    // #598 P2a：WSS/TLS accept 需进程级 rustls CryptoProvider——sip_client 的
+    // ensure_rustls_provider 只在客户端 UA 线程调用，服务端进程（rouille 旧
+    // rustls + rsipstack 0.23 并存）无人安装，首个 WSS 握手即 panic
+    // （Could not automatically determine the process-level CryptoProvider）。
+    aerodesk_protocol::sip_client::ensure_rustls_provider();
+    let sip_tls = parse_port_or_off(
+        std::env::var("SIP_TLS_PORT").ok().as_deref(),
+        "SIP_TLS_PORT",
+        5061,
+    );
+    let sip_wss = parse_port_or_off(
+        std::env::var("SIP_WSS_PORT").ok().as_deref(),
+        "SIP_WSS_PORT",
+        3061,
+    );
+    let sip_udp = parse_port_or_off(
+        std::env::var("SIP_UDP_PORT").ok().as_deref(),
+        "SIP_UDP_PORT",
+        5060,
+    );
+    let sip_enabled = sip_tls.is_some() || sip_wss.is_some() || sip_udp.is_some();
+    SIP_ENDPOINT_ENABLED.store(sip_enabled, Ordering::Relaxed);
+    if sip_enabled {
+        let realm = std::env::var("SIP_REALM").unwrap_or_else(|_| "aerodesk".into());
+        let mut passwords = HashMap::new();
+        for kv in std::env::var("SIP_DIGEST_USERS")
+            .unwrap_or_default()
+            .split(',')
+        {
+            if let Some((u, t)) = kv.split_once('=').filter(|(u, _)| !u.is_empty()) {
+                passwords.insert(u.to_string(), t.to_string());
             }
-            // #503-4 临时密码注册表：HTTP 管理端点与 SIP INVITE 授权共享。
-            let temp_passwords = Arc::new(Mutex::new(sip_server::TempRegistry::default()));
-            let _ = TEMP_PASSWORDS.set(temp_passwords.clone());
-            let bind =
-                |port: Option<u16>| port.map(|p| std::net::SocketAddr::from(([0, 0, 0, 0], p)));
-            let sip_cfg = sip_server::SipConfig {
-                realm: realm.clone(),
-                tls_addr: bind(sip_tls),
-                wss_addr: bind(sip_wss),
-                udp_addr: bind(sip_udp),
-                passwords: Arc::new(passwords),
-                // §8：未显式配置的设备以首个静态 token 为 Digest 口令。
-                token_password: config.auth_tokens.first().cloned(),
-                // 开放注册（无任何鉴权源时，与 WSS join 同姿态）。
-                open_register: config.auth_tokens.is_empty()
-                    && config.jwt_secret.is_none()
-                    && std::env::var("SIP_DIGEST_USERS")
-                        .map(|v| v.trim().is_empty())
-                        .unwrap_or(true),
-                temp_passwords,
-                tls_identity: Some(aerodesk_protocol::tls::TlsIdentity {
-                    cert: tls.cert.clone(),
-                    key: tls.key.clone(),
-                    source: tls.source,
-                }),
-                // 会议桥：SIP INVITE 非设备 AoR → SFU /start（与 WSS Join 同池）。
-                sfu_urls: config.sfu_urls.clone(),
-                sfu_token: config.sfu_token.clone(),
-            };
-            std::thread::Builder::new()
-                .name("sip-endpoint".into())
-                .spawn(move || {
-                    let cancel = tokio_util::sync::CancellationToken::new();
-                    if let Err(e) = sip_server::run_sip_endpoint(sip_cfg, cancel) {
-                        error!(error=%e, "SIP 端点启动失败");
-                    }
-                })
-                .ok();
-            info!(realm, "SIP 信令端点已启动（双栈，与 JSON 并存）");
         }
+        let bind = |port: Option<u16>| port.map(|p| std::net::SocketAddr::from(([0, 0, 0, 0], p)));
+        // Registrar 提升到 SipConfig（Arc）：SIGHUP 证书轮换重启端点时不丢注册。
+        let registrar = Arc::new(Mutex::new(sip_server::Registrar::default()));
+        let sip_cfg = sip_server::SipConfig {
+            realm: realm.clone(),
+            tls_addr: bind(sip_tls),
+            wss_addr: bind(sip_wss),
+            udp_addr: bind(sip_udp),
+            passwords: Arc::new(passwords),
+            // §8：未显式配置的设备以首个静态 token 为 Digest 口令。
+            token_password: config.auth_tokens.first().cloned(),
+            // 开放注册（无任何鉴权源时，与原 JSON join 同姿态）。
+            open_register: config.auth_tokens.is_empty()
+                && std::env::var("SIP_DIGEST_USERS")
+                    .map(|v| v.trim().is_empty())
+                    .unwrap_or(true),
+            temp_passwords,
+            tls_identity: Some(aerodesk_protocol::tls::TlsIdentity {
+                cert: tls.cert.clone(),
+                key: tls.key.clone(),
+                source: tls.source,
+            }),
+            // 会议桥：SIP INVITE 非设备 AoR → SFU /start（SIP 侧唯一 SFU 消费点）。
+            sfu_urls: config.sfu_urls.clone(),
+            sfu_token: config.sfu_token.clone(),
+            registrar,
+            pop_id: config.pop_id.clone(),
+            pop_registry: config.pop_registry.clone(),
+            pop_sip_urls: config.pop_sip_urls.clone(),
+        };
+        // D3 supervisor（SIGHUP 证书热重载，裁7 修正版）：run_sip_endpoint 返回后
+        // **先**查 RELOAD_SIP_TLS——true 换证书续跑（加载失败留旧身份），false 才
+        // 区分停机/异常：Ok 真停机 break，Err 退避 2s 重试。cancel token 被 reload
+        // 与停机双用，不能把 Ok 一律当停机。
+        let boot_token = CancellationToken::new();
+        let _ = CURRENT_SIP_TOKEN.set(Mutex::new(boot_token.clone()));
+        std::thread::Builder::new()
+            .name("sip-endpoint".into())
+            .spawn(move || {
+                let mut cfg = sip_cfg;
+                let mut cancel = boot_token;
+                loop {
+                    let result = sip_server::run_sip_endpoint(cfg.clone(), cancel.clone());
+                    let reload = RELOAD_SIP_TLS.swap(false, Ordering::Relaxed);
+                    // 换代 token：无论续跑原因（reload / 退避重试），旧 token 已消费。
+                    cancel = CancellationToken::new();
+                    if let Some(slot) = CURRENT_SIP_TOKEN.get() {
+                        *slot
+                            .lock()
+                            .unwrap_or_else(aerodesk_protocol::util::lock_recover) = cancel.clone();
+                    }
+                    if reload {
+                        match aerodesk_protocol::tls::TlsIdentity::load() {
+                            Ok(new_tls) => {
+                                cfg.tls_identity = Some(new_tls);
+                                info!("SIGHUP: SIP 端点已用新证书重启（注册不丢）");
+                            }
+                            Err(e) => {
+                                error!("SIGHUP: SIP TLS 证书加载失败（{e}），沿用旧证书重启端点");
+                            }
+                        }
+                        continue;
+                    }
+                    match result {
+                        Ok(()) => {
+                            info!("SIP 端点已停止");
+                            break;
+                        }
+                        Err(e) => {
+                            error!(error=%e, "SIP 端点异常退出，2s 后重试");
+                            std::thread::sleep(Duration::from_secs(2));
+                        }
+                    }
+                }
+            })
+            .ok();
+        info!(realm, "SIP 信令端点已启动（单栈：TLS/WSS/UDP 默认全开）");
+    } else {
+        info!("SIP 端点已按 SIP_*_PORT=off 全部关闭（仅 HTTP 运维面）");
     }
 
     // SFU 池：仅池 >1 时初始化负载感知状态并启动轮询；池=1 走纯哈希回退，
@@ -738,146 +649,10 @@ fn main() {
         let cooldown = config.sfu_fail_cooldown_secs;
         let token = config.sfu_token.clone();
         let sticky_ttl = config.sfu_sticky_ttl_secs;
-        let poll_rooms = rooms.clone();
         std::thread::Builder::new()
             .name("sfu-poller".into())
-            .spawn(move || poll_sfu_pool(pool, poll_rooms, interval, cooldown, token, sticky_ttl))
+            .spawn(move || poll_sfu_pool(pool, interval, cooldown, token, sticky_ttl))
             .ok();
-    }
-
-    // #246 桥生命周期 monitor：房间无真实客户端超过 BRIDGE_IDLE_SECS → 停桥。
-    // 空闲判定用纯函数 idle_rooms_to_stop（按 spawn 代数防旧时间戳误杀新桥）；
-    // 停桥前持 rooms 锁二次确认并执行 stop，避免与并发 Join 的 TOCTOU。
-    if let Some(bridge) = &config.bridge {
-        let bridge = bridge.clone();
-        let rooms = rooms.clone();
-        let idle = config.bridge_idle_secs;
-        let monitor_interval = config.bridge_monitor_interval;
-        let sfu_urls = config.sfu_urls.clone();
-        let sfu_token = config.sfu_token.clone();
-        std::thread::Builder::new()
-            .name("bridge-monitor".into())
-            .spawn(move || {
-                let mut idle_since: HashMap<String, Instant> = HashMap::new();
-                let mut last_epoch: HashMap<String, u64> = HashMap::new();
-                let mut alive_prev: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                let mut monitor_stopped: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                // 待重试踢人（房间 → 已尝试次数，#249 review：kick 失败有限重试）。
-                let mut kick_retry: HashMap<String, u32> = HashMap::new();
-                loop {
-                    std::thread::sleep(monitor_interval);
-                    let now = Instant::now();
-                    let running = bridge.running_rooms();
-                    let mut alive_now: std::collections::HashSet<String> =
-                        running.iter().map(|(r, _)| r.clone()).collect();
-                    let real_peers: HashMap<String, usize> = {
-                        let rooms = rooms.lock().unwrap_or_else(aerodesk_protocol::util::lock_recover);
-                        running
-                            .iter()
-                            .map(|(room, _)| {
-                                let n = rooms
-                                    .get(room)
-                                    .map(|peers| peers.iter().filter(|p| !p.bridge_leg).count())
-                                    .unwrap_or(0);
-                                (room.clone(), n)
-                            })
-                            .collect()
-                    };
-                    for room in bridge::idle_rooms_to_stop(
-                        &running,
-                        &real_peers,
-                        &mut idle_since,
-                        &mut last_epoch,
-                        idle,
-                        now,
-                    ) {
-                        // 记录为 monitor 主动停止（死亡检测排除），再二次确认 + 停桥。
-                        monitor_stopped.insert(room.clone());
-                        let stop = {
-                            let rooms = rooms.lock().unwrap_or_else(aerodesk_protocol::util::lock_recover);
-                            let real = rooms
-                                .get(&room)
-                                .map(|peers| peers.iter().filter(|p| !p.bridge_leg).count())
-                                .unwrap_or(0);
-                            if real == 0 && bridge.is_running(&room) {
-                                info!(
-                                    "bridge monitor: room {room} idle ({idle:?} no real peers), stopping bridge"
-                                );
-                                bridge.stop(&room);
-                                true
-                            } else {
-                                false
-                            }
-                        };
-                        if stop {
-                            idle_since.remove(&room);
-                            // #249 review：成功停掉的桥要从本轮存活集合移除，
-                            // 否则下一轮会被误判为「自然死亡」触发无谓 kick。
-                            alive_now.remove(&room);
-                        }
-                    }
-                    // #249 桥死亡检测：自然死亡（消失且非 monitor 停止）→ 踢本地
-                    // SFU 房间，断开已连接 viewer 的 WebRTC，触发 --reconnect 恢复。
-                    for room in bridge::died_rooms(&alive_prev, &alive_now, &monitor_stopped) {
-                        if bridge.is_running(&room) {
-                            debug!("bridge monitor: room {room} died but already rebuilt; skip kick");
-                            kick_retry.remove(&room);
-                            continue;
-                        }
-                        info!(
-                            "bridge monitor: bridge died for room {room}; kicking SFU room to trigger client recovery"
-                        );
-                        let sfu = &sfu_urls[selected_sfu_idx(&sfu_urls, &room)];
-                        if kick_sfu_room(sfu, sfu_token.as_deref(), &room) {
-                            kick_retry.remove(&room);
-                        } else {
-                            // 首次失败计入 1：下一次 tick 再重试（同 tick 不立即重复踢）。
-                            kick_retry.entry(room).or_insert(1);
-                        }
-                    }
-                    // 踢人失败有限重试（最多 3 次；期间房间若被重建则放弃）。
-                    for (room, attempts) in kick_retry.iter_mut() {
-                        if bridge.is_running(room) {
-                            *attempts = u32::MAX; // 已重建，无需再踢
-                            continue;
-                        }
-                        if *attempts >= 3 {
-                            error!(
-                                "bridge monitor: kick room {room} failed after {} attempts; check SFU_URL/SFU_TOKEN",
-                                *attempts
-                            );
-                            *attempts = u32::MAX; // 放弃重试
-                            continue;
-                        }
-                        let sfu = &sfu_urls[selected_sfu_idx(&sfu_urls, room)];
-                        if kick_sfu_room(sfu, sfu_token.as_deref(), room) {
-                            *attempts = u32::MAX; // 成功，稍后清理
-                        } else {
-                            *attempts += 1;
-                        }
-                    }
-                    kick_retry.retain(|_, a| *a != u32::MAX);
-                    alive_prev = alive_now;
-                    monitor_stopped.clear();
-                }
-            })
-            .expect("spawn bridge monitor");
-    }
-
-    // 明文 WS（开发用；生产只开 WSS 端口，SIGNAL_PLAIN_PORT=off 可完全关闭）。
-    if let Some(plain_port) = parse_plain_port(std::env::var("SIGNAL_PLAIN_PORT").ok().as_deref()) {
-        let plain_config = config.clone();
-        let plain_rooms = rooms.clone();
-        let plain = rouille::Server::new(format!("0.0.0.0:{plain_port}"), move |request| {
-            handle(request, plain_config.clone(), plain_rooms.clone())
-        })
-        .expect("start plain signaling server");
-        std::thread::spawn(move || plain.run());
-        info!("Signaling (WS plain) listening on :{plain_port}");
-    } else {
-        info!("Signaling (WS plain) disabled by SIGNAL_PLAIN_PORT=off");
     }
 
     #[cfg(unix)]
@@ -885,22 +660,27 @@ fn main() {
 
     let mut tls = tls;
     let mut server = Some(
-        rouille::Server::new_ssl(
-            format!("0.0.0.0:{port}"),
-            wss_handler as fn(&Request) -> Response,
-            tls.cert.clone(),
-            tls.key.clone(),
-        )
-        .expect("start signaling server"),
+        bind_wss_with_retry(port, &tls.cert, &tls.key, &config, 1)
+            .expect("start signaling ops server"),
     );
-    info!("Signaling (WSS) listening on :{port}");
+    info!("Signaling ops (HTTPS) listening on :{port}");
     // 轮询 + SIGHUP 证书热重载（#143，复用 #128 模式）。
     loop {
         if let Some(srv) = &server {
             srv.poll_timeout(Duration::from_millis(10));
         }
         if RELOAD_TLS.swap(false, Ordering::Relaxed) {
-            reload_tls(&mut server, &mut tls);
+            reload_tls(&mut server, &mut tls, &config);
+        }
+        // D3：SIGHUP 双写 RELOAD_SIP_TLS——这里只触发当前端点 cancel（幂等、
+        // 不吞标志）：supervisor 在端点返回后 swap 判定 reload/停机。
+        if RELOAD_SIP_TLS.load(Ordering::Relaxed)
+            && let Some(token) = CURRENT_SIP_TOKEN
+                .get()
+                .and_then(|m| m.lock().ok())
+                .map(|g| g.clone())
+        {
+            token.cancel();
         }
     }
 }
@@ -922,59 +702,6 @@ fn load_config() -> Config {
         .map(|s| s.split(',').map(|t| t.to_string()).collect())
         .unwrap_or_default();
 
-    let turn_secret = std::env::var("TURN_SECRET").ok().filter(|s| !s.is_empty());
-    let turn = turn_secret.clone().map(|secret| {
-        let urls = std::env::var("TURN_URLS").unwrap_or_default();
-        let urls = if urls.is_empty() {
-            vec![
-                "turn:127.0.0.1:3478?transport=udp".into(),
-                "turn:127.0.0.1:3478?transport=tcp".into(),
-                "turns:127.0.0.1:5349?transport=tcp".into(),
-            ]
-        } else {
-            urls.split(',').map(|u| u.to_string()).collect()
-        };
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time")
-            .as_secs();
-        let creds =
-            aerodesk_protocol::turn::generate_turn_credentials(&secret, "aerodesk", 3600, now);
-        TurnConfig {
-            urls,
-            username: creds.username,
-            credential: creds.credential,
-        }
-    });
-
-    let room_pop_map = std::env::var("ROOM_POP_MAP")
-        .unwrap_or_default()
-        .split(',')
-        .filter(|kv| kv.contains('='))
-        .map(|kv| {
-            let (prefix, pop) = kv.split_once('=').expect("checked contains '='");
-            (prefix.trim().to_string(), pop.trim().to_string())
-        })
-        .collect();
-    let pop_urls = std::env::var("POP_URLS")
-        .unwrap_or_default()
-        .split(',')
-        .filter(|kv| kv.contains('='))
-        .map(|kv| {
-            let (pop, url) = kv.split_once('=').expect("checked contains '='");
-            (pop.trim().to_string(), url.trim().to_string())
-        })
-        .collect();
-
-    let max_room_clients = std::env::var("MAX_ROOM_CLIENTS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    let max_total_clients = std::env::var("MAX_TOTAL_CLIENTS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-
     let pop_registry = std::env::var("POP_REGISTRY_FILE")
         .ok()
         .filter(|s| !s.is_empty())
@@ -986,54 +713,20 @@ fn load_config() -> Config {
             Arc::new(PopRegistry::new(Some(path.into()), ttl))
         });
 
-    let bridge = std::env::var("BRIDGE_CMD")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(|cmd| {
-            let ready_timeout = std::env::var("BRIDGE_READY_TIMEOUT_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .map(Duration::from_secs)
-                .unwrap_or(Duration::from_secs(15));
-            let fail_cooldown = std::env::var("BRIDGE_FAIL_COOLDOWN_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .map(Duration::from_secs)
-                .unwrap_or(Duration::from_secs(30));
-            let max_running = std::env::var("BRIDGE_MAX_RUNNING")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(8);
-            if !cmd.contains("{room}") {
-                warn!("BRIDGE_CMD 不含 {{room}} 占位符（自动追加 --room）；建议显式写明");
-            }
-            Arc::new(BridgeManager::new(
-                cmd,
-                ready_timeout,
-                fail_cooldown,
-                max_running,
-            ))
-        });
-    if bridge.is_some() {
-        info!(
-            "bridge orchestration enabled (BRIDGE_CMD); cross-PoP rooms bridge-first, fallback Redirect"
-        );
-    }
-
     Config {
         auth_tokens,
-        jwt_secret: std::env::var("JWT_SECRET").ok().filter(|s| !s.is_empty()),
-        jwt_secret_old: std::env::var("JWT_SECRET_OLD")
-            .ok()
-            .filter(|s| !s.is_empty()),
         pop_id: std::env::var("POP_ID").unwrap_or_else(|_| "local".into()),
-        room_pop_map,
         pop_registry,
-        max_room_clients,
-        max_total_clients,
-        pop_urls,
-        turn_secret,
-        turn,
+        // POP_SIP_URLS="pop-b=127.0.0.1:3008,..."（PoP=host:port，302 Contact 载体）。
+        pop_sip_urls: std::env::var("POP_SIP_URLS")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|kv| kv.contains('='))
+            .map(|kv| {
+                let (pop, hp) = kv.split_once('=').expect("checked contains '='");
+                (pop.trim().to_string(), hp.trim().to_string())
+            })
+            .collect(),
         // SFU 池：SFU_URLS（逗号分隔）优先；未设置回退单值 SFU_URL（向后兼容）。
         sfu_urls: {
             let list = std::env::var("SFU_URLS")
@@ -1063,156 +756,28 @@ fn load_config() -> Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(30),
         sfu_sticky_ttl_secs: parse_sticky_ttl(std::env::var("SFU_STICKY_TTL_SECS").ok().as_deref()),
-        max_prejoin_clients: std::env::var("SIGNAL_MAX_PREJOIN_CLIENTS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(256),
-        allowed_origins: std::env::var("SIGNAL_ALLOWED_ORIGINS")
-            .ok()
-            .map(|v| {
-                v.split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .filter(|v| !v.is_empty()),
-        bridge,
-        bridge_idle_secs: std::env::var("BRIDGE_IDLE_SECS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(|v| v.max(2)) // 至少 ≥ monitor 轮询间隔下限
-            .map(Duration::from_secs)
-            .unwrap_or(Duration::from_secs(300)),
-        bridge_monitor_interval: std::env::var("BRIDGE_MONITOR_INTERVAL_SECS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(|v| v.max(2))
-            .map(Duration::from_secs)
-            .unwrap_or(Duration::from_secs(15)),
     }
 }
 
-/// 房间命中映射的 PoP（最长前缀优先）；无映射返回 None。
-fn pinned_pop<'a>(config: &'a Config, room: &str) -> Option<&'a str> {
-    config
-        .room_pop_map
-        .iter()
-        .filter(|(prefix, _)| room.starts_with(prefix.as_str()))
-        .max_by_key(|(prefix, _)| prefix.len())
-        .map(|(_, pop)| pop.as_str())
-}
-
-/// 认证：JWT（新密钥优先，失败回退 JWT_SECRET_OLD 宽限期）→ 静态 token → 开发模式放行。
-/// 返回认证通过的 Claims（#171 用户配额用）；开发模式返回 None（视为通过但无用户维度）。
-fn auth_result(config: &Config, token: Option<&str>, room: &str, role: Role) -> Option<Claims> {
-    let token = token.unwrap_or_default();
-    if let Some(secret) = &config.jwt_secret {
-        // JWT 认证：校验签名/过期/房间/角色。
-        match aerodesk_protocol::jwt::validate_token(secret, token, room, role) {
-            Ok(claims) => {
-                info!(
-                    "jwt auth ok: user={} dev={:?} room={} role={:?}",
-                    claims.sub, claims.dev, room, role
-                );
-                Some(claims)
-            }
-            Err(new_err) => {
-                if let Some(old) = &config.jwt_secret_old {
-                    match aerodesk_protocol::jwt::validate_token(old, token, room, role) {
-                        Ok(claims) => {
-                            info!(
-                                "jwt auth ok (legacy secret): user={} dev={:?} room={} role={:?}",
-                                claims.sub, claims.dev, room, role
-                            );
-                            return Some(claims);
-                        }
-                        Err(e) => {
-                            warn!("jwt auth failed (new: {new_err}; legacy: {e})");
-                        }
-                    }
-                } else {
-                    warn!("jwt auth failed: {new_err}");
-                }
-                None
-            }
-        }
-    } else if !config.auth_tokens.is_empty() {
-        // 静态 token 认证（兼容模式）：以 token 本身作为用户键。
-        if config
-            .auth_tokens
-            .iter()
-            .any(|t| Some(t.as_str()) == token.into())
-        {
-            Some(Claims {
-                sub: token.to_string(),
-                dev: None,
-                room: None,
-                role: None,
-                max_conns: None,
-                iat: 0,
-                exp: 0,
-            })
-        } else {
-            None
-        }
-    } else {
-        // 开发模式：不认证（无用户维度）。
-        None
-    }
-}
-
-/// HTTP 入口（纯分发）：`/ws` 走 JSON 信令面，其余走运维/管理面。
-/// P3.0（#597 后续拆栈准备）：仅机械拆分，零行为变化——P3.1 删除 json_router
-/// 后 ops_router 成为唯一路由。
-fn handle(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
-    if request.method() == "GET" && request.url() == "/ws" {
-        return json_router(request, config, rooms);
-    }
-    ops_router(request, config, rooms)
-}
-
-/// 运维/管理 HTTP 面：/healthz、/devices、/metrics/prometheus、/admin/temp-password
-/// 与兜底响应。与信令面（/ws）分离，便于 P3 拆栈时独立演进。
-fn ops_router(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
-    // 可观测性（#180 后续）：信号服务器此前只有 /ws，无健康/指标端点。
+/// 运维/管理 HTTP 面（P3.1 起唯一 HTTP 路由）：/healthz、/devices、
+/// /metrics/prometheus、/admin/temp-password 与兜底响应。
+fn ops_router(request: &Request, config: &Config) -> Response {
     if request.method() == "GET" && request.url() == "/healthz" {
-        let clients = total_clients();
-        let room_count = rooms
-            .lock()
-            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
-            .len();
         let payload = serde_json::json!({
             "status": "ok",
-            "clients": clients,
-            "rooms": room_count,
             "pop": config.pop_id,
+            "sip": sip_health_value(),
         });
         return Response::from_data(
             "application/json",
             serde_json::to_vec(&payload).expect("serialize healthz"),
         );
     }
-    // #503 在线设备列表（无人值守入口管理数据源）：合并 WSS 房间 presence 与
-    // SIP Registrar 注册绑定。属 HTTP 管理端点（与 /healthz /metrics 同族），
-    // 不改信令协议面（SIP/JSON /ws）。WSS 侧只统计真实 publisher presence
-    // （观看端也 Join 设备房间，但不算设备在线；桥自身腿亦排除）。
+    // #503 在线设备列表（无人值守入口管理数据源）：SIP Registrar 注册绑定。
+    // P3.1：WSS presence 段随 JSON 栈退役，`via` 只剩 "sip"。
     if request.method() == "GET" && request.url() == "/devices" {
         let mut online: std::collections::BTreeMap<String, Vec<&'static str>> =
             std::collections::BTreeMap::new();
-        {
-            let rooms = rooms
-                .lock()
-                .unwrap_or_else(aerodesk_protocol::util::lock_recover);
-            for (room, peers) in rooms.iter() {
-                if peers
-                    .iter()
-                    .any(|p| is_device_presence(p.role, p.bridge_leg))
-                {
-                    online.entry(room.clone()).or_default().push("wss");
-                }
-            }
-        }
         if let Some(aors) = sip_server::registrar_snapshot() {
             for aor in aors {
                 online.entry(aor).or_default().push("sip");
@@ -1237,30 +802,15 @@ fn ops_router(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response 
         );
     }
     if request.method() == "GET" && request.url() == "/metrics/prometheus" {
-        let clients = total_clients();
-        let room_count = rooms
-            .lock()
-            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
-            .len();
-        let bridges = config
-            .bridge
-            .as_ref()
-            .map(|b| b.running_rooms().len())
-            .unwrap_or(0);
-        let body = format!(
-            "# TYPE aerodesk_signal_clients gauge\naerodesk_signal_clients {clients}\n\
-             # TYPE aerodesk_signal_rooms gauge\naerodesk_signal_rooms {room_count}\n\
-             # TYPE aerodesk_signal_bridges gauge\naerodesk_signal_bridges {bridges}\n"
-        );
-        // #551：SIP 端点开启时附 sip_ 指标（未启动则省略，保持向后兼容）。
+        // P3.1：JSON 面三 gauge（clients/rooms/bridges）随栈退役；仅剩 sip_*。
+        // SIP 端点未启动时 body 为空（保持向后兼容的省略语义）。
         let body = match sip_server::metrics_snapshot() {
             Some((regs, est, term)) => format!(
-                "{body}\
-                 # TYPE sip_registrations gauge\nsip_registrations {regs}\n\
+                "# TYPE sip_registrations gauge\nsip_registrations {regs}\n\
                  # TYPE sip_calls_established counter\nsip_calls_established {est}\n\
                  # TYPE sip_calls_terminated counter\nsip_calls_terminated {term}\n"
             ),
-            None => body,
+            None => String::new(),
         };
         return Response::from_data(
             "text/plain; version=0.0.4; charset=utf-8",
@@ -1269,37 +819,32 @@ fn ops_router(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response 
     }
     // #503-4 临时密码管理端点（主控端发起、带有效期；SIP 端点开启时可用）。
     if request.method() == "POST" && request.url() == "/admin/temp-password" {
-        return temp_password_issue(request, &config);
+        return temp_password_issue(request, config);
     }
     if request.method() == "DELETE" && request.url().starts_with("/admin/temp-password/") {
-        return temp_password_revoke(request, &config);
+        return temp_password_revoke(request, config);
     }
     if request.method() == "GET" {
-        return Response::text("aerodesk-signal: connect to /ws");
+        return Response::text("aerodesk-signal: SIP signaling server (ops HTTP plane)");
     }
     Response::text("method not allowed").with_status_code(405)
 }
 
-/// JSON 信令面（/ws WebSocket 升级）：Origin 白名单检查 + 升级 + session_loop spawn。
-fn json_router(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
-    // Origin 白名单（可选）：浏览器 WebSocket 必带 Origin（CSWSH 防护）；
-    // 非浏览器客户端（CLI/native）无 Origin 头，始终放行。
-    if let Some(allowed) = &config.allowed_origins
-        && let Some(origin) = request.header("Origin")
-        && !allowed
-            .iter()
-            .any(|a| a == "*" || a.eq_ignore_ascii_case(origin))
-    {
-        warn!("ws rejected: origin {origin} not in allowlist");
-        return Response::text("origin not allowed").with_status_code(403);
+/// /healthz 的 `sip` 字段：端点开启 → 三传输监听状态；关闭 → null。
+fn sip_health_value() -> serde_json::Value {
+    sip_health_json(
+        SIP_ENDPOINT_ENABLED.load(Ordering::Relaxed),
+        sip_server::listeners_up(),
+    )
+}
+
+/// `sip` 字段纯构造（可单测，避免测试进程触碰全局端点状态）。
+fn sip_health_json(enabled: bool, up: Option<(bool, bool, bool)>) -> serde_json::Value {
+    if !enabled {
+        return serde_json::Value::Null;
     }
-    match websocket::start(request, None::<&str>) {
-        Ok((response, rx)) => {
-            std::thread::spawn(move || session_loop(rx, config, rooms));
-            response
-        }
-        Err(_) => Response::text("websocket upgrade required").with_status_code(400),
-    }
+    let (tls, wss, udp) = up.unwrap_or((false, false, false));
+    serde_json::json!({ "tls": tls, "udp": udp, "wss": wss })
 }
 
 /// 管理端点统一鉴权：`Authorization: Bearer <token>`（SIP_ADMIN_TOKEN / 首个 AUTH_TOKEN）。
@@ -1320,10 +865,14 @@ fn admin_guard(
     if !constant_time_eq_str(auth, &format!("Bearer {token}")) {
         return Err(Response::text("unauthorized").with_status_code(401));
     }
-    let Some(registry) = TEMP_PASSWORDS.get() else {
-        return Err(Response::text("SIP 端点未开启（SIP_*_PORT 未设置）").with_status_code(501));
-    };
-    Ok(registry.clone())
+    if !SIP_ENDPOINT_ENABLED.load(Ordering::Relaxed) {
+        return Err(Response::text("SIP 端点未开启（SIP_*_PORT=off）").with_status_code(501));
+    }
+    let registry = TEMP_PASSWORDS
+        .get()
+        .expect("temp passwords initialized in main")
+        .clone();
+    Ok(registry)
 }
 
 /// POST /admin/temp-password：为设备签发临时密码（固定密码之外的一次性访问凭证）。
@@ -1422,809 +971,21 @@ fn generate_temp_password() -> String {
     }
 }
 
-/// 判断一个 peer 是否算「设备在线」presence（#503 `/devices`）：
-/// 真实 publisher（观看端也 Join 设备房间但不代表设备在线），且排除桥自身腿。
-fn is_device_presence(role: Role, bridge_leg: bool) -> bool {
-    role == Role::Publisher && !bridge_leg
-}
-
-/// 当前全局在线客户端数（TOTAL_CLIENTS 未初始化时为 0，测试/异常兜底）。
-fn total_clients() -> usize {
-    TOTAL_CLIENTS
-        .get()
-        .map(|c| c.load(Ordering::Relaxed))
-        .unwrap_or(0)
-}
-
-fn session_loop(rx: std::sync::mpsc::Receiver<Websocket>, config: Arc<Config>, rooms: Rooms) {
-    // 预 Join 连接上限（H2 缓解）：未认证/未加入的连接同样占线程与 fd，
-    // 且不受 MAX_TOTAL_CLIENTS 约束（其只在 Join 后计数）；超限直接断开。
-    let Some(mut prejoin_counted) = reserve_prejoin(&PREJOIN_CLIENTS, config.max_prejoin_clients)
-    else {
-        warn!(
-            "reject connection: too many pre-join connections (SIGNAL_MAX_PREJOIN_CLIENTS={})",
-            config.max_prejoin_clients
-        );
-        return;
-    };
-    // 兜底：rouille 升级线程理论上总会在 recv 前 build 出 Websocket；若异常
-    // 未交付，必须释放 pre-join 槽位再退出（避免 panic 留下永久泄漏）。
-    let Ok(ws_owned) = rx.recv() else {
-        release_prejoin(&PREJOIN_CLIENTS, prejoin_counted);
-        return;
-    };
-    let ws = Arc::new(Mutex::new(ws_owned));
-    // #539 呼叫可靠送达：本连接发送队列（tx 存 Peer 供转发投递；rx 本循环 drain）。
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
-    info!("session open");
-    // 本连接加入时的 peer_id：用于校验 Description.from 属于本连接（防冒用）。
-    let mut own_peer_id: Option<String> = None;
-    // #467：Join 时声明的 dc_ready 能力（会在 offer/answer 通道 DCEP 完成后发
-    // signal_ready），Description 代理 /start 时透传给 SFU 做重协商门控。
-    let mut own_dc_ready = false;
-
-    loop {
-        // #539：先 drain 发送队列（呼叫等可靠消息经队列投递——try_lock 会丢、
-        // 阻塞 lock 会与下方 next() 的持锁等待互锁）。
-        while let Ok(s) = rx.try_recv() {
-            let mut w = ws
-                .lock()
-                .unwrap_or_else(aerodesk_protocol::util::lock_recover);
-            let _ = w.send_text(&s);
-        }
-        let msg = match ws
-            .lock()
-            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
-            .next()
-        {
-            Some(Message::Text(t)) => t,
-            Some(_) => continue,
-            None => break,
-        };
-
-        // 消息体上限（信令消息远小于 1MiB）。注意：rouille 的 next() 在返回前
-        // 已把整条消息缓冲进内存，此检查只能阻止后续解析/转发——因此超限直接
-        // 断开连接（而非仅回错误），终止该连接上的重复分配。真正的分配前上限
-        // 需更换 WS 层实现（如 tungstenite 的 max_message_size）。
-        if msg.len() > 1 << 20 {
-            send(
-                &tx,
-                SignalMessage::Error {
-                    message: "message too large".into(),
-                },
-            );
-            break;
-        }
-
-        let parsed: Result<SignalMessage, _> = serde_json::from_str(&msg);
-        let Ok(msg) = parsed else {
-            send(
-                &tx,
-                SignalMessage::Error {
-                    message: "invalid message".into(),
-                },
-            );
-            continue;
-        };
-
-        match msg {
-            // #539 心跳：仅驱动读循环返回（发送队列 drain 在循环顶部），无业务。
-            SignalMessage::Ping => continue,
-            SignalMessage::Join {
-                room,
-                role,
-                auth_token,
-                dc_ready,
-            } => {
-                own_dc_ready = dc_ready;
-                // 房间名校验（防 query 注入 + 注册表滥用）。
-                if !bridge::sanitize_room(&room) {
-                    send(
-                        &tx,
-                        SignalMessage::Error {
-                            message: "invalid room".into(),
-                        },
-                    );
-                    continue;
-                }
-                // 单连接只允许 Join 一次（防重复 Join 泄漏 peer / 计数漂移）。
-                if own_peer_id.is_some() {
-                    send(
-                        &tx,
-                        SignalMessage::Error {
-                            message: "already joined".into(),
-                        },
-                    );
-                    continue;
-                }
-                // 认证先行：任何 PopRegistry 变更之前先验权。
-                let claims = auth_result(&config, auth_token.as_deref(), &room, role);
-                let auth_ok = if config.jwt_secret.is_some() || !config.auth_tokens.is_empty() {
-                    claims.is_some()
-                } else {
-                    true
-                };
-                if !auth_ok {
-                    send(
-                        &tx,
-                        SignalMessage::Error {
-                            message: "auth failed".into(),
-                        },
-                    );
-                    continue;
-                }
-                // 多 PoP（#146/#154）：先静态钉住，再查动态注册表；其它 PoP → 重定向。
-                let mut target_pop = pinned_pop(&config, &room).map(|s| s.to_string());
-                if target_pop.is_none()
-                    && let Some(reg) = &config.pop_registry
-                {
-                    target_pop = reg.lookup(&room);
-                }
-                match &target_pop {
-                    Some(pop) if pop != &config.pop_id => {
-                        if let Some(url) = config.pop_urls.get(pop) {
-                            // #216 M3：配置 BRIDGE_CMD 时，先认证+配额（防止未授权
-                            // 客户端触发进程 spawn），再尝试桥接——viewer 在本 PoP
-                            // 经桥收流（不 Redirect）；桥失败/超时/冷却回退 v1 Redirect。
-                            if config.bridge.is_some() {
-                                // 配额先行（纯检查，spawn 之前拦截）：桥自身 publisher 腿豁免。
-                                // 认证无需重查——Join 入口已先验（同输入的确定性校验）。
-                                let bridge_leg_pre = config.bridge.as_ref().is_some_and(|b| {
-                                    role == Role::Publisher && b.is_running(&room)
-                                });
-                                if !bridge_leg_pre {
-                                    let room_len = rooms
-                                        .lock()
-                                        .unwrap_or_else(aerodesk_protocol::util::lock_recover)
-                                        .get(&room)
-                                        .map(|peers| peers.len())
-                                        .unwrap_or(0);
-                                    let total = TOTAL_CLIENTS
-                                        .get()
-                                        .expect("total initialized")
-                                        .load(Ordering::Relaxed);
-                                    if let Err(reason) = quota_ok(
-                                        room_len,
-                                        total,
-                                        config.max_room_clients,
-                                        config.max_total_clients,
-                                    ) {
-                                        info!("reject join room={room} role={role:?}: {reason}");
-                                        send(
-                                            &tx,
-                                            SignalMessage::Error {
-                                                message: reason.to_string(),
-                                            },
-                                        );
-                                        continue;
-                                    }
-                                }
-                                // 桥决策：桥自身 publisher 腿走 is_running 快路径
-                                // （等自身就绪会死锁）；真实 publisher 回退 Redirect
-                                // （桥只支持主 PoP→本 PoP 媒体方向）；viewer 统一
-                                // ensure_ready（并发 viewer 共享单飞结果，失败一致回退）。
-                                let bridge_ok = match config.bridge.as_ref() {
-                                    Some(b) if role == Role::Publisher && b.is_running(&room) => {
-                                        true
-                                    }
-                                    Some(_) if role == Role::Publisher => false,
-                                    Some(b) => b.ensure_ready(&room) == BridgeOutcome::Ready,
-                                    None => false,
-                                };
-                                if bridge_ok {
-                                    info!(
-                                        "room {room} -> pop {pop} (self={self}): bridge ready, join locally",
-                                        self = config.pop_id
-                                    );
-                                } else {
-                                    info!(
-                                        "room {room} -> pop {pop} (self={self}): bridge unavailable, fallback redirect to {url}",
-                                        self = config.pop_id
-                                    );
-                                    send(
-                                        &tx,
-                                        SignalMessage::Redirect {
-                                            pop: pop.clone(),
-                                            url: url.clone(),
-                                            reason: Some("room pinned to pop".into()),
-                                        },
-                                    );
-                                    continue;
-                                }
-                            } else {
-                                // v1：无桥编排 → 直接 Redirect。
-                                info!(
-                                    "room {room} -> pop {pop} (self={self}); redirect to {url}",
-                                    self = config.pop_id
-                                );
-                                send(
-                                    &tx,
-                                    SignalMessage::Redirect {
-                                        pop: pop.clone(),
-                                        url: url.clone(),
-                                        reason: Some("room pinned to pop".into()),
-                                    },
-                                );
-                                continue;
-                            }
-                        } else {
-                            warn!("room {room} -> pop {pop} but no POP_URLS entry; ignoring pin");
-                        }
-                    }
-                    Some(_) => {
-                        // 本 PoP：静态钉住或动态命中本 PoP——刷新动态条目 TTL（若开启）。
-                        if let Some(reg) = &config.pop_registry {
-                            reg.register(&room, &config.pop_id);
-                        }
-                    }
-                    None => {
-                        // 未登记：本 PoP 成为房间归属（首个加入者），并持久化。
-                        if let Some(reg) = &config.pop_registry {
-                            info!(
-                                "room {room} registered to pop {} (first joiner)",
-                                config.pop_id
-                            );
-                            reg.register(&room, &config.pop_id);
-                        }
-                    }
-                }
-                // 桥自身 publisher 腿判定（#246）：配额豁免 + Peer 标记 + 空闲回收共用。
-                let bridge_leg = config
-                    .bridge
-                    .as_ref()
-                    .is_some_and(|b| role == Role::Publisher && b.is_running(&room));
-                // 全局配额原子预订：所有路径统一 fetch_add 占位，非桥腿超限回滚；
-                // 后续（用户/房间）失败也回滚，消除 load-then-increment 的 TOCTOU。
-                let total_reserved = {
-                    let total = TOTAL_CLIENTS
-                        .get()
-                        .expect("total initialized")
-                        .fetch_add(1, Ordering::Relaxed);
-                    if !bridge_leg
-                        && config.max_total_clients > 0
-                        && total >= config.max_total_clients
-                    {
-                        TOTAL_CLIENTS
-                            .get()
-                            .expect("total initialized")
-                            .fetch_sub(1, Ordering::Relaxed);
-                        false
-                    } else {
-                        true
-                    }
-                };
-                if !total_reserved {
-                    info!("reject join room={room} role={role:?}: server full");
-                    send(
-                        &tx,
-                        SignalMessage::Error {
-                            message: "server full".into(),
-                        },
-                    );
-                    continue;
-                }
-                // #171 用户配额：JWT max_conns（0=不限）。
-                let user = claims.as_ref().map(|c| c.sub.clone());
-                let mut user_quota_inc = false;
-                if let Some(sub) = &user {
-                    let max_conns = claims
-                        .as_ref()
-                        .map(|c| c.max_conns.unwrap_or(0))
-                        .unwrap_or(0);
-                    // max_conns==0 时 user_quota_take 不占位，回滚时不能 release。
-                    if max_conns > 0 {
-                        let mut uc = USER_CONNS
-                            .get()
-                            .expect("user conns initialized")
-                            .lock()
-                            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
-                        if let Err(reason) = user_quota_take(&mut uc, sub, max_conns) {
-                            TOTAL_CLIENTS
-                                .get()
-                                .expect("total initialized")
-                                .fetch_sub(1, Ordering::Relaxed);
-                            info!("reject join user={sub}: {reason}");
-                            send(
-                                &tx,
-                                SignalMessage::Error {
-                                    message: reason.to_string(),
-                                },
-                            );
-                            continue;
-                        }
-                        user_quota_inc = true;
-                    }
-                }
-                let peer_id = format!("{}-{}", room, fastrand_id());
-                // 房间配额检查 + peers 快照 + push 在同一 rooms 锁内（原子）。
-                let peers: Vec<PeerInfo> = {
-                    let mut r = rooms
-                        .lock()
-                        .unwrap_or_else(aerodesk_protocol::util::lock_recover);
-                    let cur = r.get(&room).map(|peers| peers.len()).unwrap_or(0);
-                    if !bridge_leg && config.max_room_clients > 0 && cur >= config.max_room_clients
-                    {
-                        TOTAL_CLIENTS
-                            .get()
-                            .expect("total initialized")
-                            .fetch_sub(1, Ordering::Relaxed);
-                        if user_quota_inc && let Some(sub) = &user {
-                            let mut uc = USER_CONNS
-                                .get()
-                                .expect("user conns initialized")
-                                .lock()
-                                .unwrap_or_else(aerodesk_protocol::util::lock_recover);
-                            user_quota_release(&mut uc, sub.as_str());
-                        }
-                        info!("reject join room={room} role={role:?}: room full");
-                        send(
-                            &tx,
-                            SignalMessage::Error {
-                                message: "room full".into(),
-                            },
-                        );
-                        continue;
-                    }
-                    let peers: Vec<PeerInfo> = r
-                        .get(&room)
-                        .map(|peers| {
-                            peers
-                                .iter()
-                                .map(|p| PeerInfo {
-                                    peer_id: p.id.clone(),
-                                    role: p.role,
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    r.entry(room.clone()).or_default().push(Peer {
-                        id: peer_id.clone(),
-                        role,
-                        ws: ws.clone(),
-                        tx: tx.clone(),
-                        user,
-                        bridge_leg,
-                    });
-                    peers
-                };
-                info!("peer {peer_id} joined room {room} as {role:?}");
-                own_peer_id = Some(peer_id.clone());
-                // 已正式计入 TOTAL_CLIENTS，释放 pre-join 槽位。
-                release_prejoin(&PREJOIN_CLIENTS, prejoin_counted);
-                prejoin_counted = false;
-                send(
-                    &tx,
-                    SignalMessage::Joined {
-                        peer_id,
-                        peers,
-                        turn: fresh_turn(&config),
-                    },
-                );
-            }
-            SignalMessage::Description {
-                from, description, ..
-            } => {
-                // 防冒用：Description.from 必须是本连接 Join 时分配的 peer_id，
-                // 否则 viewer 可用别人（尤其 publisher）的 peer_id 让信令以 publisher
-                // 角色代发 SDP，绕过 SFU 的 viewer 禁发媒体检查。
-                if own_peer_id.as_deref() != Some(from.as_str()) {
-                    send(
-                        &tx,
-                        SignalMessage::Error {
-                            message: "description from mismatch".into(),
-                        },
-                    );
-                    continue;
-                }
-                let room = find_room(&rooms, &from);
-                let Some(room) = room else {
-                    send(
-                        &tx,
-                        SignalMessage::Error {
-                            message: "not in a room".into(),
-                        },
-                    );
-                    continue;
-                };
-                // #12：把 peer 角色传给 SFU，SFU 据此拒绝 viewer 发布媒体。
-                let role = rooms
-                    .lock()
-                    .unwrap_or_else(aerodesk_protocol::util::lock_recover)
-                    .get(&room)
-                    .and_then(|peers| peers.iter().find(|p| p.id == from))
-                    .map(|p| p.role)
-                    .unwrap_or(Role::Viewer);
-                match proxy_to_sfu(&config, &room, role, own_dc_ready, &description) {
-                    Ok(answer) => send(
-                        &tx,
-                        SignalMessage::Description {
-                            from: "sfu".into(),
-                            to: from,
-                            description: answer,
-                        },
-                    ),
-                    Err(e) => send(
-                        &tx,
-                        SignalMessage::Error {
-                            message: format!("sfu error: {e}"),
-                        },
-                    ),
-                }
-            }
-            SignalMessage::Call {
-                from,
-                target,
-                call_id,
-                timeout_ms,
-            } => {
-                // #453：呼叫/响铃。Call.from 必须是本连接 peer_id（同 Description 防冒用）。
-                if own_peer_id.as_deref() != Some(from.as_str()) {
-                    send(
-                        &tx,
-                        SignalMessage::Error {
-                            message: "call from mismatch".into(),
-                        },
-                    );
-                    continue;
-                }
-                if !bridge::sanitize_room(&target) {
-                    send(
-                        &tx,
-                        SignalMessage::Error {
-                            message: "invalid target".into(),
-                        },
-                    );
-                    continue;
-                }
-                // 当前信令仍是房间 Join 模型：呼叫必须发生在被叫设备 ID/房间内，
-                // 避免只持有其它房间 token 的 viewer 跨房间骚扰任意设备。
-                if find_room(&rooms, &from).as_deref() != Some(target.as_str()) {
-                    send(
-                        &tx,
-                        SignalMessage::Error {
-                            message: "call target must match joined room".into(),
-                        },
-                    );
-                    continue;
-                }
-                // 先快照目标 publisher 连接，再释放 rooms 锁逐个发送；
-                // 目标为设备 ID/房间名，presence 以 Role::Publisher 常驻该房间。
-                let targets = publisher_targets(&rooms, &target, &from);
-                if targets.is_empty() {
-                    send(
-                        &tx,
-                        SignalMessage::CallRejected {
-                            from: "signal".into(),
-                            to: from,
-                            call_id,
-                            reason: Some("target offline".into()),
-                            error_code: Some(
-                                aerodesk_protocol::error::ErrorCode::Offline.as_str().into(),
-                            ),
-                        },
-                    );
-                    continue;
-                }
-                for target_tx in targets {
-                    info!("call forward: {from} -> {target} (call_id={call_id})");
-                    // #539：呼叫可靠送达——投递到被叫端连接发送队列（session_loop
-                    // drain 后经其 ws 写出；不碰 ws 锁，避免与阻塞读互锁/丢失）。
-                    if let Ok(text) = serde_json::to_string(&SignalMessage::Call {
-                        from: from.clone(),
-                        target: target.clone(),
-                        call_id: call_id.clone(),
-                        timeout_ms,
-                    }) {
-                        let _ = target_tx.send(text);
-                    }
-                }
-            }
-            SignalMessage::CallRinging { from, to, call_id } => {
-                if !forward_from_own(&tx, own_peer_id.as_deref(), &from) {
-                    continue;
-                }
-                forward_to_peer(
-                    &rooms,
-                    &to.clone(),
-                    SignalMessage::CallRinging { from, to, call_id },
-                );
-            }
-            SignalMessage::CallAccepted { from, to, call_id } => {
-                if !forward_from_own(&tx, own_peer_id.as_deref(), &from) {
-                    continue;
-                }
-                forward_to_peer(
-                    &rooms,
-                    &to.clone(),
-                    SignalMessage::CallAccepted { from, to, call_id },
-                );
-            }
-            SignalMessage::CallRejected {
-                from,
-                to,
-                call_id,
-                reason,
-                error_code,
-            } => {
-                if !forward_from_own(&tx, own_peer_id.as_deref(), &from) {
-                    continue;
-                }
-                forward_to_peer(
-                    &rooms,
-                    &to.clone(),
-                    SignalMessage::CallRejected {
-                        from,
-                        to,
-                        call_id,
-                        reason,
-                        error_code,
-                    },
-                );
-            }
-            SignalMessage::Hangup {
-                from,
-                to,
-                call_id,
-                reason,
-            } => {
-                if !forward_from_own(&tx, own_peer_id.as_deref(), &from) {
-                    continue;
-                }
-                forward_to_peer(
-                    &rooms,
-                    &to.clone(),
-                    SignalMessage::Hangup {
-                        from,
-                        to,
-                        call_id,
-                        reason,
-                    },
-                );
-            }
-            SignalMessage::IceCandidate { .. } => {
-                // v1 非 trickle：candidate 内嵌在 offer/answer 中
-            }
-            SignalMessage::Joined { .. }
-            | SignalMessage::PeerLeft { .. }
-            | SignalMessage::Error { .. }
-            | SignalMessage::Redirect { .. } => {}
-        }
-    }
-
-    // 未 Join 即断开：释放 pre-join 槽位。
-    release_prejoin(&PREJOIN_CLIENTS, prejoin_counted);
-
-    // 断开：移除并广播 PeerLeft
-    let found = {
-        let mut rooms = rooms
-            .lock()
-            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
-        let mut found = None;
-        for (room, peers) in rooms.iter_mut() {
-            if let Some(idx) = peers.iter().position(|p| Arc::ptr_eq(&p.ws, &ws)) {
-                found = Some((room.clone(), peers[idx].id.clone(), peers[idx].user.clone()));
-                peers.remove(idx);
-                break;
-            }
-        }
-        if let Some((room, _, _)) = &found
-            && rooms.get(room).map(|p| p.is_empty()).unwrap_or(true)
-        {
-            rooms.remove(room);
-        }
-        found
-    };
-    let Some((room, peer_id, user)) = found else {
-        info!("session closed");
-        return;
-    };
-    TOTAL_CLIENTS
-        .get()
-        .expect("total initialized")
-        .fetch_sub(1, Ordering::Relaxed);
-    if let Some(sub) = &user {
-        let mut uc = USER_CONNS
-            .get()
-            .expect("user conns initialized")
-            .lock()
-            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
-        user_quota_release(&mut uc, sub);
-    }
-    info!("peer {peer_id} left room {room}");
-    // #66：先快照同房间其它连接的发送队列、释放 rooms 锁，再广播 PeerLeft。
-    // 不能在持有 rooms 锁时去锁其它连接的 ws（锁序反转 → 死锁）。
-    // 广播经各连接发送队列投递（#539）——try_lock 直写 ws 在对方 session_loop
-    // 阻塞读时必然失败，而 PeerLeft 已有消费方（被控端清理 Active 呼叫，见
-    // signal_presence.rs peer_left 处理），必须可靠到达。
-    let target_txs: Vec<std::sync::mpsc::Sender<String>> = {
-        let rooms = rooms
-            .lock()
-            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
-        rooms
-            .get(&room)
-            .map(|peers| peers.iter().map(|p| p.tx.clone()).collect())
-            .unwrap_or_default()
-    };
-    let Ok(text) = serde_json::to_string(&SignalMessage::PeerLeft {
-        peer_id: peer_id.clone(),
-    }) else {
-        return;
-    };
-    for tx in target_txs {
-        let _ = tx.send(text.clone());
-    }
-    info!("session closed");
-}
-
-/// 本连接发送队列投递（唯一发送通道，session_loop 循环顶部 drain）。
-///
-/// #487 审查批次 2：原 #66 try_lock 直写路径与队列并存，注释互相矛盾——
-/// 直写在对方 session_loop 阻塞读持有 ws 锁时**静默丢消息**（PeerLeft 曾因此
-/// 丢失，有消费方后已改队列）。统一后所有应答/错误都经队列：可靠投递，
-/// 延迟一个循环周期（微秒级，drain 在阻塞读之前执行，无顺序问题）。
-fn send(tx: &std::sync::mpsc::Sender<String>, msg: SignalMessage) {
-    let Ok(text) = serde_json::to_string(&msg) else {
-        return;
-    };
-    let _ = tx.send(text);
-}
-
-fn find_room(rooms: &Rooms, peer_id: &str) -> Option<String> {
-    let rooms = rooms
-        .lock()
-        .unwrap_or_else(aerodesk_protocol::util::lock_recover);
-    rooms
-        .iter()
-        .find(|(_, peers)| peers.iter().any(|p| p.id == peer_id))
-        .map(|(room, _)| room.clone())
-}
-
-/// 校验信令消息的 `from` 是否属于当前连接；不匹配时回 `Error` 并返回 false。
-fn forward_from_own(
-    tx: &std::sync::mpsc::Sender<String>,
-    own_peer_id: Option<&str>,
-    from: &str,
-) -> bool {
-    if own_peer_id == Some(from) {
-        return true;
-    }
-    send(
-        tx,
-        SignalMessage::Error {
-            message: "message from mismatch".into(),
-        },
-    );
-    false
-}
-
-/// 判断一个 peer 是否应收到呼叫（真实 publisher presence，而非桥腿）。
-fn is_callable_publisher(role: Role, peer_id: &str, bridge_leg: bool, exclude_peer: &str) -> bool {
-    role == Role::Publisher && peer_id != exclude_peer && !bridge_leg
-}
-
-/// 返回目标房间内所有 publisher 连接（排除发起呼叫的 peer）。
-///
-/// presence 被叫端以 [`Role::Publisher`] 常驻设备 ID 房间；该函数只收集连接快照，
-/// 调用方在释放 rooms 锁后逐条发送，避免跨连接锁序反转。
-fn publisher_targets(
-    rooms: &Rooms,
-    target: &str,
-    exclude_peer: &str,
-) -> Vec<std::sync::mpsc::Sender<String>> {
-    let rooms = rooms
-        .lock()
-        .unwrap_or_else(aerodesk_protocol::util::lock_recover);
-    rooms
-        .get(target)
-        .map(|peers| {
-            peers
-                .iter()
-                .filter(|p| is_callable_publisher(p.role, &p.id, p.bridge_leg, exclude_peer))
-                .map(|p| p.tx.clone())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// 按 peer_id 转发一条信令消息；目标不存在时返回 false（不阻塞锁）。
-/// #539：经目标连接发送队列投递（session_loop 常驻读持有 ws 锁，try_lock
-/// 会丢弃呼叫/拒绝等可靠消息；阻塞 lock 会与读互锁——队列由本连接循环 drain）。
-fn forward_to_peer(rooms: &Rooms, to: &str, msg: SignalMessage) -> bool {
-    let target_tx = {
-        let rooms = rooms
-            .lock()
-            .unwrap_or_else(aerodesk_protocol::util::lock_recover);
-        rooms
-            .values()
-            .flat_map(|peers| peers.iter())
-            .find(|p| p.id == to)
-            .map(|p| p.tx.clone())
-    };
-    let Some(target_tx) = target_tx else {
-        tracing::debug!("signal forward skipped: peer {to} not found");
-        return false;
-    };
-    let Ok(text) = serde_json::to_string(&msg) else {
-        return false;
-    };
-    let _ = target_tx.send(text);
-    true
-}
-
-/// 调用 SFU 内部接口：POST /start?room=xxx&role=xxx[&dc_ready=1]（body = SDP offer JSON）
-/// #467：dc_ready=1 声明客户端会在 offer/answer 通道 DCEP 完成后发 signal_ready，
-/// SFU 据此门控重协商时机（旧客户端不携带，走兼容路径）。
-fn proxy_to_sfu(
-    config: &Config,
-    room: &str,
-    role: Role,
-    dc_ready: bool,
-    description: &str,
-) -> Result<String, String> {
-    let role_name = match role {
-        Role::Publisher => "publisher",
-        Role::Viewer => "viewer",
-    };
-    let sfu = &config.sfu_urls[selected_sfu_idx(&config.sfu_urls, room)];
-    let mut url = format!("{sfu}/start?room={room}&role={role_name}");
-    if dc_ready {
-        url.push_str("&dc_ready=1");
-    }
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(10))
-        .build();
-    let mut req = agent.post(&url).set("Content-Type", "application/json");
-    if let Some(token) = &config.sfu_token {
-        req = req.set("X-Internal-Token", token);
-    }
-    let resp = req.send_string(description).map_err(|e| e.to_string())?;
-    resp.into_string().map_err(|e| e.to_string())
-}
-
-/// 进程内单调计数器：与纳秒时间戳组合，保证 peer_id 唯一。
-///
-/// 仅用纳秒时间戳在粗时钟（如 macOS ~1ms 分辨率）下可能同 tick 碰撞：
-/// publisher 与 viewer 几乎同时 Join 得到相同 peer_id，Description 按 id
-/// 查角色时会命中错误条目（如 publisher 被当成 viewer）→ SFU #12 误拒。
-static PEER_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn fastrand_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let n = PEER_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{nanos:x}-{n}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aerodesk_protocol::jwt::mint_token;
 
-    fn cfg(new: &str, old: Option<&str>) -> Config {
+    fn cfg() -> Config {
         Config {
             auth_tokens: vec![],
-            jwt_secret: Some(new.into()),
-            jwt_secret_old: old.map(|s| s.to_string()),
             pop_id: "pop-a".into(),
-            room_pop_map: vec![],
             pop_registry: None,
-            max_room_clients: 0,
-            max_total_clients: 0,
-            pop_urls: HashMap::new(),
-            turn_secret: None,
-            turn: None,
+            pop_sip_urls: vec![],
             sfu_urls: vec!["http://127.0.0.1:3002".into()],
             sfu_token: None,
             sfu_poll_interval_secs: 5,
             sfu_fail_cooldown_secs: 30,
             sfu_sticky_ttl_secs: 6 * 3600,
-            max_prejoin_clients: 0,
-            allowed_origins: None,
-            bridge: None,
-            bridge_idle_secs: Duration::from_secs(300),
-            bridge_monitor_interval: Duration::from_secs(15),
         }
     }
 
@@ -2289,61 +1050,32 @@ mod tests {
     }
 
     #[test]
-    fn devices_endpoint_returns_json_with_empty_rooms() {
+    fn devices_endpoint_returns_json_with_sip_only() {
         use std::io::Read;
-        // 注意：不触碰 TOTAL_CLIENTS（进程级 OnceLock，health 测试首个设置；
-        // /devices 端点不读它）。
-        let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
-        let config = Arc::new(cfg("s", None));
-
-        let h = handle(
+        let config = cfg();
+        let h = ops_router(
             &Request::fake_http("GET", "/devices", vec![], Vec::new()),
-            config,
-            rooms,
+            &config,
         );
         assert_eq!(h.status_code, 200);
         let (mut reader, _size) = h.data.into_reader_and_size();
         let mut body = String::new();
         reader.read_to_string(&mut body).unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["devices"], serde_json::json!([]), "{body}");
+        // 无注册时的空列表（有 SIP e2e 并发注册时只增不减，列表非空亦合法——
+        // 只断言结构与 pop 字段）。
+        assert!(v["devices"].is_array(), "{body}");
         assert_eq!(v["pop"], "pop-a");
-    }
-
-    /// #503：设备在线判定——viewer 观看端与桥自身腿都不算设备在线。
-    #[test]
-    fn device_presence_filters_viewer_and_bridge_leg() {
-        assert!(is_device_presence(Role::Publisher, false));
-        assert!(
-            !is_device_presence(Role::Viewer, false),
-            "观看端不算设备在线"
-        );
-        assert!(
-            !is_device_presence(Role::Publisher, true),
-            "桥自身 publisher 腿不算设备在线"
-        );
     }
 
     #[test]
     fn health_and_metrics_endpoints() {
         use std::io::Read;
-        // TOTAL_CLIENTS 是进程级 OnceLock，本测试首个设置；其它测试不触碰。
-        let _ = TOTAL_CLIENTS.set(Arc::new(AtomicUsize::new(3)));
-        let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
-        rooms
-            .lock()
-            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
-            .insert("room-a".into(), Vec::new());
-        rooms
-            .lock()
-            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
-            .insert("room-b".into(), Vec::new());
-        let config = Arc::new(cfg("s", None));
+        let config = cfg();
 
-        let h = handle(
+        let h = ops_router(
             &Request::fake_http("GET", "/healthz", vec![], Vec::new()),
-            config.clone(),
-            rooms.clone(),
+            &config,
         );
         assert_eq!(h.status_code, 200);
         let (mut reader, _size) = h.data.into_reader_and_size();
@@ -2351,185 +1083,23 @@ mod tests {
         reader.read_to_string(&mut body).unwrap();
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["status"], "ok");
-        assert_eq!(v["clients"], 3);
-        assert_eq!(v["rooms"], 2);
         assert_eq!(v["pop"], "pop-a");
+        // clients/rooms 字段随 JSON 栈退役（P3.1）；sip 字段形状由
+        // sip_health_json_shape 单测覆盖（此处不依赖全局端点状态）。
+        assert!(v.get("clients").is_none(), "{body}");
+        assert!(v.get("rooms").is_none(), "{body}");
 
-        let m = handle(
+        let m = ops_router(
             &Request::fake_http("GET", "/metrics/prometheus", vec![], Vec::new()),
-            config,
-            rooms,
+            &config,
         );
         let (mut reader, _size) = m.data.into_reader_and_size();
         let mut body = String::new();
         reader.read_to_string(&mut body).unwrap();
-        assert!(body.contains("aerodesk_signal_clients 3"), "{body}");
-        assert!(body.contains("aerodesk_signal_rooms 2"), "{body}");
-        assert!(body.contains("aerodesk_signal_bridges 0"), "{body}");
-    }
-
-    #[test]
-    fn dual_secret_accepts_new_and_legacy() {
-        let token_new = mint_token(
-            "new-secret",
-            "u1",
-            None,
-            Some("r1"),
-            Some(Role::Viewer),
-            60,
-            None,
-        )
-        .unwrap();
-        let token_old = mint_token(
-            "old-secret",
-            "u2",
-            None,
-            Some("r1"),
-            Some(Role::Viewer),
-            60,
-            None,
-        )
-        .unwrap();
-        let config = cfg("new-secret", Some("old-secret"));
         assert!(
-            auth_result(&config, Some(&token_new), "r1", Role::Viewer).is_some(),
-            "new secret token must pass"
+            !body.contains("aerodesk_signal_"),
+            "JSON 面三 gauge 应退役：{body}"
         );
-        assert!(
-            auth_result(&config, Some(&token_old), "r1", Role::Viewer).is_some(),
-            "legacy secret token must pass during grace"
-        );
-    }
-
-    #[test]
-    fn dual_secret_rejects_wrong_secret_and_wrong_room() {
-        let token_wrong = mint_token(
-            "attacker",
-            "u3",
-            None,
-            Some("r1"),
-            Some(Role::Viewer),
-            60,
-            None,
-        )
-        .unwrap();
-        let config = cfg("new-secret", Some("old-secret"));
-        assert!(
-            !auth_result(&config, Some(&token_wrong), "r1", Role::Viewer).is_some(),
-            "wrong secret must fail"
-        );
-
-        let token_room = mint_token(
-            "new-secret",
-            "u4",
-            None,
-            Some("r2"),
-            Some(Role::Viewer),
-            60,
-            None,
-        )
-        .unwrap();
-        assert!(
-            !auth_result(&config, Some(&token_room), "r1", Role::Viewer).is_some(),
-            "room mismatch must fail"
-        );
-    }
-
-    #[test]
-    fn old_secret_only_valid_before_rotation_completes() {
-        // 轮换完成（JWT_SECRET_OLD 移除）后，旧密钥 token 必须拒绝
-        let token_old = mint_token(
-            "old-secret",
-            "u5",
-            None,
-            Some("r1"),
-            Some(Role::Viewer),
-            60,
-            None,
-        )
-        .unwrap();
-        let config = cfg("new-secret", None);
-        assert!(
-            !auth_result(&config, Some(&token_old), "r1", Role::Viewer).is_some(),
-            "old token must fail after grace ends"
-        );
-    }
-
-    /// 回归：peer_id 必须在快速连续 Join 下保持唯一（粗时钟下纳秒时间戳会碰撞，
-    /// 碰撞会让 Description 按 id 查角色时命中错误条目，导致 SFU #12 误拒）。
-    #[test]
-    fn user_quota_take_and_release() {
-        let mut conns = HashMap::new();
-        // max=0 不限
-        assert!(user_quota_take(&mut conns, "u1", 0).is_ok());
-        assert!(user_quota_take(&mut conns, "u1", 0).is_ok());
-        // 上限 1：第一次 ok，第二次拒绝
-        let mut conns2 = HashMap::new();
-        assert!(user_quota_take(&mut conns2, "u2", 1).is_ok());
-        assert_eq!(
-            user_quota_take(&mut conns2, "u2", 1),
-            Err("user quota exceeded")
-        );
-        // 不同用户互不影响
-        assert!(user_quota_take(&mut conns2, "u3", 1).is_ok());
-        // 释放后可再进
-        user_quota_release(&mut conns2, "u2");
-        assert!(user_quota_take(&mut conns2, "u2", 1).is_ok());
-    }
-
-    #[test]
-    fn quota_ok_boundaries() {
-        // 0 = 不限
-        assert!(quota_ok(5, 100, 0, 0).is_ok());
-        assert!(quota_ok(5, 40, 0, 50).is_ok());
-        assert!(quota_ok(5, 100, 10, 0).is_ok());
-        // 房间满
-        assert_eq!(quota_ok(2, 0, 2, 0), Err("room full"));
-        assert_eq!(quota_ok(2, 0, 3, 0), Ok(()));
-        // 全局满
-        assert_eq!(quota_ok(0, 2, 0, 2), Err("server full"));
-        assert_eq!(quota_ok(0, 2, 0, 3), Ok(()));
-        // 两者取交集
-        assert_eq!(quota_ok(2, 2, 2, 2), Err("room full"));
-        assert_eq!(quota_ok(1, 2, 2, 2), Err("server full"));
-    }
-
-    #[test]
-    fn peer_ids_unique_across_rapid_calls() {
-        let mut seen = std::collections::HashSet::new();
-        for _ in 0..10_000 {
-            let id = fastrand_id();
-            let dup = !seen.insert(id.clone());
-            assert!(!dup, "duplicate peer_id: {id}");
-        }
-    }
-
-    #[test]
-    fn callable_publisher_filters_role_self_and_bridge_legs() {
-        assert!(is_callable_publisher(
-            Role::Publisher,
-            "device-1",
-            false,
-            "caller"
-        ));
-        assert!(!is_callable_publisher(
-            Role::Viewer,
-            "viewer-1",
-            false,
-            "caller"
-        ));
-        assert!(!is_callable_publisher(
-            Role::Publisher,
-            "caller",
-            false,
-            "caller"
-        ));
-        assert!(!is_callable_publisher(
-            Role::Publisher,
-            "bridge-leg",
-            true,
-            "caller"
-        ));
     }
 
     /// 极简 HTTP 假服务器：接受一个连接，读取请求头，回固定响应。
@@ -2591,94 +1161,28 @@ mod tests {
         assert_eq!(poll_sfu_load(&url, None), Err(PollErr::Unauthorized));
     }
 
-    #[test]
-    fn reserve_prejoin_caps_and_releases() {
-        let counter = AtomicUsize::new(0);
-        assert_eq!(
-            reserve_prejoin(&counter, 0),
-            Some(false),
-            "cap=0 不限且不计数"
-        );
-        assert_eq!(counter.load(Ordering::Relaxed), 0);
-        assert_eq!(reserve_prejoin(&counter, 2), Some(true));
-        assert_eq!(reserve_prejoin(&counter, 2), Some(true));
-        assert_eq!(reserve_prejoin(&counter, 2), None, "超过上限拒绝");
-        assert_eq!(counter.load(Ordering::Relaxed), 2, "被拒的不得占位");
-        release_prejoin(&counter, true);
-        assert_eq!(reserve_prejoin(&counter, 2), Some(true), "释放后可再进");
-        release_prejoin(&counter, false);
-        release_prejoin(&counter, true);
-        release_prejoin(&counter, true);
-        assert_eq!(counter.load(Ordering::Relaxed), 0, "未计数的释放不得多减");
-    }
-
-    #[test]
-    fn parse_plain_port_variants() {
-        assert_eq!(parse_plain_port(None), Some(3003));
-        assert_eq!(parse_plain_port(Some("3005")), Some(3005));
-        assert_eq!(parse_plain_port(Some("off")), None);
-        assert_eq!(parse_plain_port(Some("DISABLED")), None);
-        assert_eq!(parse_plain_port(Some("none")), None);
-        assert_eq!(parse_plain_port(Some("bad")), Some(3003), "非法值回退默认");
-    }
-
-    #[test]
-    fn origin_whitelist_blocks_and_allows() {
-        let mut config = cfg("s", None);
-        config.allowed_origins = Some(vec!["https://good.example".into()]);
-        let config = Arc::new(config);
-        let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
-
-        // 非白名单 Origin → 403。
-        let req = Request::fake_http(
-            "GET",
-            "/ws",
-            vec![("Origin".into(), "https://evil.example".into())],
-            Vec::new(),
-        );
-        assert_eq!(handle(&req, config.clone(), rooms.clone()).status_code, 403);
-
-        // 白名单 Origin / 无 Origin（CLI/native）→ 通过 Origin 检查，
-        // 进入 websocket 升级（fake 请求缺升级头 → 400）。
-        let req = Request::fake_http(
-            "GET",
-            "/ws",
-            vec![("Origin".into(), "https://good.example".into())],
-            Vec::new(),
-        );
-        assert_eq!(handle(&req, config.clone(), rooms.clone()).status_code, 400);
-        let req = Request::fake_http("GET", "/ws", vec![], Vec::new());
-        assert_eq!(handle(&req, config, rooms).status_code, 400);
-    }
-
-    /// 粘性映射淘汰（M3）：有活跃 peer 的房间**永不淘汰**（即使映射空闲超过
-    /// TTL——审查反馈：Join 不调用 select，静默信令的活跃房间不能用时间戳判死）；
-    /// 无 peer 且空闲超过 TTL 的房间才被淘汰。
+    /// 粘性映射淘汰（P3.1 纯 TTL 口径）：空闲超过 TTL 即淘汰——last_used 由
+    /// SIP INVITE 会议分支（池唯一消费点）刷新，零 INVITE 超 TTL 视为死房间。
     #[test]
     fn sticky_map_evicts_idle_rooms() {
         let pool = SfuPool::new(vec!["http://s1".into(), "http://s2".into()]);
-        let _ = pool.select("live-quiet");
         let _ = pool.select("stale");
+        let _ = pool.select("fresh");
         {
             let mut reg = pool
                 .room_sfu
                 .lock()
                 .unwrap_or_else(aerodesk_protocol::util::lock_recover);
-            reg.get_mut("live-quiet").unwrap().1 = unix_secs() - 7 * 3600;
             reg.get_mut("stale").unwrap().1 = unix_secs() - 7 * 3600;
+            reg.get_mut("fresh").unwrap().1 = unix_secs();
         }
-        let mut alive = std::collections::HashSet::new();
-        alive.insert("live-quiet".to_string());
-        let evicted = pool.evict_stale(&alive, 6 * 3600, unix_secs());
-        assert_eq!(evicted, 1, "只淘汰无 peer 且空闲超过 TTL 的房间");
+        let evicted = pool.evict_stale(6 * 3600, unix_secs());
+        assert_eq!(evicted, 1, "只淘汰空闲超过 TTL 的房间");
         let reg = pool
             .room_sfu
             .lock()
             .unwrap_or_else(aerodesk_protocol::util::lock_recover);
-        assert!(
-            reg.contains_key("live-quiet"),
-            "有活跃 peer 的房间即使映射空闲超时也不得淘汰"
-        );
+        assert!(reg.contains_key("fresh"), "活跃（近期有 INVITE）不得淘汰");
         assert!(!reg.contains_key("stale"));
     }
 
@@ -2690,5 +1194,190 @@ mod tests {
         assert_eq!(parse_sticky_ttl(Some("0")), 6 * 3600);
         assert_eq!(parse_sticky_ttl(Some("bad")), 6 * 3600);
         assert_eq!(parse_sticky_ttl(Some("3600")), 3600);
+    }
+
+    // -- P3.1 新增：D2 默认翻转 / D3 健康面 / D4 failover / 多 PoP 302 --
+
+    #[test]
+    fn parse_port_or_off_variants() {
+        assert_eq!(parse_port_or_off(None, "SIP_UDP_PORT", 5060), Some(5060));
+        assert_eq!(parse_port_or_off(Some("5062"), "X", 5060), Some(5062));
+        assert_eq!(parse_port_or_off(Some("off"), "X", 5060), None);
+        assert_eq!(parse_port_or_off(Some("OFF"), "X", 5060), None);
+        assert_eq!(parse_port_or_off(Some("Disabled"), "X", 5060), None);
+        assert_eq!(parse_port_or_off(Some("none"), "X", 5060), None);
+        assert_eq!(
+            parse_port_or_off(Some("bad"), "SIP_TLS_PORT", 5061),
+            Some(5061),
+            "非法值回退默认"
+        );
+    }
+
+    /// /admin/temp-password 三分支：503（无 token）/ 401（口令错）/ 501（SIP 端点关）。
+    #[test]
+    fn admin_guard_three_branches() {
+        let req = || Request::fake_http("POST", "/admin/temp-password", vec![], Vec::new());
+
+        // 503：无任何管理 token。
+        let c = cfg();
+        match admin_guard(&req(), &c) {
+            Err(r) => assert_eq!(r.status_code, 503),
+            Ok(_) => panic!("无 token 应 503"),
+        }
+
+        // 401：token 存在但 Bearer 不匹配。
+        let c = Config {
+            auth_tokens: vec!["tok".into()],
+            ..cfg()
+        };
+        let req401 = Request::fake_http(
+            "POST",
+            "/admin/temp-password",
+            vec![("Authorization".into(), "Bearer wrong".into())],
+            Vec::new(),
+        );
+        match admin_guard(&req401, &c) {
+            Err(r) => assert_eq!(r.status_code, 401),
+            Ok(_) => panic!("口令错应 401"),
+        }
+
+        // 501：鉴权通过但 SIP 端点关闭（SIP_ENDPOINT_ENABLED=false）。
+        let prev = SIP_ENDPOINT_ENABLED.load(Ordering::Relaxed);
+        SIP_ENDPOINT_ENABLED.store(false, Ordering::Relaxed);
+        let req501 = Request::fake_http(
+            "POST",
+            "/admin/temp-password",
+            vec![("Authorization".into(), "Bearer tok".into())],
+            Vec::new(),
+        );
+        let r = admin_guard(&req501, &c);
+        SIP_ENDPOINT_ENABLED.store(prev, Ordering::Relaxed);
+        match r {
+            Err(resp) => assert_eq!(resp.status_code, 501),
+            Ok(_) => panic!("SIP 端点关闭应 501"),
+        }
+    }
+
+    /// /healthz `sip` 字段形状：关闭 → null；开启 → 三传输布尔。
+    #[test]
+    fn sip_health_json_shape() {
+        assert_eq!(sip_health_json(false, None), serde_json::Value::Null);
+        assert_eq!(
+            sip_health_json(true, Some((true, true, true))),
+            serde_json::json!({"tls": true, "udp": true, "wss": true})
+        );
+        // 端点开但状态未上报（极端窗口）→ 全 false 而非 panic。
+        assert_eq!(
+            sip_health_json(true, None),
+            serde_json::json!({"tls": false, "udp": false, "wss": false})
+        );
+    }
+
+    /// D4 候选次序：首选在前，其余健康优先 + 负载升序；无池保持原序。
+    #[test]
+    fn order_candidates_healthy_and_loaded() {
+        let pool = SfuPool::new(vec![
+            "http://a".into(),
+            "http://b".into(),
+            "http://c".into(),
+        ]);
+        pool.loads[1].store(1000, Ordering::Relaxed);
+        pool.loads[2].store(5000, Ordering::Relaxed);
+        // 全健康：首选 0，其余按负载升序 [1, 2]。
+        assert_eq!(order_candidates(0, Some(&pool), 3), vec![0, 1, 2]);
+        // 1 下线：即使负载最低也排到最后（健康优先）。
+        pool.down_until[1].store(unix_secs() + 60, Ordering::Relaxed);
+        assert_eq!(order_candidates(0, Some(&pool), 3), vec![0, 2, 1]);
+        // 无池：保持原序（rendezvous 兜底语义）。
+        assert_eq!(order_candidates(1, None, 3), vec![1, 0, 2]);
+    }
+
+    /// D4 有界 failover：首选 5xx → 转移到次选成功；4xx（配置/请求错）不转移。
+    /// 候选首选由 rendezvous 决定（权重只依赖下标，与 URL 内容无关）——
+    /// 把「故障」mock 放到 `sfu_for_room` 首选下标，使断言与哈希结果解耦。
+    #[test]
+    fn sfu_proxy_start_fails_over_only_on_transient() {
+        // 首选回 500（瞬时故障），次选回 200 answer → 应转移并成功。
+        let (bad, bad_rx) = fake_http_server("HTTP/1.1 500 Internal Server Error", "");
+        let (good, good_rx) = fake_http_server("HTTP/1.1 200 OK", "ANSWER-BODY");
+        let mut urls = vec![format!("http://{bad}"), format!("http://{good}")];
+        if sfu_for_room(&urls, "room-fo") != 0 {
+            urls.swap(0, 1);
+        }
+        let answer = sip_server::sfu_proxy_start(&urls, None, "room-fo", "OFFER");
+        assert_eq!(answer, Ok("ANSWER-BODY".to_string()), "5xx 应转移次选");
+        assert!(bad_rx.recv_timeout(Duration::from_secs(5)).is_ok());
+        assert!(good_rx.recv_timeout(Duration::from_secs(5)).is_ok());
+
+        // 首选回 400（请求/配置错，转移无意义）→ 立即失败，次选不被打扰。
+        let (fatal, fatal_rx) = fake_http_server("HTTP/1.1 400 Bad Request", "");
+        let (idle, idle_rx) = fake_http_server("HTTP/1.1 200 OK", "SHOULD-NOT-HIT");
+        let mut urls = vec![format!("http://{fatal}"), format!("http://{idle}")];
+        if sfu_for_room(&urls, "room-fo") != 0 {
+            urls.swap(0, 1);
+        }
+        let r = sip_server::sfu_proxy_start(&urls, None, "room-fo", "OFFER");
+        assert!(r.is_err(), "4xx 应原样失败");
+        assert!(fatal_rx.recv_timeout(Duration::from_secs(5)).is_ok());
+        assert!(
+            idle_rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "4xx 不得转移到次选"
+        );
+    }
+
+    /// 302 Contact 头形状（RFC 3261 §20.10）：`<sip:<room>@<host:port>>`。
+    #[test]
+    fn pop_contact_value_shape() {
+        assert_eq!(
+            sip_server::pop_contact_value("meet-1", "127.0.0.1:3008"),
+            "<sip:meet-1@127.0.0.1:3008>"
+        );
+    }
+
+    /// 多 PoP INVITE 归属三态（#146/#154 迁移）：未登记 → 登记（首 INVITE）；
+    /// 本 PoP → 刷 TTL；他 PoP → 有目标 302 / 无目标 486。
+    #[test]
+    fn decide_pop_route_register_refresh_redirect_busy() {
+        // 未开注册表（单 PoP 默认）：直接放行，行为零变化。
+        assert_eq!(
+            sip_server::decide_pop_route("meet-1", "pop-a", None, &[]),
+            sip_server::PopRoute::Proceed {
+                first_registration: false
+            }
+        );
+
+        let reg = PopRegistry::new(None, 3600);
+        // 未登记 → Proceed{first_registration: true}（首个 INVITE 登记 owner PoP）。
+        assert_eq!(
+            sip_server::decide_pop_route("meet-2", "pop-a", Some(&reg), &[]),
+            sip_server::PopRoute::Proceed {
+                first_registration: true
+            }
+        );
+        reg.register("meet-2", "pop-a");
+        // 本 PoP 命中 → Proceed{false}（刷 TTL）。
+        assert_eq!(
+            sip_server::decide_pop_route("meet-2", "pop-a", Some(&reg), &[]),
+            sip_server::PopRoute::Proceed {
+                first_registration: false
+            }
+        );
+        // 他 PoP 命中 + 有目标 → 302 Redirect。
+        reg.register("meet-3", "pop-b");
+        let targets = vec![("pop-b".to_string(), "127.0.0.1:3008".to_string())];
+        assert_eq!(
+            sip_server::decide_pop_route("meet-3", "pop-a", Some(&reg), &targets),
+            sip_server::PopRoute::Redirect {
+                pop: "pop-b".into(),
+                host_port: "127.0.0.1:3008".into()
+            }
+        );
+        // 他 PoP 命中 + 无目标 → 486（即刻失败优于 30s 超时）。
+        assert_eq!(
+            sip_server::decide_pop_route("meet-3", "pop-a", Some(&reg), &[]),
+            sip_server::PopRoute::BusyNoTarget {
+                pop: "pop-b".into()
+            }
+        );
     }
 }

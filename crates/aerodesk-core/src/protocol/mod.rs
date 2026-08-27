@@ -4,5 +4,5 @@
 //! crate：服务端不再被迫链接客户端引擎重依赖。客户端 crate 路径零改动。
 
 pub use aerodesk_protocol::{
-    chat, cmd, cursor, error, file, input, jwt, signal, sip, sip_client, tls, turn,
+    chat, cmd, cursor, error, file, input, signal, sip, sip_client, tls, turn,
 };

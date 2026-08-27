@@ -192,7 +192,7 @@ pub fn connect_live_forced(
     )
 }
 
-/// 连接并保留活跃会话（任意角色）。`auth` 为 JWT/静态 token（可选）。
+/// 连接并保留活跃会话（任意角色）。`auth` 为静态 token（可选）。
 pub fn connect_live_role(
     server: &str,
     room: &str,

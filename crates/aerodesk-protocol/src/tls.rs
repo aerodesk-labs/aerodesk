@@ -8,7 +8,7 @@
 //!   绝不静默回退到内嵌开发证书（其私钥在公开仓库中，生产误用会被 MITM）。
 
 /// TLS 身份（证书 + 私钥，PEM 字节）。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TlsIdentity {
     pub cert: Vec<u8>,
     pub key: Vec<u8>,
