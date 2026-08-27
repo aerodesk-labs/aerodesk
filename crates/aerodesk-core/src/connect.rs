@@ -779,7 +779,7 @@ pub fn connect_viewer_sip(
 /// 消费者：跨 PoP 桥 pub 腿、host auto_publish 登录媒体、Android/OHOS 被控端。
 /// 会话语义与 CLI agent connect_inner 的 publisher 路径一致——一次原语只承接
 /// 一个呼叫（桥/host/移动端当前均为单会话场景）；后续 INVITE 由看护线程拒绝
-/// （busy），不在此扩展多呼叫复用。
+/// （busy），不在此扩展多呼叫复用。`codec` 透传 P2pCallConfig（None=默认 H264）。
 ///
 /// 返回 [`P2pCall`]（调用方驱动 `poll()` 泵媒体，endpoint/socket 经访问器取用）
 /// 与 video/audio mid；SipCallLink 移入看护线程持有至进程退出（Drop 即 BYE/注销），
@@ -791,6 +791,7 @@ pub fn connect_publisher_sip(
     force_relay: bool,
     sip_transport: Option<&str>,
     sip_port: Option<u16>,
+    codec: Option<crate::platform::Codec>,
 ) -> Result<
     (
         crate::p2p_call::P2pCall,
@@ -838,6 +839,8 @@ pub fn connect_publisher_sip(
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
+    // 就绪栅栏日志（与 agent CLI 同字面量——win-logon/bridge e2e grep 锚点）。
+    tracing::info!("SIP registered: {device_id}");
 
     // 等待来电并免授权静默接听（desktop UAS 流的收敛版）：IncomingCall →
     // P2pCall(Callee, Publisher) accept_offer → accept(answer)。等 INVITE 300s
@@ -871,7 +874,7 @@ pub fn connect_publisher_sip(
     let mut p2p = crate::p2p_call::P2pCall::new(crate::p2p_call::P2pCallConfig {
         role: crate::p2p_call::P2pRole::Callee,
         device_role: Role::Publisher,
-        codec: None,
+        codec,
         with_audio: false,
         with_camera: false,
         force_relay,
