@@ -198,6 +198,13 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/smoke.sh
 
+      # #598 P0：标准 SIP 客户端 WSS（RFC 7118）验收线——浏览器 SIP 化的
+      # 报文形态背书，此前 scripts/sip-accept-wss.py 零 CI 调用方。
+      # Linux 专属：Windows runner 的 python/pip 名与 venv 约束不同，避免平台分叉。
+      - name: e2e sip accept over WSS (Linux only)
+        if: runner.os == 'Linux'
+        run: ./scripts/sip-accept-wss-e2e.sh
+
       # #58 画质选层端到端（SIP 语义版，#552 迁移后重写）：Web 发布端 +
       # 2×CLI viewer（SIP 会议桥）多播收流 + 选层请求转发断言；simulcast
       # 三层（q/h/f + f>q 码率）断言待原生端会议发布落地（P2）恢复。
