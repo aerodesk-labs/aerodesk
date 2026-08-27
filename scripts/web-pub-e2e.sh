@@ -31,18 +31,41 @@ const ROOM = process.argv[2];
       '--ignore-certificate-errors',      // 3061 为自签 WSS（RFC 7118）
     ],
   });
-  const page = await browser.newPage();
-  await page.goto(`http://127.0.0.1:${process.env.WEB_SERVE_PORT || 38082}/sip-publisher.html?device=${ROOM}&signal=wss://127.0.0.1:3061`);
-  await page.click('#connect');
-  await page.waitForFunction(() => document.getElementById('status').innerText.includes('等待观看端拨入'), { timeout: 20000 });
-  console.log('PASS page registered, waiting INVITE');
-  await page.waitForFunction(() => document.getElementById('status').innerText.includes('已接听'), { timeout: 30000 });
-  console.log('PASS page answered call (200 OK)');
-  // 保持发布 12s（让 CLI viewer 收到关键帧 + 若干帧）
-  await new Promise(r => setTimeout(r, 12000));
-  await browser.close();
-  console.log('E2E DONE');
-})().catch(e => { console.error('E2E FAIL:', e.message); process.exit(1); });
+  // 不单靠 launch flag：context 级 ignoreHTTPSErrors 走 CDP
+  // Security.setIgnoreCertificateErrors，对 wss 一并生效且跨渠道稳定。
+  const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await ctx.newPage();
+  // 观测转发：失败原因必须落进本 stdout（node log），否则 bash 侧 tail 抓空。
+  page.on('console', m => console.log('[console]', m.text()));
+  page.on('pageerror', e => console.error('[pageerror]', e.message));
+  page.on('requestfailed', r => console.log('[requestfailed]', r.url(), r.failure() && r.failure().errorText));
+  page.on('websocket', ws => { console.log('[ws open]', ws.url()); ws.on('close', () => console.log('[ws closed]')); });
+  try {
+    await page.goto(`http://127.0.0.1:${process.env.WEB_SERVE_PORT || 38082}/sip-publisher.html?device=${ROOM}&signal=wss://127.0.0.1:3061`);
+    await page.click('#connect');
+    // 15s < bash 注册门 30s：TimeoutError + 页面快照必须先于 bash 门放弃落盘。
+    await page.waitForFunction(() => document.getElementById('status').innerText.includes('等待观看端拨入'), { timeout: 15000 });
+    console.log('PASS page registered, waiting INVITE');
+    await page.waitForFunction(() => document.getElementById('status').innerText.includes('已接听'), { timeout: 30000 });
+    console.log('PASS page answered call (200 OK)');
+    // 保持发布 12s（让 CLI viewer 收到关键帧 + 若干帧）
+    await new Promise(r => setTimeout(r, 12000));
+    await browser.close();
+    console.log('E2E DONE');
+  } catch (e) {
+    // 失败现场快照：页面 status/log 随错误一并输出（此前 tail 恒为空文件的盲区）。
+    let extra = '';
+    try {
+      const s = await page.evaluate(() => ({
+        status: document.getElementById('status').innerText,
+        log: document.getElementById('log').innerText.slice(-800),
+      }));
+      extra = ' ' + JSON.stringify(s);
+    } catch (_) { /* 页面未及创建/已关闭：无快照可抓 */ }
+    console.error('E2E FAIL:', e.message + extra);
+    process.exit(1);
+  }
+})();
 JS
 
 cd "$ROOT"
@@ -60,15 +83,27 @@ SIP_WSS_PORT=3061 SIP_UDP_PORT=5060 "$ROOT/target/debug/aerodesk-signal" >/tmp/w
 SIG=$!
 (cd "$ROOT/web" && python3 -m http.server "$WEB_SERVE_PORT" >/tmp/webpub-http.log 2>&1) &
 HTTP=$!
+# HTTP 静态服务就绪门（此前无探活——node goto 撞上启动空窗即白跑）。
+WEB_OK=0
+for _ in $(seq 1 50); do
+  if (exec 3<>/dev/tcp/127.0.0.1/"$WEB_SERVE_PORT") 2>/dev/null; then WEB_OK=1; break; fi
+  sleep 0.2
+done
+[ "$WEB_OK" = "1" ] || { echo "FAIL: web http.server 未就绪"; tail -10 /tmp/webpub-http.log; exit 1; }
+# signal 就绪门：SIP/UDP + SIP/WSS 两行监听日志 + SFU TCP 3002 探活。WSS 单列防
+# TLS/证书加载失败被 UDP 单条件漏放行（浏览器侧 wss 连不上即注册不了）。
 OK=0
 for _ in $(seq 1 50); do
-    if grep -q "SIP/UDP 监听已起" /tmp/webpub-sig.log 2>/dev/null && (exec 3<>/dev/tcp/127.0.0.1/3002) 2>/dev/null; then OK=1; break; fi
+    if grep -q "SIP/UDP 监听已起" /tmp/webpub-sig.log 2>/dev/null \
+        && grep -q "SIP/WSS 监听已起" /tmp/webpub-sig.log 2>/dev/null \
+        && (exec 3<>/dev/tcp/127.0.0.1/3002) 2>/dev/null; then OK=1; break; fi
     if ! kill -0 "$SFU" 2>/dev/null; then break; fi
     sleep 0.2
 done
 if [ "$OK" != "1" ]; then
   echo "FAIL: SFU/signal 未就绪；sfu log:"; tail -20 /tmp/webpub-sfu.log; exit 1
 fi
+echo "PASS signal ready (SIP/UDP + SIP/WSS + SFU TCP 3002)"
 # LAN-IP 配方：viewer 信令走本机出口 IP（浏览器通告 LAN 候选；绑回环 ICE 必败）。
 LAN_IP=$(python3 - <<'PY'
 import socket
@@ -88,11 +123,19 @@ WEB_SERVE_PORT="$WEB_SERVE_PORT" node "$E2E_DIR/e2e-pub.js" "$ROOM" >/tmp/webpub
 NODE=$!
 set -e
 OK=0
-for _ in $(seq 1 40); do
+# 60×0.5s=30s > js 内 waitForFunction 15s+launch/goto：js 的 TimeoutError+快照
+# 必然先落盘，tail 不再抓到空文件。
+for _ in $(seq 1 60); do
   grep -q "PASS page registered" /tmp/webpub-node.log 2>/dev/null && OK=1 && break
   sleep 0.5
 done
-[ "$OK" = "1" ] || { echo "FAIL 页面未注册就绪"; tail -6 /tmp/webpub-node.log; exit 1; }
+if [ "$OK" != "1" ]; then
+  echo "FAIL 页面未注册就绪"
+  echo "--- node.log ---"; tail -15 /tmp/webpub-node.log
+  echo "--- sig.log ---"; tail -20 /tmp/webpub-sig.log
+  echo "--- http.log ---"; tail -10 /tmp/webpub-http.log
+  exit 1
+fi
 
 # CLI viewer 作为观看端：断言能收到 Web 被控端发布的媒体帧。
 "$ROOT/target/debug/aerodesk-agent" --role viewer --signal "ws://$LAN_IP:3061" --room "$ROOM" >/tmp/webpub-view.log 2>&1 &
