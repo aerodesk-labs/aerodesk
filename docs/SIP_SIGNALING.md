@@ -51,7 +51,7 @@
 | `busy` | `486 Busy Here` | |
 | `offline` | `480 Temporarily Unavailable` / `404 Not Found` | 注册过期不可达 / AoR 不存在 |
 | `timeout` | `408 Request Timeout`（proxy 生成）；被叫侧 `487 Request Terminated` | 主叫 CANCEL → UAS 回 487 |
-| `auth_required`（口令质询/口令错） | `407 Proxy Auth Required` / `403 Forbidden` | INVITE 无凭据 → 407 质询；已带凭据但口令错 → 403（不泄露设备存在性）。主叫侧统一归 `auth_required`。旧 WSS 仍可发 `control_disabled`→`403`（仅反向映射保留，#595） |
+| `auth_required`（口令质询/口令错） | `407 Proxy Auth Required` / `403 Forbidden` | INVITE 无凭据 → 407 质询；已带凭据但口令错 → 403（不泄露设备存在性）。主叫侧统一归 `auth_required`。注意：本端「未开启被控」时原生被控端仍以 `control_disabled`→`403` 拒绝（desktop 被叫与旧 WSS 均可能发出），主叫侧同样折叠为 `auth_required`——403 一律按认资失败提示是已知归并代价（#595） |
 | 未知能力 | `420 Bad Extension`（Unsupported 头） | 版本/能力协商 |
 | 未实现方法 | `501 Not Implemented` | 严格子集纪律（§6） |
 

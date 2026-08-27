@@ -157,6 +157,15 @@ pub struct FileTransfer {
     clipboard_pending: Option<String>,
     clipboard_sends: u32,
     last_clipboard_send: Option<Instant>,
+    /// 终端态（收到接收端 Done ack）的常规文件发送 id——完成观察粘滞。
+    /// 观察者（viewer --send-file 轮询 send_complete()）可能晚于同轮 tick 的
+    /// 剪贴板图片换槽（busy-check 只拦未确认槽位）：live-slot 判定漏报 →
+    /// viewer 永不退出（#595 审查二批，agent 层 AtomicBool 无法覆盖“首次
+    /// 观察前”窗口故下沉至此）。下一个常规发送真正启动时清除
+    /// （start_next_queued / send_file 直启），保持 #503 契约「推进到下一项
+    /// 后不再报完成」。本地读失败走 tick 的槽位清空路径、不置粘滞——与既有
+    /// 行为一致（该类失败从不触发 viewer 退出）。
+    last_done_file: Option<String>,
 }
 
 struct Sender {
@@ -225,6 +234,7 @@ impl FileTransfer {
             clipboard_pending: None,
             clipboard_sends: 0,
             last_clipboard_send: None,
+            last_done_file: None,
         }
     }
 
@@ -245,10 +255,15 @@ impl FileTransfer {
     /// 拒绝（#503 无 recv-dir 显式 Nack）只是"本次同步失败"，不是 --send-file
     /// 的上传终结——若计入，viewer 会在媒体腿建立前退出（simulcast e2e 回归：
     /// 剪贴板回声 → Nack → exit(0)，RECEIVED 0 帧）。
+    ///
+    /// 粘滞判定（#595 审查二批）：收到常规文件的终端 Done ack 后，即使同轮
+    /// tick 的剪贴板图片顶掉槽位，完成仍可观察（否则观察者可能永远错过一瞬
+    /// 即逝的 confirmed 态）；粘滞由新文件启动清除。
     pub fn send_complete(&self) -> bool {
         self.send
             .as_ref()
             .is_some_and(|s| s.confirmed && s.kind != FileKind::ClipboardImage)
+            || self.last_done_file.is_some()
     }
 
     /// 当前接收落盘目录（#122：--request-file 模式轮询落盘判定）。
@@ -271,6 +286,8 @@ impl FileTransfer {
             self.push_queue(path, size)
         } else {
             self.send = Some(Sender::open(path)?);
+            // 新常规发送启动：完成粘滞失效（新上传的确认未发生）。
+            self.last_done_file = None;
             Ok(())
         }
     }
@@ -344,6 +361,8 @@ impl FileTransfer {
                     // 否则启动瞬间 UI 还持有旧 id，逐项取消会「找不到传输项」，
                     // 且同一文件在记录里出现两个 id。
                     s.id = q.id.clone();
+                    // 队列下一项启动：上一项的完成粘滞失效（#503 推进契约）。
+                    self.last_done_file = None;
                     tracing::info!(
                         "file send start (queued): {} (queue {})",
                         q.name,
@@ -583,6 +602,8 @@ impl FileTransfer {
         );
         let sender = Sender::from_bytes(name, png, FileKind::ClipboardImage)?;
         tracing::info!("clipboard image send start: {} bytes", sender.size);
+        // 不清除 last_done_file：图片顶掉「已确认、观察未到」的常规发送正是
+        // 完成粘滞要覆盖的场景（send_complete 需保持 true 直到新文件启动）。
         self.send = Some(sender);
         Ok(())
     }
@@ -625,6 +646,10 @@ impl FileTransfer {
                     if let Some(s) = &mut self.send {
                         if d.ok {
                             s.confirmed = true;
+                            if s.kind != FileKind::ClipboardImage {
+                                // 完成粘滞：确认可被晚到的观察者看见（换槽不灭失）。
+                                self.last_done_file = Some(s.id.clone());
+                            }
                             tracing::info!(
                                 "file transfer confirmed by receiver: {} ({} bytes)",
                                 s.name,
@@ -637,6 +662,11 @@ impl FileTransfer {
                             let reason = d.error.unwrap_or_else(|| "接收端拒绝".to_string());
                             s.failed = Some(format!("{}：发送失败（{reason}）", s.name));
                             s.confirmed = true;
+                            if s.kind != FileKind::ClipboardImage {
+                                // 失败同样置粘滞：维持既有「拒收也退出 viewer」语义，
+                                // 仅把此前依赖竞态的单迭代窗口变确定。
+                                self.last_done_file = Some(s.id.clone());
+                            }
                         }
                     }
                     if let Some((id, name, size, path)) = record {
@@ -1788,6 +1818,108 @@ mod tests {
         let mut ep = crate::Endpoint::new();
         ft.handle_data(serde_json::to_string(&done).unwrap().as_bytes(), &mut ep);
         assert!(ft.send_complete(), "普通文件确认后应报完成");
+        let _ = std::fs::remove_file(a);
+    }
+
+    #[test]
+    fn send_complete_sticky_survives_clipboard_image_eviction() {
+        // #595 二批根因回归：确认（Done ok）与首次观察之间，同轮 tick 的剪贴板
+        // 图片换槽会顶掉已确认槽位——busy-check 只拦未确认发送者。agent 层
+        // AtomicBool 闩锁只能保住“已观察到的 true”，一旦观察发生在换槽之后即
+        // 永不置位 → viewer --send-file 永不退出。完成判定下沉为 core 粘滞 id：
+        // 换槽不灭失，直到下一个常规文件真正启动。
+        let a = tmp_file("sc-sticky.bin", 100);
+        let mut ft = FileTransfer::new(None);
+        ft.send_file(&a).unwrap();
+        let id = ft.status().sending.unwrap().id;
+        let mut ep = crate::Endpoint::new();
+        let done = FileControl::Done(FileDone {
+            id,
+            ok: true,
+            error: None,
+        });
+        ft.handle_data(serde_json::to_string(&done).unwrap().as_bytes(), &mut ep);
+        assert!(ft.send_complete(), "确认后应报完成");
+
+        // 模拟同轮 tick：剪贴板图片顶掉已确认的常规文件槽位。
+        ft.send_clipboard_image(vec![0x89, b'P', b'N', b'G'])
+            .unwrap();
+        let img_id = ft.status().sending.unwrap().id;
+        assert!(
+            ft.send_complete(),
+            "图片换槽后已确认文件的完成仍须可观察（否则 viewer 永不退出）"
+        );
+
+        // 图片本次同步终结（接收端无 recv-dir Nack 语义）：粘滞不受影响。
+        let img_done = FileControl::Done(FileDone {
+            id: img_id,
+            ok: false,
+            error: Some("接收端未开启接收".into()),
+        });
+        ft.handle_data(
+            serde_json::to_string(&img_done).unwrap().as_bytes(),
+            &mut ep,
+        );
+        assert!(ft.send_complete(), "图片终结不得清除常规文件的完成粘滞");
+
+        // 下一个常规发送启动 → 粘滞清除（#503 契约：新一轮上传未确认前不报完成，
+        // viewer 不得凭上一轮结果提前退出）。
+        let b = tmp_file("sc-sticky-next.bin", 50);
+        ft.tick(&mut ep); // 槽位为失败终态：清槽走 tick 失败分支，再直启新文件
+        ft.send_file(&b).unwrap();
+        assert!(!ft.send_complete(), "新常规发送启动后粘滞必须清除");
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(b);
+    }
+
+    #[test]
+    fn sticky_persists_past_cancel_and_clears_on_next_start() {
+        // 粘滞生命周期补测：对端已 ack 的完成不因本地取消/清槽而灭失
+        // （与修复前“先观察到才有效”的闩锁语义同向，只是变确定）；
+        // 只有下一个常规发送真正启动时才复位。
+        let a = tmp_file("sc-sticky-cancel.bin", 100);
+        let mut ft = FileTransfer::new(None);
+        ft.send_file(&a).unwrap();
+        let id = ft.status().sending.unwrap().id;
+        let mut ep = crate::Endpoint::new();
+        let done = FileControl::Done(FileDone {
+            id,
+            ok: true,
+            error: None,
+        });
+        ft.handle_data(serde_json::to_string(&done).unwrap().as_bytes(), &mut ep);
+
+        ft.cancel_send(&mut ep); // 本地取消并清槽
+        assert!(ft.status().sending.is_none(), "槽位应已被取消清空");
+        assert!(
+            ft.send_complete(),
+            "已 ack 的完成不得因取消灭失（否则观察竞态重现）"
+        );
+
+        let b = tmp_file("sc-sticky-next2.bin", 40);
+        ft.send_file(&b).unwrap(); // 新一轮常规发送直启
+        assert!(!ft.send_complete(), "新发送启动即清除上一轮粘滞");
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(b);
+    }
+
+    #[test]
+    fn send_complete_sticky_also_on_receiver_reject() {
+        // 接收端拒收（ok=false）同样置粘滞——保持既有「拒收也退出 viewer」
+        // 的观察语义（修复前依赖“同迭代先观察、下一轮 tick 才清槽”的竞态窗口，
+        // 现在确定可观察）。复位时机与成功路径一致：下一个常规发送启动。
+        let a = tmp_file("sc-reject.bin", 60);
+        let mut ft = FileTransfer::new(None);
+        ft.send_file(&a).unwrap();
+        let id = ft.status().sending.unwrap().id;
+        let mut ep = crate::Endpoint::new();
+        let done = FileControl::Done(FileDone {
+            id,
+            ok: false,
+            error: Some("接收端未开启接收".into()),
+        });
+        ft.handle_data(serde_json::to_string(&done).unwrap().as_bytes(), &mut ep);
+        assert!(ft.send_complete(), "拒收终态亦为完成观察点（既有语义）");
         let _ = std::fs::remove_file(a);
     }
 }

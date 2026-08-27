@@ -36,7 +36,17 @@ pub(crate) fn resolve_recv_dir() -> Option<std::path::PathBuf> {
     let base = std::env::var("USERPROFILE").ok();
     #[cfg(not(windows))]
     let base = std::env::var("HOME").ok();
-    let dir = std::path::Path::new(&base?)
+    resolve_recv_dir_in(base.as_deref())
+}
+
+/// `resolve_recv_dir` 的可注入内核：主目录缺失/非法、目录创建失败都显式
+/// 禁用并留痕——接收静默失效必须可在日志定位（#595 审查二批）。
+fn resolve_recv_dir_in(base: Option<&str>) -> Option<std::path::PathBuf> {
+    let Some(base) = base else {
+        tracing::warn!("无法确定用户主目录（USERPROFILE/HOME 未设置），被控端文件接收禁用");
+        return None;
+    };
+    let dir = std::path::Path::new(base)
         .join("Downloads")
         .join("AeroDesk");
     match std::fs::create_dir_all(&dir) {
@@ -724,5 +734,41 @@ mod tests {
             valid_publisher_room("  AD-123456  "),
             Some("AD-123456".into())
         );
+    }
+
+    #[test]
+    fn resolve_recv_dir_creates_and_returns_some() {
+        // #595 二批：契约变更回归——创建成功必须是 Some 且目录真实存在
+        // （此前调用方兜底 create_dir_all，现由 resolver 全责）。
+        let home = std::env::temp_dir().join(format!("aerodesk-rdir-{}", std::process::id()));
+        let got = super::resolve_recv_dir_in(Some(home.to_str().unwrap())).expect("应可创建");
+        assert_eq!(got, home.join("Downloads").join("AeroDesk"));
+        assert!(
+            got.is_dir(),
+            "resolver 必须完成落盘目录创建: {}",
+            got.display()
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn resolve_recv_dir_none_when_base_missing() {
+        // 主目录缺失 → None（接收显式禁用），且必须有 warn 日志路径可循。
+        assert!(super::resolve_recv_dir_in(None).is_none());
+    }
+
+    #[test]
+    fn resolve_recv_dir_none_when_create_fails() {
+        // 创建失败 → None：file 通道对端会得到显式 Nack「未开启接收」，
+        // 而不是把整份文件缓冲进内存后落盘失败。
+        let blocker =
+            std::env::temp_dir().join(format!("aerodesk-rdir-block-{}", std::process::id()));
+        // 以普通「文件」冒充主目录：create_dir_all(<文件>/Downloads/AeroDesk) 必败。
+        std::fs::write(&blocker, b"x").unwrap();
+        assert!(
+            super::resolve_recv_dir_in(Some(blocker.to_str().unwrap())).is_none(),
+            "父路径被文件占用时应返回 None"
+        );
+        let _ = std::fs::remove_file(&blocker);
     }
 }
