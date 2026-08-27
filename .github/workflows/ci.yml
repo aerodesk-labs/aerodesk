@@ -467,10 +467,27 @@ jobs:
       # #58/#408 显示器切换 CLI 接线回归：viewer --display N → control → publisher 重建。
       # #487 同脚本断言 screen 发布端真出帧（RECEIVED>0）——静屏走 #477 心跳。
       # 采集不可用的 runner 自动 SKIP（与 windows_runtime 容错一致）。
+      # #487 类零帧曾定性为 runner 负载/采集时序 flake（代码路径无回归）：
+      # 限 3 次重试（参照 simulcast/web-pub 写法，重试统一收口 ci-retry）。
       - name: e2e display switch + screen frames (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/display-switch-e2e-win.ps1
+        shell: bash
+        run: bash scripts/ci-retry.sh 3 pwsh -NoProfile -File ./scripts/display-switch-e2e-win.ps1
+      # 失败留痕：display-switch 现场（pub/view/sfu 日志）此前从不留存——flake
+      # 与回归不可分辨。ps1 的 %TEMP% 即 Git Bash /tmp，直接收集。
+      - name: collect display-switch e2e logs (failure only)
+        if: failure() && runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p display-switch-e2e-logs
+          cp /tmp/display-switch-e2e-*/* display-switch-e2e-logs/ 2>/dev/null || true
+      - name: upload display-switch e2e logs
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: display-switch-e2e-logs
+          path: display-switch-e2e-logs
+          if-no-files-found: ignore
       - name: linux adapter
         if: runner.os == 'Linux'
         run: cargo check -p aerodesk-platform -p aerodesk-desktop
@@ -536,6 +553,21 @@ jobs:
         shell: bash
         run: bash scripts/windows-ui-e2e.sh
 
+      # 失败留痕：UI e2e 四件套日志（含此前从不打印的 view/pub 现场）。
+      - name: collect Windows UI e2e logs (failure only)
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p ui-e2e-logs
+          cp /tmp/winui-*.log ui-e2e-logs/ 2>/dev/null || true
+      - name: upload Windows UI e2e logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: winui-e2e-logs
+          path: ui-e2e-logs
+          if-no-files-found: ignore
+
   # Linux 主控端运行态自测：#4 观看端真实媒体（Xvfb 无头跑 Slint UI → 本地 SFU → 解码帧断言）。
   linux-ui-e2e:
     needs: changes
@@ -556,6 +588,21 @@ jobs:
 
       - name: Run Linux UI e2e
         run: bash scripts/linux-ui-e2e.sh
+
+      # 失败留痕：UI e2e 四件套日志（含此前从不打印的 view/pub 现场）。
+      - name: collect Linux UI e2e logs (failure only)
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p ui-e2e-logs
+          cp /tmp/linuxui-*.log ui-e2e-logs/ 2>/dev/null || true
+      - name: upload Linux UI e2e logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linuxui-e2e-logs
+          path: ui-e2e-logs
+          if-no-files-found: ignore
 
       # #306 Linux 原生被控端端到端：Xvfb + CLI --encoder screen（X11 采集→编码→SFU）→ viewer 收帧。
       - name: Run Linux native controlled-side e2e
@@ -583,5 +630,21 @@ jobs:
 
       - name: Run macOS UI e2e
         run: bash scripts/macos-ui-e2e.sh
+
+      # 失败留痕：UI e2e 四件套日志（含此前从不打印的 view/pub 现场）——
+      # mac 无法本机复现，靠它定位残余不确定性。
+      - name: collect macOS UI e2e logs (failure only)
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p ui-e2e-logs
+          cp /tmp/macosui-*.log ui-e2e-logs/ 2>/dev/null || true
+      - name: upload macOS UI e2e logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macosui-e2e-logs
+          path: ui-e2e-logs
+          if-no-files-found: ignore
 
   # Android APK build job 同上（移出 PR CI，见前文注释；platform-cross.yml 手动覆盖）。
