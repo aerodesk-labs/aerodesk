@@ -839,6 +839,8 @@ pub fn connect_publisher_sip(
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
+    // 就绪栅栏日志（与 agent CLI 同字面量——win-logon/bridge e2e grep 锚点）。
+    tracing::info!("SIP registered: {device_id}");
 
     // 等待来电并免授权静默接听（desktop UAS 流的收敛版）：IncomingCall →
     // P2pCall(Callee, Publisher) accept_offer → accept(answer)。等 INVITE 300s
