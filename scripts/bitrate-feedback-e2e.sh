@@ -22,7 +22,7 @@ SIG=$!
 # （session-api 无 token 403 断言被旧实例 200 击穿，main CI 红）。
 trap 'kill $SFU $SIG 2>/dev/null || true; wait $SFU 2>/dev/null || true; wait $SIG 2>/dev/null || true' EXIT
 for _ in $(seq 1 50); do
-  if nc -z 127.0.0.1 14002 2>/dev/null && nc -z 127.0.0.1 14003 2>/dev/null; then break; fi
+  if nc -z 127.0.0.1 14002 2>/dev/null && grep -q "SIP/UDP 监听已起" /tmp/brf-sig.log 2>/dev/null; then break; fi
   sleep 0.2
 done
 sleep 0.3

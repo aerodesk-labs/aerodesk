@@ -33,7 +33,7 @@ SFU_PID=$!
 "$BIN/aerodesk-signal" >/tmp/av10-sig.log 2>&1 &
 SIG_PID=$!
 for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 3003 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then break; fi
+    if grep -q "SIP/UDP 监听已起" /tmp/av10-sig.log 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then break; fi
     if ! kill -0 "$SFU_PID" 2>/dev/null || ! kill -0 "$SIG_PID" 2>/dev/null; then
         echo "sfu/signal 启动失败"; tail -5 /tmp/av10-sfu.log; tail -5 /tmp/av10-sig.log; exit 1
     fi

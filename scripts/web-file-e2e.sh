@@ -46,7 +46,7 @@ echo "== 启动服务"
 # 前置 e2e 可能残留 SFU/signal 占用 3002/3003 → 先清理，并等端口释放。
 pkill -f "aerodesk-sfu|aerodesk-signal" 2>/dev/null || true
 for _ in $(seq 1 50); do
-    if ! nc -z 127.0.0.1 3002 2>/dev/null && ! nc -z 127.0.0.1 3003 2>/dev/null; then break; fi
+    if ! nc -z 127.0.0.1 3002 2>/dev/null && ! grep -q "SIP/UDP 监听已起" /tmp/webfile-sig.log 2>/dev/null; then break; fi
     sleep 0.2
 done
 sleep 0.5
@@ -56,7 +56,7 @@ SFU=$!
 SIP_UDP_PORT=5060 "$ROOT/target/debug/aerodesk-signal" >/tmp/webfile-sig.log 2>&1 &
 SIG=$!
 for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 3003 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then break; fi
+    if grep -q "SIP/UDP 监听已起" /tmp/webfile-sig.log 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then break; fi
     sleep 0.2
 done
 RECV="$E2E_DIR/recv"

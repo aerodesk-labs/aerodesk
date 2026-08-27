@@ -76,7 +76,7 @@ stop_services() {
 }
 wait_ports() {
     for _ in $(seq 1 50); do
-        if nc -z 127.0.0.1 14502 2>/dev/null && nc -z 127.0.0.1 14503 2>/dev/null; then return 0; fi
+        if nc -z 127.0.0.1 14502 2>/dev/null && grep -q "SIP/UDP 监听已起" /tmp/webrec-sig.log 2>/dev/null; then return 0; fi
         sleep 0.2
     done
     return 1

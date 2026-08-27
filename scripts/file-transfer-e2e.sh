@@ -35,7 +35,7 @@ SFU_PID=$!
 "$BIN/aerodesk-signal" >/tmp/ftx-sig.log 2>&1 &
 SIG_PID=$!
 for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 3003 2>/dev/null; then break; fi
+    if grep -q "SIP/UDP 监听已起" /tmp/ftx-sig.log 2>/dev/null; then break; fi
     if ! kill -0 "$SIG_PID" 2>/dev/null; then
         echo "signal 服务器启动失败"; cat /tmp/ftx-sig.log; exit 1
     fi

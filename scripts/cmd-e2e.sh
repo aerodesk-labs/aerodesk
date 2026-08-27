@@ -25,7 +25,7 @@ SFU_PID=$!
 SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/cmd-sig.log 2>&1 &
 SIG_PID=$!
 for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 3003 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then break; fi
+    if grep -q "SIP/UDP 监听已起" /tmp/cmd-sig.log 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then break; fi
     if ! kill -0 "$SFU_PID" 2>/dev/null || ! kill -0 "$SIG_PID" 2>/dev/null; then
         echo "sfu/signal 启动失败"; tail -5 /tmp/cmd-sfu.log; tail -5 /tmp/cmd-sig.log; exit 1
     fi

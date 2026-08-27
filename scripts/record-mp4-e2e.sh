@@ -23,7 +23,7 @@ SIGNAL_PORT=14001 SIGNAL_PLAIN_PORT=14003 SFU_URL=http://127.0.0.1:14002 \
 SIG=$!
 trap 'kill $SFU $SIG 2>/dev/null || true' EXIT
 for _ in $(seq 1 50); do
-  if nc -z 127.0.0.1 14002 2>/dev/null && nc -z 127.0.0.1 14003 2>/dev/null; then break; fi
+  if nc -z 127.0.0.1 14002 2>/dev/null && grep -q "SIP/UDP 监听已起" /tmp/recmp4-sig.log 2>/dev/null; then break; fi
   sleep 0.2
 done
 sleep 0.3
