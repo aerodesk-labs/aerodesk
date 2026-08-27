@@ -82,6 +82,10 @@ pub enum SipLinkEvent {
     },
     /// 已升级至 SFU 会议 AoR（§4.1）：上层应按 `view_aor` 重新呼叫（媒体切 SFU）。
     EscalatedToSfu { call_id: String, view_aor: String },
+    /// PoP 重定向（#598 P1a：302+Contact）：目标信令点 URI
+    /// `sip:<room>@<host>:<port>`。上层据此换拨（重建链路 → REGISTER → 重呼叫），
+    /// 解析用 [`redirect_target`]。
+    RedirectedTo { call_id: String, contact: String },
     /// 对端 trickle 候选（INFO sdpfrag）。
     Trickle {
         call_id: String,
@@ -208,6 +212,42 @@ fn signal_host(url: &str) -> Result<String, String> {
         return Err(format!("信令 URL 无有效 host：{url}"));
     }
     Ok(host)
+}
+
+/// 解析 302 Contact 目标（#598 P1a PoP 重定向）：`<sip:user@host[:port]>;参数…`
+/// 或裸 `sip:user@host[:port]` → `(host, port, user)`。port 缺省回 5060（UDP
+/// 重拨缺省传输）；IPv6 字面量按中括号识别。解析失败 None（调用方降级：按
+/// 无-Contact 的会议升级语义处理或放弃跟随）。
+pub fn redirect_target(contact: &str) -> Option<(String, u16, String)> {
+    // 取尖括号内目标（展示名/头参数外壳），无尖括号则整串。
+    let raw = match contact.split_once('<') {
+        Some((_, r)) if r.contains('>') => {
+            let end = r.find('>').unwrap();
+            &r[..end]
+        }
+        _ => contact.trim(),
+    };
+    let rest = raw
+        .strip_prefix("sip:")
+        .or_else(|| raw.strip_prefix("sips:"))?;
+    let user_host = rest.split(';').next()?; // 去 uri 参数
+    let (user, host_port) = user_host.split_once('@')?;
+    let (host, port) = if let Some(b) = host_port.strip_prefix('[') {
+        let host = b.split(']').next()?;
+        let port = b
+            .split_once("]:")
+            .and_then(|(_, p)| p.split(';').next()?.parse().ok())
+            .unwrap_or(5060);
+        (host.to_string(), port)
+    } else if let Some((h, p)) = host_port.rsplit_once(':') {
+        (h.to_string(), p.parse().ok().unwrap_or(5060))
+    } else {
+        (host_port.to_string(), 5060)
+    };
+    if host.is_empty() || user.is_empty() {
+        return None;
+    }
+    Some((host, port, user.to_string()))
 }
 
 /// 常驻 SIP 呼叫信令链路。
@@ -487,6 +527,13 @@ impl SipCallLink {
                 self.events
                     .push_back(SipLinkEvent::EscalatedToSfu { call_id, view_aor });
             }
+            SipEvent::RedirectedTo { call_id, contact } => {
+                // #598 P1a：PoP 重定向（302+Contact）。不在链路层自动换拨——
+                // 「换拨」意味着整条 UA 重启到新 server，属于上层会话决策
+                // （丢弃当前媒体端点、重走 REGISTER+INVITE）；本层只透传。
+                self.events
+                    .push_back(SipLinkEvent::RedirectedTo { call_id, contact });
+            }
             SipEvent::Trickle { call_id, candidate } => {
                 self.events
                     .push_back(SipLinkEvent::Trickle { call_id, candidate });
@@ -551,6 +598,35 @@ mod tests {
         assert_eq!(link.start(), SipLinkStatus::Connecting { attempt: 1 });
         assert_eq!(link.stop(), SipLinkStatus::Stopped);
         assert_eq!(link.status(), SipLinkStatus::Stopped);
+    }
+
+    /// #598 P1a：302 Contact → (host, port, user) 解析矩阵。
+    #[test]
+    fn redirect_target_parses_contact_forms() {
+        // 带端口的尖括号形态（服务端 message 构造的预期产出）。
+        assert_eq!(
+            redirect_target("<sip:room-eu@pop-eu.example:5070>;expires=30"),
+            Some(("pop-eu.example".into(), 5070, "room-eu".into()))
+        );
+        // 裸 URI、无端口（缺省 5060）。
+        assert_eq!(
+            redirect_target("sip:AD-01AB@10.0.0.9"),
+            Some(("10.0.0.9".into(), 5060, "AD-01AB".into()))
+        );
+        // uri 参数在后（transport 等）不影响 host/port。
+        assert_eq!(
+            redirect_target("<sip:r@h.example;transport=udp>").map(|(h, p, u)| (h, p, u)),
+            Some(("h.example".into(), 5060, "r".into()))
+        );
+        // IPv6 字面量。
+        assert_eq!(
+            redirect_target("<sip:r@[2001:db8::1]:5071>"),
+            Some(("2001:db8::1".into(), 5071, "r".into()))
+        );
+        // 缺 user / 非 sip scheme：拒绝跟随。
+        assert_eq!(redirect_target("<sip:@pop-x>"), None);
+        assert_eq!(redirect_target("tel:+8613800000000"), None);
+        assert_eq!(redirect_target(""), None);
     }
 
     #[test]
