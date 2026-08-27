@@ -76,7 +76,7 @@ case "$TURN_PROTO" in
   turns) SIG_TURN_URLS="turns:127.0.0.1:$TURN_TLS_PORT?transport=tcp" ;;
   *)    SIG_TURN_URLS="turn:127.0.0.1:$TURN_PORT?transport=udp,turn:127.0.0.1:$TURN_PORT?transport=tcp,turns:127.0.0.1:$TURN_TLS_PORT?transport=tcp" ;;
 esac
-SIGNAL_PORT=14501 SIGNAL_PLAIN_PORT=14503 SFU_URL=http://127.0.0.1:14502 \
+SIGNAL_PORT=14501 SFU_URL=http://127.0.0.1:14502 \
   TURN_SECRET="$TURN_SECRET" TURN_URLS="$SIG_TURN_URLS" \
   "$TARGET_DIR"/aerodesk-signal >/tmp/turn-e2e-sig.log 2>&1 &
 echo $! > /tmp/turn-e2e-sig.pid

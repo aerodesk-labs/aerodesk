@@ -18,7 +18,7 @@ echo "== 启动 sfu（录制）+ signal（独立端口）"
 RECORD_DIR="$REC" SFU_MEDIA_PORT=1478 SFU_SIGNAL_PORT=14000 SFU_INTERNAL_PORT=14002 \
   ./target/debug/aerodesk-sfu >/tmp/recmp4-sfu.log 2>&1 &
 SFU=$!
-SIGNAL_PORT=14001 SIGNAL_PLAIN_PORT=14003 SFU_URL=http://127.0.0.1:14002 \
+SIGNAL_PORT=14001 SFU_URL=http://127.0.0.1:14002 \
   SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/recmp4-sig.log 2>&1 &
 SIG=$!
 trap 'kill $SFU $SIG 2>/dev/null || true' EXIT

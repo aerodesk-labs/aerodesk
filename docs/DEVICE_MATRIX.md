@@ -64,10 +64,10 @@
 ```sh
 cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 RECORD_DIR=/tmp/aerodesk-acceptance ./target/debug/aerodesk-sfu   # 分片服务，:3002/metrics
-./target/debug/aerodesk-signal                                     # WS :3003（明文，开发）/ WSS :3001（TLS）
+./target/debug/aerodesk-signal                                     # P3 SIP 单栈：UDP 5060 / TLS 5061 / WSS 3061 + ops HTTPS 3001
 ```
-- 真机连宿主机用 **LAN IP**（不是 127.0.0.1）；放行端口：3001/3003（WS/WSS）、3478/5349（TURN，见 docs/TURN.md）、WebRTC UDP 动态端口。
-- 无 JWT 时可不设 `JWT_SECRET`；生产按 docs/DEPLOYMENT.md 配置。
+- 真机连宿主机用 **LAN IP**（不是 127.0.0.1）；放行端口：UDP 5060/TCP 5061（SIP）、3001（ops HTTPS）、3478/5349（TURN，见 docs/TURN.md）、WebRTC UDP 动态端口。
+- 认证：`AUTH_TOKENS` 静态 token 即 SIP Digest 口令（P3）；生产按 docs/DEPLOYMENT.md 配置。
 - 快速全链路自检（本机）：`scripts/smoke.sh`（sfu+signal+publisher+viewer 自动起停并断言媒体/输入）。
 
 ### 1. macOS × macOS（已 ✅，PR #49，无需外部硬件）

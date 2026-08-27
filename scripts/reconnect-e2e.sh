@@ -20,7 +20,7 @@ start_sfu() {
     echo $! > /tmp/rec-sfu.pid
 }
 start_signal() {
-    SIGNAL_PORT=14501 SIGNAL_PLAIN_PORT=14503 SFU_URL=http://127.0.0.1:14502 SFU_TOKEN="$SFU_TOK" \
+    SIGNAL_PORT=14501 SFU_URL=http://127.0.0.1:14502 SFU_TOKEN="$SFU_TOK" \
       SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/rec-sig.log 2>&1 &
     echo $! > /tmp/rec-sig.pid
 }

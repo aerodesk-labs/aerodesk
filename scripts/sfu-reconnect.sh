@@ -32,7 +32,7 @@ if [ "$TURN_RELAY" = "1" ]; then
     TURN_SECRET="$TURN_SECRET" SFU_TURN_PORT="$TURN_PORT" TURN_LIFETIME_SEC="$TURN_LIFETIME_SEC" \
     "$TARGET_DIR/aerodesk-sfu" >/tmp/reconnect-sfu.log 2>&1 &
   SFU=$!
-  SIGNAL_PORT=14501 SIGNAL_PLAIN_PORT=14503 SFU_URL=http://127.0.0.1:14502 \
+  SIGNAL_PORT=14501 SFU_URL=http://127.0.0.1:14502 \
     TURN_SECRET="$TURN_SECRET" TURN_URLS="turn:127.0.0.1:${TURN_PORT}?transport=udp" \
     "$TARGET_DIR/aerodesk-signal" >/tmp/reconnect-sig.log 2>&1 &
   SIG=$!
@@ -43,7 +43,7 @@ else
   RECORD_DIR="$REC" SFU_MEDIA_PORT=14578 SFU_SIGNAL_PORT=14500 SFU_INTERNAL_PORT=14502 \
     "$TARGET_DIR/aerodesk-sfu" >/tmp/reconnect-sfu.log 2>&1 &
   SFU=$!
-  SIGNAL_PORT=14501 SIGNAL_PLAIN_PORT=14503 SFU_URL=http://127.0.0.1:14502 \
+  SIGNAL_PORT=14501 SFU_URL=http://127.0.0.1:14502 \
     "$TARGET_DIR/aerodesk-signal" >/tmp/reconnect-sig.log 2>&1 &
   SIG=$!
 fi

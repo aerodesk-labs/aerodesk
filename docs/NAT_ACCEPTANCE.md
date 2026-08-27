@@ -71,8 +71,9 @@ export SFU_TURN_PORT=3479                    # UDP+TCP
 export SFU_TURN_TLS_PORT=5349                # 可选（turns:），需证书
 export RECORD_DIR=/data/rec
 ./target/release/aerodesk-sfu &              # 内嵌 TURN+STUN 自动启动
-export SIGNAL_PORT=3061                      # WSS
-export SIGNAL_PLAIN_PORT=5060                # SIP UDP/TCP
+export SIGNAL_OPS_PORT=3001                  # ops HTTPS（/healthz /metrics /admin/*）
+export SIP_TLS_PORT=5061                     # SIP/TLS；SIP/WSS 3061 默认同证书开启
+export SIP_UDP_PORT=5060                     # SIP/UDP（P3 单栈；明文 WS 已退役）
 export TURN_URLS="turn:<VPS 公网 IP>:3479?transport=udp,turn:<VPS 公网 IP>:3479?transport=tcp,turns:<VPS 公网 IP>:5349?transport=tcp"
 ./target/release/aerodesk-signal &
 ```

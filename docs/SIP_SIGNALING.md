@@ -28,7 +28,7 @@
 | 1 | `Ping` | **（消失）** | 现 Ping 是服务端发送队列 drain 的实现工件；rsipstack 传输层常活后无此需求。连接保活 = 传输层 keepalive（WSS ping/pong、RFC 5626 flow）；会话保活 = Session-Timer（§5） |
 | 2 | `Join{room,role,auth_token,dc_ready}` | `REGISTER` → `401` → `REGISTER`+Authorization → `200` | room→AoR；auth_token→Digest 口令；dc_ready 见本节末注 |
 | 3 | `Joined{peer_id,peers,turn}` | `200 OK`(REGISTER) | peers：P0 不下发 roster（在线 = 注册存在）；turn：**不进 SIP 面**，沿用 `/config` HTTP 签发（#549 已定） |
-| 4 | `Redirect{pop,url,reason}` | `302 Moved Temporarily`（Contact = 目标 PoP） | 多 PoP，P0 可后置；亦用于 P2P→SFU 升级重定向（§4.1） |
+| 4 | `Redirect{pop,url,reason}` | `302 Moved Temporarily`（Contact = 目标 PoP） | 多 PoP：**服务端 302+Contact 已实现**（P3.1，POP_SIP_URLS），客户端跟随待 #600 合并；亦用于 P2P→SFU 升级重定向（§4.1） |
 | 5 | `Description{from,to,description}` | `INVITE` / `200 OK` 的 SDP body；重协商 = re-INVITE | signal 透传不解析；SFU 模式 = 客户端与 SFU UAS 的对话（见 §4 注） |
 | 6 | `IceCandidate{from,to,candidate}` | `INFO`，Content-Type: `application/trickle-ice-sdpfrag`（RFC 8840） | 字段对齐 candidate / sdpMid / sdpMLineIndex |
 | 7 | `PeerLeft{peer_id}` | **语义拆分**：对话内对端离开 = `BYE`；presence 离线 = `REGISTER` expires=0 / 注册过期 | 现 PeerLeft 混淆「媒体会话结束」与「在线消失」两类语义；SIP 内建分开——此类翻译丢失 bug 由标准消除 |
@@ -150,11 +150,13 @@
 ## 7. P0 非目标
 
 SUBSCRIBE/NOTIFY presence roster、forking、GRUU、MESSAGE（呼叫提示，可后置）、
-302 多 PoP（可后置）、TLS 客户端证书
+TLS 客户端证书
 
-## 8. 迁移与兼容约束（#549 已定口径）
+## 8. 迁移与兼容约束（#549 已定口径；P3.1 起收敛为 **SIP 单栈**）
 
-- 双栈并存 + feature gate；JSON 协议在 SIP parity 前不下线
+- ~~双栈并存 + feature gate；JSON 协议在 SIP parity 前不下线~~
+  **P3.1 已退役 JSON 信令面**：SIP 三传输默认全开（UDP 5060/TLS 5061/WSS 3061，
+  `off` 显式关闭），HTTP 仅保留运维面（/healthz /devices /metrics /admin/*）
 - `User-Agent` 携带协议版本；option-tag `Require: aerodesk.p2p` 能力协商
 - Digest 迁移：现有 token 即口令，服务端仅存 HA1（迁移期旧 token 一次性登记）
 - TURN 凭证签发留在 `/config` HTTP

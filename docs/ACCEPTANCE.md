@@ -33,11 +33,12 @@
 ## 4K60 压测流程（工具已就绪）
 
 ```sh
-# 服务端
-JWT_SECRET=... RECORD_DIR=... ./target/debug/aerodesk-sfu &
-./target/debug/aerodesk-signal &
+# 服务端（P3：signal 为 SIP 单栈；loadtest 的 JSON join 面待 SIP 化重写）
+RECORD_DIR=... ./target/debug/aerodesk-sfu &
+SIGNAL_OPS_PORT=3001 SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal &
 
-# 压测：N 房间 × P 对 @ 4K60（需硬件编码服务器）
+# 压测：N 房间 × P 对 @ 4K60（需硬件编码服务器；P3 起冻结——loadtest 走已退役的
+# JSON join，SIP 化重写待 #600/#601 合并后进行）
 scripts/loadtest.sh 4 2 60 3840 2160 60
 # 看 /metrics：clients/rx/tx 包数；RECORD_DIR 录制约 4K 码流用于验证
 ```

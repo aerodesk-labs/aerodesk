@@ -6,7 +6,7 @@
 //! 环境变量：
 //! - ADMIN_BIND（默认 127.0.0.1:3080）
 //! - SFU_ADMIN_URL（默认 http://127.0.0.1:3002）
-//! - SIGNAL_ADMIN_URL（默认 http://127.0.0.1:3003）
+//! - SIGNAL_ADMIN_URL（默认 https://127.0.0.1:3001，P3 ops HTTPS 面；自签证书需信任或忽略校验）
 //! - INTERNAL_TOKEN（SFU 管理接口鉴权；未设置则后端 loopback 模式，仍可试）
 //! - ADMIN_TOKEN（dashboard 自身鉴权；设置后 /api/* 需 X-Admin-Token 头）
 
@@ -232,7 +232,7 @@ fn main() {
 
     let bind = env_or("ADMIN_BIND", "127.0.0.1:3080");
     let sfu = env_or("SFU_ADMIN_URL", "http://127.0.0.1:3002");
-    let signal = env_or("SIGNAL_ADMIN_URL", "http://127.0.0.1:3003");
+    let signal = env_or("SIGNAL_ADMIN_URL", "https://127.0.0.1:3001");
     let token = env_or("INTERNAL_TOKEN", "");
     let admin_token = env_or("ADMIN_TOKEN", "");
     tracing::info!(

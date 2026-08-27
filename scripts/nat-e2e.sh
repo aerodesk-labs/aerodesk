@@ -157,7 +157,7 @@ start_servers() {
     SFU_TURN_PORT=$TURN_PORT SFU_TURN_TLS_PORT=$TURN_TLS_PORT
   "$TARGET_DIR/aerodesk-sfu" >"$LOG_DIR/sfu.log" 2>&1 &
   SFU_PID=$!
-  export SIP_UDP_PORT=$SIP_UDP SIGNAL_PORT=$SIG_WSS SIGNAL_PLAIN_PORT=$SIG_PLAIN \
+  export SIP_UDP_PORT=$SIP_UDP SIGNAL_PORT=$SIG_WSS \
     TURN_SECRET="$TURN_SECRET" TURN_URLS="$turn_urls"
   "$TARGET_DIR/aerodesk-signal" >"$LOG_DIR/signal.log" 2>&1 &
   SIG_PID=$!

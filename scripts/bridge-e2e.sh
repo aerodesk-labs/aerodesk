@@ -34,13 +34,13 @@ echo "== 启动 PoP-A（14600 系）+ PoP-B（14700 系）"
 RECORD_DIR="$REC_A" SFU_MEDIA_PORT="$MEDIA_A" SFU_SIGNAL_PORT="$SIG_A" SFU_INTERNAL_PORT="$INT_A" \
   "$TARGET_DIR/aerodesk-sfu" >/tmp/bridge-sfu-a.log 2>&1 &
 SFU_A=$!
-SIGNAL_PORT=14601 SIGNAL_PLAIN_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
+SIGNAL_PORT=14601 SIGNAL_OPS_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
   SIP_UDP_PORT=5060 "$TARGET_DIR/aerodesk-signal" >/tmp/bridge-sig-a.log 2>&1 &
 SIG_A_PID=$!
 RECORD_DIR="$REC_B" SFU_MEDIA_PORT="$MEDIA_B" SFU_SIGNAL_PORT="$SIG_B" SFU_INTERNAL_PORT="$INT_B" \
   "$TARGET_DIR/aerodesk-sfu" >/tmp/bridge-sfu-b.log 2>&1 &
 SFU_B=$!
-SIGNAL_PORT=14701 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
+SIGNAL_PORT=14701 SIGNAL_OPS_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
   SIP_UDP_PORT= "$TARGET_DIR/aerodesk-signal" >/tmp/bridge-sig-b.log 2>&1 &
 SIG_B_PID=$!
 for _ in $(seq 1 80); do
