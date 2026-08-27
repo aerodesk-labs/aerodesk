@@ -26,13 +26,19 @@ pub struct ViewerSession {
 impl ViewerSession {
     /// 连接信令并启动收流线程。`force_relay` 为 true 时 ICE 只通告 relayed
     /// 候选（#201：规避 NAT/模拟器下直连候选假通导致媒体入站被丢）。
-    pub fn connect(server: &str, room: &str, force_relay: bool) -> Result<ViewerSession, String> {
+    /// `token` 为 Digest 口令（#598 P1d：JNI 补 token 通道；None=开放部署）。
+    pub fn connect(
+        server: &str,
+        room: &str,
+        token: Option<&str>,
+        force_relay: bool,
+    ) -> Result<ViewerSession, String> {
         // #552：WSS join → SIP（REGISTER + INVITE；SipViewerSession 看护线程持链）。
         let (_sip, mut endpoint, socket, _video_mid, _audio_mid, _camera_mid) =
             aerodesk_core::connect::connect_viewer_sip(
                 server,
                 room,
-                None,
+                token,
                 force_relay,
                 true,
                 false,
