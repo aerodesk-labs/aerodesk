@@ -27,7 +27,7 @@ SIG_B=$!
 
 for _ in $(seq 1 50); do
     if nc -z 127.0.0.1 3002 2>/dev/null && nc -z 127.0.0.1 3007 2>/dev/null \
-       && nc -z 127.0.0.1 3003 2>/dev/null && nc -z 127.0.0.1 3006 2>/dev/null; then
+       && grep -q "SIP/UDP 监听已起" /tmp/popreg-sig-a.log 2>/dev/null && grep -q "SIP/UDP 监听已起" /tmp/popreg-sig-b.log 2>/dev/null; then
         break
     fi
     sleep 0.2

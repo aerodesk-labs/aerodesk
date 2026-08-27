@@ -54,7 +54,7 @@ SIP_UDP_PORT=5060 "$ROOT/target/debug/aerodesk-signal" >/tmp/webpub-sig.log 2>&1
 SIG=$!
 OK=0
 for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 3003 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then OK=1; break; fi
+    if grep -q "SIP/UDP 监听已起" /tmp/webpub-sig.log 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then OK=1; break; fi
     if ! kill -0 "$SFU" 2>/dev/null; then break; fi
     sleep 0.2
 done

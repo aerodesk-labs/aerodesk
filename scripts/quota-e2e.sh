@@ -43,7 +43,7 @@ fail=0
 echo "== Phase A：房间上限 2"
 SIP_UDP_PORT=5060 SIGNAL_PORT=14301 SIGNAL_PLAIN_PORT=14303 MAX_ROOM_CLIENTS=2 SFU_URL=http://127.0.0.1:14502 SFU_TOKEN="$SFU_TOKEN" ./target/debug/aerodesk-signal >/tmp/quota-sig-a.log 2>&1 &
 SIGA=$!
-for _ in $(seq 1 50); do nc -z 127.0.0.1 14303 2>/dev/null && break; sleep 0.2; done
+for _ in $(seq 1 50); do grep -q "SIP/UDP 监听已起" /tmp/quota-sig-a.log 2>/dev/null && break; sleep 0.2; done
 ROOM_A="quota-a-$(date +%s)"
 ./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy --signal ws://127.0.0.1:14303 --room "$ROOM_A" >/tmp/quota-a-pub.log 2>&1 &
 PUB_A=$!
@@ -70,7 +70,7 @@ kill $SIGA 2>/dev/null || true
 echo "== Phase B：全局上限 2"
 SIP_UDP_PORT=5060 SIGNAL_PORT=14401 SIGNAL_PLAIN_PORT=14403 MAX_TOTAL_CLIENTS=2 SFU_URL=http://127.0.0.1:14502 SFU_TOKEN="$SFU_TOKEN" ./target/debug/aerodesk-signal >/tmp/quota-sig-b.log 2>&1 &
 SIGB=$!
-for _ in $(seq 1 50); do nc -z 127.0.0.1 14403 2>/dev/null && break; sleep 0.2; done
+for _ in $(seq 1 50); do grep -q "SIP/UDP 监听已起" /tmp/quota-sig-b.log 2>/dev/null && break; sleep 0.2; done
 RB1="quota-b1-$(date +%s)"; RB2="quota-b2-$(date +%s)"; RB3="quota-b3-$(date +%s)"
 ./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy --signal ws://127.0.0.1:14403 --room "$RB1" >/tmp/quota-b-p1.log 2>&1 &
 P1=$!
@@ -97,7 +97,7 @@ SIGNAL_PORT=14701 SIGNAL_PLAIN_PORT=14703 JWT_SECRET=uq-secret \
   SFU_URL=http://127.0.0.1:14502 SFU_TOKEN="$SFU_TOKEN" \
   SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/quota-sig-c.log 2>&1 &
 SIGC=$!
-for _ in $(seq 1 50); do nc -z 127.0.0.1 14703 2>/dev/null && break; sleep 0.2; done
+for _ in $(seq 1 50); do grep -q "SIP/UDP 监听已起" /tmp/quota-sig-c.log 2>/dev/null && break; sleep 0.2; done
 RC="uc-$(date +%s)"
 TOK=$(JWT_SECRET=uq-secret ./target/debug/aerodesk-agent --issue-token --user u1 --room '*' --role '*' --ttl 600 --max-conns 1)
 ./target/debug/aerodesk-agent --role viewer --token "$TOK" --signal ws://127.0.0.1:14703 --room "$RC" >/tmp/quota-c-v1.log 2>&1 &

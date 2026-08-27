@@ -57,7 +57,7 @@ SIP_UDP_PORT=5060 SIP_DIGEST_USERS="AD-E2EUI=e2e-token" \
 SIG=$!
 OK=0
 for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 3003 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then OK=1; break; fi
+    if grep -q "SIP/UDP 监听已起" /tmp/linuxui-sig.log 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then OK=1; break; fi
     sleep 0.2
 done
 if [ "$OK" != "1" ]; then echo "FAIL: SFU/signal not ready; logs:"; tail -20 /tmp/linuxui-sig.log /tmp/linuxui-sfu.log; exit 1; fi

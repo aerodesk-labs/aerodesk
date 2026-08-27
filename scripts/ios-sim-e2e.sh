@@ -55,7 +55,7 @@ SIG=$!
 # 等 SFU/signal 就绪再起 publisher（此前固定 sleep 1.5，CI 负载下 SFU /start 会超时）
 for _ in $(seq 1 50); do
     if nc -z 127.0.0.1 "${SFU_INTERNAL_PORT:-3002}" 2>/dev/null \
-       && nc -z 127.0.0.1 "${SIGNAL_PLAIN_PORT:-3003}" 2>/dev/null; then break; fi
+       && grep -q "SIP/UDP 监听已起" /tmp/iossim-sig.log 2>/dev/null; then break; fi
     sleep 0.2
 done
 # 发布端编码：默认 h265（#328 参数集内联回归；合成源无需采集权限）。

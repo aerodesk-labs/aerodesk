@@ -20,7 +20,7 @@ SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/smoke-sig.log 2>&1 &
 SIG_PID=$!
 # 等待信令服务器就绪（避免负载下启动慢导致 CLI 连接失败；最多 ~10s）。
 for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 3003 2>/dev/null; then break; fi
+    if grep -q "SIP/UDP 监听已起" /tmp/smoke-sig.log 2>/dev/null; then break; fi
     if ! kill -0 "$SIG_PID" 2>/dev/null; then
         echo "signal 服务器启动失败"; cat /tmp/smoke-sig.log; exit 1
     fi

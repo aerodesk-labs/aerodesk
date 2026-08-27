@@ -26,7 +26,7 @@ SFU_PID=$!
 SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/mcp-sig.log 2>&1 &
 SIG_PID=$!
 for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 3003 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then break; fi
+    if grep -q "SIP/UDP 监听已起" /tmp/mcp-sig.log 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then break; fi
     sleep 0.2
 done
 sleep 0.3
