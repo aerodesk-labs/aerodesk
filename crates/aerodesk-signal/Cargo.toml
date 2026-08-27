@@ -1,6 +1,6 @@
 [package]
 name = "aerodesk-signal"
-description = "AeroDesk signaling server (WSS): rooms, auth, TURN credentials, SFU proxy"
+description = "AeroDesk SIP signaling server: REGISTER/INVITE endpoint (UDP/TLS/WSS) + ops HTTP(S) face"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

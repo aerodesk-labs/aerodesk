@@ -19,7 +19,7 @@
 //!   桥双腿 SIP 化重建。
 //!
 //! 环境变量：
-//!   SIGNAL_OPS_PORT  HTTP 运维端口（默认 3001；兼容别名 SIGNAL_PORT）
+//!   SIGNAL_OPS_PORT  HTTPS 运维端口（默认 3001；兼容别名 SIGNAL_PORT）
 //!   AUTH_TOKENS      静态 token（SIP Digest 回退口令 + /admin 鉴权回退）
 //!   SIP_REALM        SIP 域（默认 aerodesk）
 //!   SIP_DIGEST_USERS 设备固定密码表（逗号分隔 user=password）
@@ -1102,7 +1102,12 @@ mod tests {
         );
     }
 
-    /// 极简 HTTP 假服务器：接受一个连接，读取请求头，回固定响应。
+    /// 极简 HTTP 假服务器：接受一个连接，读完请求头+请求体，回固定响应。
+    ///
+    /// 必须按 content-length 排空请求体再回包/关闭：若读到头就 drop socket，
+    /// body 字节尚在途中（并行负载下常见）时 Windows 对「接收缓冲有未读数据」
+    /// 的 closesocket 发 RST，客户端 ureq 报传输错误而非 `Error::Status`，
+    /// 把本应 4xx 的响应误分类为可转移故障。
     fn fake_http_server(
         status_line: &'static str,
         body: &'static str,
@@ -1113,16 +1118,40 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            // 兜底读超时：body 迟迟不到时不无限挂起测试线程。
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
             let mut req = String::new();
             let mut buf = [0u8; 4096];
-            // GET 无 body，读到请求头结束即可。
-            while !req.contains("\r\n\r\n") {
-                let n = match stream.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => n,
-                    Err(_) => break,
-                };
-                req.push_str(&String::from_utf8_lossy(&buf[..n]));
+            // 先读到请求头结束。
+            let head_end = loop {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break None,
+                    Ok(n) => {
+                        req.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        if let Some(p) = req.find("\r\n\r\n") {
+                            break Some(p + 4);
+                        }
+                    }
+                }
+            };
+            // 再排空请求体（GET 无 body 即 0），保证关闭时接收缓冲为空走优雅 FIN。
+            if let Some(head_end) = head_end {
+                let clen = req[..head_end]
+                    .to_ascii_lowercase()
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                let mut received = req.len() - head_end;
+                while received < clen {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            req.push_str(&String::from_utf8_lossy(&buf[..n]));
+                            received += n;
+                        }
+                    }
+                }
             }
             let _ = tx.send(req);
             let resp = format!(
