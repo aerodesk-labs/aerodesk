@@ -92,14 +92,23 @@ start_view() { # $1=room $2=log
 echo "== 场景 A：双房间并发桥"
 PUB1=$(start_pub "$ROOM1" /tmp/bmr-pub1.log)
 PUB2=$(start_pub "$ROOM2" /tmp/bmr-pub2.log)
-for _ in $(seq 1 120); do
-  grep -q "ICE connected" /tmp/bmr-pub1.log 2>/dev/null && grep -q "ICE connected" /tmp/bmr-pub2.log 2>/dev/null && break
+# #552 SIP 1:1：publisher 是 UAS（等 IncomingCall）——无呼叫时无 ICE。先等两个
+# publisher 注册就绪，再起 viewer（呼入触发 ICE）；注册前等 ICE 必超时。
+for _ in $(seq 1 30); do
+  grep -q "SIP registered" /tmp/bmr-pub1.log 2>/dev/null && grep -q "SIP registered" /tmp/bmr-pub2.log 2>/dev/null && break
   sleep 0.5
 done
-grep -q "ICE connected" /tmp/bmr-pub1.log || fail "publisher R1 未连上"
-grep -q "ICE connected" /tmp/bmr-pub2.log || fail "publisher R2 未连上"
+grep -q "SIP registered" /tmp/bmr-pub1.log || fail "场景A：publisher R1 未注册"
+grep -q "SIP registered" /tmp/bmr-pub2.log || fail "场景A：publisher R2 未注册"
 VIEW1=$(start_view "$ROOM1" /tmp/bmr-view1.log)
 VIEW2=$(start_view "$ROOM2" /tmp/bmr-view2.log)
+# viewer 呼入后 publisher 侧 ICE 才建立（显式断言，便于失败归因到建链而非解码）。
+ok=0
+for _ in $(seq 1 120); do
+  grep -q "ICE connected" /tmp/bmr-pub1.log 2>/dev/null && grep -q "ICE connected" /tmp/bmr-pub2.log 2>/dev/null && ok=1 && break
+  sleep 0.5
+done
+[ "$ok" = "1" ] || fail "场景A：publisher 未连上（R1=$(grep -c 'ICE connected' /tmp/bmr-pub1.log 2>/dev/null) R2=$(grep -c 'ICE connected' /tmp/bmr-pub2.log 2>/dev/null)）"
 wait_decoded /tmp/bmr-view1.log || fail "场景A：R1 viewer 未解码（见 /tmp/bmr-view1.log）"
 wait_decoded /tmp/bmr-view2.log || fail "场景A：R2 viewer 未解码（见 /tmp/bmr-view2.log）"
 grep -q "signal redirect" /tmp/bmr-view1.log && fail "场景A：R1 不应 Redirect"
@@ -142,13 +151,20 @@ grep -q "BRIDGE_MAX_RUNNING" /tmp/bmr-sig-b2.log || true   # 无日志；以行�
 
 PUB1=$(start_pub "$ROOM1" /tmp/bmr-pub1b.log)
 PUB2=$(start_pub "$ROOM2" /tmp/bmr-pub2b.log)
-for _ in $(seq 1 120); do
-  grep -q "ICE connected" /tmp/bmr-pub1b.log 2>/dev/null && grep -q "ICE connected" /tmp/bmr-pub2b.log 2>/dev/null && break
+# 同场景 A：先等注册就绪再起 viewer（SIP 1:1 无呼叫无 ICE）。
+for _ in $(seq 1 30); do
+  grep -q "SIP registered" /tmp/bmr-pub1b.log 2>/dev/null && grep -q "SIP registered" /tmp/bmr-pub2b.log 2>/dev/null && break
   sleep 0.5
 done
-grep -q "ICE connected" /tmp/bmr-pub1b.log || fail "场景B：publisher R1 未连上"
-grep -q "ICE connected" /tmp/bmr-pub2b.log || fail "场景B：publisher R2 未连上"
+grep -q "SIP registered" /tmp/bmr-pub1b.log || fail "场景B：publisher R1 未注册"
+grep -q "SIP registered" /tmp/bmr-pub2b.log || fail "场景B：publisher R2 未注册"
 VIEW1=$(start_view "$ROOM1" /tmp/bmr-view1b.log)
+ok=0
+for _ in $(seq 1 120); do
+  grep -q "ICE connected" /tmp/bmr-pub1b.log 2>/dev/null && ok=1 && break
+  sleep 0.5
+done
+[ "$ok" = "1" ] || fail "场景B：publisher R1 未连上"
 wait_decoded /tmp/bmr-view1b.log || fail "场景B：R1（桥优先）未解码"
 grep -q "signal redirect" /tmp/bmr-view1b.log && fail "场景B：R1 不应 Redirect"
 # R2：上限=1 → Redirect 并跟随到 PoP-A 直连解码。

@@ -4,10 +4,12 @@
 # 双 PoP（无静态钉住，共享注册表文件，各自显式 SIP UDP 端口）：
 #   publisher 经 signal-a 首个 INVITE dyn-* 房间 → 登记 pop-a（owner PoP）；
 #   viewer 经 signal-b INVITE 同房间 → 注册表命中 pop-a → 302+Contact 引导回
-#   PoP-A → 客户端（#600）跟随 → 会议桥入 sfu-a。
+#   PoP-A → 客户端跟随 → 会议桥入 sfu-a。
 #
-# 注意：客户端 302 跟随随 #600 合并——此前本脚本只能验证到「登记 + 302 决策」，
-# CI 维持 if:false。
+# 注意：服务端 INVITE 归属登记 + 302+Contact P3.1 已实现（断言 1/2/3 锚定现实
+# 日志：302 决策消息体为「room -> pop <pop> …」，房间名在 room= 结构化字段）；
+# 客户端 302 跟随（会话层换拨）**尚未实现**（#600 仅落地 core 层 RedirectedTo
+# 事件透传）——断言 4（跟随后媒体入 PoP-A）在跟随落地前必失败，CI 维持 if:false。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -62,8 +64,11 @@ if grep -q "room $ROOM registered to pop pop-a (first inviter)" /tmp/popreg-sig-
 else
     echo "FAIL no first-inviter registration"; tail -5 /tmp/popreg-sig-a.log; fail=1
 fi
-# 2) signal-b 查注册表命中 pop-a → 302+Contact 引导
-if grep -q "room $ROOM -> pop pop-a" /tmp/popreg-sig-b.log \
+# 2) signal-b 查注册表命中 pop-a → 302+Contact 引导（P3 日志：房间名在 room=
+#    结构化字段；消息体「room -> pop pop-a …」不含房间名，勿用
+#    「room $ROOM -> pop pop-a」旧 JSON 形态——对现实日志永不匹配）
+if grep -q "room=$ROOM" /tmp/popreg-sig-b.log \
+   && grep -q "room -> pop pop-a " /tmp/popreg-sig-b.log \
    && grep -q "302 redirect" /tmp/popreg-sig-b.log; then
     echo "PASS signal-b dynamic redirect (302) to pop-a"
 else
@@ -75,7 +80,7 @@ if grep -q "\"$ROOM\"" "$REG" 2>/dev/null; then
 else
     echo "FAIL registry file missing room"; cat "$REG" 2>/dev/null | tail -3; fail=1
 fi
-# 4) viewer 跟随后媒体入 PoP-A（ICE 建链 + 解码帧；#600 合并前必然缺失）
+# 4) viewer 跟随后媒体入 PoP-A（ICE 建链 + 解码帧；客户端 302 跟随未实现前必缺失）
 if grep -q "ICE connected" /tmp/popreg-view.log \
    && grep -qE "DECODED: [1-9]" /tmp/popreg-view.log; then
     echo "PASS media on sfu-a via pop-a (ICE + decoded frames)"

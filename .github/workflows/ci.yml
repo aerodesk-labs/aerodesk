@@ -211,7 +211,7 @@ jobs:
       # Web 发布端（headless Chrome 屏幕共享）偶发浏览器崩溃（同类 flake 见
       # web-pub/web-reconnect），按仓库约定限 3 次重试。
       # #598 P2a 起暂停；P3.1 服务端 JSON 面已退役（SIP 单栈）。恢复条件：
-      # #601 SIP 会议桥落地 + 浏览器端 SIP/WSS 会议发布面（见脚本头注）。
+      # P3 会议桥「浏览器/原生发布端入会」路径成形（见脚本头注）。
       - name: e2e simulcast layer switching (macOS only)
         if: false && runner.os == 'macOS'
         run: bash scripts/ci-retry.sh 3 ./scripts/simulcast-e2e.sh
@@ -245,15 +245,17 @@ jobs:
 
       # #146 多 PoP 房间路由：双 PoP 本地验证信令重定向 + 客户端自动跟随。
       # （#148/#159 重构 ci.yml 时曾丢失该 step，多次恢复于 #154/#160 合并）
-      # P3.1：服务端 302+Contact（POP_SIP_URLS）已实现，脚本已改 302 断言；
-      # 冻结待 #600 客户端 302 跟随（RedirectedTo/redirect_target）合并。
+      # P3.1：服务端 302+Contact（POP_SIP_URLS）已实现，脚本服务端断言已锚定
+      # 现实日志；客户端 302 跟随（会话层换拨）未实现——#600 仅落地 core 层
+      # RedirectedTo 事件透传，跟随落地后解冻（目标 PoP 重注册 + 媒体断言）。
       - name: e2e multi-PoP room routing (macOS only)
         if: false && runner.os == 'macOS'
         run: ./scripts/multipop-e2e.sh
 
       # #154 多 PoP v2：动态 room→PoP 注册表（首个加入者登记 + 共享文件 + 重定向）。
-      # 冻结待 #600 客户端 302 跟随合并（服务端 INVITE 归属登记/302 已就绪，
-      # 脚本断言已锚定新日志 registered to pop ... (first inviter)）。
+      # 客户端 302 跟随（会话层换拨）未实现（#600 仅 core RedirectedTo 事件
+      # 透传）——服务端 INVITE 归属登记/302 已就绪，脚本服务端断言已锚定现实
+      # 日志（registered to pop ... (first inviter)）；跟随落地后解冻。
       - name: e2e multi-PoP dynamic registry (macOS only)
         if: false && runner.os == 'macOS'
         run: ./scripts/popreg-e2e.sh
@@ -349,7 +351,8 @@ jobs:
 
       # #180 SFU /start 准入配额：MAX_ROOM_CLIENTS=1 时第 2 个连接被 503。
       # 冻结：SFU /start 配额的触达路径是 SIP 会议桥（P3.1 已接 D4 failover），
-      # 桥面客户端随 #600/#601 合并恢复后启用。SFU 侧配额本体勿动。
+      # 脚本按 SIP 面更新（旧 SIGNAL_PLAIN_PORT spawn 已退役）并核验会议桥
+      # 客户端路径后启用。SFU 侧配额本体勿动。
       - name: e2e SFU start quota (macOS only)
         if: false && runner.os == 'macOS'
         run: ./scripts/sfu-quota-e2e.sh

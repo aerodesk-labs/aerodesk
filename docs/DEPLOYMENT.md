@@ -96,13 +96,14 @@ signal.aerodesk.io {
 }
 ```
 
-**nginx 反代 + 限流示例**（生产推荐：TLS 终止在 nginx，signal 明文 WS 只绑内网；
-限流覆盖连接/请求速率，防未授权客户端连接 DoS）：
+**nginx 反代 + 限流示例**（生产推荐：TLS 终止在 nginx，signal ops 面只绑内网；
+限流覆盖连接/请求速率，防未授权客户端拉取运维面 DoS。注意 P3 单栈下 SIP/UDP
+5060、SIP/TLS 5061 直连不经反代——反代只服务 ops HTTPS 面）：
 
 ```nginx
 # 每 IP 并发连接 + 请求速率
-limit_conn_zone $binary_remote_addr zone=ws_conn:10m;
-limit_req_zone  $binary_remote_addr zone=ws_req:10m rate=10r/s;
+limit_conn_zone $binary_remote_addr zone=ops_conn:10m;
+limit_req_zone  $binary_remote_addr zone=ops_req:10m rate=10r/s;
 
 server {
     listen 443 ssl;
@@ -110,24 +111,22 @@ server {
     ssl_certificate     /etc/aerodesk/tls/cer.pem;
     ssl_certificate_key /etc/aerodesk/tls/key.pem;
 
-    # HTTP 请求体上限（升级前的握手请求）
     client_max_body_size 1m;
 
-    location /ws {
-        limit_conn ws_conn 5;      # 每 IP 最多 5 个 WS 并发
-        limit_req  zone=ws_req burst=20 nodelay;
-        proxy_pass http://127.0.0.1:3003;  # signal 明文端口
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 3600s;
+    location / {
+        limit_conn ops_conn 20;
+        limit_req  zone=ops_req burst=40 nodelay;
+        # ops HTTPS 上游（/healthz /devices /metrics/prometheus /admin/*）。
+        # signal 自带 TLS（缺省开发证书），内网回环跳过校验即可。
+        proxy_pass https://127.0.0.1:3001;
+        proxy_ssl_verify off;
+        proxy_read_timeout 30s;
     }
 }
 ```
 
-> 注意：nginx 反代 WS 是隧道转发，**无法限制单个 websocket 帧的 payload 大小**（#361 的
-> 帧级上限），只能限连接数/速率/握手请求体。帧级上限需换支持 `max_message_size` 的 ws 库，
-> 或接受 signal 侧 1MiB 事后 cap（挡 serde 解析开销）。
+> 旧 JSON 明文 WS（3003/14703 端口、`Upgrade` 升级头、#361 WS 帧级上限）随
+> P3.1 JSON 面一并退役——SIP 单栈无 WS 长连接反代需求。
 
 **内部 CA（企业内网）**：用 `step-ca` 或 vault PKI 签发，客户端信任链预置；
 证书轮换走 **SIGHUP 热重载**（signal/SFU 均已实现：`kill -HUP <pid>` 重读
@@ -142,8 +141,9 @@ server {
   **302 + Contact**（`POP_SIP_URLS`，`PoP=host:port`）把主叫引导到 owner PoP 重发 INVITE。
   无 `POP_REGISTRY_FILE` 时单 PoP 行为不变；命中他 PoP 但无 302 目标时回 486 即刻失败。
   静态前缀钉住（旧 `ROOM_POP_MAP`/`POP_URLS`）随 JSON 面退役，如需预登记可预先写入共享
-  注册表文件（见 `scripts/multipop-e2e.sh`）。客户端 302 跟随（RedirectedTo/redirect_target）
-  随 #600 合并生效。
+  注册表文件（见 `scripts/multipop-e2e.sh`）。客户端 302 跟随（会话层换拨）尚未
+  实现（#600 仅落地 core 层 RedirectedTo 事件透传）——跟随落地前跨 PoP 主叫无法
+  自动跟随 302，会以呼叫失败收场。
   单机多 PoP 测试可用 `SFU_MEDIA_PORT`/`SFU_SIGNAL_PORT`/`SFU_INTERNAL_PORT` 覆盖 SFU 端口，
   示例见 `scripts/multipop-e2e.sh` / `scripts/popreg-e2e.sh`。
 - **跨 PoP 实时桥接（v3，#216，P3 退役待重建）**：旧 `BRIDGE_CMD` 进程编排随 JSON 面

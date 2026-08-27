@@ -27,8 +27,8 @@
 |---|---|---|---|
 | 1 | `Ping` | **（消失）** | 现 Ping 是服务端发送队列 drain 的实现工件；rsipstack 传输层常活后无此需求。连接保活 = 传输层 keepalive（WSS ping/pong、RFC 5626 flow）；会话保活 = Session-Timer（§5） |
 | 2 | `Join{room,role,auth_token,dc_ready}` | `REGISTER` → `401` → `REGISTER`+Authorization → `200` | room→AoR；auth_token→Digest 口令；dc_ready 见本节末注 |
-| 3 | `Joined{peer_id,peers,turn}` | `200 OK`(REGISTER) | peers：P0 不下发 roster（在线 = 注册存在）；turn：**不进 SIP 面**，沿用 `/config` HTTP 签发（#549 已定） |
-| 4 | `Redirect{pop,url,reason}` | `302 Moved Temporarily`（Contact = 目标 PoP） | 多 PoP：**服务端 302+Contact 已实现**（P3.1，POP_SIP_URLS），客户端跟随待 #600 合并；亦用于 P2P→SFU 升级重定向（§4.1） |
+| 3 | `Joined{peer_id,peers,turn}` | `200 OK`(REGISTER) | peers：P0 不下发 roster（在线 = 注册存在）；turn：**不进 SIP 面**——旧 `/config` HTTP 签发已随 JSON 面退役，客户端经 `AERO_TURN_URLS/USERNAME/CREDENTIAL` 静态注入（内嵌 TURN 走 `SFU_TURN_SECRET` 静态 secret） |
+| 4 | `Redirect{pop,url,reason}` | `302 Moved Temporarily`（Contact = 目标 PoP） | 多 PoP：**服务端 302+Contact 已实现**（P3.1，POP_SIP_URLS）；客户端跟随（会话层换拨）尚未实现（#600 仅落地 core 层 RedirectedTo 事件透传）；亦用于 P2P→SFU 升级重定向（§4.1） |
 | 5 | `Description{from,to,description}` | `INVITE` / `200 OK` 的 SDP body；重协商 = re-INVITE | signal 透传不解析；SFU 模式 = 客户端与 SFU UAS 的对话（见 §4 注） |
 | 6 | `IceCandidate{from,to,candidate}` | `INFO`，Content-Type: `application/trickle-ice-sdpfrag`（RFC 8840） | 字段对齐 candidate / sdpMid / sdpMLineIndex |
 | 7 | `PeerLeft{peer_id}` | **语义拆分**：对话内对端离开 = `BYE`；presence 离线 = `REGISTER` expires=0 / 注册过期 | 现 PeerLeft 混淆「媒体会话结束」与「在线消失」两类语义；SIP 内建分开——此类翻译丢失 bug 由标准消除 |
@@ -40,8 +40,8 @@
 | 13 | `Error{message}` | `400` / 4xx / 5xx + Warning；畸形报文 400 | 延续 #542 口径（400 不 panic） |
 
 **注（signal_ready / dc_ready，#467）**：P2P 模式下 DCEP 在 SDP `m=application` 数据通道
-协商内完成，就绪 = data channel onopen 事件，**不再占用信令消息**；SFU 兼容路径在双栈期
-保留现有 JSON 字段。
+协商内完成，就绪 = data channel onopen 事件，**不再占用信令消息**；SFU 兼容路径双栈期
+曾保留的 JSON 字段随 P3.1 双栈退役（SFU 内嵌 Web 面不属本规范范围）。
 
 ## 3. 拒绝/错误码映射
 
@@ -159,7 +159,9 @@ TLS 客户端证书
   `off` 显式关闭），HTTP 仅保留运维面（/healthz /devices /metrics /admin/*）
 - `User-Agent` 携带协议版本；option-tag `Require: aerodesk.p2p` 能力协商
 - Digest 迁移：现有 token 即口令，服务端仅存 HA1（迁移期旧 token 一次性登记）
-- TURN 凭证签发留在 `/config` HTTP
+- TURN 凭证不进 SIP 面：旧 `/config` HTTP 签发随 JSON 面退役；客户端经
+  `AERO_TURN_URLS/USERNAME/CREDENTIAL` 静态注入（内嵌 TURN 用 `SFU_TURN_SECRET`
+  静态 secret，外部 coturn 用 `TURN_URLS`）
 - **媒体核心不 import SIP 类型**（#552 约束）：SIP UA 收敛在 protocol/core 信令层，
   对媒体层只暴露 SDP/ICE 参数
 

@@ -10,8 +10,11 @@
 # 服务端回 302+Contact(<sip:room@127.0.0.1:5070>) → 客户端跟随重 INVITE PoP-B
 # → 会议桥入 sfu-b。
 #
-# 注意：客户端 302 跟随（RedirectedTo/redirect_target）随 #600 合并——此前本脚本
-# 只能验证到「服务端 302 决策 + Contact 发送」，CI 维持 if:false。
+# 注意：服务端 302+Contact（POP_SIP_URLS）P3.1 已实现（断言 1/2 锚定现实日志：
+# tracing 消息体为「room -> pop <pop> (self=…): 302 redirect」，房间名在
+# room= 结构化字段，不在消息体）；客户端 302 跟随（会话层换拨）**尚未实现**
+#（#600 仅落地 core 层 RedirectedTo 事件透传）——断言 3/4（目标 PoP 重注册 +
+# 跟随后媒体）在跟随落地前必失败，CI 维持 if:false。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -63,8 +66,9 @@ wait 2>/dev/null || true
 
 echo "== 断言"
 fail=0
-# 1) signal-a 302 决策（房间归属 pop-b，措辞沿用「room ... -> pop pop-b」）
-if grep -qE "room .* -> pop pop-b" /tmp/mpop-sig-a.log; then
+# 1) signal-a 302 决策（房间归属 pop-b；P3 日志消息体「room -> pop pop-b …」
+#    不含房间名，勿用「room .* -> pop pop-b」旧 JSON 形态——对现实日志永不匹配）
+if grep -q "room -> pop pop-b " /tmp/mpop-sig-a.log; then
     echo "PASS signal-a redirect eu-* -> pop-b"
 else
     echo "FAIL no redirect in signal-a"; tail -5 /tmp/mpop-sig-a.log; fail=1
@@ -75,7 +79,7 @@ if grep -q "302 redirect" /tmp/mpop-sig-a.log; then
 else
     echo "FAIL no 302+Contact sent"; tail -5 /tmp/mpop-sig-a.log; fail=1
 fi
-# 3) 目标 PoP 受理 REGISTER（客户端 #600 跟随后重注册 PoP-B）
+# 3) 目标 PoP 受理 REGISTER（客户端 302 跟随落地后重注册 PoP-B；跟随未实现前必缺失）
 if grep -q "SIP 注册" /tmp/mpop-sig-b.log; then
     echo "PASS client registered to signal-b (pop-b)"
 else

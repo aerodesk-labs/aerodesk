@@ -3,7 +3,8 @@
 # 前置：
 #   1. E:\aerodesk-vm\WinDev2407Eval.vhdx 已解压（下载：aka.ms/windev_VM_hyperv）
 #   2. E:\aerodesk-vm\bins\ 下已放 aerodesk-host/cli/signal/sfu 四 exe + FFmpeg DLL
-#   3. 宿主 signal/sfu 由本脚本自启（防火墙放通 3001/TCP + 5060/UDP 与 3478/UDP+TCP）
+#   3. 宿主 signal/sfu 由本脚本自启（防火墙放通 3001/TCP + 5060/UDP + 5061/TCP
+#      + 3061/TCP 与 3478/UDP+TCP）
 #   注：P3 起 signal 为 SIP 单栈——WSS 时代工件，本脚本覆盖部分场景
 #   （SIP/UDP 5060 直连；SIP/TLS 5061、SIP/WSS 3061 默认同证书开启）。
 #   viewer 的 AERO_SIP_PORT 显式端口提示待 #601 客户端面合并。
@@ -17,12 +18,13 @@ $VMName  = 'aerodesk-prelogin'
 $hostIp = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -like '*Default Switch*' } | Select-Object -First 1).IPAddress
 if (-not $hostIp) { $hostIp = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -like '*Ethernet*' } | Select-Object -First 1).IPAddress }
 Write-Host "宿主对 VM 可达 IP: $hostIp"
-foreach ($r in 'AeroDeskMatrix-Signal','AeroDeskMatrix-SFUudp','AeroDeskMatrix-SFUtcp') {
+foreach ($r in 'AeroDeskMatrix-Signal','AeroDeskMatrix-SipUdp','AeroDeskMatrix-SipTls','AeroDeskMatrix-SipWss','AeroDeskMatrix-SFUudp','AeroDeskMatrix-SFUtcp') {
   if (Get-NetFirewallRule -Name $r -ErrorAction SilentlyContinue) { Remove-NetFirewallRule -Name $r }
 }
 New-NetFirewallRule -Name 'AeroDeskMatrix-Signal' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3001 | Out-Null
 New-NetFirewallRule -Name 'AeroDeskMatrix-SipUdp' -Direction Inbound -Action Allow -Protocol UDP -LocalPort 5060 | Out-Null
 New-NetFirewallRule -Name 'AeroDeskMatrix-SipTls' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5061 | Out-Null
+New-NetFirewallRule -Name 'AeroDeskMatrix-SipWss' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3061 | Out-Null
 New-NetFirewallRule -Name 'AeroDeskMatrix-SFUudp' -Direction Inbound -Action Allow -Protocol UDP -LocalPort 3478 | Out-Null
 New-NetFirewallRule -Name 'AeroDeskMatrix-SFUtcp' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3478 | Out-Null
 # SFU 候选必须通告宿主在 Default Switch 侧的 IP,否则 guest 够不到候选地址

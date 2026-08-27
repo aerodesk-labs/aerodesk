@@ -5,7 +5,7 @@
 #
 # 前提：
 #   1) 本机可免密 ssh 到两台主机且有 sudo（systemd 安装）；
-#   2) 本机可编译（默认 release）；本机有 nc（健康探测）；
+#   2) 本机可编译（默认 release）；本机有 curl（P3 探活走 ops HTTPS /healthz）；
 #   3) 端口：SFU 媒体 3478/公共 HTTPS 3000/内部 3002；signal ops HTTPS 3001/
 #      SIP/UDP 5060（P3 SIP 单栈，TLS 5061/WSS 3061 默认同证书开启）；
 #      TURN UDP+TCP 3479/TLS 5349（可经 --*-port 覆盖）；
@@ -89,7 +89,8 @@ scp_to() { # $1=host $2=本地 $3=远端
 }
 
 HOST_A="${POP_A##*@}"; HOST_B="${POP_B##*@}"
-# 当前 tungstenite 构建无 TLS feature：默认明文 ws://<host>:3003/ws（见注意 2）。
+# P3 SIP 单栈：客户端信令地址 = SIP 形态 ws://<host>:<SIG_SIP_PORT>（agent 解析
+# 为 SIP/UDP 到该 host:port，AERO_SIP_PORT 可显式覆盖；见前提 5）。
 SIGNAL_A_URL="${SIGNAL_A_URL:-ws://${HOST_A}:${SIG_SIP_PORT}}"
 SIGNAL_B_URL="${SIGNAL_B_URL:-ws://${HOST_B}:${SIG_SIP_PORT}}"
 
@@ -128,8 +129,11 @@ gen_signal_env() { # $1=pop-a|pop-b
   printf -v OUT '%sEnvironment=SFU_URL=http://127.0.0.1:%s\n' "$OUT" "$SFU_INT_PORT"
   printf -v OUT '%sEnvironment=SFU_TOKEN=%s\n' "$OUT" "$AUTH"
   printf -v OUT '%sEnvironment=POP_ID=%s\n' "$OUT" "$1"
-  if [ "$1" = "pop-b" ]; then
-    # 跨 PoP：本 PoP 房间归属他 PoP 时 302+Contact 引导（host:port 载体）。
+  # 跨 PoP：本 PoP 房间归属他 PoP 时 302+Contact 引导（host:port 载体）。
+  # 双向对称——任一 PoP 都可能收到归属对端的 INVITE，缺一侧会回 486 而非 302。
+  if [ "$1" = "pop-a" ]; then
+    printf -v OUT '%sEnvironment=POP_SIP_URLS=pop-b=%s:%s\n' "$OUT" "$HOST_B" "$SIG_SIP_PORT"
+  else
     printf -v OUT '%sEnvironment=POP_SIP_URLS=pop-a=%s:%s\n' "$OUT" "$HOST_A" "$SIG_SIP_PORT"
   fi
   if [ -n "$CERT_FILE" ]; then printf -v OUT '%sEnvironment=CERT_FILE=%s\n' "$OUT" "$CERT_FILE"; fi
