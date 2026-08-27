@@ -3865,7 +3865,8 @@ fn publisher_capture_ffmpeg(
 
         if connected {
             // #503 隐私屏：跳过真实采集，注入黑/文字帧（媒体继续出流）。
-            let bgra: Vec<u8> = if privacy.enabled {
+            let owned;
+            let bgra: &[u8] = if privacy.enabled {
                 // 节拍：正常路径由 capture_frame(50ms) 限速；隐私路径无帧源，
                 // 必须等价限速，否则循环满速编码（60~250fps），RTP 时钟远超
                 // 墙钟——CPU/带宽暴涨 + 观看端 A/V 漂移（#503 回归修复）。
@@ -3874,12 +3875,17 @@ fn publisher_capture_ffmpeg(
                     privacy_buf = vec![0u8; (w * h * 4) as usize];
                 }
                 privacy::paint(&privacy, &mut privacy_buf, w, h);
-                // 免每帧整帧 memcpy：paint 已就地填充，这里只移交所有权供编码借用。
-                std::mem::take(&mut privacy_buf)
+                // 就地复用缓冲：paint 全帧覆盖，逐帧零分配零拷贝
+                // （此前 mem::take 使下一帧整帧重分配+清零，与克隆同价还多一趟 memset，
+                // #595 审查修复）。
+                &privacy_buf
             } else if let Some(surface) = capture.capture_frame(Duration::from_millis(50)) {
                 // IOSurface（BGRA）→ 行复制到 CPU 缓冲 → FFmpeg 编码。
                 match aerodesk_platform::macos::capture::surface_to_bgra(&surface, w, h) {
-                    Ok(b) => b,
+                    Ok(b) => {
+                        owned = b;
+                        &owned
+                    }
                     Err(e) => {
                         warn!("surface read failed: {e}");
                         continue;
@@ -3889,7 +3895,7 @@ fn publisher_capture_ffmpeg(
                 continue;
             };
             // 运行期编码错误降级为丢帧 + 告警（旧 expect 一错即崩整个发布端）。
-            match encoder.encode_bgra(&bgra) {
+            match encoder.encode_bgra(bgra) {
                 Ok(Some(unit)) => {
                     let rtp_time = str0m::media::MediaTime::new(
                         pts as u64 * 3000,
