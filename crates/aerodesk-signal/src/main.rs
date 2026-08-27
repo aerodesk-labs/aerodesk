@@ -1162,27 +1162,19 @@ fn auth_result(config: &Config, token: Option<&str>, room: &str, role: Role) -> 
     }
 }
 
+/// HTTP 入口（纯分发）：`/ws` 走 JSON 信令面，其余走运维/管理面。
+/// P3.0（#597 后续拆栈准备）：仅机械拆分，零行为变化——P3.1 删除 json_router
+/// 后 ops_router 成为唯一路由。
 fn handle(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
     if request.method() == "GET" && request.url() == "/ws" {
-        // Origin 白名单（可选）：浏览器 WebSocket 必带 Origin（CSWSH 防护）；
-        // 非浏览器客户端（CLI/native）无 Origin 头，始终放行。
-        if let Some(allowed) = &config.allowed_origins
-            && let Some(origin) = request.header("Origin")
-            && !allowed
-                .iter()
-                .any(|a| a == "*" || a.eq_ignore_ascii_case(origin))
-        {
-            warn!("ws rejected: origin {origin} not in allowlist");
-            return Response::text("origin not allowed").with_status_code(403);
-        }
-        return match websocket::start(request, None::<&str>) {
-            Ok((response, rx)) => {
-                std::thread::spawn(move || session_loop(rx, config, rooms));
-                response
-            }
-            Err(_) => Response::text("websocket upgrade required").with_status_code(400),
-        };
+        return json_router(request, config, rooms);
     }
+    ops_router(request, config, rooms)
+}
+
+/// 运维/管理 HTTP 面：/healthz、/devices、/metrics/prometheus、/admin/temp-password
+/// 与兜底响应。与信令面（/ws）分离，便于 P3 拆栈时独立演进。
+fn ops_router(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
     // 可观测性（#180 后续）：信号服务器此前只有 /ws，无健康/指标端点。
     if request.method() == "GET" && request.url() == "/healthz" {
         let clients = total_clients();
@@ -1286,6 +1278,28 @@ fn handle(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
         return Response::text("aerodesk-signal: connect to /ws");
     }
     Response::text("method not allowed").with_status_code(405)
+}
+
+/// JSON 信令面（/ws WebSocket 升级）：Origin 白名单检查 + 升级 + session_loop spawn。
+fn json_router(request: &Request, config: Arc<Config>, rooms: Rooms) -> Response {
+    // Origin 白名单（可选）：浏览器 WebSocket 必带 Origin（CSWSH 防护）；
+    // 非浏览器客户端（CLI/native）无 Origin 头，始终放行。
+    if let Some(allowed) = &config.allowed_origins
+        && let Some(origin) = request.header("Origin")
+        && !allowed
+            .iter()
+            .any(|a| a == "*" || a.eq_ignore_ascii_case(origin))
+    {
+        warn!("ws rejected: origin {origin} not in allowlist");
+        return Response::text("origin not allowed").with_status_code(403);
+    }
+    match websocket::start(request, None::<&str>) {
+        Ok((response, rx)) => {
+            std::thread::spawn(move || session_loop(rx, config, rooms));
+            response
+        }
+        Err(_) => Response::text("websocket upgrade required").with_status_code(400),
+    }
 }
 
 /// 管理端点统一鉴权：`Authorization: Bearer <token>`（SIP_ADMIN_TOKEN / 首个 AUTH_TOKEN）。
