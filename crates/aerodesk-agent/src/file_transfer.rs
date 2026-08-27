@@ -16,22 +16,17 @@ static CANCEL_SEND_AFTER: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::
 static CANCEL_SEND_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// #122：发送是否已确认（viewer --send-file 模式发送完成）。
-/// 闩锁语义（#595 审查修复）：一旦观察到确认即永久为 true——事件循环里
-/// tick()（内含剪贴板轮询，可替换已确认的发送槽位）先于本判定执行，
-/// 无闩锁时残留剪贴板图片会在确认与观察之间顶掉上传记录 → viewer 永不退出。
-static SEND_DONE_LATCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
+/// 完成粘滞语义在 core 状态机内实现（`FileTransfer::send_complete` 的
+/// `last_done_file`）：同轮事件处理里剪贴板图片在确认与首次观察之间换槽、
+/// 甚至本地取消/推进清空槽位，完成仍可观察（#595 审查二批——此前 agent 层
+/// AtomicBool 闩锁无法覆盖“首次观察前”的换槽窗口，观察不到即永不置位）。
+/// 互斥锁中毒时与 tick/handle_event 同策略降级为 false，不再 unwrap 崩溃。
 pub fn send_confirmed() -> bool {
-    let confirmed = FILE_TX
+    FILE_TX
         .lock()
-        .unwrap()
-        .as_ref()
-        .map(|f| f.send_complete())
-        .unwrap_or(false);
-    if confirmed {
-        SEND_DONE_LATCH.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-    SEND_DONE_LATCH.load(std::sync::atomic::Ordering::SeqCst)
+        .ok()
+        .and_then(|f| f.as_ref().map(|ft| ft.send_complete()))
+        .unwrap_or(false)
 }
 
 /// #122：当前接收落盘目录（viewer --request-file 模式轮询落盘）。
@@ -64,7 +59,6 @@ pub fn init(
     *FILE_TX.lock().unwrap() = Some(ft);
     *CANCEL_SEND_AFTER.lock().unwrap() = cancel_send_after.map(|d| Instant::now() + d);
     CANCEL_SEND_DONE.store(false, std::sync::atomic::Ordering::SeqCst);
-    SEND_DONE_LATCH.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// 路由 data channel 事件到状态机（no-op 除非 label == "file"）。
