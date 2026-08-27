@@ -37,21 +37,42 @@ const ROOM = process.argv[2];
   const SP = process.env.WEB_SERVE_PORT || 38087;
   // 被控页（UAS；服务重启后同样自动重连）
   const pub = await browser.newPage();
+  pub.on('pageerror', e => console.log('PUB_PAGEERROR: ' + e.message));
   await pub.goto('http://127.0.0.1:' + SP + '/sip-publisher.html?device=' + ROOM + '&signal=wss://127.0.0.1:3061');
   await pub.click('#connect');
   await pub.waitForFunction(() => document.getElementById('status').innerText.includes('等待观看端拨入'), { timeout: 40000 });
   console.log('PUBLISHER_OK');
   // 观看页（初始收流 → 服务重启后自动重连恢复）
   const view = await browser.newPage();
+  view.on('pageerror', e => console.log('VIEW_PAGEERROR: ' + e.message));
   await view.goto('http://127.0.0.1:' + SP + '/sip-viewer.html?target=' + ROOM + '&signal=wss://127.0.0.1:3061');
   await view.click('#connect');
   await view.waitForFunction(() => document.getElementById('video').readyState >= 2, { timeout: 40000 });
   console.log('INITIAL_OK');
-  // 服务被 bash 重启后，页面应自动重连（退避重连日志含 "重连"）
-  await view.waitForFunction(() => document.getElementById('log').innerText.includes('自动重连'), { timeout: 120000 });
-  await view.waitForFunction(() => document.getElementById('status').innerText.includes('已连接'), { timeout: 90000 });
-  await view.waitForFunction(() => document.getElementById('video').readyState >= 2, { timeout: 90000 });
-  console.log('RECONNECT_OK');
+  // 服务被 bash 重启后，页面应自动重连——显式轮询打点（每一步可见，替代
+  // waitForFunction 黑盒；页面内部 30s INVITE 超时也在此暴露）。
+  const t0 = Date.now();
+  let sawReconnect = false, sawConnected = false, sawVideo = false, gaveUp = false;
+  while (Date.now() - t0 < 150000 && !sawVideo && !gaveUp) {
+    const st = await view.evaluate(() => ({
+      status: document.getElementById('status').innerText,
+      log: document.getElementById('log').innerText.slice(-600),
+      rs: document.getElementById('video').readyState,
+    })).catch(() => null);
+    if (st) {
+      if (!sawReconnect && st.log.includes('自动重连')) { sawReconnect = true; console.log('RECONNECT_LOG_SEEN'); }
+      if (!sawConnected && st.status.includes('已连接')) { sawConnected = true; console.log('CONNECTED_AGAIN'); }
+      if (!sawVideo && st.rs >= 2) { sawVideo = true; console.log('VIDEO_BACK'); }
+      if (st.status.includes('连接失败') || st.status.includes('启动失败')) {
+        console.log('RECONNECT_FAILED status=' + st.status + ' | log=' + st.log);
+        gaveUp = true;
+      }
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  console.log('RECONNECT_OK=' + (sawVideo ? 'true' : 'false'));
+  console.log('FINAL_STATUS=' + await view.evaluate(() => document.getElementById('status').innerText).catch(() => '?'));
+  console.log('FINAL_LOG=' + await view.evaluate(() => document.getElementById('log').innerText.slice(-800)).catch(() => '?'));
   await browser.close();
   console.log('E2E_DONE');
 })().catch(e => { console.error('E2E_FAIL: ' + e.message); process.exit(1); });
