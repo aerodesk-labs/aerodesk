@@ -107,7 +107,7 @@ curl -s http://127.0.0.1:<SFU_INTERNAL_PORT>/metrics/prometheus | grep turn_allo
 | `AERODESK_FORCE_RELAY` | `1`（S3 用） | 只通告 relayed 候选 |
 | `AERO_SIP_TRANSPORT` | `udp`（默认）/`tls` | 信令传输；公网建议 `tls` |
 | `AERO_SIP_PORT` | 0=按传输默认（5060/5061） | 覆盖端口 |
-| `AERO_SIP_DOMAIN` | `aerodesk.io`（与 signal 配置一致） | Digest realm |
+| `AERO_SIP_DOMAIN` | `aerodesk.test`（代码缺省；AoR 报文域。Digest realm 由服务端 401 质询下发——与 domain 无关，误填不影响认证只影响路由域一致性） | AoR 域 |
 | `AERO_SIP_CA_PEM` | CA 路径（自签时） | TLS 校验 |
 | `RUST_LOG` | `aerodesk_agent=info`（证据采集时 `=debug`） | 日志级别；**媒体源地址与路径锁定证据需 debug** |
 
