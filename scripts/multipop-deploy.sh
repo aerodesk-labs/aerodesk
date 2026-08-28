@@ -5,24 +5,23 @@
 #
 # 前提：
 #   1) 本机可免密 ssh 到两台主机且有 sudo（systemd 安装）；
-#   2) 本机可编译（默认 release）；本机有 nc（健康探测）；
-#   3) 端口：SFU 媒体 3478/公共 HTTPS 3000/内部 3002；signal WSS 3001/明文 3003；
+#   2) 本机可编译（默认 release）；本机有 curl（P3 探活走 ops HTTPS /healthz）；
+#   3) 端口：SFU 媒体 3478/公共 HTTPS 3000/内部 3002；signal ops HTTPS 3001/
+#      SIP/UDP 5060（P3 SIP 单栈，TLS 5061/WSS 3061 默认同证书开启）；
 #      TURN UDP+TCP 3479/TLS 5349（可经 --*-port 覆盖）；
-#   4) 认证：静态 token（AUTH_TOKENS）——本脚本不签发 JWT（--jwt-secret 为可选
-#      附加项；验收链路使用静态 token，见注意 1）；
-#   5) 客户端默认用明文 ws://<host>:3003/ws 连信令（当前 tungstenite 构建无 TLS
-#      feature，不支持 wss://）；生产请在前端放 TLS 反代或启用 wss 构建（见注意 2）；
+#   4) 认证：静态 token（AUTH_TOKENS）——即 SIP Digest 口令（规范 §8 迁移期
+#      同一凭据），客户端 --token 直传；
+#   5) 客户端信令地址为 SIP 形态 ws://<host>:<sip-udp-port>（agent 的 ws://
+#      URL 即 SIP 寻址载体，AERO_SIP_PORT 可显式覆盖端口）；跨 PoP 房间由
+#      signal 302+Contact（POP_SIP_URLS）引导；
 #   6) --cert-file/--key-file 指向主机上已存在的证书路径（脚本不负责上传）。
 #
-# 注意 1：--jwt-secret 一旦设置，信令 auth_result 只认 JWT、不再回退 AUTH_TOKENS，
-#         验收（静态 token）会全部 auth failed——生产用 JWT 请手动签发，勿与本
-#         脚本验收混用。
-# 注意 2：默认 SIGNAL_A_URL/B 为 ws://<host>:3003/ws；生产 wss 需 tungstenite TLS
-#         feature + 证书，或反代 TLS 到 3003。
+# 注意：远程桥接模式验收（BRIDGE 编排）随 P3 服务端拆栈退役，待 #601 桥双腿
+#       SIP 化重建后恢复；当前 --deploy-only 部署链路可用。
 #
 # 用法：
 #   scripts/multipop-deploy.sh --pop-a root@pop-a.example.com --pop-b root@pop-b.example.com \
-#     --auth <信令token> --room-prefix bridge- [--dry-run] [--deploy-only] [--cleanup] [--help]
+#     --auth <信令token> [--dry-run] [--deploy-only] [--cleanup] [--help]
 #   [--sfu-host-address-a <IP> --sfu-host-address-b <IP>]  # SFU 对外通告地址覆盖（NAT/docker0；默认取 HOST 点分 IPv4）
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -33,10 +32,10 @@ AUTH=""; ROOM_PREFIX="bridge-"
 SIGNAL_A_URL=""; SIGNAL_B_URL=""
 INSTALL_DIR="/opt/aerodesk"; RECORD_DIR="/var/lib/aerodesk/records"
 SFU_PORT=3478; SFU_HTTP_PORT=3000; SFU_INT_PORT=3002
-SIG_WSS_PORT=3001; SIG_PLAIN_PORT=3003; TURN_PORT=3479; TURN_TLS_PORT=5349
+SIG_OPS_PORT=3001; SIG_SIP_PORT=5060; TURN_PORT=3479; TURN_TLS_PORT=5349
 PROFILE="release"; TARGET_DIR="$PWD/target/$PROFILE"
 DRY_RUN=0; DEPLOY_ONLY=0; CLEANUP=0; SKIP_BUILD=0
-JWT_SECRET=""; CERT_FILE=""; KEY_FILE=""
+CERT_FILE=""; KEY_FILE=""
 SFU_HOST_ADDRESS_A=""; SFU_HOST_ADDRESS_B=""
 need_value() { [ "$#" -ge 2 ] || { echo "参数 $1 需要值" >&2; exit 2; }; }
 while [ "$#" -gt 0 ]; do
@@ -49,7 +48,6 @@ while [ "$#" -gt 0 ]; do
     --signal-url-b) need_value "$@"; SIGNAL_B_URL="$2"; shift 2 ;;
     --install-dir) need_value "$@"; INSTALL_DIR="$2"; shift 2 ;;
     --record-dir) need_value "$@"; RECORD_DIR="$2"; shift 2 ;;
-    --jwt-secret) need_value "$@"; JWT_SECRET="$2"; shift 2 ;;
     --cert-file) need_value "$@"; CERT_FILE="$2"; shift 2 ;;
     --key-file) need_value "$@"; KEY_FILE="$2"; shift 2 ;;
     --sfu-host-address-a) need_value "$@"; SFU_HOST_ADDRESS_A="$2"; shift 2 ;;
@@ -57,8 +55,8 @@ while [ "$#" -gt 0 ]; do
     --sfu-port) need_value "$@"; SFU_PORT="$2"; shift 2 ;;
     --sfu-http-port) need_value "$@"; SFU_HTTP_PORT="$2"; shift 2 ;;
     --sfu-int-port) need_value "$@"; SFU_INT_PORT="$2"; shift 2 ;;
-    --sig-wss-port) need_value "$@"; SIG_WSS_PORT="$2"; shift 2 ;;
-    --sig-plain-port) need_value "$@"; SIG_PLAIN_PORT="$2"; shift 2 ;;
+    --sig-ops-port) need_value "$@"; SIG_OPS_PORT="$2"; shift 2 ;;
+    --sig-sip-port) need_value "$@"; SIG_SIP_PORT="$2"; shift 2 ;;
     --turn-port) need_value "$@"; TURN_PORT="$2"; shift 2 ;;
     --turn-tls-port) need_value "$@"; TURN_TLS_PORT="$2"; shift 2 ;;
     --profile) need_value "$@"; PROFILE="$2"; TARGET_DIR="$PWD/target/$PROFILE"; shift 2 ;;
@@ -78,7 +76,6 @@ case "$PROFILE" in release|debug) ;; *) echo "--profile 仅支持 release|debug"
 [ -n "$POP_A" ] && [ -n "$POP_B" ] || { echo "需要 --pop-a 与 --pop-b（user@host）" >&2; exit 2; }
 command -v openssl >/dev/null || { echo "需要 openssl（生成默认 token/密钥）" >&2; exit 2; }
 [ -n "$AUTH" ] || AUTH="$(openssl rand -hex 16)"
-[ -n "$JWT_SECRET" ] && echo "WARN: --jwt-secret 会让信令只认 JWT，静态 token 验收将失败（见注意 1）" >&2
 
 say() { echo "[deploy] $*"; }
 run() { if [ "$DRY_RUN" = "1" ]; then echo "[dry-run] $*"; else "$@"; fi; }
@@ -92,9 +89,10 @@ scp_to() { # $1=host $2=本地 $3=远端
 }
 
 HOST_A="${POP_A##*@}"; HOST_B="${POP_B##*@}"
-# 当前 tungstenite 构建无 TLS feature：默认明文 ws://<host>:3003/ws（见注意 2）。
-SIGNAL_A_URL="${SIGNAL_A_URL:-ws://${HOST_A}:${SIG_PLAIN_PORT}/ws}"
-SIGNAL_B_URL="${SIGNAL_B_URL:-ws://${HOST_B}:${SIG_PLAIN_PORT}/ws}"
+# P3 SIP 单栈：客户端信令地址 = SIP 形态 ws://<host>:<SIG_SIP_PORT>（agent 解析
+# 为 SIP/UDP 到该 host:port，AERO_SIP_PORT 可显式覆盖；见前提 5）。
+SIGNAL_A_URL="${SIGNAL_A_URL:-ws://${HOST_A}:${SIG_SIP_PORT}}"
+SIGNAL_B_URL="${SIGNAL_B_URL:-ws://${HOST_B}:${SIG_SIP_PORT}}"
 
 # ---- env 生成（printf 展开；$ 保留字面，供 sh -c 在子进程展开）----
 gen_sfu_env() { # $1=pop-a|pop-b
@@ -124,29 +122,24 @@ gen_sfu_env() { # $1=pop-a|pop-b
 }
 gen_signal_env() { # $1=pop-a|pop-b
   OUT=""
-  printf -v OUT '%sEnvironment=SIGNAL_PORT=%s\n' "$OUT" "$SIG_WSS_PORT"
-  printf -v OUT '%sEnvironment=SIGNAL_PLAIN_PORT=%s\n' "$OUT" "$SIG_PLAIN_PORT"
+  printf -v OUT '%sEnvironment=SIGNAL_OPS_PORT=%s\n' "$OUT" "$SIG_OPS_PORT"
+  # P3 SIP 单栈：SIP/UDP 显式；SIP/TLS 5061 与 SIP/WSS 3061 复用同证书默认开。
+  printf -v OUT '%sEnvironment=SIP_UDP_PORT=%s\n' "$OUT" "$SIG_SIP_PORT"
   printf -v OUT '%sEnvironment=AUTH_TOKENS=%s\n' "$OUT" "$AUTH"
-  if [ -n "$JWT_SECRET" ]; then printf -v OUT '%sEnvironment=JWT_SECRET=%s\n' "$OUT" "$JWT_SECRET"; fi
-  printf -v OUT '%sEnvironment=TURN_SECRET=%s\n' "$OUT" "$AUTH"
   printf -v OUT '%sEnvironment=SFU_URL=http://127.0.0.1:%s\n' "$OUT" "$SFU_INT_PORT"
   printf -v OUT '%sEnvironment=SFU_TOKEN=%s\n' "$OUT" "$AUTH"
   printf -v OUT '%sEnvironment=POP_ID=%s\n' "$OUT" "$1"
+  # 跨 PoP：本 PoP 房间归属他 PoP 时 302+Contact 引导（host:port 载体）。
+  # 双向对称——任一 PoP 都可能收到归属对端的 INVITE，缺一侧会回 486 而非 302。
   if [ "$1" = "pop-a" ]; then
-    printf -v OUT '%sEnvironment=TURN_URLS=turn:%s:%s?transport=udp,turn:%s:%s?transport=tcp,turns:%s:%s?transport=tcp\n' "$OUT" "$HOST_A" "$TURN_PORT" "$HOST_A" "$TURN_PORT" "$HOST_A" "$TURN_TLS_PORT"
+    printf -v OUT '%sEnvironment=POP_SIP_URLS=pop-b=%s:%s\n' "$OUT" "$HOST_B" "$SIG_SIP_PORT"
   else
-    printf -v OUT '%sEnvironment=TURN_URLS=turn:%s:%s?transport=udp,turn:%s:%s?transport=tcp,turns:%s:%s?transport=tcp\n' "$OUT" "$HOST_B" "$TURN_PORT" "$HOST_B" "$TURN_PORT" "$HOST_B" "$TURN_TLS_PORT"
-    printf -v OUT '%sEnvironment=ROOM_POP_MAP=%s=pop-a\n' "$OUT" "$ROOM_PREFIX"
-    printf -v OUT '%sEnvironment=POP_URLS=pop-a=%s\n' "$OUT" "$SIGNAL_A_URL"
-    # systemd Environment= 值含空格必须整段加引号；$BRIDGE_AUTH_TOKEN 保持字面，
-    # 由 signal 的 sh -c 在子进程展开（BRIDGE_AUTH_TOKEN 单独一行设置）。
-    printf -v OUT '%sEnvironment="BRIDGE_CMD=%s/bin/aerodesk-bridge --remote-signal %s --local-signal %s --room {room} --auth-token $BRIDGE_AUTH_TOKEN --codec h264"\n' "$OUT" "$INSTALL_DIR" "$SIGNAL_A_URL" "$SIGNAL_B_URL"
-    printf -v OUT '%sEnvironment=BRIDGE_AUTH_TOKEN=%s\n' "$OUT" "$AUTH"
-    printf -v OUT '%sEnvironment=BRIDGE_READY_TIMEOUT_SECS=30\n' "$OUT"
+    printf -v OUT '%sEnvironment=POP_SIP_URLS=pop-a=%s:%s\n' "$OUT" "$HOST_A" "$SIG_SIP_PORT"
   fi
   if [ -n "$CERT_FILE" ]; then printf -v OUT '%sEnvironment=CERT_FILE=%s\n' "$OUT" "$CERT_FILE"; fi
   if [ -n "$KEY_FILE" ]; then printf -v OUT '%sEnvironment=KEY_FILE=%s\n' "$OUT" "$KEY_FILE"; fi
 }
+
 gen_unit_file() { # $1=unit名 $2=kind $3=pop  -> $TMPDIR_UNITS/$1
   gen_${2}_env "$3"
   local envs="$OUT"
@@ -208,45 +201,29 @@ deploy_host() { # $1=host(user@host) $2=pop
 deploy_host "$POP_A" "pop-a"
 deploy_host "$POP_B" "pop-b"
 
-# ---- 3) 健康等待（验收用明文端口 3003；dry-run 只打印命令）----
-say "等待服务健康（$HOST_A:$SIG_PLAIN_PORT / $HOST_B:${SIG_PLAIN_PORT}）"
+# ---- 3) 健康等待（P3：探 ops HTTPS /healthz；dry-run 只打印命令）----
+say "等待服务健康（$HOST_A:$SIG_OPS_PORT / $HOST_B:${SIG_OPS_PORT}）"
 if [ "$DRY_RUN" = "1" ]; then
-  echo "[dry-run] nc -z $HOST_A $SIG_PLAIN_PORT && nc -z $HOST_B $SIG_PLAIN_PORT"
+  echo "[dry-run] curl -sk https://$HOST_A:$SIG_OPS_PORT/healthz && curl -sk https://$HOST_B:$SIG_OPS_PORT/healthz"
 else
   for i in $(seq 1 60); do
-    if nc -z "$HOST_A" "$SIG_PLAIN_PORT" 2>/dev/null && nc -z "$HOST_B" "$SIG_PLAIN_PORT" 2>/dev/null; then
-      say "双 PoP 信令端口就绪"; break
+    if curl -sk "https://$HOST_A:$SIG_OPS_PORT/healthz" 2>/dev/null | grep -q status \
+       && curl -sk "https://$HOST_B:$SIG_OPS_PORT/healthz" 2>/dev/null | grep -q status; then
+      say "双 PoP ops 面就绪"; break
     fi
     [ "$i" = "60" ] && { echo "健康等待超时" >&2; exit 1; }
     sleep 2
   done
 fi
 
-# ---- 4) 远程模式验收 + 报告 ----
+# ---- 4) 远程验收（P3 退役注记）----
+
 if [ "$DEPLOY_ONLY" = "1" ]; then
   say "部署完成（--deploy-only，跳过验收）"
   exit 0
 fi
-REPORT="/tmp/aerodesk-acceptance-$(date +%Y%m%d-%H%M%S).log"
-say "运行远程模式验收（报告：${REPORT}）"
-BRIDGE_CMD_ACCEPT="${INSTALL_DIR}/bin/aerodesk-bridge --remote-signal ${SIGNAL_A_URL} --local-signal ${SIGNAL_B_URL} --room {room} --auth-token \$BRIDGE_AUTH_TOKEN --codec h264"
-if [ "$DRY_RUN" = "1" ]; then
-  echo "[dry-run] POP_A_SIGNAL=$SIGNAL_A_URL POP_B_SIGNAL=$SIGNAL_B_URL AUTH=<redacted> \\"
-  echo "[dry-run]   BRIDGE_CMD='$BRIDGE_CMD_ACCEPT' BRIDGE_KILL_CMD='ssh $POP_B pkill -f aerodesk-bridge' \\"
-  echo "[dry-run]   scripts/bridge-fallback-e2e.sh | tee $REPORT"
-  exit 0
-fi
-POP_A_SIGNAL="$SIGNAL_A_URL" POP_B_SIGNAL="$SIGNAL_B_URL" AUTH="$AUTH" \
-  BRIDGE_CMD="$BRIDGE_CMD_ACCEPT" \
-  BRIDGE_KILL_CMD="ssh $POP_B pkill -f aerodesk-bridge" \
-  scripts/bridge-fallback-e2e.sh 2>&1 | tee "$REPORT"
-RC=${PIPESTATUS[0]}
-echo
-say "验收报告：$REPORT"
-grep -E "PASS|FAIL|p50/p90/p99" "$REPORT" | tail -20 || true
-if [ "$RC" = "0" ]; then
-  say "真实多 PoP 部署验收 PASS"
-else
-  say "验收失败（RC=${RC}），详见 $REPORT"
-fi
-exit "$RC"
+# P3：BRIDGE 编排（远程桥验收）随服务端拆栈退役——待 #601 桥双腿 SIP 化重建。
+# 当前 --deploy-only 部署链路可用；不带 --deploy-only 时提示并退出。
+say "远程桥验收已退役（BRIDGE 编排待 #601 重建）；仅完成部署与健康检查"
+exit 0
+

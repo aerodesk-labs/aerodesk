@@ -42,20 +42,20 @@ xcrun simctl bootstatus "$DEVICE" -b >/dev/null 2>&1 || true
 xcrun simctl boot "$DEVICE" 2>/dev/null || true
 xcrun simctl bootstatus "$DEVICE" -b >/dev/null 2>&1 || true
 
-echo "== [4/7] 启动 SFU/signal/publisher（端口可配，默认 3478/3000/3002 + 3001/3003）"
+echo "== [4/7] 启动 SFU/signal/publisher（端口可配，默认 3478/3000/3002 + ops 3001/SIP UDP 5060）"
 REC="$(mktemp -d)"
 SFU_MEDIA_PORT="${SFU_MEDIA_PORT:-3478}" SFU_SIGNAL_PORT="${SFU_SIGNAL_PORT:-3000}" \
   SFU_INTERNAL_PORT="${SFU_INTERNAL_PORT:-3002}" RECORD_DIR="$REC" \
   ./target/debug/aerodesk-sfu >/tmp/iossim-sfu.log 2>&1 &
 SFU=$!
-SIGNAL_PORT="${SIGNAL_PORT:-3001}" SIGNAL_PLAIN_PORT="${SIGNAL_PLAIN_PORT:-3003}" \
+SIGNAL_OPS_PORT="${SIGNAL_OPS_PORT:-3001}" \
   SFU_URL="http://127.0.0.1:${SFU_INTERNAL_PORT:-3002}" \
   SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/iossim-sig.log 2>&1 &
 SIG=$!
 # 等 SFU/signal 就绪再起 publisher（此前固定 sleep 1.5，CI 负载下 SFU /start 会超时）
 for _ in $(seq 1 50); do
     if nc -z 127.0.0.1 "${SFU_INTERNAL_PORT:-3002}" 2>/dev/null \
-       && grep -q "SIP/UDP 监听已起" /tmp/iossim-sig.log 2>/dev/null; then break; fi
+       && curl -sk "https://127.0.0.1:${SIGNAL_OPS_PORT:-3001}/healthz" 2>/dev/null | grep -q status; then break; fi
     sleep 0.2
 done
 # 发布端编码：默认 h265（#328 参数集内联回归；合成源无需采集权限）。
@@ -75,7 +75,7 @@ elif [ "$PUBLISHER_ENCODER" = "screen" ]; then
 else
     ENC="$PUBLISHER_ENCODER"
 fi
-./target/debug/aerodesk-agent --role publisher --signal "ws://127.0.0.1:${SIGNAL_PLAIN_PORT:-3003}" --room "$ROOM" --encoder "$ENC" $CODEC_ARGS $CAMERA_ARGS >/tmp/iossim-pub.log 2>&1 &
+./target/debug/aerodesk-agent --role publisher --signal "ws://127.0.0.1:${SIGNAL_OPS_PORT:-3001}" --room "$ROOM" --encoder "$ENC" $CODEC_ARGS $CAMERA_ARGS >/tmp/iossim-pub.log 2>&1 &
 PUB=$!
 sleep 2
 
@@ -86,7 +86,7 @@ xcrun simctl install "$DEVICE" "$APP"
 launch_app() {
     rm -f /tmp/iossim-console.log
     nohup xcrun simctl launch --console "$DEVICE" io.aerodesk.viewer \
-        -autoconnect -server "ws://127.0.0.1:${SIGNAL_PLAIN_PORT:-3003}" -room "$ROOM" > /tmp/iossim-console.log 2>&1 &
+        -autoconnect -server "ws://127.0.0.1:${SIGNAL_OPS_PORT:-3001}" -room "$ROOM" > /tmp/iossim-console.log 2>&1 &
 }
 launch_app
 APP_OK=0

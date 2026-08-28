@@ -125,10 +125,6 @@ fn run() {
     let args: Vec<String> = std::env::args().collect();
     init_log();
 
-    if args.iter().any(|a| a == "--issue-token") {
-        issue_token(&args);
-        return;
-    }
     // macOS 系统音频采集探针：--probe-audio 启动 audio-only SCStream 5s，
     // 打印采集样本统计（验证 SCK 系统音频在本机可用）。
     if args.iter().any(|a| a == "--probe-audio") {
@@ -608,56 +604,6 @@ fn run() {
             )
         }
         other => panic!("unknown role {other}"),
-    }
-}
-
-/// 签发信令 JWT（供运维/测试使用）。
-///
-/// 用法：
-///   JWT_SECRET=<secret> aerodesk-agent --issue-token --user u1 --device mac-1 --room demo --role publisher --ttl 3600
-///   JWT_SECRET=<secret> aerodesk-agent --issue-token --user u1 --room demo --role "*" --ttl 86400 [--max-conns 4]
-fn issue_token(args: &[String]) {
-    let secret = match std::env::var("JWT_SECRET") {
-        Ok(s) if !s.is_empty() => s,
-        _ => {
-            eprintln!("JWT_SECRET 环境变量未设置");
-            std::process::exit(1);
-        }
-    };
-    let user = arg(args, "--user").unwrap_or_else(|| {
-        eprintln!("缺少 --user");
-        std::process::exit(1);
-    });
-    let device = arg(args, "--device");
-    let room = arg(args, "--room");
-    let role = match arg(args, "--role").as_deref() {
-        Some("publisher") => Some(Role::Publisher),
-        Some("viewer") => Some(Role::Viewer),
-        Some("*") | None => None,
-        Some(other) => {
-            eprintln!("unknown role: {other} (publisher/viewer/*)");
-            std::process::exit(1);
-        }
-    };
-    let ttl: u64 = arg(args, "--ttl")
-        .and_then(|t| t.parse().ok())
-        .unwrap_or(3600);
-    let max_conns: Option<u32> = arg(args, "--max-conns").and_then(|m| m.parse().ok());
-
-    match aerodesk_core::protocol::jwt::mint_token(
-        &secret,
-        &user,
-        device.as_deref(),
-        room.as_deref(),
-        role,
-        ttl,
-        max_conns,
-    ) {
-        Ok(token) => println!("{token}"),
-        Err(e) => {
-            eprintln!("签发失败: {e}");
-            std::process::exit(1);
-        }
     }
 }
 

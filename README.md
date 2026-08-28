@@ -23,7 +23,7 @@ aerodesk/
 ├── crates/
 │   ├── aerodesk-sfu/        # SFU 服务端：8 shard × SO_REUSEPORT + UnifiedSocket(UDP/TCP/SSL-TCP 3478)
 │   │                        #   + BitrateController/simulcast 选层 + /healthz + /metrics[/prometheus] ✅
-│   ├── aerodesk-signal/     # 独立信令：WSS:3001 + WS:3003，房间/认证/TURN 凭证，代理 SFU 内部 API ✅
+│   ├── aerodesk-signal/     # 独立信令（P3 SIP 单栈）：SIP/UDP 5060 + TLS 5061 + WSS 3061 + ops HTTPS 3001，REGISTER/INVITE ✅
 │   ├── aerodesk-protocol/   # 共享协议：input/signal 消息 + coturn REST 凭证 ✅
 │   ├── aerodesk-core/       # 客户端核心：Endpoint(SDP/ICE/DTLS/数据通道) + 信令客户端 + VP8 解析 ✅
 │   │                        #   platform trait：MediaSource/Encoder/Decoder/Renderer/InputInjector/
@@ -45,7 +45,7 @@ aerodesk/
 # 服务端（SFU：UDP/TCP/SSL-TCP 同端口 3478 + 内部 API 3002）
 TURN_SECRET=<coturn static-auth-secret> cargo run -p aerodesk-sfu
 
-# 独立信令（WSS 3001 / WS 3003）
+# 独立信令（P3 SIP 单栈：SIP/UDP 5060 + SIP/TLS 5061 + SIP/WSS 3061；ops HTTPS 3001）
 cargo run -p aerodesk-signal
 
 # 发布端（macOS 真实屏幕采集，需屏幕录制 + 辅助功能权限）
@@ -99,7 +99,7 @@ native (被控端) ───┼─ WebRTC ─▶ aerodesk-sfu ─┼─ (无重�
                   └── input 数据通道（观看端→被控端）──┘
 ```
 
-- 信令：WSS（aerodesk-signal :3001）→ Join → offer/answer 代理到 SFU 内部接口（127.0.0.1:3002）
+- 信令：SIP（aerodesk-signal，REGISTER/INVITE，UDP 5060/TLS 5061/WSS 3061）→ 会议 INVITE 桥接到 SFU 内部接口（127.0.0.1:3002）
 - 媒体：`MediaData` 选择性转发（不重编码）；simulcast 选层（q/h/f）已实现
 - 输入：`input` 通道 JSON 事件（协议类型在 `aerodesk-protocol::input`）
 - 编码：VideoToolbox 硬编（macOS 主路径）/ x264 软编回退（RGB→I420 4:2:0，单 slice 确定性输出）

@@ -90,7 +90,7 @@ start_sfu() {
 }
 start_signal() {
     # #598 P2a：浏览器信令走 SIP-WSS（3061）；UDP 5060 供 CLI（本脚本不用）。
-    SIGNAL_PORT=14501 SIGNAL_PLAIN_PORT=14503 SFU_URL=http://127.0.0.1:14502 \
+    SIGNAL_PORT=14501 SFU_URL=http://127.0.0.1:14502 \
       SIP_UDP_PORT=5060 SIP_WSS_PORT=3061 ./target/debug/aerodesk-signal >/tmp/webrec-sig.log 2>&1 &
     echo $! > /tmp/webrec-sig.pid
 }

@@ -18,11 +18,11 @@ ROOM="bridge-turn-$(date +%s)"
 AUTH="test-bridge-token"
 TURN_SECRET="testsecret"
 # PoP-A
-SIG_A=15700; INT_A=15702; PLAIN_A=15703; MEDIA_A=15778; TURN_A=15779; TURN_TLS_A=15734
+SIG_A=15700; INT_A=15702; PLAIN_A=15703; MEDIA_A=15778; SIP_A=15704; TURN_A=15779; TURN_TLS_A=15734
 # PoP-B
-SIG_B=15800; INT_B=15802; PLAIN_B=15803; MEDIA_B=15878; TURN_B=15879; TURN_TLS_B=15834
+SIG_B=15800; INT_B=15802; PLAIN_B=15803; MEDIA_B=15878; SIP_B=15804; TURN_B=15879; TURN_TLS_B=15834
 SIG_A_URL="ws://127.0.0.1:${PLAIN_A}"; SIG_B_URL="ws://127.0.0.1:${PLAIN_B}"
-BRIDGE_CMD="$TARGET_DIR/aerodesk-bridge --remote-signal ${SIG_A_URL} --local-signal ${SIG_B_URL} --room {room} --auth-token \"\$BRIDGE_AUTH_TOKEN\" --codec h264"
+BRIDGE_CMD="$TARGET_DIR/aerodesk-bridge --remote-signal ${SIG_A_URL} --local-signal ${SIG_B_URL} --room {room} --auth-token \"\$BRIDGE_AUTH_TOKEN\" --codec h264 --remote-sip-port \"$SIP_A\" --local-sip-port \"$SIP_B\""
 
 fail() { echo "FAIL: $*"; exit 1; }
 cleanup() {
@@ -82,19 +82,27 @@ RECORD_DIR="$REC_A" SFU_MEDIA_PORT="$MEDIA_A" SFU_SIGNAL_PORT="$SIG_A" SFU_INTER
   TURN_SECRET="$TURN_SECRET" SFU_TURN_PORT="$TURN_A" SFU_TURN_TLS_PORT="$TURN_TLS_A" \
   "$TARGET_DIR/aerodesk-sfu" >/tmp/btr-sfu-a.log 2>&1 &
 SFU_A=$!
-POP_ID=pop-a AUTH_TOKENS="$AUTH" SIGNAL_PORT=15001 SIGNAL_PLAIN_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
+POP_ID=pop-a AUTH_TOKENS="$AUTH" SIGNAL_PORT=15001 SIGNAL_OPS_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
   TURN_SECRET="$TURN_SECRET" TURN_URLS="turn:127.0.0.1:${TURN_A}?transport=udp" \
-  SIP_UDP_PORT=5060 "$TARGET_DIR/aerodesk-signal" >/tmp/btr-sig-a.log 2>&1 &
+  SIP_UDP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-signal" >/tmp/btr-sig-a.log 2>&1 &
 SIG_A_PID=$!
 for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_A" 2>/dev/null && break; sleep 0.2; done
 wait_turn_ready "$INT_A" "PoP-A" /tmp/btr-sfu-a.log || fail "PoP-A 内嵌 TURN 未就绪"
 sleep 0.3
 
 echo "== 场景 0：PoP-A 直连基线（TURN relay）延迟"
-"$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
+# #552 SIP 1:1：publisher 是 UAS（等 IncomingCall）——先等注册就绪再起 viewer
+#（呼入触发 ICE）；注册前等 ICE 必超时。
+AERO_SIP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/btr-direct-pub.log 2>&1 &
 PUB0=$!
+ok=0
+for _ in $(seq 1 30); do grep -q "SIP registered" /tmp/btr-direct-pub.log 2>/dev/null && ok=1 && break; sleep 0.5; done
+[ "$ok" = "1" ] || { echo "publisher 未注册："; tail -5 /tmp/btr-direct-pub.log; fail "场景0：publisher 未注册"; }
+AERO_SIP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
+  >/tmp/btr-direct-view.log 2>&1 &
+VIEW0=$!
 ok=0
 for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/btr-direct-pub.log 2>/dev/null && ok=1 && break; sleep 0.5; done
 if [ "$ok" != "1" ]; then
@@ -102,9 +110,6 @@ if [ "$ok" != "1" ]; then
   echo "--- SFU-A 日志尾 ---"; tail -20 /tmp/btr-sfu-a.log
   fail "场景0：publisher 未连上（TURN relay）"
 fi
-"$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
-  >/tmp/btr-direct-view.log 2>&1 &
-VIEW0=$!
 wait_decoded /tmp/btr-direct-view.log || fail "场景0：直连 viewer 未解码（TURN relay）"
 for _ in $(seq 1 160); do
   [ "$(latency_count /tmp/btr-direct-view.log)" -ge 15 ] && break
@@ -126,8 +131,8 @@ SFU_B=$!
 POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=${SIG_A_URL}" \
   BRIDGE_CMD="$BRIDGE_CMD" BRIDGE_READY_TIMEOUT_SECS=20 BRIDGE_AUTH_TOKEN="$AUTH" \
   TURN_SECRET="$TURN_SECRET" TURN_URLS="turn:127.0.0.1:${TURN_B}?transport=udp" \
-  SIGNAL_PORT=15101 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
-  SIP_UDP_PORT= "$TARGET_DIR/aerodesk-signal" >/tmp/btr-sig-b.log 2>&1 &
+  SIGNAL_PORT=15101 SIGNAL_OPS_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
+  SIP_UDP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-signal" >/tmp/btr-sig-b.log 2>&1 &
 SIG_B_PID=$!
 for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break; sleep 0.2; done
 wait_turn_ready "$INT_B" "PoP-B" /tmp/btr-sfu-b.log || fail "PoP-B 内嵌 TURN 未就绪"
@@ -135,10 +140,18 @@ sleep 0.3
 grep -q "bridge orchestration enabled" /tmp/btr-sig-b.log || fail "PoP-B 未启用桥编排"
 
 echo "== 场景 1：PoP-A publisher(--audio) + bridge（双腿 TURN relay）→ PoP-B viewer"
-"$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
+# 同场景 0：先等注册就绪，bridge view 腿呼入后再等 ICE。
+AERO_SIP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy --audio \
   >/tmp/btr-pub-a.log 2>&1 &
 PUB_A=$!
+ok=0
+for _ in $(seq 1 30); do grep -q "SIP registered" /tmp/btr-pub-a.log 2>/dev/null && ok=1 && break; sleep 0.5; done
+[ "$ok" = "1" ] || { echo "publisher 未注册："; tail -5 /tmp/btr-pub-a.log; fail "场景1：PoP-A publisher 未注册"; }
+
+AERO_SIP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" \
+  >/tmp/btr-view-b.log 2>&1 &
+VIEW_B=$!
 ok=0
 for _ in $(seq 1 120); do grep -q "ICE connected" /tmp/btr-pub-a.log 2>/dev/null && ok=1 && break; sleep 0.5; done
 if [ "$ok" != "1" ]; then
@@ -147,9 +160,6 @@ if [ "$ok" != "1" ]; then
   fail "场景1：PoP-A publisher 未连上（TURN relay）"
 fi
 
-"$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" \
-  >/tmp/btr-view-b.log 2>&1 &
-VIEW_B=$!
 wait_decoded /tmp/btr-view-b.log || fail "场景1：PoP-B viewer 未解码跨 PoP 媒体（TURN relay，见 /tmp/btr-view-b.log）"
 grep -q "signal redirect" /tmp/btr-view-b.log && fail "场景1：viewer 不应收到 Redirect"
 ok=0

@@ -90,7 +90,7 @@ web_port = int(os.environ.get("WEB_SERVE_PORT", "38086"))
 ok = False
 for _ in range(50):
     try:
-        for p in (3003, 3002, web_port):
+        for p in (3002, web_port):  # 3003 明文 WS 已随 #598 P3 退役，剔出探活
             c = socket.create_connection(("127.0.0.1", p), 0.5); c.close()
         ok = True; break
     except OSError:

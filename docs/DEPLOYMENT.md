@@ -7,8 +7,9 @@
 
 ```
                         ┌────────────────────────────┐
- 客户端 ──WSS(:443)────▶│ aerodesk-signal           │
-   │                    │  JWT 认证 / 房间 / TURN 凭证 │
+ 客户端 ──SIP/UDP:5060─▶│ aerodesk-signal（SIP 单栈） │
+   │   SIP/TLS:5061     │  REGISTER/INVITE + ops HTTP │
+   │   SIP/WSS:3061     │  （房间归属 / SFU 会议桥）    │
    │  WebRTC            └──────────┬─────────────────┘
    │   UDP:3478 / TCP:443          │ 内部 HTTP(S) :3002（SFU_TOKEN 保护）
    │        │                      ▼
@@ -24,10 +25,12 @@
 
 | 组件 | 变量 | 说明 |
 |---|---|---|
-| signal | `JWT_SECRET` | HS256 共享密钥；**生产必设**，开启 JWT 认证 |
-| signal | `JWT_SECRET_OLD` | 旧密钥（轮换宽限期，可选）：新密钥验证失败时回退；轮换完成后移除 |
-| signal | `AUTH_TOKENS` | 静态 token（兼容模式；JWT 开启时忽略） |
-| signal | `TURN_SECRET` / `TURN_URLS` | TURN REST 凭证下发（内嵌或 coturn） |
+| signal | `SIGNAL_OPS_PORT` | HTTP 运维面端口（默认 3001；兼容别名 `SIGNAL_PORT`）：/healthz /devices /metrics/prometheus /admin/temp-password |
+| signal | `SIP_TLS_PORT` / `SIP_WSS_PORT` / `SIP_UDP_PORT` | SIP 三传输端口（P3 默认全开：5061 / 3061 / 5060）；`off`/`disabled`/`none` 显式关闭对应传输 |
+| signal | `SIP_REALM` | SIP Digest 域（默认 `aerodesk`） |
+| signal | `SIP_DIGEST_USERS` | 设备固定密码表（逗号分隔 `user=password`；#503-4） |
+| signal | `SIP_ADMIN_TOKEN` | /admin/temp-password 管理 token（缺省回退首个 `AUTH_TOKEN`） |
+| signal | `AUTH_TOKENS` | 静态 token：即 SIP Digest 回退口令（规范 §8 迁移期同一凭据）+ /admin 鉴权回退 |
 | sfu | `TURN_SECRET` | 启用 TURN：未设 `TURN_URLS` 时启动内嵌 TURN server（#191） |
 | sfu | `SFU_TURN_PORT` | 内嵌 TURN UDP+TCP 端口（默认 3479，#196） |
 | sfu | `SFU_TURN_TLS_PORT` | 内嵌 TURN TLS 端口（默认 5349；证书加载失败降级） |
@@ -41,29 +44,21 @@
 | sfu | `SFU_SHARD_COUNT` | 媒体分片数（默认 CPU 核数，上限 8；1..=64 可覆盖）。大规格机器可上调利用更多核，小容器可下调到 1 |
 | signal | `SFU_URLS` / `SFU_URL` / `SFU_TOKEN` | SFU 池（逗号分隔，可选）+ 单值回退 + 内部 token。设 `SFU_URLS` 时按房间名无状态哈希选路到池中某个 SFU（同房间恒同 SFU）；未设回退 `SFU_URL`（单 SFU，向后兼容） |
 | signal | `SFU_POLL_INTERVAL_SECS` / `SFU_FAIL_COOLDOWN_SECS` | SFU 池负载轮询间隔（默认 5s）与探测失败冷却期（默认 30s，期间不参与新房间分配）。仅 `SFU_URLS` 池 >1 时生效；新房间选最闲 SFU 并避开下线节点；同房间粘性（已分配房间不重映射，SFU 下线由客户端 --reconnect 恢复）。轮询携带 `SFU_TOKEN`（SFU 设 `INTERNAL_TOKEN` 时必须配置）；401/403 视为配置错误告警，不标记节点下线 |
-| signal | `SFU_STICKY_TTL_SECS` | 房间→SFU 粘性映射空闲淘汰阈值（秒，默认 21600=6h，0 值无效按默认；仅池 >1 时生效）：**有活跃 peer 的房间永不淘汰**（粘性保证）；房间已空且映射空闲超过 TTL 才淘汰，防无界增长 |
+| signal | `SFU_STICKY_TTL_SECS` | 房间→SFU 粘性映射空闲淘汰阈值（秒，默认 21600=6h，0 值无效按默认；仅池 >1 时生效）：last_used 由 SIP INVITE 会议分支刷新（池唯一消费点），零 INVITE 超过 TTL 视为死房间淘汰，防无界增长 |
 | sfu | `RECORD_DIR` | 录制/审计目录（可选） |
 | sfu | `RECORD_ON_DEMAND` | `1` 时只录显式 start() 的房间（配合内部 API 按需录制，#160） |
 | sfu | `MAX_ROOM_CLIENTS` / `MAX_TOTAL_CLIENTS` | `/start` 准入配额（0=不限，#180，信令层 #163/#171 之外 SFU 侧纵深防御）；超限 503 `room full`/`server full` |
 | sfu | `RECORD_MAX_BYTES` / `RECORD_MAX_SECS` | 录制轮转（0=不限，#180）：达阈值自动开新段 `{room}.adrec.{N}`，meta.json 汇总 segments |
 | sfu | `AUDIT_MAX_BYTES` | 录制审计日志 `audit.log` 轮转上限（0=不限）：超限归档为 `audit.log.1` 后重开 |
-| signal | `POP_REGISTRY_FILE` | 动态 room→PoP 注册表文件（可选，#154）：多 PoP 共享同一文件即互见；首个加入者登记房间归属 |
+| signal | `POP_REGISTRY_FILE` | 动态 room→PoP 注册表文件（可选，#154）：多 PoP 共享同一文件即互见；房间归属由首个 INVITE 登记（P3 写入点在 INVITE 会议分支） |
 | signal | `POP_REGISTRY_TTL_SECS` | 注册条目 TTL（默认 3600，过期后可被重新登记） |
-| signal | `MAX_ROOM_CLIENTS` | 每房间人数上限（0=不限，#163）；超限 Join 返回 `Error("room full")` |
-| signal | `MAX_TOTAL_CLIENTS` | 单实例全局连接上限（0=不限，#163）；超限返回 `Error("server full")` |
-| signal | `SIGNAL_MAX_PREJOIN_CLIENTS` | 并发「未 Join」连接上限（默认 256，0=不限）：认证/Join 之前的连接同样占线程与 fd 且不受 `MAX_TOTAL_CLIENTS` 约束，超限直接断开（防预认证连接堆积） |
-| signal | `SIGNAL_ALLOWED_ORIGINS` | /ws Origin 白名单（逗号分隔；未设置不校验，`*` 放行全部）。浏览器 WebSocket 必带 Origin；CLI/native 客户端无 Origin 头始终放行 |
-| signal | `SIGNAL_PLAIN_PORT` | 明文 WS 端口（默认 3003，开发用）；设为 `off`/`disabled`/`none` 完全关闭明文服务器（生产建议关闭或用防火墙限制） |
-| signal | `BRIDGE_CMD` | 跨 PoP 桥接编排（#216 M3，可选）：房间桥命令模板（含 `{room}`）。设置后跨 PoP viewer 先经桥在本 PoP 接入，失败/超时回退 v1 Redirect（详见 docs/BRIDGE.md） |
-| signal | `BRIDGE_READY_TIMEOUT_SECS` | 桥就绪等待上限（默认 15） |
-| signal | `BRIDGE_FAIL_COOLDOWN_SECS` | 桥失败冷却（默认 30；期间直接 Redirect 不反复 spawn） |
-| signal | `BRIDGE_MAX_RUNNING` | 并发桥上限（默认 8；防房间名轮换绕过冷却的进程滥用） |
-| signal | `BRIDGE_AUTH_TOKEN` | 注入桥子进程的认证 token（`BRIDGE_CMD` 内 `$BRIDGE_AUTH_TOKEN` 引用，配合 aerodesk-bridge `--auth-token`） |
-| signal | `BRIDGE_IDLE_SECS` | 桥空闲回收阈值（默认 300；房间无真实客户端超时停桥，#246） |
+| signal | `POP_SIP_URLS` | PoP=SIP 目标 host:port（逗号分隔；跨 PoP 房间 INVITE 的 302 Contact 载体） |
+| （P3.1 退役） | `MAX_ROOM_CLIENTS` / `MAX_TOTAL_CLIENTS` / `SIGNAL_MAX_PREJOIN_CLIENTS` / `SIGNAL_ALLOWED_ORIGINS` / `SIGNAL_PLAIN_PORT` / `JWT_SECRET` / `JWT_SECRET_OLD` / `TURN_SECRET`(signal) / `TURN_URLS`(signal) / `ROOM_POP_MAP` / `POP_URLS` / `BRIDGE_*` | 随 JSON 信令面退役（配额/白名单/JWT 认证/TURN 下发/明文 WS/桥编排）；SFU 侧同名配额不受影响 |
 
 ## 2. TLS 证书自动化
 
-生产只开 WSS/443 + SSL-TCP 443，证书自动续期：
+P3 SIP 单栈下证书同时服务 SIP/TLS(:5061)、SIP/WSS(:3061) 与 ops HTTPS(:3001)；
+生产建议 443 反代终止 TLS，SIP/TLS 直连端口配公网证书，自动续期：
 
 **Let's Encrypt（推荐，公网）**：Caddy 或 nginx 反代终止 TLS；
 也可以让 signal/SFU 直接终止 —— 已支持 `CERT_FILE`/`KEY_FILE` 从文件读取
@@ -86,11 +81,11 @@ certbot renew --deploy-hook scripts/cert-renew-hook.sh
 ExecStart=/opt/aerodesk/aerodesk-signal
 Environment=CERT_FILE=/etc/aerodesk/tls/cer.pem
 Environment=KEY_FILE=/etc/aerodesk/tls/key.pem
-Environment=JWT_SECRET=...
+Environment=AUTH_TOKENS=CHANGE_ME
 Restart=on-failure
 ```
 完整可用的 systemd 单元模板见 `deploy/systemd/aerodesk-signal.service` /
-`aerodesk-sfu.service`（含 BRIDGE_CMD/BRIDGE_AUTH_TOKEN 等跨 PoP 桥接示例，
+`aerodesk-sfu.service`（P3 SIP 单栈：SIGNAL_OPS_PORT + SIP 三传输 + POP_SIP_URLS 示例，
 #246）。Prometheus 双 PoP 抓取示例见 `deploy/prometheus/prometheus.yml`。
 
 Caddy 示例：
@@ -101,13 +96,14 @@ signal.aerodesk.io {
 }
 ```
 
-**nginx 反代 + 限流示例**（生产推荐：TLS 终止在 nginx，signal 明文 WS 只绑内网；
-限流覆盖连接/请求速率，防未授权客户端连接 DoS）：
+**nginx 反代 + 限流示例**（生产推荐：TLS 终止在 nginx，signal ops 面只绑内网；
+限流覆盖连接/请求速率，防未授权客户端拉取运维面 DoS。注意 P3 单栈下 SIP/UDP
+5060、SIP/TLS 5061 直连不经反代——反代只服务 ops HTTPS 面）：
 
 ```nginx
 # 每 IP 并发连接 + 请求速率
-limit_conn_zone $binary_remote_addr zone=ws_conn:10m;
-limit_req_zone  $binary_remote_addr zone=ws_req:10m rate=10r/s;
+limit_conn_zone $binary_remote_addr zone=ops_conn:10m;
+limit_req_zone  $binary_remote_addr zone=ops_req:10m rate=10r/s;
 
 server {
     listen 443 ssl;
@@ -115,24 +111,22 @@ server {
     ssl_certificate     /etc/aerodesk/tls/cer.pem;
     ssl_certificate_key /etc/aerodesk/tls/key.pem;
 
-    # HTTP 请求体上限（升级前的握手请求）
     client_max_body_size 1m;
 
-    location /ws {
-        limit_conn ws_conn 5;      # 每 IP 最多 5 个 WS 并发
-        limit_req  zone=ws_req burst=20 nodelay;
-        proxy_pass http://127.0.0.1:3003;  # signal 明文端口
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 3600s;
+    location / {
+        limit_conn ops_conn 20;
+        limit_req  zone=ops_req burst=40 nodelay;
+        # ops HTTPS 上游（/healthz /devices /metrics/prometheus /admin/*）。
+        # signal 自带 TLS（缺省开发证书），内网回环跳过校验即可。
+        proxy_pass https://127.0.0.1:3001;
+        proxy_ssl_verify off;
+        proxy_read_timeout 30s;
     }
 }
 ```
 
-> 注意：nginx 反代 WS 是隧道转发，**无法限制单个 websocket 帧的 payload 大小**（#361 的
-> 帧级上限），只能限连接数/速率/握手请求体。帧级上限需换支持 `max_message_size` 的 ws 库，
-> 或接受 signal 侧 1MiB 事后 cap（挡 serde 解析开销）。
+> 旧 JSON 明文 WS（3003/14703 端口、`Upgrade` 升级头、#361 WS 帧级上限）随
+> P3.1 JSON 面一并退役——SIP 单栈无 WS 长连接反代需求。
 
 **内部 CA（企业内网）**：用 `step-ca` 或 vault PKI 签发，客户端信任链预置；
 证书轮换走 **SIGHUP 热重载**（signal/SFU 均已实现：`kill -HUP <pid>` 重读
@@ -142,25 +136,19 @@ server {
 
 - **就近接入**：每个 PoP 一组 `signal + sfu`（SFU 内嵌 TURN+STUN，#191）；客户端经 DNS（GeoDNS/Anycast）
   选最近 PoP，信令返回该 PoP 的 TURN/SFU 地址。
-- **房间跨 PoP（v1 已支持，#146）**：信令层把房间钉到固定 PoP——每 PoP 设置
-  `POP_ID`，并用 `ROOM_POP_MAP`（`房间前缀=PoP`，逗号分隔，最长前缀优先）声明钉 PoP 的房间，
-  `POP_URLS`（`PoP=客户端信令URL`）给出各 PoP 的信令地址。客户端连错 PoP 时信令返回
-  `Redirect`，原生客户端（aerodesk-core）自动重连到目标 PoP 的 signal/SFU
-  （最多 3 跳防环）；Web 端重定向支持为后续。
+- **房间跨 PoP（P3 SIP 302，#146/#154）**：每 PoP 设置 `POP_ID`；房间归属由动态注册表
+  登记（首个 INVITE 所在 PoP 成为 owner），其它 PoP 收到同房间 INVITE 时查注册表命中 →
+  **302 + Contact**（`POP_SIP_URLS`，`PoP=host:port`）把主叫引导到 owner PoP 重发 INVITE。
+  无 `POP_REGISTRY_FILE` 时单 PoP 行为不变；命中他 PoP 但无 302 目标时回 486 即刻失败。
+  静态前缀钉住（旧 `ROOM_POP_MAP`/`POP_URLS`）随 JSON 面退役，如需预登记可预先写入共享
+  注册表文件（见 `scripts/multipop-e2e.sh`）。客户端 302 跟随（会话层换拨）尚未
+  实现（#600 仅落地 core 层 RedirectedTo 事件透传）——跟随落地前跨 PoP 主叫无法
+  自动跟随 302，会以呼叫失败收场。
   单机多 PoP 测试可用 `SFU_MEDIA_PORT`/`SFU_SIGNAL_PORT`/`SFU_INTERNAL_PORT` 覆盖 SFU 端口，
-  示例见 `scripts/multipop-e2e.sh`。
-- **跨 PoP 实时桥接（v3，#216）**：副 PoP 信令设置 `BRIDGE_CMD` 后，跨 PoP viewer
-  不再直接 Redirect，而是由信令自动拉起 `aerodesk-bridge`（view 主 PoP + publish
-  本 PoP，RTP 载荷直通不重编码 + data channel 白名单桥）并在就绪后本 PoP 接入；
-  桥失败/超时回退 v1 Redirect（`BRIDGE_READY_TIMEOUT_SECS`/`BRIDGE_FAIL_COOLDOWN_SECS`
-  可调）。设计/验收见 [ADR-0004](adr/0004-multipop-bridging.md) 与 `docs/BRIDGE.md`；
-  真实部署验收直接跑 `POP_A_SIGNAL=... POP_B_SIGNAL=... scripts/bridge-fallback-e2e.sh`
-  （远程模式：直连基线 + 桥优先 + 延迟 p50/p90/p99；可选 `BRIDGE_KILL_CMD`
-  桥死亡自动恢复，见 BRIDGE.md）。
-- **动态注册表（v2，#154）**：不配 `ROOM_POP_MAP` 时，房间归属由**首个加入者所在 PoP 登记**
-  （`POP_REGISTRY_FILE` 共享文件 + `POP_REGISTRY_TTL_SECS` 过期）；其它 PoP 加入同房间时
-  查注册表命中 → 返回 `Redirect`。文件后端为 last-writer-wins（低变更场景可接受）；
-  生产多写并发可换 Redis 后端。示例见 `scripts/popreg-e2e.sh`。
+  示例见 `scripts/multipop-e2e.sh` / `scripts/popreg-e2e.sh`。
+- **跨 PoP 实时桥接（v3，#216，P3 退役待重建）**：旧 `BRIDGE_CMD` 进程编排随 JSON 面
+  退役；桥双腿 SIP 化重建见 #601（设计与验收输入见 [ADR-0004](adr/0004-multipop-bridging.md)
+  与 `docs/BRIDGE.md`）。重建前跨 PoP 房间一律走 302 引导。
 - **TURN 就近**：默认每 PoP 由 SFU 内嵌 TURN server 提供中继（`SFU_TURN_PORT=3479`
   UDP+TCP，`SFU_TURN_TLS_PORT=5349` TLS，#196）；外部 coturn 部署可设 `TURN_URLS`
   指向本 PoP（向后兼容）。开放 UDP/TCP 3479、TCP 5349 与 `RELAY 端口段` 49152-49200。
@@ -179,9 +167,10 @@ server {
   （配合容量基线 scripts/sfu-capacity-bench.sh）。
 - **健康检查**：`GET /healthz` 返回 JSON（`status: ok|draining` + shards/clients）；
   正常 200，**draining 中 503**，供 LB/探活与滚动发布判断。
-- **信号服务器探活/指标**：`GET /healthz`（JSON `status/clients/rooms/pop`）与
-  `GET /metrics/prometheus`（`aerodesk_signal_clients/rooms/bridges`）暴露于
-  信令端口（plain 与 WSS 同路径），供探活与 Prometheus 抓取。
+- **信号服务器探活/指标**（P3 ops HTTPS 面，默认 :3001）：`GET /healthz`
+  （JSON `status`/`pop`/`sip`——`sip` 为三传输监听状态对象，SIP 端点关闭时为
+  `null`）与 `GET /metrics/prometheus`（`sip_registrations` gauge、
+  `sip_calls_established`/`sip_calls_terminated` counter）供探活与 Prometheus 抓取。
 - **优雅关闭**：`SIGTERM`/`SIGINT` → 拒绝新房间（`/start` 503）→ 限时 3s drain
   现有客户端 → finalize 录制 → 退出；systemd `KillSignal=SIGTERM` 可安全停服。
 - **录制审计**：`RECORD_DIR` 落在独立数据盘（只读权限仅运维），
@@ -223,21 +212,15 @@ server {
 （含踢人）处于无认证状态（仅限开发回环使用）。`X-Internal-Token` 缺失/错误返回
 403 并写入审计日志（record/session 路径）。
 
-## 4. JWT 密钥管理
+## 4. 认证（P3：JWT 信令认证已退役）
 
-- `JWT_SECRET` 用强随机值：`openssl rand -base64 48`
-- 每 PoP 独立或共享按需；密钥轮换（**双 secret 宽限期已支持**）：
-  1. 签发新 token 用新 `JWT_SECRET`；同时设置 `JWT_SECRET_OLD` 保留旧密钥（无需重启）
-  2. 观察宽限期（按旧 token TTL）内认证无异常后，移除 `JWT_SECRET_OLD` 并重启（或滚动）
-- **按用户连接配额（#171）**：JWT claims 支持可选 `max_conns`（该用户最大并发连接数，
-  0/缺省=不限）；信令按 `sub` 计数，超限返回 `Error("user quota exceeded")`。
-  签发示例：`JWT_SECRET=... aerodesk-agent --issue-token --user u1 --room demo --role viewer --max-conns 4`
-- 签发 token（运维/测试）：
-
-```sh
-JWT_SECRET=<secret> cargo run -p aerodesk-agent -- --issue-token \
-  --user u1 --device mac-1 --room demo --role publisher --ttl 3600
-```
+- P3.1 起 signal 不再支持 JWT 信令认证（`JWT_SECRET`/`JWT_SECRET_OLD`、
+  `aerodesk-agent --issue-token` 同批退役）；认证走 **SIP Digest**：
+  - 设备固定口令：`SIP_DIGEST_USERS`（`user=password` 逗号分隔）；
+  - 存量静态 token 直接作为 Digest 口令（`AUTH_TOKENS` 首个为未列设备回退，
+    规范 §8 迁移期同一凭据）；口令表与 token 全空时为开放注册（开发/e2e）。
+- 临时口令（无人值守访问）经 `/admin/temp-password` 签发（#503-4），
+  `Authorization: Bearer <SIP_ADMIN_TOKEN 或首个 AUTH_TOKEN>`。
 
 ## 5. 录制文件格式
 
@@ -247,59 +230,57 @@ JWT_SECRET=<secret> cargo run -p aerodesk-agent -- --issue-token \
 {RECORD_DIR}/audit.log          # JSON Lines：room_start / room_end / record_api / session_api
 ```
 
-## 6. 快速起一套（开发）
+## 6. 快速起一套（开发，P3 SIP 流）
 
 ```sh
-export JWT_SECRET=$(openssl rand -base64 48)
 export RECORD_DIR=/tmp/aerodesk-rec
 export TURN_SECRET=<共享 secret>  # 未设 TURN_URLS 时 SFU 内嵌 TURN（#191）
 
 cargo run -p aerodesk-sfu &        # 媒体 3478 + HTTPS 3000 + /healthz + /metrics[/prometheus]
-cargo run -p aerodesk-signal &     # WSS 3001 / 明文 3003（开发）
+cargo run -p aerodesk-signal &     # SIP/UDP 5060 + SIP/TLS 5061 + SIP/WSS 3061（默认全开）
+                                   # ops HTTPS 3001（/healthz /devices /metrics /admin/*）
 ```
 
-冒烟：
+冒烟（SIP REGISTER → 被叫 INVITE）：
 
 ```sh
-# 签发并连接
-JWT_SECRET=$JWT_SECRET cargo run -p aerodesk-agent -- --issue-token \
-  --user u1 --room demo --role publisher --ttl 600 | xargs -I{} \
-  cargo run -p aerodesk-agent -- --role publisher --signal ws://127.0.0.1:3003 \
-  --room demo --token {}
+# 被控端（publisher 以 --room 值为设备 AoR 注册；AUTH_TOKENS 口令经 --token 传入）
+cargo run -p aerodesk-agent -- --role publisher --signal ws://127.0.0.1:5060   --room demo --token <AUTH_TOKENS 值>
+
+# 主控端观看（viewer INVITE demo 房间）
+cargo run -p aerodesk-agent -- --role viewer --signal ws://127.0.0.1:5060   --room demo --token <AUTH_TOKENS 值>
 ```
 
-## 6.1 公共测试服务器（2026-08-15 已部署，129.226.150.174）
+## 6.1 公共测试服务器（129.226.150.174）
 
 > 开发/跨机联调用公共节点（腾讯云轻量），signal + SFU（内嵌 TURN）单机部署；
-> **未配置 JWT**（`JWT_SECRET` 未设），用静态 token（`AUTH_TOKENS`）直连即可；
+> 认证用静态 token（`AUTH_TOKENS`，P3 起即 SIP Digest 口令）直连即可；
 > token 值向维护者索取（不写进公开仓库）。
 
 | 端口 | 协议 | 用途 |
 |---|---|---|
-| 14703 | TCP | signal 明文 WS（客户端连接口，最关键） |
+| 15060 | UDP | signal SIP/UDP（客户端连接口，最关键；P3 单栈） |
+| 15061 | TCP | signal SIP/TLS（可选；公网证书就绪后启用） |
+| 14701 | TCP | signal ops HTTPS（/healthz /devices /metrics/prometheus /admin/*） |
 | 14778 | UDP + TCP | SFU 媒体（WebRTC RTP/RTCP，**UDP 必须放行**） |
 | 14779 | UDP + TCP | TURN 中继 |
 | 15449 | TCP | TURN TLS（可选） |
-| 14701 | TCP | signal WSS（可选） |
 
-连接示例（UI/CLI 信令地址会自动补协议与 `/ws` 路径）：
+连接示例（信令地址 = SIP 形态 `ws://host:sip-udp-port`）：
 
 ```sh
-# 信令地址：ws://129.226.150.174:14703
+# 信令地址：ws://129.226.150.174:15060（agent 解析为 SIP/UDP 到该 host）
 # token：从服务器 AUTH_TOKENS 获取
 
-cargo run -p aerodesk-agent -- --role publisher --signal ws://129.226.150.174:14703 \
-  --room accept --token <AUTH_TOKENS 值>
+cargo run -p aerodesk-agent -- --role publisher --signal ws://129.226.150.174:15060   --room accept --token <AUTH_TOKENS 值>
 ```
 
-> 注意：14701（WSS）当前为开发 CA 证书，客户端默认信任链（rustls webpki-roots）会拒绝；
-> 正式使用需换成公网证书。跨机联调用明文 `ws://` 即可。
-> 2026-08-15 已用该节点完成 Windows 客户端跨机联调（合成源 viewer DECODED 187；
-> Windows 被控端 RTP/光标/输入/剪贴板全通），详见 [DEVICE_MATRIX.md](DEVICE_MATRIX.md)。
+> 注意：14703 明文 WS 已随 P3 JSON 面退役；14701（ops HTTPS）当前为开发 CA 证书，
+> 浏览器访问需手动信任。节点重部署到 P3 单栈后以本表为准。
 
 ## 7. 验收清单（对应 Issue #5）
 
-- [x] 信令 JWT 认证（用户/设备/房间/角色）
+- [x] 信令认证（P3：SIP Digest + 临时口令；JWT 面随 P3.1 退役）
 - [x] 房间录制/审计（SFU 侧，RECORD_DIR）
 - [ ] 多 PoP 部署文档（本节即文档；跨 PoP 媒体桥待评估）
 - [x] TLS 自动化落地（CERT_FILE/KEY_FILE + certbot deploy-hook；建议生产走 Caddy 边终止）

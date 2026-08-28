@@ -1,5 +1,10 @@
 # 跨 PoP 媒体桥接（#216 M1/M2）
 
+> **P3.1 状态（2026-08）**：桥编排器（signal 内 `BRIDGE_CMD` 管理器 + monitor +
+> kick_sfu_room）已随 JSON 信令面退役；本文档保留为 #601「桥双腿 SIP 化重建」的
+> 设计输入（盘点三 B3/C：monitor 数据源换 SFU /session/clients）。重建前跨 PoP
+> 房间由 signal INVITE 302+Contact（POP_SIP_URLS）引导。
+
 ## 目标
 房间成员跨 PoP 实时互通（媒体 + data channel）：viewer 在其 PoP（PoP-B）加入钉在另一
 PoP（PoP-A）的房间时，**不经 Redirect** 经桥接客户端收到 PoP-A 媒体（**不重编码**，

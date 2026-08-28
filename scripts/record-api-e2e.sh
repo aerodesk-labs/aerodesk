@@ -22,7 +22,7 @@ RECORD_DIR="$REC" RECORD_ON_DEMAND=1 INTERNAL_TOKEN="$TOKEN" \
   SFU_MEDIA_PORT=1478 SFU_SIGNAL_PORT=14000 SFU_INTERNAL_PORT=14002 \
   ./target/debug/aerodesk-sfu >/tmp/recapi-sfu.log 2>&1 &
 SFU=$!
-SIP_UDP_PORT=5060 SIGNAL_PORT=14001 SIGNAL_PLAIN_PORT=14003 SFU_URL=http://127.0.0.1:14002 SFU_TOKEN="$TOKEN" ./target/debug/aerodesk-signal >/tmp/recapi-sig.log 2>&1 &
+SIP_UDP_PORT=5060 SIGNAL_PORT=14001 SFU_URL=http://127.0.0.1:14002 SFU_TOKEN="$TOKEN" ./target/debug/aerodesk-signal >/tmp/recapi-sig.log 2>&1 &
 SIG=$!
 for _ in $(seq 1 50); do
     if nc -z 127.0.0.1 14002 2>/dev/null && grep -q "SIP/UDP 监听已起" /tmp/recapi-sig.log 2>/dev/null; then break; fi

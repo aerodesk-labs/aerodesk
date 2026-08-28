@@ -68,9 +68,9 @@ aerodesk-agent --role viewer    --audio --room accept-p2p-2
 | 端点 | 结果 |
 |---|---|
 | SFU /healthz | `{"clients":0,"shards":8,"status":"ok"}` ✅ |
-| signal /healthz | `{"clients":0,"pop":"local","rooms":0,"status":"ok"}` ✅ |
+| signal /healthz | `{"clients":0,"pop":"local","rooms":0,"status":"ok"}` ✅（P3.1 起字段变为 `status/pop/sip`，历史断言留档） |
 | signal /metrics/prometheus | `sip_registrations 4`、`sip_calls_established 2`、`sip_calls_terminated 0` ✅（#551 新指标） |
-| signal /metrics/prometheus | `aerodesk_signal_clients/rooms/bridges` 保留 ✅ |
+| signal /metrics/prometheus | `aerodesk_signal_clients/rooms/bridges` 保留 ✅（P3.1 起改 `sip_*` 指标，历史断言留档） |
 | /config | `{"turn":null}`（本机未配 TURN，格式正确）✅ |
 
 ## 6. 问题清单与 P1 交接项

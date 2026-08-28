@@ -15,11 +15,11 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}/debug"
 ROOM1="mroom-$(date +%s)-r1"; ROOM2="mroom-$(date +%s)-r2"
 AUTH="test-bridge-token"
 # PoP-A
-SIG_A=14100; INT_A=14102; PLAIN_A=14103; MEDIA_A=14178
+SIG_A=14100; INT_A=14102; PLAIN_A=14103; MEDIA_A=14178; SIP_A=14104
 # PoP-B
-SIG_B=14200; INT_B=14202; PLAIN_B=14203; MEDIA_B=14278
+SIG_B=14200; INT_B=14202; PLAIN_B=14203; MEDIA_B=14278; SIP_B=14204
 SIG_A_URL="ws://127.0.0.1:${PLAIN_A}"; SIG_B_URL="ws://127.0.0.1:${PLAIN_B}"
-BRIDGE_CMD="$TARGET_DIR/aerodesk-bridge --remote-signal ${SIG_A_URL} --local-signal ${SIG_B_URL} --room {room} --auth-token \"\$BRIDGE_AUTH_TOKEN\" --codec h264"
+BRIDGE_CMD="$TARGET_DIR/aerodesk-bridge --remote-signal ${SIG_A_URL} --local-signal ${SIG_B_URL} --room {room} --auth-token \"\$BRIDGE_AUTH_TOKEN\" --codec h264 --remote-sip-port \"$SIP_A\" --local-sip-port \"$SIP_B\""
 
 fail() { echo "FAIL: $*"; exit 1; }
 cleanup() {
@@ -59,16 +59,16 @@ echo "== 启动 PoP-A（141xx）+ PoP-B（142xx，BRIDGE_CMD 桥优先）"
 RECORD_DIR="$REC_A" SFU_MEDIA_PORT="$MEDIA_A" SFU_SIGNAL_PORT="$SIG_A" SFU_INTERNAL_PORT="$INT_A" \
   "$TARGET_DIR/aerodesk-sfu" >/tmp/bmr-sfu-a.log 2>&1 &
 SFU_A=$!
-POP_ID=pop-a AUTH_TOKENS="$AUTH" SIGNAL_PORT=14101 SIGNAL_PLAIN_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
-  SIP_UDP_PORT=5060 "$TARGET_DIR/aerodesk-signal" >/tmp/bmr-sig-a.log 2>&1 &
+POP_ID=pop-a AUTH_TOKENS="$AUTH" SIGNAL_PORT=14101 SIGNAL_OPS_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
+  SIP_UDP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-signal" >/tmp/bmr-sig-a.log 2>&1 &
 SIG_A_PID=$!
 RECORD_DIR="$REC_B" SFU_MEDIA_PORT="$MEDIA_B" SFU_SIGNAL_PORT="$SIG_B" SFU_INTERNAL_PORT="$INT_B" \
   "$TARGET_DIR/aerodesk-sfu" >/tmp/bmr-sfu-b.log 2>&1 &
 SFU_B=$!
 POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="mroom-=pop-a" POP_URLS="pop-a=${SIG_A_URL}" \
   BRIDGE_CMD="$BRIDGE_CMD" BRIDGE_READY_TIMEOUT_SECS=20 BRIDGE_AUTH_TOKEN="$AUTH" \
-  SIGNAL_PORT=14201 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
-  SIP_UDP_PORT= "$TARGET_DIR/aerodesk-signal" >/tmp/bmr-sig-b.log 2>&1 &
+  SIGNAL_PORT=14201 SIGNAL_OPS_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
+  SIP_UDP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-signal" >/tmp/bmr-sig-b.log 2>&1 &
 SIG_B_PID=$!
 for _ in $(seq 1 80); do
   nc -z 127.0.0.1 "$PLAIN_A" 2>/dev/null && nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break
@@ -78,13 +78,13 @@ sleep 0.3
 grep -q "bridge orchestration enabled" /tmp/bmr-sig-b.log || fail "PoP-B 未启用桥编排（BRIDGE_CMD 未生效）"
 
 start_pub() { # $1=room $2=log
-  "$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$1" --token "$AUTH" \
+  AERO_SIP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$1" --token "$AUTH" \
     --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
     >"$2" 2>&1 &
   echo $!
 }
 start_view() { # $1=room $2=log
-  "$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_B_URL" --room "$1" --token "$AUTH" \
+  AERO_SIP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_B_URL" --room "$1" --token "$AUTH" \
     >"$2" 2>&1 &
   echo $!
 }
@@ -92,14 +92,23 @@ start_view() { # $1=room $2=log
 echo "== 场景 A：双房间并发桥"
 PUB1=$(start_pub "$ROOM1" /tmp/bmr-pub1.log)
 PUB2=$(start_pub "$ROOM2" /tmp/bmr-pub2.log)
-for _ in $(seq 1 120); do
-  grep -q "ICE connected" /tmp/bmr-pub1.log 2>/dev/null && grep -q "ICE connected" /tmp/bmr-pub2.log 2>/dev/null && break
+# #552 SIP 1:1：publisher 是 UAS（等 IncomingCall）——无呼叫时无 ICE。先等两个
+# publisher 注册就绪，再起 viewer（呼入触发 ICE）；注册前等 ICE 必超时。
+for _ in $(seq 1 30); do
+  grep -q "SIP registered" /tmp/bmr-pub1.log 2>/dev/null && grep -q "SIP registered" /tmp/bmr-pub2.log 2>/dev/null && break
   sleep 0.5
 done
-grep -q "ICE connected" /tmp/bmr-pub1.log || fail "publisher R1 未连上"
-grep -q "ICE connected" /tmp/bmr-pub2.log || fail "publisher R2 未连上"
+grep -q "SIP registered" /tmp/bmr-pub1.log || fail "场景A：publisher R1 未注册"
+grep -q "SIP registered" /tmp/bmr-pub2.log || fail "场景A：publisher R2 未注册"
 VIEW1=$(start_view "$ROOM1" /tmp/bmr-view1.log)
 VIEW2=$(start_view "$ROOM2" /tmp/bmr-view2.log)
+# viewer 呼入后 publisher 侧 ICE 才建立（显式断言，便于失败归因到建链而非解码）。
+ok=0
+for _ in $(seq 1 120); do
+  grep -q "ICE connected" /tmp/bmr-pub1.log 2>/dev/null && grep -q "ICE connected" /tmp/bmr-pub2.log 2>/dev/null && ok=1 && break
+  sleep 0.5
+done
+[ "$ok" = "1" ] || fail "场景A：publisher 未连上（R1=$(grep -c 'ICE connected' /tmp/bmr-pub1.log 2>/dev/null) R2=$(grep -c 'ICE connected' /tmp/bmr-pub2.log 2>/dev/null)）"
 wait_decoded /tmp/bmr-view1.log || fail "场景A：R1 viewer 未解码（见 /tmp/bmr-view1.log）"
 wait_decoded /tmp/bmr-view2.log || fail "场景A：R2 viewer 未解码（见 /tmp/bmr-view2.log）"
 grep -q "signal redirect" /tmp/bmr-view1.log && fail "场景A：R1 不应 Redirect"
@@ -132,8 +141,8 @@ ROOM1="mroom-$(date +%s)-b1"; ROOM2="mroom-$(date +%s)-b2"
 POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="mroom-=pop-a" POP_URLS="pop-a=${SIG_A_URL}" \
   BRIDGE_CMD="$BRIDGE_CMD" BRIDGE_READY_TIMEOUT_SECS=20 BRIDGE_AUTH_TOKEN="$AUTH" \
   BRIDGE_MAX_RUNNING=1 \
-  SIGNAL_PORT=14201 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
-  SIP_UDP_PORT= "$TARGET_DIR/aerodesk-signal" >/tmp/bmr-sig-b2.log 2>&1 &
+  SIGNAL_PORT=14201 SIGNAL_OPS_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
+  SIP_UDP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-signal" >/tmp/bmr-sig-b2.log 2>&1 &
 SIG_B_PID=$!
 for _ in $(seq 1 50); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break; sleep 0.2; done
 sleep 0.3
@@ -142,13 +151,20 @@ grep -q "BRIDGE_MAX_RUNNING" /tmp/bmr-sig-b2.log || true   # 无日志；以行�
 
 PUB1=$(start_pub "$ROOM1" /tmp/bmr-pub1b.log)
 PUB2=$(start_pub "$ROOM2" /tmp/bmr-pub2b.log)
-for _ in $(seq 1 120); do
-  grep -q "ICE connected" /tmp/bmr-pub1b.log 2>/dev/null && grep -q "ICE connected" /tmp/bmr-pub2b.log 2>/dev/null && break
+# 同场景 A：先等注册就绪再起 viewer（SIP 1:1 无呼叫无 ICE）。
+for _ in $(seq 1 30); do
+  grep -q "SIP registered" /tmp/bmr-pub1b.log 2>/dev/null && grep -q "SIP registered" /tmp/bmr-pub2b.log 2>/dev/null && break
   sleep 0.5
 done
-grep -q "ICE connected" /tmp/bmr-pub1b.log || fail "场景B：publisher R1 未连上"
-grep -q "ICE connected" /tmp/bmr-pub2b.log || fail "场景B：publisher R2 未连上"
+grep -q "SIP registered" /tmp/bmr-pub1b.log || fail "场景B：publisher R1 未注册"
+grep -q "SIP registered" /tmp/bmr-pub2b.log || fail "场景B：publisher R2 未注册"
 VIEW1=$(start_view "$ROOM1" /tmp/bmr-view1b.log)
+ok=0
+for _ in $(seq 1 120); do
+  grep -q "ICE connected" /tmp/bmr-pub1b.log 2>/dev/null && ok=1 && break
+  sleep 0.5
+done
+[ "$ok" = "1" ] || fail "场景B：publisher R1 未连上"
 wait_decoded /tmp/bmr-view1b.log || fail "场景B：R1（桥优先）未解码"
 grep -q "signal redirect" /tmp/bmr-view1b.log && fail "场景B：R1 不应 Redirect"
 # R2：上限=1 → Redirect 并跟随到 PoP-A 直连解码。

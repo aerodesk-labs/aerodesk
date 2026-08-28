@@ -31,19 +31,21 @@ cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 REC_A="$(mktemp -d)"; REC_B="$(mktemp -d)"
 
 echo "== 启动 PoP-A（14600 系）+ PoP-B（14700 系）"
-# #598 P1b：双腿已迁 SIP——双 PoP 各自显式 SIP 端口（A=14604/B=14704），
-# 客户端经 AERO_SIP_PORT 指到所属 PoP（URL 端口不再进信令面）。
+# #598 P1b（merge-ready，同 bridge-fallback/multiroom/turn）：双腿已迁 SIP——
+# 双 PoP 各自显式 SIP 端口（A=14604/B=14704），客户端经 AERO_SIP_PORT 指到
+# 所属 PoP。旧「PoP-B SIP_UDP_PORT= 空值禁 SIP」形态在 P3 parse_port_or_off
+# 语义下（空串→警告并回退 5060）会与 PoP-A 抢 5060，已废弃；禁用一律 `off`。
 SIP_A=14604; SIP_B=14704
 RECORD_DIR="$REC_A" SFU_MEDIA_PORT="$MEDIA_A" SFU_SIGNAL_PORT="$SIG_A" SFU_INTERNAL_PORT="$INT_A" \
   "$TARGET_DIR/aerodesk-sfu" >/tmp/bridge-sfu-a.log 2>&1 &
 SFU_A=$!
-SIGNAL_PORT=14601 SIGNAL_PLAIN_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
+SIGNAL_PORT=14601 SIGNAL_OPS_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
   SIP_UDP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-signal" >/tmp/bridge-sig-a.log 2>&1 &
 SIG_A_PID=$!
 RECORD_DIR="$REC_B" SFU_MEDIA_PORT="$MEDIA_B" SFU_SIGNAL_PORT="$SIG_B" SFU_INTERNAL_PORT="$INT_B" \
   "$TARGET_DIR/aerodesk-sfu" >/tmp/bridge-sfu-b.log 2>&1 &
 SFU_B=$!
-SIGNAL_PORT=14701 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
+SIGNAL_PORT=14701 SIGNAL_OPS_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
   SIP_UDP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-signal" >/tmp/bridge-sig-b.log 2>&1 &
 SIG_B_PID=$!
 for _ in $(seq 1 80); do
@@ -53,6 +55,8 @@ done
 sleep 0.3
 
 echo "== PoP-A：启动 publisher（room=${ROOM}）"
+# #598 P1b + #552 SIP 1:1：publisher 是 UAS（等 IncomingCall）——先等 SIP 注册
+# 就绪，bridge view 腿呼入后再等 ICE。
 AERO_SIP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-agent" --role publisher --signal "ws://127.0.0.1:${PLAIN_A}" --room "$ROOM" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/bridge-pub-a.log 2>&1 &
@@ -66,8 +70,8 @@ done
 
 echo "== 启动 bridge（view PoP-A + publish PoP-B）"
 # #598 P1b：viewer 腿（SIP 呼 PoP-A 房间）→ A-publisher 1:1；pub 腿（SIP 注册
-# 于 PoP-B 同房间名）→ B viewer 呼入。view 腿连接完成即打 marker（含 ICE——
-# 对 A-publisher 的呼叫由 view 腿在同步建链阶段完成）。
+# 于 PoP-B 同房间名）→ B viewer 呼入。view 腿连接完成即打 READY marker
+# "publisher leg:"（含 ICE——对 A-publisher 的呼叫由 view 腿在同步建链阶段完成）。
 "$TARGET_DIR/aerodesk-bridge" --remote-signal "ws://127.0.0.1:${PLAIN_A}" \
   --local-signal "ws://127.0.0.1:${PLAIN_B}" --room "$ROOM" --codec h264 \
   --remote-sip-port "$SIP_A" --local-sip-port "$SIP_B" \

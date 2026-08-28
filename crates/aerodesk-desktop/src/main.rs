@@ -5527,7 +5527,9 @@ mod multi_session_e2e {
     use std::time::{Duration, Instant};
 
     const SFU_INTERNAL: u16 = 15002;
-    const SIGNAL_PLAIN: u16 = 15003;
+    /// P3 SIP 单栈：signal 的 SIP/UDP 端口（agent 注册面）与 ops HTTPS 端口。
+    const SIGNAL_SIP: u16 = 15003;
+    const SIGNAL_OPS: u16 = 15001;
     const ROOM_A: &str = "e2e-a";
     const ROOM_B: &str = "e2e-b";
 
@@ -5626,8 +5628,8 @@ mod multi_session_e2e {
         let sfu = Procs::spawn(&mut sfu_cmd, "sfu");
         let mut sig_cmd = Command::new(format!("{bin}/aerodesk-signal"));
         sig_cmd
-            .env("SIGNAL_PLAIN_PORT", SIGNAL_PLAIN.to_string())
-            .env("SIGNAL_PORT", "15001") // WSS：独立端口避免与其它实例冲突
+            .env("SIGNAL_OPS_PORT", SIGNAL_OPS.to_string()) // ops HTTPS（健康探针）
+            .env("SIP_UDP_PORT", SIGNAL_SIP.to_string()) // P3 SIP 单栈：agent 注册面
             .env("SFU_URL", format!("http://127.0.0.1:{SFU_INTERNAL}"));
         let sig = Procs::spawn(&mut sig_cmd, "sig");
         let (Some(sfu), Some(sig)) = (sfu, sig) else {
@@ -5636,11 +5638,14 @@ mod multi_session_e2e {
         procs.kids.push(sfu);
         procs.kids.push(sig);
         assert!(wait_port(SFU_INTERNAL, 10), "SFU 未就绪");
-        assert!(wait_port(SIGNAL_PLAIN, 10), "signal 未就绪");
+        assert!(wait_port(SIGNAL_OPS, 10), "signal 未就绪");
 
         // 2) 两个被控端（发布端）
         for room in [ROOM_A, ROOM_B] {
             let mut cmd = Command::new(format!("{bin}/aerodesk-agent"));
+            // AERO_SIP_PORT：ws:// URL 的端口不被信令解析使用（传输默认 5060），
+            // 显式指定本实例的 SIP/UDP 端口。
+            cmd.env("AERO_SIP_PORT", SIGNAL_SIP.to_string());
             cmd.args([
                 "--role",
                 "publisher",
@@ -5648,7 +5653,7 @@ mod multi_session_e2e {
                 "x264",
                 "--noisy",
                 "--signal",
-                &format!("ws://127.0.0.1:{SIGNAL_PLAIN}"),
+                &format!("ws://127.0.0.1:{SIGNAL_SIP}"),
                 "--room",
                 room,
             ]);
@@ -5666,7 +5671,7 @@ mod multi_session_e2e {
         //    每个会话 = connect_live_role + 独立 input 通道 + pump 线程。
         let mut ice_flags: Vec<bool> = Vec::new();
         let mut stops: Vec<Arc<AtomicBool>> = Vec::new();
-        let server = format!("127.0.0.1:{SIGNAL_PLAIN}");
+        let server = format!("127.0.0.1:{SIGNAL_OPS}");
         for room in [ROOM_A, ROOM_B] {
             let live = match aerodesk_core::connect::connect_live_role(
                 &server,

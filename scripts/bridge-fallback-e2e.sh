@@ -41,9 +41,9 @@ fi
 
 ROOM="bridge-fb-$(date +%s)"
 # PoP-A
-SIG_A=14800; INT_A=14802; PLAIN_A=14803; MEDIA_A=14878
+SIG_A=14800; INT_A=14802; PLAIN_A=14803; MEDIA_A=14878; SIP_A=14804
 # PoP-B
-SIG_B=14900; INT_B=14902; PLAIN_B=14903; MEDIA_B=14978
+SIG_B=14900; INT_B=14902; PLAIN_B=14903; MEDIA_B=14978; SIP_B=14904
 if [ "$REMOTE" = "1" ] && [ "${REMOTE_LOOPBACK:-}" != "1" ]; then
   SIG_A_URL="$POP_A_SIGNAL"; SIG_B_URL="$POP_B_SIGNAL"
 else
@@ -58,7 +58,7 @@ if [ "$REMOTE" = "1" ] && [ "${REMOTE_LOOPBACK:-}" != "1" ]; then
   [ -n "$BRIDGE_CMD" ] || fail "远程模式必须设置 BRIDGE_CMD（与 PoP-B 信令同款命令模板，含 {room}；实际由 PoP-B 信令执行，本脚本仅校验非空）"
 else
   AUTH="test-bridge-token"
-  BRIDGE_CMD="$TARGET_DIR/aerodesk-bridge --remote-signal ${SIG_A_URL} --local-signal ${SIG_B_URL} --room {room} --auth-token \"\$BRIDGE_AUTH_TOKEN\" --codec h264"
+  BRIDGE_CMD="$TARGET_DIR/aerodesk-bridge --remote-signal ${SIG_A_URL} --local-signal ${SIG_B_URL} --room {room} --auth-token \"\$BRIDGE_AUTH_TOKEN\" --codec h264 --remote-sip-port \"$SIP_A\" --local-sip-port \"$SIP_B\""
 fi
 
 cleanup() {
@@ -118,8 +118,8 @@ if [ "$REMOTE" = "0" ] || [ "${REMOTE_LOOPBACK:-}" = "1" ]; then
   RECORD_DIR="$REC_A" SFU_MEDIA_PORT="$MEDIA_A" SFU_SIGNAL_PORT="$SIG_A" SFU_INTERNAL_PORT="$INT_A" \
     "$TARGET_DIR/aerodesk-sfu" >/tmp/bfb-sfu-a.log 2>&1 &
   SFU_A=$!
-  POP_ID=pop-a AUTH_TOKENS="$AUTH" SIGNAL_PORT=14801 SIGNAL_PLAIN_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
-    SIP_UDP_PORT=5060 "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-a.log 2>&1 &
+  POP_ID=pop-a AUTH_TOKENS="$AUTH" SIGNAL_PORT=14801 SIGNAL_OPS_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
+    SIP_UDP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-a.log 2>&1 &
   SIG_A_PID=$!
   for _ in $(seq 1 80); do grep -q "SIP/UDP 监听已起" /tmp/bfb-sig-a.log 2>/dev/null && break; sleep 0.2; done
   sleep 0.3
@@ -128,7 +128,7 @@ elif [ "${REMOTE_LOOPBACK:-}" != "1" ]; then
 fi
 
 echo "== 场景 0：直连延迟基线（同 PoP-A publisher+viewer）"
-"$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
+AERO_SIP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/bfb-direct-pub.log 2>&1 &
 PUB0=$!
@@ -137,7 +137,7 @@ PUB0=$!
 ok=0
 for _ in $(seq 1 30); do grep -q "SIP registered" /tmp/bfb-direct-pub.log 2>/dev/null && ok=1 && break; sleep 0.5; done
 [ "$ok" = "1" ] || { echo "publisher 未注册："; tail -5 /tmp/bfb-direct-pub.log; fail "场景0：publisher 未注册"; }
-"$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
+AERO_SIP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   >/tmp/bfb-direct-view.log 2>&1 &
 VIEW0=$!
 ok=0
@@ -168,8 +168,8 @@ if [ "$REMOTE" = "0" ] || [ "${REMOTE_LOOPBACK:-}" = "1" ]; then
   POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=${SIG_A_URL}" \
     BRIDGE_CMD="$BRIDGE_CMD" BRIDGE_READY_TIMEOUT_SECS=20 BRIDGE_AUTH_TOKEN="$AUTH" \
     BRIDGE_MONITOR_INTERVAL_SECS=2 \
-    SIGNAL_PORT=14901 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
-    SIP_UDP_PORT= "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b.log 2>&1 &
+    SIGNAL_PORT=14901 SIGNAL_OPS_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
+    SIP_UDP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b.log 2>&1 &
   SIG_B_PID=$!
   for _ in $(seq 1 80); do grep -q "SIP/UDP 监听已起" /tmp/bfb-sig-b.log 2>/dev/null && break; sleep 0.2; done
   sleep 0.3
@@ -181,7 +181,7 @@ fi
 
 echo "== 场景 1：PoP-A publisher + PoP-B viewer（桥优先，不 Redirect）"
 # --audio（PCMU）：验证 #260 音频跨 PoP 桥转发。
-"$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
+AERO_SIP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy --audio \
   >/tmp/bfb-pub-a.log 2>&1 &
 PUB_A=$!
@@ -195,7 +195,7 @@ for _ in $(seq 1 30); do grep -q "SIP registered" /tmp/bfb-pub-a.log 2>/dev/null
 RECONNECT_FLAG=""
 [ "$REMOTE" = "1" ] && RECONNECT_FLAG="--reconnect"
 # --display 1：验证 #260 显示器切换经 control 通道跨 PoP（到主 PoP publisher）。
-"$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" $RECONNECT_FLAG --display 1 \
+AERO_SIP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" $RECONNECT_FLAG --display 1 \
   >/tmp/bfb-view-b.log 2>&1 &
 VIEW_B=$!
 ok=0
@@ -299,7 +299,7 @@ sleep 1
 pkill -f 'aerodesk-bridge' 2>/dev/null || true
 sleep 2
 # --reconnect：场景 4 需要连接中 viewer 在 kick 后自动重连。
-"$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" --reconnect \
+AERO_SIP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" --reconnect \
   >/tmp/bfb-view-b3.log 2>&1 &
 VIEW_B=$!
 wait_decoded /tmp/bfb-view-b3.log || fail "场景3：桥死亡后 viewer 未恢复解码（见 /tmp/bfb-view-b3.log）"
@@ -351,12 +351,12 @@ sleep 1
 # 重启 PoP-B 信令：BRIDGE_CMD 必失败（false）→ 桥失败 → 回退 Redirect。
 POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=${SIG_A_URL}" \
   BRIDGE_CMD="false" BRIDGE_READY_TIMEOUT_SECS=5 BRIDGE_FAIL_COOLDOWN_SECS=5 \
-  SIGNAL_PORT=14901 SIGNAL_PLAIN_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
-  SIP_UDP_PORT= "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b2.log 2>&1 &
+  SIGNAL_PORT=14901 SIGNAL_OPS_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
+  SIP_UDP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b2.log 2>&1 &
 SIG_B_PID=$!
 for _ in $(seq 1 50); do grep -q "SIP/UDP 监听已起" /tmp/bfb-sig-b2.log 2>/dev/null && break; sleep 0.2; done
 # PoP-A publisher 仍在 room（重新起）
-"$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
+AERO_SIP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/bfb-pub-a2.log 2>&1 &
 PUB_A=$!
@@ -365,7 +365,7 @@ ok=0
 for _ in $(seq 1 30); do grep -q "SIP registered" /tmp/bfb-pub-a2.log 2>/dev/null && ok=1 && break; sleep 0.5; done
 [ "$ok" = "1" ] || { echo "publisher 未注册："; tail -5 /tmp/bfb-pub-a2.log; fail "场景2：PoP-A publisher 未注册"; }
 
-"$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" \
+AERO_SIP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-agent" --role viewer --signal "$SIG_B_URL" --room "$ROOM" --token "$AUTH" \
   >/tmp/bfb-view-b2.log 2>&1 &
 VIEW_B=$!
 ok=0

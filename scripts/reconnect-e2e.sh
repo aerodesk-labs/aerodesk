@@ -20,7 +20,7 @@ start_sfu() {
     echo $! > /tmp/rec-sfu.pid
 }
 start_signal() {
-    SIGNAL_PORT=14501 SIGNAL_PLAIN_PORT=14503 SFU_URL=http://127.0.0.1:14502 SFU_TOKEN="$SFU_TOK" \
+    SIGNAL_PORT=14501 SFU_URL=http://127.0.0.1:14502 SFU_TOKEN="$SFU_TOK" \
       SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/rec-sig.log 2>&1 &
     echo $! > /tmp/rec-sig.pid
 }
@@ -44,7 +44,7 @@ fail=0
 
 echo "== Phase A：中途断线自动重连"
 start_sfu; start_signal
-wait_port 14502 && wait_port 14503 || { echo "FAIL A: 服务未就绪"; exit 1; }
+wait_port 14502 && grep -q "SIP/UDP 监听已起" /tmp/rec-sig.log || { echo "FAIL A: 服务未就绪"; tail -8 /tmp/rec-sig.log; exit 1; }
 ROOM="rec-$(date +%s)"
 ./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
     --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/rec-pub.log 2>&1 &
@@ -70,7 +70,7 @@ wait "$PUB" 2>/dev/null || true
 stop_services
 sleep 3
 start_sfu; start_signal
-wait_port 14502 && wait_port 14503 || { echo "FAIL A: 重启后服务未就绪"; fail=1; }
+wait_port 14502 && grep -q "SIP/UDP 监听已起" /tmp/rec-sig.log || { echo "FAIL A: 重启后服务未就绪"; fail=1; }
 # 重启 publisher（旧发布端已随杀服务窗口终止，viewer 的对端死亡 → 断线重连）
 ./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
     --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/rec-pub2.log 2>&1 &

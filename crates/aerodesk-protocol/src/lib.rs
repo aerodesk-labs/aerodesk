@@ -19,7 +19,6 @@ pub mod cursor;
 pub mod error;
 pub mod file;
 pub mod input;
-pub mod jwt;
 pub mod signal;
 pub mod sip;
 pub mod sip_client;

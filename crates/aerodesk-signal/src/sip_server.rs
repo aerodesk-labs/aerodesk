@@ -1,28 +1,33 @@
 //! SIP 信令端点（#551 / 规范 docs/SIP_SIGNALING.md）。
 //!
-//! 本模块把 rsipstack 引入 signal，与现有 JSON/rouille 服务**双栈并存**：SIP 端点由
-//! `SIP_TLS_PORT` / `SIP_WSS_PORT` / `SIP_UDP_PORT` 显式开启（默认关闭，生产 JSON
-//! 路径不受影响，规范 §8 迁移约束）。
+//! P3.1 起本端点是 signal 的**唯一信令面**（SIP 单栈）：JSON/rouille 面已退役。
+//! 传输：SIP/TLS（原生端默认）+ SIP/WSS（Web，RFC 7118）+ SIP/UDP（内网/调试）；
+//! TLS 身份复用 signal 证书加载，SIGHUP 证书轮换由 supervisor 重启端点承接
+//! （注册表经 SipConfig.registrar 外置，轮换不丢注册）。
 //!
-//! 已落地（slice 1 Registrar + slice 2 透明 Proxy）：
-//! - 传输：SIP/TLS（原生端默认）+ SIP/WSS（Web，RFC 7118）+ SIP/UDP（内网/调试可选，
-//!   规范 §0 传输矩阵）；TLS 身份复用 signal 证书加载；
+//! 已落地：
 //! - `REGISTER` + SIP Digest 认证（401 质询 → 200）；AoR→Contact 注册表，含路由地址
 //!   （可靠传输复用注册 flow / UDP 经 Via received+rport）、expires 过期、expires=0 注销；
 //! - 透明 INVITE Proxy（规范 §4）：A 腿（主叫）与 B 腿（被叫）dialog 配对，INVITE/
 //!   180/200/ACK 端到端透传、SDP 零修改（非 B2BUA——仅 From/To tag 由 dialog API 重生成，
 //!   见 proxy_call 备注）；CANCEL/BYE 级联、INFO（trickle-ice-sdpfrag）双向透传；
 //!   被叫离线/未注册 → 404（规范 §3 offline）；
+//! - 会议桥（规范 §4）：非设备 AoR（合法房间名）INVITE → SFU /start 代理，
+//!   SFU 池走 `crate::sfu_candidates`（粘性 + 负载感知 + 有界 failover：仅 5xx
+//!   与传输错误转移，4xx 原样返回）；INVITE 同时是多 PoP 归属登记的写入点
+//!   （#146/#154：lookup 他 PoP → 302+Contact（POP_SIP_URLS）/ 无目标 486；
+//!   本 PoP → 刷 TTL；未登记 → 登记 owner PoP）；
 //! - `OPTIONS` 保活/能力探测（200 + Allow）；
 //! - **INVITE 授权（#503-4）**：被叫设备有口令（固定密码/临时密码）时要求
 //!   `Proxy-Authorization`——407 质询（Digest，与 REGISTER 同款）→ 客户端以
 //!   被叫口令应答 → 校验通过放行、口令错 403；无口令设备不设卡（旧行为）；
 //! - 严格子集（规范 §6）：SUBSCRIBE/NOTIFY/REFER/UPDATE/… 一律 501（ACK/CANCEL 由
 //!   rsipstack 事务层吸收，不进分发循环）；
-//! - 指标 `sip_registrations`/`sip_calls_established`/`sip_calls_terminated`（/metrics）。
+//! - 指标 `sip_registrations`/`sip_calls_established`/`sip_calls_terminated`（/metrics）
+//!   与三传输监听状态（/healthz `sip` 字段）。
 //!
 //! 硬化项（后续，不影响线上互通）：HA1-at-rest、nonce stale 防重放、连接关闭时清理
-//! 注册 flow（transport inspector janitor）、多 PoP 302。
+//! 注册 flow（transport inspector janitor）、dialog 层 302+Contact（客户端跟随待 #600）。
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -30,7 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::bridge;
+use crate::pop_registry::PopRegistry;
 use rsipstack::EndpointBuilder;
 use rsipstack::dialog::DialogId;
 use rsipstack::dialog::authenticate::verify_digest;
@@ -47,7 +52,7 @@ use rsipstack::transport::tls::{TlsConfig, TlsListenerConnection};
 use rsipstack::transport::websocket::WebSocketListenerConnection;
 use tokio_util::sync::CancellationToken;
 
-use aerodesk_protocol::sip::PROTOCOL_VERSION;
+use aerodesk_protocol::sip::{PROTOCOL_VERSION, valid_room_name};
 use aerodesk_protocol::tls::TlsIdentity;
 
 /// 严格子集（规范 §6）：本端点实现的方法；其余一律 501。
@@ -227,6 +232,21 @@ pub fn metrics_snapshot() -> Option<(u64, u64, u64)> {
     ))
 }
 
+/// 三传输监听状态（D3）：serve 开头全清 false，各 bind 成功后置 true——
+/// supervisor 重启窗口期 /healthz 会短暂报 false（如实反映）。
+static SIP_TLS_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SIP_WSS_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SIP_UDP_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 当前三传输监听状态（tls, wss, udp）；供 /healthz `sip` 字段。
+pub fn listeners_up() -> Option<(bool, bool, bool)> {
+    Some((
+        SIP_TLS_UP.load(Ordering::Relaxed),
+        SIP_WSS_UP.load(Ordering::Relaxed),
+        SIP_UDP_UP.load(Ordering::Relaxed),
+    ))
+}
+
 /// 生成 Digest 质询 nonce（无状态，slice 1 不追踪 stale——见模块头硬化项）。
 fn make_nonce(counter: &AtomicU64, secret: &str) -> String {
     let n = counter.fetch_add(1, Ordering::Relaxed);
@@ -399,6 +419,7 @@ fn callee_fixed_password(cfg: &SipConfig, device: &str) -> Option<String> {
 }
 
 /// SIP 端点配置。
+#[derive(Clone)]
 pub struct SipConfig {
     pub realm: String,
     /// SIP over TLS 监听地址（None = 不开）。
@@ -414,7 +435,7 @@ pub struct SipConfig {
     /// 用 SIP_DIGEST_USERS 显式覆盖。
     pub token_password: Option<String>,
     /// 开放注册（开发/e2e）：口令表与 token 均未配置时跳过 Digest 校验——
-    /// 与 WSS join 同姿态（无鉴权源即开放，main.rs auth_ok 语义）。
+    /// 与原 JSON join 同姿态（无鉴权源即开放）。
     pub open_register: bool,
     /// 临时口令注册表（#503-4：主控端经 /admin/temp-password 签发、带有效期；
     /// INVITE 授权时与固定口令并列校验）。main.rs 与 HTTP 管理端点共享。
@@ -426,6 +447,14 @@ pub struct SipConfig {
     pub sfu_urls: Vec<String>,
     /// SFU 内部接口 token（可选）。
     pub sfu_token: Option<String>,
+    /// Registrar（外置于端点）：SIGHUP 证书轮换重启端点时不丢注册。
+    pub registrar: Arc<Mutex<Registrar>>,
+    /// 本 PoP 标识（多 PoP 归属决策用，#146）。
+    pub pop_id: String,
+    /// 动态房间归属注册表（POP_REGISTRY_FILE 开启时存在；#154）。
+    pub pop_registry: Option<Arc<PopRegistry>>,
+    /// PoP → SIP 目标 host:port（POP_SIP_URLS；302 Contact 载体）。
+    pub pop_sip_urls: Vec<(String, String)>,
 }
 
 /// 在独立 tokio runtime 上跑 SIP 端点（阻塞当前线程；由调用方 spawn 线程）。
@@ -440,6 +469,10 @@ pub fn run_sip_endpoint(cfg: SipConfig, cancel: CancellationToken) -> Result<(),
 }
 
 async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> {
+    // 监听状态清零：supervisor 重启窗口期 /healthz 如实报 false。
+    SIP_TLS_UP.store(false, Ordering::Relaxed);
+    SIP_WSS_UP.store(false, Ordering::Relaxed);
+    SIP_UDP_UP.store(false, Ordering::Relaxed);
     let tl = TransportLayer::new(cancel.clone());
 
     // TLS 监听（原生端）。
@@ -460,6 +493,7 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
             .await
             .map_err(|e| format!("SIP/TLS 监听 {addr} 失败: {e}"))?;
         tl.inner.add_listener(SipConnection::from(listener));
+        SIP_TLS_UP.store(true, Ordering::Relaxed);
         info!(%addr, "SIP/TLS 监听已起");
     }
 
@@ -473,6 +507,7 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
         .await
         .map_err(|e| format!("SIP/UDP 监听 {addr} 失败: {e}"))?;
         tl.inner.add_listener(SipConnection::from(conn));
+        SIP_UDP_UP.store(true, Ordering::Relaxed);
         info!(%addr, "SIP/UDP 监听已起");
     }
 
@@ -492,6 +527,7 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
             .await
             .map_err(|e| format!("SIP/WSS 监听 {addr} 失败: {e}"))?;
         tl.inner.add_listener(SipConnection::from(listener));
+        SIP_WSS_UP.store(true, Ordering::Relaxed);
         info!(%addr, "SIP/WSS 监听已起");
     }
 
@@ -516,8 +552,9 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
         });
     }
 
-    let registrar = Arc::new(Mutex::new(Registrar::default()));
-    // #503 设备列表：登记注册表句柄供 main.rs `/devices` 读取在线 AoR。
+    // #503 设备列表 + supervisor 证书轮换：注册表由 SipConfig 外置传入
+    // （SIGHUP 重启端点不丢注册），登记句柄供 main.rs `/devices` 读取在线 AoR。
+    let registrar = cfg.registrar.clone();
     let _ = SIP_REGISTRAR.write().unwrap().replace(registrar.clone());
     let nonce_counter = Arc::new(AtomicU64::new(0));
     let nonce_secret =
@@ -665,21 +702,72 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
                         let user = callee.clone().unwrap_or_default();
                         if !user.starts_with("AD-")
                             && !cfg.sfu_urls.is_empty()
-                            && bridge::sanitize_room(&user)
+                            && valid_room_name(&user)
                         {
-                            // 会议语义（规范 §4）：非设备 AoR = SFU 房间名——
-                            // 桥接到 SFU /start（offer→answer），200 OK 回 answer。
-                            let offer = tx.original.body.clone();
-                            let urls = cfg.sfu_urls.clone();
-                            let token = cfg.sfu_token.clone();
-                            let dl = dialog_layer.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) =
-                                    conference_bridge(dl, tx, user, offer, urls, token).await
-                                {
-                                    warn!(error=%e, "conference_bridge 失败");
+                            // 多 PoP 归属决策（#146/#154：写入点自 JSON Join 迁
+                            // SIP INVITE 会议分支）。登记口径前缀无关（dyn- 仅
+                            // e2e 惯例）；单 PoP 默认（无 POP_REGISTRY_FILE/
+                            // POP_SIP_URLS）行为零变化——直接进会议桥。
+                            match decide_pop_route(
+                                &user,
+                                &cfg.pop_id,
+                                cfg.pop_registry.as_deref(),
+                                &cfg.pop_sip_urls,
+                            ) {
+                                PopRoute::Redirect { pop, host_port } => {
+                                    // 事务层 302+Contact（规范 §7）：客户端跟随
+                                    // 重发 INVITE 到目标 PoP（#600 合并后生效）。
+                                    info!(
+                                        room = %user, %pop, %host_port,
+                                        "room -> pop {pop} (self={}): 302 redirect", cfg.pop_id
+                                    );
+                                    let contact = Header::Other(
+                                        "Contact".into(),
+                                        pop_contact_value(&user, &host_port),
+                                    );
+                                    let _ = tx
+                                        .reply_with(
+                                            StatusCode::MovedTemporarily,
+                                            vec![contact],
+                                            None,
+                                        )
+                                        .await;
                                 }
-                            });
+                                PopRoute::BusyNoTarget { pop } => {
+                                    // 误路由且无 302 目标：486 即刻失败（优于
+                                    // 不跟随 302 的旧客户端 30s 超时悬死）。
+                                    warn!(
+                                        room = %user, %pop,
+                                        "room pinned to pop {pop} but no POP_SIP_URLS entry; reject 486"
+                                    );
+                                    let _ = tx.reply(StatusCode::BusyEverywhere).await;
+                                }
+                                PopRoute::Proceed { first_registration } => {
+                                    if let Some(reg) = &cfg.pop_registry {
+                                        if first_registration {
+                                            info!(
+                                                "room {user} registered to pop {} (first inviter)",
+                                                cfg.pop_id
+                                            );
+                                        }
+                                        reg.register(&user, &cfg.pop_id);
+                                    }
+                                    // 会议语义（规范 §4）：非设备 AoR = SFU 房间名
+                                    // ——桥接到 SFU /start（offer→answer），200 OK 回 answer。
+                                    let offer = tx.original.body.clone();
+                                    let urls = cfg.sfu_urls.clone();
+                                    let token = cfg.sfu_token.clone();
+                                    let dl = dialog_layer.clone();
+                                    tokio::spawn(async move {
+                                        if let Err(e) =
+                                            conference_bridge(dl, tx, user, offer, urls, token)
+                                                .await
+                                        {
+                                            warn!(error=%e, "conference_bridge 失败");
+                                        }
+                                    });
+                                }
+                            }
                         } else {
                             // 设备不在线（AD-*）或非法房间名/未配 SFU → 404（规范 §3 offline）。
                             let _ = tx.reply(StatusCode::NotFound).await;
@@ -1075,34 +1163,116 @@ async fn conference_bridge(
     Ok(())
 }
 
-/// SFU /start 代理（viewer 角色；与 main.rs `proxy_to_sfu` 同构，SIP 侧独立
-/// 实现避免依赖 WSS Config）：房间名 FNV 哈希选池内 SFU（与 WSS 侧
-/// `selected_sfu_idx` 语义一致——同房间稳定同 SFU）。
-fn sfu_proxy_start(
+/// SFU /start 代理（viewer 角色）：候选序 [`crate::sfu_candidates`]（粘性 +
+/// 负载感知），**有界 failover**——只试前 2 个候选，仅 5xx 与传输错误转移，
+/// 4xx 原样返回（配置/请求错转移无意义）；全部失败才让 conference_bridge 503。
+pub(crate) fn sfu_proxy_start(
     sfu_urls: &[String],
     sfu_token: Option<&str>,
     room: &str,
     offer: &str,
 ) -> Result<String, String> {
-    let idx = fnv1a(room) as usize % sfu_urls.len();
-    let mut url = format!("{}/start?room={room}&role=viewer", sfu_urls[idx]);
-    url.push_str("&dc_ready=1");
+    let candidates = crate::sfu_candidates(sfu_urls, room);
+    let mut last_err = String::new();
+    for idx in candidates.into_iter().take(2) {
+        match post_start(&sfu_urls[idx], sfu_token, room, offer) {
+            Ok(answer) => return Ok(answer),
+            Err(SfuProxyError::Fatal(e)) => return Err(e),
+            Err(SfuProxyError::Transient(e)) => last_err = e,
+        }
+    }
+    Err(last_err)
+}
+
+/// 单次 SFU /start 调用的失败分类（D4 failover 判据）。
+enum SfuProxyError {
+    /// 4xx：配置/请求错（token 不符、offer 非法等），转移无意义。
+    Fatal(String),
+    /// 5xx / 传输错误：SFU 侧瞬时故障，可转移下一候选。
+    Transient(String),
+}
+
+/// 单个 SFU 的 POST /start?room=xxx&role=viewer&dc_ready=1（body = SDP offer）。
+fn post_start(
+    url: &str,
+    sfu_token: Option<&str>,
+    room: &str,
+    offer: &str,
+) -> Result<String, SfuProxyError> {
+    let mut full = format!("{url}/start?room={room}&role=viewer");
+    full.push_str("&dc_ready=1");
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(10))
         .build();
-    let mut req = agent.post(&url).set("Content-Type", "application/json");
+    let mut req = agent.post(&full).set("Content-Type", "application/json");
     if let Some(token) = sfu_token {
         req = req.set("X-Internal-Token", token);
     }
-    let resp = req.send_string(offer).map_err(|e| e.to_string())?;
-    resp.into_string().map_err(|e| e.to_string())
+    match req.send_string(offer) {
+        Ok(resp) => resp
+            .into_string()
+            .map_err(|e| SfuProxyError::Transient(format!("read body failed: {e}"))),
+        // ureq2 对 >=400 返回 Err(Status)：4xx 视为致命（不转移），5xx 转移。
+        Err(ureq::Error::Status(code, _)) if (400..500).contains(&code) => {
+            Err(SfuProxyError::Fatal(format!("sfu {url} http {code}")))
+        }
+        Err(ureq::Error::Status(code, _)) => {
+            Err(SfuProxyError::Transient(format!("sfu {url} http {code}")))
+        }
+        Err(e) => Err(SfuProxyError::Transient(format!("sfu {url}: {e}"))),
+    }
 }
 
-/// FNV-1a 房间哈希（SFU 池选路；与 WSS 侧同义）。
-fn fnv1a(s: &str) -> u64 {
-    s.bytes().fold(0xcbf29ce484222325u64, |h, b| {
-        (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
-    })
+/// 多 PoP INVITE 归属决策结果（纯逻辑，可单测）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PopRoute {
+    /// 他 PoP 房间且有 302 目标：事务层回 302+Contact。
+    Redirect { pop: String, host_port: String },
+    /// 他 PoP 房间但无 POP_SIP_URLS 目标：486 即刻失败。
+    BusyNoTarget { pop: String },
+    /// 本 PoP 处理（进会议桥）。`first_registration`：未登记房间的首个 INVITE
+    /// ——调用方登记 owner PoP（镜像原 JSON Join「首个加入者登记」语义）。
+    Proceed { first_registration: bool },
+}
+
+/// PoP 归属决策（#146/#154）：注册表未开启 → 直接放行（单 PoP 默认，行为零
+/// 变化）；未登记 → Proceed{true}；命中本 PoP → Proceed{false}（刷 TTL）；
+/// 命中他 PoP → 有 POP_SIP_URLS 目标则 302，无目标则 486。
+pub fn decide_pop_route(
+    room: &str,
+    self_pop: &str,
+    registry: Option<&PopRegistry>,
+    pop_sip_urls: &[(String, String)],
+) -> PopRoute {
+    let Some(reg) = registry else {
+        return PopRoute::Proceed {
+            first_registration: false,
+        };
+    };
+    match reg.lookup(room) {
+        None => PopRoute::Proceed {
+            first_registration: true,
+        },
+        Some(pop) if pop == self_pop => PopRoute::Proceed {
+            first_registration: false,
+        },
+        Some(pop) => {
+            let target = pop_sip_urls
+                .iter()
+                .find(|(p, _)| p == &pop)
+                .map(|(_, hp)| hp.clone());
+            match target {
+                Some(host_port) => PopRoute::Redirect { pop, host_port },
+                None => PopRoute::BusyNoTarget { pop },
+            }
+        }
+    }
+}
+
+/// 302 Contact 头值（RFC 3261 §20.10）：`<sip:<room>@<host:port>>`——客户端
+/// （#600 合并后）据此对目标 PoP 重发 INVITE。
+pub fn pop_contact_value(room: &str, host_port: &str) -> String {
+    format!("<sip:{room}@{host_port}>")
 }
 
 #[cfg(test)]
@@ -1482,6 +1652,10 @@ mod tests {
             token_password: None,
             open_register: false,
             temp_passwords: Arc::default(),
+            registrar: Arc::new(Mutex::new(Registrar::default())),
+            pop_id: "pop-a".into(),
+            pop_registry: None,
+            pop_sip_urls: vec![],
         };
         let server_cancel = cancel.clone();
         let server = tokio::spawn(async move { serve(cfg, server_cancel).await });
@@ -1593,6 +1767,10 @@ mod tests {
             token_password: None,
             open_register: false,
             temp_passwords: Arc::default(),
+            registrar: Arc::new(Mutex::new(Registrar::default())),
+            pop_id: "pop-a".into(),
+            pop_registry: None,
+            pop_sip_urls: vec![],
         };
         let sc = cancel.clone();
         let server = tokio::spawn(async move { serve(cfg, sc).await });
@@ -1775,6 +1953,10 @@ mod tests {
             token_password: None,
             open_register: false,
             temp_passwords: Arc::default(),
+            registrar: Arc::new(Mutex::new(Registrar::default())),
+            pop_id: "pop-a".into(),
+            pop_registry: None,
+            pop_sip_urls: vec![],
         };
         let server_cancel = CancellationToken::new();
         let sc = server_cancel.clone();
@@ -1902,6 +2084,10 @@ mod tests {
             token_password: None,
             open_register: false,
             temp_passwords: Arc::default(),
+            registrar: Arc::new(Mutex::new(Registrar::default())),
+            pop_id: "pop-a".into(),
+            pop_registry: None,
+            pop_sip_urls: vec![],
         };
         let server_cancel = CancellationToken::new();
         let sc = server_cancel.clone();
@@ -1982,6 +2168,10 @@ mod tests {
             token_password: None,
             open_register: false,
             temp_passwords: Arc::default(),
+            registrar: Arc::new(Mutex::new(Registrar::default())),
+            pop_id: "pop-a".into(),
+            pop_registry: None,
+            pop_sip_urls: vec![],
         };
         let server_cancel = CancellationToken::new();
         let sc = server_cancel.clone();
@@ -2371,6 +2561,10 @@ mod tests {
             token_password: None,
             open_register: false,
             temp_passwords: Arc::default(),
+            registrar: Arc::new(Mutex::new(Registrar::default())),
+            pop_id: "pop-a".into(),
+            pop_registry: None,
+            pop_sip_urls: vec![],
         };
         let client_cfg = |device: &str| SipClientConfig {
             device_id: device.into(),
@@ -2412,6 +2606,10 @@ mod tests {
             token_password: None,
             open_register: false,
             temp_passwords: Arc::default(),
+            registrar: Arc::new(Mutex::new(Registrar::default())),
+            pop_id: "pop-a".into(),
+            pop_registry: None,
+            pop_sip_urls: vec![],
         };
         let ca_pem_cfg = ca_pem.clone();
         let client_cfg = |device: &str| SipClientConfig {
@@ -2467,6 +2665,10 @@ mod tests {
                     token_password: None,
                     open_register: false,
                     temp_passwords: Arc::default(),
+                    registrar: Arc::new(Mutex::new(Registrar::default())),
+                    pop_id: "pop-a".into(),
+                    pop_registry: None,
+                    pop_sip_urls: vec![],
                 },
                 sc,
             )
@@ -2655,6 +2857,10 @@ mod tests {
                     token_password: None,
                     open_register: false,
                     temp_passwords: temps2,
+                    registrar: Arc::new(Mutex::new(Registrar::default())),
+                    pop_id: "pop-a".into(),
+                    pop_registry: None,
+                    pop_sip_urls: vec![],
                 },
                 sc,
             )

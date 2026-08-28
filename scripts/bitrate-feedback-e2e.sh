@@ -15,7 +15,7 @@ echo "== 启动 sfu + signal（独立端口）"
 SFU_MEDIA_PORT=1478 SFU_SIGNAL_PORT=14000 SFU_INTERNAL_PORT=14002 \
   ./target/debug/aerodesk-sfu >/tmp/brf-sfu.log 2>&1 &
 SFU=$!
-SIGNAL_PORT=14001 SIGNAL_PLAIN_PORT=14003 SFU_URL=http://127.0.0.1:14002 \
+SIGNAL_PORT=14001 SFU_URL=http://127.0.0.1:14002 \
   SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/brf-sig.log 2>&1 &
 SIG=$!
 # 等待 SFU/signal 真正退出（drain 3s），避免下一个 e2e 命中本脚本 14002 残留实例
