@@ -210,10 +210,10 @@ jobs:
       # 三层（q/h/f + f>q 码率）断言待原生端会议发布落地（P2）恢复。
       # Web 发布端（headless Chrome 屏幕共享）偶发浏览器崩溃（同类 flake 见
       # web-pub/web-reconnect），按仓库约定限 3 次重试。
-      # #598 P2a 起暂停；P3.1 服务端 JSON 面已退役（SIP 单栈）。恢复条件：
-      # P3 会议桥「浏览器/原生发布端入会」路径成形（见脚本头注）。
+      # #598 v0.4 恢复：会议桥 + 方向判定 + 浏览器发布端入会齐备（#606/#608），
+      # 脚本重写为会议形态（发布端 conference=1 直接入会 + 2 viewer 选层）。
       - name: e2e simulcast layer switching (macOS only)
-        if: false && runner.os == 'macOS'
+        if: runner.os == 'macOS'
         run: bash scripts/ci-retry.sh 3 ./scripts/simulcast-e2e.sh
 
       # #8 高码率（大帧）回归：VT 1080p60 --noisy ~5k pps → viewer 关键帧/解码

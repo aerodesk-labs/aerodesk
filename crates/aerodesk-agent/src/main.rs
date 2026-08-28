@@ -2815,7 +2815,7 @@ fn publisher_x264(
     const W: u32 = 640;
     const H: u32 = 360;
 
-    let (_signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
+    let (session, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
         match connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio) {
             Ok(v) => v,
             Err(e) => {
@@ -2864,6 +2864,14 @@ fn publisher_x264(
         if !endpoint.is_alive() {
             warn!("endpoint dead, exiting publisher loop");
             break;
+        }
+        // §4.1 升级检测：被控端收到第 2 个观看者 INVITE → 看护线程已回
+        // 302+BYE → 本变体直接重建为会议发布（源统一合成 pcap，见
+        // publisher_conference；真实采集源的会议模式为后续项）。
+        if let Some(aor) = session.escalated_to_sfu() {
+            info!(%aor, "1:1 升级为 SFU 会议（发布方向重建）");
+            let _ = publisher_conference(signal_url, room, auth, audio, audio_opus);
+            return;
         }
         // #211：排空式读取（软编/高负载下保证 SCTP ACK 及时消费，input 送达率不塌陷）。
         let wait = Duration::from_millis(5);
@@ -2979,7 +2987,7 @@ fn publisher_vt(
     use aerodesk_platform::macos::vt_encoder::VtEncoder;
     use str0m::media::Rid;
 
-    let (_signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
+    let (session, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
         match connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio) {
             Ok(v) => v,
             Err(e) => {
@@ -3035,6 +3043,14 @@ fn publisher_vt(
         if !endpoint.is_alive() {
             warn!("endpoint dead, exiting publisher loop");
             break;
+        }
+        // §4.1 升级检测：被控端收到第 2 个观看者 INVITE → 看护线程已回
+        // 302+BYE → 本变体直接重建为会议发布（源统一合成 pcap，见
+        // publisher_conference；真实采集源的会议模式为后续项）。
+        if let Some(aor) = session.escalated_to_sfu() {
+            info!(%aor, "1:1 升级为 SFU 会议（发布方向重建）");
+            let _ = publisher_conference(signal_url, room, auth, audio, audio_opus);
+            return;
         }
         // #211：排空式读取（软编/高负载下保证 SCTP ACK 及时消费，input 送达率不塌陷）。
         let wait = Duration::from_millis(5);
@@ -3149,7 +3165,7 @@ fn publisher_generic<
     camera_cap: Option<CC>,
     mut cursor: Option<CS>,
 ) {
-    let (_signal, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) =
+    let (session, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) =
         match if camera_cap.is_some() {
             connect_camera(signal_url, room, Role::Publisher, auth, audio, Some(codec))
         } else {
@@ -3190,6 +3206,14 @@ fn publisher_generic<
         if !endpoint.is_alive() {
             warn!("endpoint dead, exiting publisher loop");
             break;
+        }
+        // §4.1 升级检测：被控端收到第 2 个观看者 INVITE → 看护线程已回
+        // 302+BYE → 本变体直接重建为会议发布（源统一合成 pcap，见
+        // publisher_conference；真实采集源的会议模式为后续项）。
+        if let Some(aor) = session.escalated_to_sfu() {
+            info!(%aor, "1:1 升级为 SFU 会议（发布方向重建）");
+            let _ = publisher_conference(signal_url, room, auth, audio, audio_opus);
+            return;
         }
         // #211：排空式读取（软编/高负载下保证 SCTP ACK 及时消费，input 送达率不塌陷）。
         let wait = Duration::from_millis(5);
@@ -3894,7 +3918,7 @@ fn publisher_capture_ffmpeg(
     const H: u32 = 0;
     const FPS: u32 = 30;
 
-    let (_signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
+    let (session, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
         match connect_codec(signal_url, room, Role::Publisher, auth, audio, codec) {
             Ok(v) => v,
             Err(e) => {
@@ -3944,6 +3968,14 @@ fn publisher_capture_ffmpeg(
         if !endpoint.is_alive() {
             warn!("endpoint dead, exiting publisher loop");
             break;
+        }
+        // §4.1 升级检测：被控端收到第 2 个观看者 INVITE → 看护线程已回
+        // 302+BYE → 本变体直接重建为会议发布（源统一合成 pcap，见
+        // publisher_conference；真实采集源的会议模式为后续项）。
+        if let Some(aor) = session.escalated_to_sfu() {
+            info!(%aor, "1:1 升级为 SFU 会议（发布方向重建）");
+            let _ = publisher_conference(signal_url, room, auth, audio, audio_opus);
+            return;
         }
         // #211：排空式读取（软编/高负载下保证 SCTP ACK 及时消费，input 送达率不塌陷）。
         let wait = Duration::from_millis(5);
@@ -4107,7 +4139,7 @@ fn publisher_capture(
         _ => VtCodec::H264,
     };
 
-    let (_signal, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) = match connect_inner(
+    let (session, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) = match connect_inner(
         signal_url,
         room,
         Role::Publisher,
@@ -4296,6 +4328,14 @@ fn publisher_capture(
         if !endpoint.is_alive() {
             warn!("endpoint dead, exiting publisher loop");
             break;
+        }
+        // §4.1 升级检测：被控端收到第 2 个观看者 INVITE → 看护线程已回
+        // 302+BYE → 本变体直接重建为会议发布（源统一合成 pcap，见
+        // publisher_conference；真实采集源的会议模式为后续项）。
+        if let Some(aor) = session.escalated_to_sfu() {
+            info!(%aor, "1:1 升级为 SFU 会议（发布方向重建）");
+            let _ = publisher_conference(signal_url, room, auth, audio, audio_opus);
+            return;
         }
         // #211：排空式读取（软编/高负载下保证 SCTP ACK 及时消费，input 送达率不塌陷）。
         let wait = Duration::from_millis(5);
