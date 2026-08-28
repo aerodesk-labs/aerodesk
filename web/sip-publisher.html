@@ -59,6 +59,9 @@ $('device').value = params.get('device') || '';
 $('signal').value = params.get('signal') || '';
 $('token').value = params.get('token') || '';
 if (params.get('auto') === '0' || params.get('auto') === 'false') $('auto').checked = false;
+// #598 v0.4：conference=1 → 直接会议发布（注册后立即 INVITE view-AoR，
+// 跳过 1:1 等待——simulcast/录制等「发布端即入会」场景）。
+const DIRECT_CONFERENCE = params.get('conference') === '1' || params.get('conference') === 'true';
 
 // ---------- 常量与状态 ----------
 const DOMAIN = 'aerodesk.test';
@@ -594,6 +597,10 @@ async function connect() {
         phase = 'waiting';
         setStatus('等待观看端拨入（设备 ID=' + deviceId() + '）…');
         log('等待 INVITE…');
+        if (DIRECT_CONFERENCE) {
+            log('conference=1：直接转会议发布');
+            escalateToConference();
+        }
     } catch (e) {
         setStatus('启动失败: ' + e.message);
         log('error: ' + e);
