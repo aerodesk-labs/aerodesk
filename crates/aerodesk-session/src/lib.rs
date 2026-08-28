@@ -16,12 +16,10 @@ pub mod keymap;
 // 不看 macOS、session 不给 macOS 提供泛型观看端，遗留断链）。
 pub mod generic_media;
 #[cfg(target_os = "macos")]
-pub mod macos_media;
 #[cfg(target_os = "macos")]
 pub mod macos_publisher;
 //#[cfg(target_os = "macos")]
-//pub mod macos_media;
-//#[cfg(target_os = "macos")]
+////#[cfg(target_os = "macos")]
 //pub mod macos_publisher;
 
 /// #72 UI → 会话文件/剪贴板命令（经 mpsc 传到会话线程）。

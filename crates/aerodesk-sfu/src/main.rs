@@ -1361,8 +1361,14 @@ fn web_request(
         return Response::text("not found").with_status_code(404);
     }
 
+    // #598 P4：内嵌双 SIP 页（index.html 已随 JSON 栈退役删除）——
+    // 根路径 = 观看页；/publish = 被控发布页（浏览器 UAS）。页面信令走
+    // signal 的 SIP-WSS（3061），不在 SFU 端口。
+    if request.method() == "GET" && request.url().starts_with("/publish") {
+        return Response::html(include_str!("../../../web/sip-publisher.html"));
+    }
     if request.method() == "GET" {
-        return Response::html(include_str!("../../../web/index.html"));
+        return Response::html(include_str!("../../../web/sip-viewer.html"));
     }
 
     // 优雅关闭中：拒绝新房间（503），已有连接继续服务直至 drain 超时。
