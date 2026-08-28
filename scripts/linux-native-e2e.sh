@@ -26,7 +26,7 @@ SIP_UDP_PORT=5060 "$ROOT/target/debug/aerodesk-signal" >/tmp/linux-native-sig.lo
 SIG=$!
 OK=0
 for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 3003 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then OK=1; break; fi
+    if grep -q "SIP/UDP 监听已起" /tmp/linux-native-sig.log 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then OK=1; break; fi
     sleep 0.2
 done
 if [ "$OK" != "1" ]; then echo "FAIL: SFU/signal 未就绪"; tail -10 /tmp/linux-native-sfu.log; exit 1; fi

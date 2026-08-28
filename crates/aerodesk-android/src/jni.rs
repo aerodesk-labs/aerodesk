@@ -7,8 +7,6 @@ use jni::JNIEnv;
 use jni::objects::{JClass, JString};
 use jni::sys::jstring;
 
-use aerodesk_core::connect::connect_viewer;
-
 const VERSION: &str = concat!("aerodesk-android ", env!("CARGO_PKG_VERSION"));
 
 #[unsafe(no_mangle)]
@@ -19,36 +17,18 @@ pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_version<'local>(
     env.new_string(VERSION).expect("jstring alloc").into_raw()
 }
 
-/// 观看端连接（阻塞调用，请在 Kotlin 后台线程执行）。
-/// 返回状态文本（含 peer_id / ICE 状态）。
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_connect<'local>(
-    mut env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    server: JString<'local>,
-    room: JString<'local>,
-) -> jstring {
-    let server: String = env
-        .get_string(&server)
-        .map(|s| s.into())
-        .unwrap_or_default();
-    let room: String = env.get_string(&room).map(|s| s.into()).unwrap_or_default();
-    let status = connect_viewer(&server, &room)
-        .map(|r| r.summary())
-        .unwrap_or_else(|e| format!("连接失败: {e}"));
-    env.new_string(status).expect("jstring alloc").into_raw()
-}
-
 use aerodesk_platform::android::viewer::ViewerSession;
 use jni::objects::JByteArray;
 
 /// 创建观看会话（连接 + 后台收流）。返回指针（jlong），失败为 0。
+/// `token` 为 Digest 口令（#598 P1d：JNI 补 token 通道；null 视为未配置）。
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerCreate<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     server: JString<'local>,
     room: JString<'local>,
+    token: JString<'local>,
     force_relay: jboolean,
 ) -> jlong {
     let server: String = env
@@ -56,7 +36,14 @@ pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_viewerCreate<'local>
         .map(|s| s.into())
         .unwrap_or_default();
     let room: String = env.get_string(&room).map(|s| s.into()).unwrap_or_default();
-    match ViewerSession::connect(&server, &room, force_relay == JNI_TRUE) {
+    let token: Option<String> = env
+        .get_string(&token)
+        .map(|s| {
+            let s: String = s.into();
+            (!s.is_empty()).then_some(s)
+        })
+        .unwrap_or(None);
+    match ViewerSession::connect(&server, &room, token.as_deref(), force_relay == JNI_TRUE) {
         Ok(v) => Box::into_raw(Box::new(v)) as jlong,
         Err(e) => {
             // 模拟器/CI 自测诊断：连接失败原因写 app 私有文件（run-as 可读）。
@@ -134,19 +121,28 @@ use aerodesk_platform::android::publisher::PublisherSession;
 use jni::sys::{JNI_FALSE, JNI_TRUE, jboolean, jbyteArray, jlong};
 
 /// 创建发布会话（被控端）。返回指针（jlong），失败为 0。
+/// `token` 为 Digest 口令（#598 P1d：JNI 补 token 通道；null 视为未配置）。
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_aerodesk_viewer_NativeBridge_publisherCreate<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     server: JString<'local>,
     room: JString<'local>,
+    token: JString<'local>,
 ) -> jlong {
     let server: String = env
         .get_string(&server)
         .map(|s| s.into())
         .unwrap_or_default();
     let room: String = env.get_string(&room).map(|s| s.into()).unwrap_or_default();
-    match PublisherSession::connect(&server, &room) {
+    let token: Option<String> = env
+        .get_string(&token)
+        .map(|s| {
+            let s: String = s.into();
+            (!s.is_empty()).then_some(s)
+        })
+        .unwrap_or(None);
+    match PublisherSession::connect(&server, &room, token.as_deref()) {
         Ok(p) => Box::into_raw(Box::new(p)) as jlong,
         Err(e) => {
             // 模拟器/CI 自测诊断：连接失败原因写 app 私有文件（run-as 可读）。

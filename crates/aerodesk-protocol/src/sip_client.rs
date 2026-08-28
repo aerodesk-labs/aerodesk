@@ -13,8 +13,10 @@
 //! - 主叫：`Call` → 经 signal 透明 Proxy 的 INVITE（offer 字节透传）；`180`→
 //!   [`SipEvent::Ringing`]，`200`→[`SipEvent::Answered`]（answer 字节透传），
 //!   4xx/6xx→[`SipEvent::Rejected`]（error_code 按规范 §3 由响应码映射），
-//!   `302`→[`SipEvent::EscalatedToSfu`]（会议 AoR 按 §4.1 由对端设备确定性推导——
-//!   rsipstack `reject` 不能带 Contact，推导规则使两端同样收敛）。
+//!   `302`→分派：无 Contact → [`SipEvent::EscalatedToSfu`]（会议 AoR 按 §4.1
+//!   由对端设备确定性推导——rsipstack `reject` 不能带 Contact，推导规则使两端
+//!   同样收敛）；带 Contact（PoP 重定向，需服务端 message 构造路径）→
+//!   [`SipEvent::RedirectedTo`]（#598 P1a）。
 //! - 被叫：INVITE → [`SipEvent::IncomingCall`]；core 以 `Ring`/`Accept`/`Reject`/
 //!   `RedirectToSfu` 决策；对端 CANCEL → [`SipEvent::PeerHangup`]。
 //! - 对话内：`Hangup`→BYE（reason 透传 Reason 头；[`crate::sip::ESCALATE_BYE_REASON`]
@@ -161,6 +163,13 @@ pub enum SipEvent {
     /// 呼叫已升级至 SFU 会议 AoR（§4.1：对端 BYE cause=302，或主叫侧收 302）。
     /// core 应按 view_aor 重新发起呼叫（媒体切 SFU）。
     EscalatedToSfu { call_id: String, view_aor: String },
+    /// 主叫侧收 **带 Contact** 的 302（#598 P1a：PoP 重定向——目标在别的信令点）。
+    /// 与 [`SipEvent::EscalatedToSfu`] 的区分依据是 302 是否携带 Contact 头：
+    /// 无 Contact（rsipstack reject 限制，现有会议升级路径）→ 端侧确定性推导
+    /// 会议 AoR；有 Contact → `contact` 为目标 URI（`sip:<room>@<host>:<port>`），
+    /// core 应换拨该信令点（重注册 + 重呼叫）。两条终局通道（JoinHandle 终局 /
+    /// Terminated）经 `CallEntry.redirect_contact` 消歧，先到先报不重复。
+    RedirectedTo { call_id: String, contact: String },
     /// 对端 trickle 候选（IceCandidate 同构，INFO sdpfrag）。
     Trickle {
         call_id: String,
@@ -283,11 +292,14 @@ struct CallEntry {
     initiator: bool,
     /// 对话已 Confirmed（200/ACK 之后）。
     established: bool,
-    /// 终局事件（Answered/Rejected/EscalatedToSfu）已上报——去重
+    /// 终局事件（Answered/Rejected/EscalatedToSfu/RedirectedTo）已上报——去重
     /// Confirmed 事件与 do_invite JoinHandle 的双通道到达。
     final_notified: bool,
     /// 升级事件已上报（BYE cause=302）——抑制后续 PeerHangup。
     escalate_notified: bool,
+    /// 主叫腿 302 响应携带的 Contact 头（#598 P1a PoP 重定向）。JoinHandle 终局
+    /// 通道捕获后存此——Terminated 通道先到也可据此分派（两条通道消歧的锚点）。
+    redirect_contact: Option<String>,
 }
 
 /// `handle_command` 的静态上下文（收束参数个数）。
@@ -652,6 +664,7 @@ async fn handle_command(cmd: SipCommand, ctx: CmdCtx<'_>) {
                             established: false,
                             final_notified: false,
                             escalate_notified: false,
+                            redirect_contact: None,
                         },
                     );
                     // JoinHandle 终局响应回注主循环（302/4xx/6xx 的权威语义）。
@@ -827,6 +840,7 @@ async fn handle_incoming(
                             established: false,
                             final_notified: false,
                             escalate_notified: false,
+                            redirect_contact: None,
                         },
                     );
                     info!(%call_id, from = %from_device, "SIP 来电");
@@ -1017,7 +1031,11 @@ fn handle_terminated(
     dialog_layer.remove_dialog(&id);
 }
 
-/// 主叫腿终局响应码 → Rejected / EscalatedToSfu（302，§4.1 推导会议 AoR）。
+/// 主叫腿终局响应码 → Rejected / EscalatedToSfu / RedirectedTo（#598 P1a）。
+///
+/// 302 分派：带 Contact → PoP 重定向（换信令点）；无 Contact → 会议升级
+/// （§4.1 端侧确定性推导会议 AoR——rsipstack reject 不能带 Contact 的现状路径）。
+/// 纯函数以便单测（不构造 dialog/response）。
 fn report_final_status(
     call_id: &str,
     code: &StatusCode,
@@ -1030,6 +1048,16 @@ fn report_final_status(
         entry.final_notified = true;
         if status == 302 {
             entry.escalate_notified = true;
+            // #598 P1a：JoinHandle 终局通道先到时捕获的 Contact 是双通道消歧锚点
+            // ——Terminated 通道后到也据此分派（而非盲目升级）。
+            if let Some(contact) = entry.redirect_contact.clone() {
+                info!(%call_id, %contact, "呼叫被 302 重定向（PoP）");
+                let _ = event_tx.send(SipEvent::RedirectedTo {
+                    call_id: call_id.to_string(),
+                    contact,
+                });
+                return;
+            }
             let view = view_aor(&entry.peer_device, &cfg.domain);
             info!(%call_id, %view, "呼叫被 302 重定向至 SFU 会议");
             let _ = event_tx.send(SipEvent::EscalatedToSfu {
@@ -1044,6 +1072,14 @@ fn report_final_status(
         status,
         error_code: status_to_error_code(status).map(str::to_string),
     });
+}
+
+/// 从响应里取 Contact 头原始值（PoP 重定向目标；无则 None）。
+fn contact_header(resp: &Response) -> Option<String> {
+    resp.headers
+        .iter()
+        .find(|h| h.name().eq_ignore_ascii_case("Contact"))
+        .map(|h| h.value().to_string())
 }
 
 /// do_invite_async 的 JoinHandle 终局（302/4xx/6xx 权威；2xx 与 Confirmed 去重）。
@@ -1075,6 +1111,19 @@ fn handle_invite_final(
                 302 => {
                     entry.final_notified = true;
                     entry.escalate_notified = true;
+                    // #598 P1a：带 Contact 的 302 = PoP 重定向（换信令点重拨）；
+                    // 无 Contact = 会议升级（§4.1 端侧推导，rsipstack reject
+                    // 无 Contact 现状）。捕获的 Contact 同时存入 entry——
+                    // Terminated 通道后到时据此分派。
+                    if let Some(contact) = contact_header(&resp) {
+                        info!(%call_id, %contact, "呼叫被 302 重定向（PoP）");
+                        entry.redirect_contact = Some(contact.clone());
+                        let _ = event_tx.send(SipEvent::RedirectedTo {
+                            call_id: call_id.to_string(),
+                            contact,
+                        });
+                        return;
+                    }
                     let view = view_aor(&entry.peer_device, &cfg.domain);
                     info!(%call_id, %view, "呼叫被 302 重定向至 SFU 会议");
                     let _ = event_tx.send(SipEvent::EscalatedToSfu {

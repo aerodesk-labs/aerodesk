@@ -772,6 +772,174 @@ pub fn connect_viewer_sip(
     ))
 }
 
+/// #598 P1a 被控端 SIP 连接原语（UAS 形态，替代 `connect_live_role` Publisher 路径）：
+/// REGISTER（device_id 即 AoR/用户名）→ 等首个 INVITE → 免授权静默接听
+/// （P2pCall Callee 反演 offer → answer）→ ICE 收敛。
+///
+/// 消费者：跨 PoP 桥 pub 腿、host auto_publish 登录媒体、Android/OHOS 被控端。
+/// 会话语义与 CLI agent connect_inner 的 publisher 路径一致——一次原语只承接
+/// 一个呼叫（桥/host/移动端当前均为单会话场景）；后续 INVITE 由看护线程拒绝
+/// （busy），不在此扩展多呼叫复用。`codec` 透传 P2pCallConfig（None=默认 H264）。
+///
+/// 返回 [`P2pCall`]（调用方驱动 `poll()` 泵媒体，endpoint/socket 经访问器取用）
+/// 与 video/audio mid；SipCallLink 移入看护线程持有至进程退出（Drop 即 BYE/注销），
+/// 与 `connect_viewer_sip` 同形。
+pub fn connect_publisher_sip(
+    server: &str,
+    device_id: &str,
+    token: Option<&str>,
+    force_relay: bool,
+    sip_transport: Option<&str>,
+    sip_port: Option<u16>,
+    codec: Option<crate::platform::Codec>,
+) -> Result<
+    (
+        crate::p2p_call::P2pCall,
+        Option<str0m::media::Mid>,
+        Option<str0m::media::Mid>,
+    ),
+    String,
+> {
+    // 传输推导：显式参数 > URL scheme（wss=TLS/ws=UDP；无 scheme 按 ws）。
+    let transport = sip_transport.unwrap_or({
+        #[allow(clippy::match_like_matches_macro)]
+        let tls = server.starts_with("wss");
+        if tls { "tls" } else { "udp" }
+    });
+    let mut cfg = crate::sip_link::SipLinkConfig::from_parts(
+        server,
+        device_id,
+        token.unwrap_or(""),
+        transport,
+        sip_port.unwrap_or(0),
+        "",
+        "",
+    )?;
+    if cfg.transport == crate::protocol::sip_client::SipTransport::Tls && cfg.tls.is_none() {
+        // from_parts 已注系统根；此处仅防御（理论不可达）。
+        cfg.tls = Some(crate::protocol::sip_client::SipTlsConfig {
+            ca_certs: crate::protocol::sip_client::system_ca_pem(),
+            sni_hostname: None,
+            client_cert: None,
+            client_key: None,
+        });
+    }
+    let mut link = crate::sip_link::SipCallLink::new(cfg);
+    link.start();
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(75);
+        loop {
+            let st = link.poll();
+            if st.is_online() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!("SIP 注册未完成（75s）：{st:?}"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    // 就绪栅栏日志（与 agent CLI 同字面量——win-logon/bridge e2e grep 锚点）。
+    tracing::info!("SIP registered: {device_id}");
+
+    // 等待来电并免授权静默接听（desktop UAS 流的收敛版）：IncomingCall →
+    // P2pCall(Callee, Publisher) accept_offer → accept(answer)。等 INVITE 300s
+    // （agent CLI 同款）；被叫无门禁——「开启被控」开关属上层 UI 语义。
+    const INCOMING_TIMEOUT: Duration = Duration::from_secs(300);
+    let (call_id, answer_sdp) = {
+        let deadline = std::time::Instant::now() + INCOMING_TIMEOUT;
+        let mut got: Result<(String, String), String> =
+            Err("等待来电超时（300s 内无 INVITE）".into());
+        'wait: while std::time::Instant::now() < deadline {
+            let _ = link.poll();
+            for ev in link.take_events() {
+                match ev {
+                    crate::sip_link::SipLinkEvent::IncomingCall {
+                        call_id, offer_sdp, ..
+                    } => {
+                        got = Ok((call_id, offer_sdp));
+                        break 'wait;
+                    }
+                    crate::sip_link::SipLinkEvent::Rejected { status, .. } => {
+                        got = Err(format!("注册被拒（{status}）"));
+                        break 'wait;
+                    }
+                    _ => {}
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        got?
+    };
+    let mut p2p = crate::p2p_call::P2pCall::new(crate::p2p_call::P2pCallConfig {
+        role: crate::p2p_call::P2pRole::Callee,
+        device_role: Role::Publisher,
+        codec,
+        with_audio: false,
+        with_camera: false,
+        force_relay,
+        bind: "0.0.0.0:0".parse().unwrap(),
+        turn: crate::turn_client::p2p_turn_transport(
+            &std::env::var("AERO_TURN_URLS").unwrap_or_default(),
+            &std::env::var("AERO_TURN_USERNAME").unwrap_or_default(),
+            &std::env::var("AERO_TURN_CREDENTIAL").unwrap_or_default(),
+        ),
+        inline_candidates: true,
+    })
+    .map_err(|e| format!("被叫媒体端点创建失败：{e}"))?;
+    let answer = p2p.accept_offer(&answer_sdp).map_err(|e| {
+        let _ = link.reject(&call_id, "internal");
+        format!("accept_offer 失败：{e}")
+    })?;
+    let video_mid = crate::p2p_call::offer_video_mid(&answer_sdp);
+    let audio_mid = crate::p2p_call::offer_audio_mid(&answer_sdp);
+    link.accept(&call_id, &answer)
+        .map_err(|e| format!("SIP 接听失败：{e}"))?;
+
+    // ICE 收敛（TURN 5-12s → 15s 窗口；与 viewer 同款口径）。
+    {
+        let budget = if p2p.socket().turn().is_some() { 15 } else { 5 };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(budget);
+        while std::time::Instant::now() < deadline && p2p.is_alive() {
+            p2p.poll().map_err(|e| e.to_string())?;
+            if p2p.ice_connected() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if !p2p.ice_connected() {
+            return Err(format!(
+                "ICE 连接超时（直连 5s / TURN 15s 未建立，budget={budget}s）"
+            ));
+        }
+    }
+
+    // 信令看护线程：持有 link 至进程退出；后到 INVITE 拒 busy，PeerHangup 记日志
+    // （会话循环只驱动 P2pCall——与 viewer 看护职责对称）。
+    std::thread::Builder::new()
+        .name("sip-pub-watch".into())
+        .spawn(move || {
+            loop {
+                let _ = link.poll();
+                for ev in link.take_events() {
+                    match ev {
+                        crate::sip_link::SipLinkEvent::PeerHangup { call_id, .. } => {
+                            tracing::info!("SIP 对端挂断：{call_id}");
+                        }
+                        crate::sip_link::SipLinkEvent::IncomingCall { call_id, .. } => {
+                            let _ = link.reject(&call_id, "busy");
+                        }
+                        _ => {}
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        })
+        .ok();
+
+    Ok((p2p, video_mid, audio_mid))
+}
+
 pub fn connect_viewer(server: &str, room: &str) -> Result<ConnectResult, ConnectError> {
     let live = connect_live_role(server, room, Role::Viewer, None)?;
     Ok(ConnectResult {

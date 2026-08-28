@@ -33,11 +33,17 @@ SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal.exe >/tmp/logon-sig.log 2>&1 &
 SIG_PID=$!
 sleep 2
 
-echo "== 服务体(--service-fg --force-media,合成源发布)"
+echo "== 服务体（--service-fg --force-media，SIP UAS 等拨）"
 "$BIN" --service-fg --force-media >/tmp/logon-fg.log 2>&1 &
 FG_PID=$!
-sleep 6
-grep -q "ICE connected" /tmp/logon-fg.log || { echo "FAIL 服务体媒体未连接"; tail -20 /tmp/logon-fg.log; exit 1; }
+# #598 P1c：auto_publish 迁 SIP 被叫（connect_publisher_sip）——服务体不再主动
+# 入 SFU 房间，注册就绪即等 viewer 拨入；就绪栅栏由「ICE connected」改为「SIP registered」。
+ok=0
+for _ in $(seq 1 40); do
+  grep -q "SIP registered" /tmp/logon-fg.log 2>/dev/null && ok=1 && break
+  sleep 0.5
+done
+[ "$ok" = "1" ] || { echo "FAIL 服务体媒体未注册"; tail -20 /tmp/logon-fg.log; exit 1; }
 
 echo "== viewer 收流断言"
 OUT=$(timeout 12 "$CLI_BIN" --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" 2>&1 | grep "RECEIVED" | tail -1)

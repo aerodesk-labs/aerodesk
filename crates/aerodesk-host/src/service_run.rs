@@ -523,8 +523,11 @@ fn media_start(settings: &ServiceSettings) -> HeadlessMedia {
     }
 }
 
-/// 媒体主循环：帧源→编码→`send_video_frame`，同 cli publisher 驱动模式
-/// （UDP 输入→timeout→poll_output→poll_event，1ms 粒度 sleep）。
+/// 媒体主循环（#598 P1c：登录界面/auto_publish）：SIP UAS 建链
+/// （`connect_publisher_sip`：REGISTER→等来电→静默接听→ICE 收敛）后，
+/// 以与 #552 被叫侧完全相同的 `run_media_p2p` 泵转发（ChannelOpen 门控、
+/// 帧发送、统计）。旧 JSON SFU join 路径随信令面退役；1:1 会话语义与
+/// desktop/host 来电路径一致（多观看端场景走后续升级会议链，非本面）。
 fn run_media(
     server: String,
     room: String,
@@ -533,117 +536,29 @@ fn run_media(
     helper_port: u16,
     stop: Arc<AtomicBool>,
 ) {
-    use str0m::net::{Protocol, Receive};
-    use str0m::{Input, Output};
     let auth = if token.is_empty() {
         None
     } else {
         Some(token.as_str())
     };
-    // host 无 cli 的 connect():走 core 泛型连接(desktop 发布端同款)。
-    let live = match aerodesk_core::connect::connect_live_role_codec(
+    match aerodesk_core::connect::connect_publisher_sip(
         &server,
         &room,
-        Role::Publisher,
         auth,
+        false,
+        None,
+        None,
         Some(Codec::H264),
     ) {
-        Ok(l) => l,
+        Ok((call, Some(video_mid), _audio_mid)) => {
+            let (_tx, rx) = std::sync::mpsc::channel::<String>();
+            run_media_p2p(call, video_mid, frame_source, helper_port, rx, stop);
+        }
+        Ok((_, None, _)) => warn!("登录界面媒体连接失败：接听后无视频 mid"),
         Err(e) => {
             warn!("登录界面媒体连接失败（server={server} room={room}）：{e}");
-            return;
         }
-    };
-    let (mut endpoint, mut socket, video_mid, _audio_mid) = (
-        live.endpoint,
-        live.socket,
-        live.video_mid.ok_or_else(|| {
-            warn!("登录界面媒体连接失败：无视频 mid");
-        }),
-        live.audio_mid,
-    );
-    let Ok(video_mid) = video_mid else {
-        return;
-    };
-    // #471 M3 帧源解析（见 frame_source_box 注）；SFU 与 P2P 媒体线程共用。
-    let mut source = frame_source_box(&frame_source, helper_port);
-    let mut encoder =
-        match aerodesk_codec::encode::FfmpegEncoder::new(640, 360, 30, 1_500_000, Codec::H264) {
-            Ok(e) => e,
-            Err(e) => {
-                warn!("编码器初始化失败（硬编探测+软编回退均败，S0 环境实属预期待实测项 C）：{e}");
-                return;
-            }
-        };
-    info!("登录界面媒体线程启动（合成源 640x360@30 H264，room={room}）");
-    let mut pts: u64 = 0;
-    let mut stat_at = Instant::now();
-    let mut connected = false;
-    let mut next_frame = Instant::now();
-    loop {
-        if stop.load(Ordering::SeqCst) || !endpoint.is_alive() {
-            break;
-        }
-        // UDP 输入（STUN/DTLS/RTP）。
-        socket.set_read_timeout(Some(Duration::from_millis(2))).ok();
-        let mut buf = [0u8; 2000];
-        if let Ok((n, src)) = socket.recv_from(&mut buf)
-            && let Ok(contents) = buf[..n].try_into()
-        {
-            let _ = endpoint.handle_input(Input::Receive(
-                Instant::now(),
-                Receive {
-                    proto: Protocol::Udp,
-                    source: src,
-                    destination: socket.local_addr().unwrap(),
-                    contents,
-                },
-            ));
-        }
-        let _ = endpoint.handle_timeout(Instant::now());
-        while let Some(out) = endpoint.poll_output() {
-            match out {
-                Output::Transmit(t) => {
-                    let _ = socket.send_to(&t.contents, t.destination);
-                }
-                Output::Timeout(_) => break,
-                Output::Event(_) => {}
-            }
-        }
-        while let Some(ev) = endpoint.poll_event() {
-            if let ClientEvent::IceConnected = ev {
-                connected = true;
-                info!("登录界面媒体 ICE connected");
-            }
-        }
-        // 帧发送（90kHz：30fps = 3000 ticks/帧）。
-        if connected && Instant::now() >= next_frame {
-            next_frame += Duration::from_millis(33);
-            if let Some(f) = source.next_frame() {
-                match encoder.encode_bgra(&f.bgra) {
-                    Ok(Some(unit)) => {
-                        // FFmpeg 编码输出直接进 RTP（annexb 转换是 macOS VT 路径专属）。
-                        let rtp_time = str0m::media::MediaTime::new(
-                            pts * 3000,
-                            str0m::media::Frequency::NINETY_KHZ,
-                        );
-                        if let Err(e) = endpoint.send_video_frame(video_mid, unit.data, rtp_time) {
-                            warn!("send frame：{e:?}");
-                        }
-                        pts += 1;
-                    }
-                    Ok(None) => {}
-                    Err(e) => warn!("encode：{e}"),
-                }
-            }
-        }
-        if stat_at.elapsed() >= Duration::from_secs(5) {
-            stat_at = Instant::now();
-            info!("媒体已发 {pts} 帧");
-        }
-        std::thread::sleep(Duration::from_millis(1));
     }
-    info!("登录界面媒体线程结束（共发 {pts} 帧）");
 }
 
 /// #471 M3 帧源解析（SFU/P2P 媒体线程共用）：
