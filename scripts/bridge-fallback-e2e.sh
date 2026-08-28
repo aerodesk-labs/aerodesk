@@ -121,7 +121,7 @@ if [ "$REMOTE" = "0" ] || [ "${REMOTE_LOOPBACK:-}" = "1" ]; then
   POP_ID=pop-a AUTH_TOKENS="$AUTH" SIGNAL_PORT=14801 SIGNAL_OPS_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
     SIP_UDP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-a.log 2>&1 &
   SIG_A_PID=$!
-  for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_A" 2>/dev/null && break; sleep 0.2; done
+  for _ in $(seq 1 80); do grep -q "SIP/UDP 监听已起" /tmp/bfb-sig-a.log 2>/dev/null && break; sleep 0.2; done
   sleep 0.3
 elif [ "${REMOTE_LOOPBACK:-}" != "1" ]; then
   echo "== 远程模式：使用外部 PoP（A=${POP_A_SIGNAL} B=${POP_B_SIGNAL}），跳过本地启动"
@@ -171,7 +171,7 @@ if [ "$REMOTE" = "0" ] || [ "${REMOTE_LOOPBACK:-}" = "1" ]; then
     SIGNAL_PORT=14901 SIGNAL_OPS_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
     SIP_UDP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b.log 2>&1 &
   SIG_B_PID=$!
-  for _ in $(seq 1 80); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break; sleep 0.2; done
+  for _ in $(seq 1 80); do grep -q "SIP/UDP 监听已起" /tmp/bfb-sig-b.log 2>/dev/null && break; sleep 0.2; done
   sleep 0.3
   grep -q "bridge orchestration enabled" /tmp/bfb-sig-b.log || fail "PoP-B 未启用桥编排（BRIDGE_CMD 未生效）"
   echo "  PoP-B bridge orchestration enabled"
@@ -354,7 +354,7 @@ POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=${
   SIGNAL_PORT=14901 SIGNAL_OPS_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
   SIP_UDP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b2.log 2>&1 &
 SIG_B_PID=$!
-for _ in $(seq 1 50); do nc -z 127.0.0.1 "$PLAIN_B" 2>/dev/null && break; sleep 0.2; done
+for _ in $(seq 1 50); do grep -q "SIP/UDP 监听已起" /tmp/bfb-sig-b2.log 2>/dev/null && break; sleep 0.2; done
 # PoP-A publisher 仍在 room（重新起）
 AERO_SIP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-agent" --role publisher --signal "$SIG_A_URL" --room "$ROOM" --token "$AUTH" \
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \

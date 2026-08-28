@@ -26,12 +26,6 @@ int ad_decoder_hardware(void);
 int ad_decoder_decode(void *decoder, const uint8_t *data, size_t len,
                       int64_t pts, void **out);
 
-/// 观看端连接（阻塞；后台线程调用）。返回 malloc 字符串，用 ad_free_string 释放。
-const char *ad_connect(const char *server, const char *room);
-
-/// 释放 ad_connect 返回的字符串。
-void ad_free_string(char *s);
-
 /// 创建观看会话（连接 + 后台收流解码）。失败返回 NULL。
 void *ad_viewer_create(const char *server, const char *room);
 /// 销毁观看会话。

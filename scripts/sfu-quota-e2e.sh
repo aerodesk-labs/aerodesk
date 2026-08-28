@@ -20,7 +20,7 @@ SIGNAL_PORT=14501 SIGNAL_PLAIN_PORT=14503 SFU_URL=http://127.0.0.1:14502 \
   SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/sfuq-sig.log 2>&1 &
 echo $! > /tmp/sfuq-sig.pid
 for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 14502 2>/dev/null && nc -z 127.0.0.1 14503 2>/dev/null; then break; fi
+    if nc -z 127.0.0.1 14502 2>/dev/null && grep -q "SIP/UDP 监听已起" /tmp/sfuq-sig.log 2>/dev/null; then break; fi
     sleep 0.2
 done
 sleep 0.3

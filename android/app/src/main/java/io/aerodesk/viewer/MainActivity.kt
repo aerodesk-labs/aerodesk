@@ -56,15 +56,23 @@ class MainActivity : AppCompatActivity() {
             is String -> v == "true"
             else -> false
         }
+        // #598 P1d：-e token → Digest 口令（开认证部署的观看端接入）。
+        val token = intent.getStringExtra("token")
         if (auto && srv != null && rm != null) {
-            status.postDelayed({ doConnect(srv, rm, status, forceRelay) }, 500)
+            status.postDelayed({ doConnect(srv, rm, token, status, forceRelay) }, 500)
         }
     }
 
-    private fun doConnect(s: String, r: String, status: TextView, forceRelay: Boolean = false) {
+    private fun doConnect(
+        s: String,
+        r: String,
+        token: String?,
+        status: TextView,
+        forceRelay: Boolean = false,
+    ) {
         status.text = "连接中…"
         Thread {
-            val v = NativeBridge.viewerCreate(s, r, forceRelay)
+            val v = NativeBridge.viewerCreate(s, r, token, forceRelay)
             runOnUiThread {
                 if (v == 0L) {
                     status.text = "连接失败"

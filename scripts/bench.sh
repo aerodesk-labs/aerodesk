@@ -30,7 +30,7 @@ SFU_PID=$!
 SIP_UDP_PORT=5060 ./target/release/aerodesk-signal >"$REPORT_DIR/signal.log" 2>&1 &
 SIG_PID=$!
 for _ in $(seq 1 50); do
-  if nc -z 127.0.0.1 3003 2>/dev/null; then break; fi
+  if grep -q "SIP/UDP 监听已起" $REPORT_DIR/signal.log 2>/dev/null; then break; fi
   if ! kill -0 "$SFU_PID" 2>/dev/null; then echo "sfu 启动失败"; cat "$REPORT_DIR/sfu.log"; exit 1; fi
   sleep 0.2
 done

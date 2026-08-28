@@ -39,7 +39,7 @@ for MODE in "${MODES[@]}"; do
     SIG=$!
   fi
   for _ in $(seq 1 80); do
-    nc -z 127.0.0.1 14502 2>/dev/null && nc -z 127.0.0.1 14503 2>/dev/null && break
+    nc -z 127.0.0.1 14502 2>/dev/null && grep -q "SIP/UDP 监听已起" /tmp/q-sig.log 2>/dev/null && break
     sleep 0.2
   done
   sleep 0.3

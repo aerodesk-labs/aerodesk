@@ -38,10 +38,10 @@ class PublisherCapture(
     private var csd: ByteArray? = null
     private var ptsUs = 0L
 
-    fun start(server: String, room: String) {
+    fun start(server: String, room: String, token: String? = null) {
         running = true
         Thread {
-            val ptr = bridge.publisherCreate(server, room)
+            val ptr = bridge.publisherCreate(server, room, token)
             publisherPtr = ptr
             if (ptr == 0L) {
                 running = false

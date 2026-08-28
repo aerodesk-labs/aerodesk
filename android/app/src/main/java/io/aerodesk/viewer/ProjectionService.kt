@@ -31,6 +31,8 @@ class ProjectionService : Service() {
         }
         val server = intent?.getStringExtra("server") ?: ""
         val room = intent?.getStringExtra("room") ?: ""
+        // #598 P1d：-e token → Digest 口令（被控端发布）。
+        val token = intent?.getStringExtra("token")
 
         startForegroundCompat()
 
@@ -41,7 +43,7 @@ class ProjectionService : Service() {
         val mp = getSystemService(MediaProjectionManager::class.java)
         val projection: MediaProjection = mp.getMediaProjection(resultCode, data)
         capture = PublisherCapture(this, projection, NativeBridge)
-        capture?.start(server, room)
+        capture?.start(server, room, token)
         return START_NOT_STICKY
     }
 
