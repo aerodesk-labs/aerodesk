@@ -1965,18 +1965,6 @@ fn publisher_conference(
 /// 每轮检查升级信号（§4.1：被控端触发 302 后返回升级标记，由上层转会议
 /// 发布方向重建——endpoint/socket 随返回 drop，REGISTER 由看护线程保留，
 /// 会议原语以同 AoR 重注册覆盖绑定）；会议阶段传 None（会议内不再升级）。
-/// §4.1 升级检测（媒体循环共享）：看护线程回 302+BYE 后推送会议 AoR——
-/// 任一 publisher/viewer 变体的循环顶部调用；命中返回
-/// `ESCALATE_MARKER` 前缀 Err（调用处转会议模式重建）。
-fn check_escalation(session: Option<&SipSession>) -> Result<(), String> {
-    if let Some(s) = session
-        && let Some(aor) = s.escalated_to_sfu()
-    {
-        return Err(format!("{ESCALATE_MARKER}{aor}"));
-    }
-    Ok(())
-}
-
 fn publisher_media_loop(
     session: Option<&SipSession>,
     mut endpoint: &mut Endpoint,
@@ -2077,7 +2065,7 @@ fn publisher_media_loop(
                 }
                 ClientEvent::Closed => {
                     info!("connection closed");
-                    return Ok(());
+                    return Err("connection closed".into());
                 }
                 ev => handle_publisher_input(&mut endpoint, ev),
             }
@@ -2607,7 +2595,7 @@ fn viewer(
                 }
                 ClientEvent::Closed => {
                     info!("connection closed");
-                    return Ok(());
+                    return Err("connection closed".into());
                 }
                 _ => {}
             }
@@ -2873,15 +2861,13 @@ fn publisher_x264(
 
     loop {
         // 会话失效（ICE 断开/对端离开）时干净退出循环，不再空转采集/编码。
-        // §4.1 升级检测（x264 变体）：看护线程已回 302+BYE → 退出 1:1 转会议。
-        check_escalation(Some(&session))?;
         if !endpoint.is_alive() {
             warn!("endpoint dead, exiting publisher loop");
             break;
         }
         // §4.1 升级检测：被控端收到第 2 个观看者 INVITE → 看护线程已回
         // 302+BYE → 本变体直接重建为会议发布（源统一合成 pcap，见
-        // publisher_conference；真实采集源的会议模式为后续工作）。
+        // publisher_conference；真实采集源的会议模式为后续项）。
         if let Some(aor) = session.escalated_to_sfu() {
             info!(%aor, "1:1 升级为 SFU 会议（发布方向重建）");
             let _ = publisher_conference(signal_url, room, auth, audio, audio_opus);
@@ -3060,7 +3046,7 @@ fn publisher_vt(
         }
         // §4.1 升级检测：被控端收到第 2 个观看者 INVITE → 看护线程已回
         // 302+BYE → 本变体直接重建为会议发布（源统一合成 pcap，见
-        // publisher_conference；真实采集源的会议模式为后续工作）。
+        // publisher_conference；真实采集源的会议模式为后续项）。
         if let Some(aor) = session.escalated_to_sfu() {
             info!(%aor, "1:1 升级为 SFU 会议（发布方向重建）");
             let _ = publisher_conference(signal_url, room, auth, audio, audio_opus);
@@ -3223,7 +3209,7 @@ fn publisher_generic<
         }
         // §4.1 升级检测：被控端收到第 2 个观看者 INVITE → 看护线程已回
         // 302+BYE → 本变体直接重建为会议发布（源统一合成 pcap，见
-        // publisher_conference；真实采集源的会议模式为后续工作）。
+        // publisher_conference；真实采集源的会议模式为后续项）。
         if let Some(aor) = session.escalated_to_sfu() {
             info!(%aor, "1:1 升级为 SFU 会议（发布方向重建）");
             let _ = publisher_conference(signal_url, room, auth, audio, audio_opus);
@@ -3932,7 +3918,7 @@ fn publisher_capture_ffmpeg(
     const H: u32 = 0;
     const FPS: u32 = 30;
 
-    let (_signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
+    let (session, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
         match connect_codec(signal_url, room, Role::Publisher, auth, audio, codec) {
             Ok(v) => v,
             Err(e) => {
@@ -3985,7 +3971,7 @@ fn publisher_capture_ffmpeg(
         }
         // §4.1 升级检测：被控端收到第 2 个观看者 INVITE → 看护线程已回
         // 302+BYE → 本变体直接重建为会议发布（源统一合成 pcap，见
-        // publisher_conference；真实采集源的会议模式为后续工作）。
+        // publisher_conference；真实采集源的会议模式为后续项）。
         if let Some(aor) = session.escalated_to_sfu() {
             info!(%aor, "1:1 升级为 SFU 会议（发布方向重建）");
             let _ = publisher_conference(signal_url, room, auth, audio, audio_opus);
@@ -4153,7 +4139,7 @@ fn publisher_capture(
         _ => VtCodec::H264,
     };
 
-    let (_signal, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) = match connect_inner(
+    let (session, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) = match connect_inner(
         signal_url,
         room,
         Role::Publisher,
@@ -4345,7 +4331,7 @@ fn publisher_capture(
         }
         // §4.1 升级检测：被控端收到第 2 个观看者 INVITE → 看护线程已回
         // 302+BYE → 本变体直接重建为会议发布（源统一合成 pcap，见
-        // publisher_conference；真实采集源的会议模式为后续工作）。
+        // publisher_conference；真实采集源的会议模式为后续项）。
         if let Some(aor) = session.escalated_to_sfu() {
             info!(%aor, "1:1 升级为 SFU 会议（发布方向重建）");
             let _ = publisher_conference(signal_url, room, auth, audio, audio_opus);
