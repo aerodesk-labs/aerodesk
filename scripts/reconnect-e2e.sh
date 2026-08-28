@@ -105,7 +105,14 @@ ROOM2="rec-b-$(date +%s)"
 VIEWB=$!
 sleep 2
 start_signal
-wait_port 14503
+# 14503 明文口已随 #598 P3 退役（裸 wait_port 会 set -e 静默死亡）——
+# 就绪信号 = signal 日志的 SIP/UDP 行。
+OK=0
+for _ in $(seq 1 50); do
+    grep -q "SIP/UDP 监听已起" /tmp/rec-sig.log 2>/dev/null && { OK=1; break; }
+    sleep 0.2
+done
+[ "$OK" = "1" ] || { echo "FAIL B: signal SIP 未就绪"; tail -8 /tmp/rec-sig.log; fail=1; }
 ./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
     --signal ws://127.0.0.1:14503 --room "$ROOM2" >/tmp/recb-pub.log 2>&1 &
 PUBB=$!
