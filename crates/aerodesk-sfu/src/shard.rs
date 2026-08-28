@@ -1938,8 +1938,6 @@ mod tests {
         assert_eq!(c.lookup(&"10.0.0.2:1000".parse().unwrap()), Some(2));
     }
 
-    use super::offer_sends_media;
-
     fn sdp(m_lines: &str) -> String {
         format!("v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n{m_lines}")
     }
