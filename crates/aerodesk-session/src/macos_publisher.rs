@@ -106,8 +106,41 @@ impl PublisherTransport {
             Self::Peer(p2p) => p2p.endpoint(),
         }
     }
+
+    /// #552：注入对端后到候选（P2P trickle；SFU 路径已退役）。
+    fn add_remote_candidate(&mut self, sdp_candidate: &str) {
+        if let Self::Peer(p2p) = self {
+            if let Err(e) = p2p.add_remote_candidate(sdp_candidate) {
+                tracing::warn!("trickle 候选注入失败：{e}");
+            }
+        }
+    }
 }
 
+fn run_publisher_peer(
+    p2p: aerodesk_core::p2p_call::P2pCall,
+    video_mid: str0m::media::Mid,
+    room: String,
+    on_event: PublisherEventSink,
+    trickle_rx: Option<std::sync::mpsc::Receiver<String>>,
+    stop: Arc<AtomicBool>,
+) {
+    run_publisher_pump(
+        PublisherTransport::Peer(p2p),
+        video_mid,
+        None,
+        false,
+        room,
+        on_event,
+        false,
+        true,
+        false,
+        trickle_rx,
+        stop,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_publisher_pump(
     mut t: PublisherTransport,
     video_mid: str0m::media::Mid,
