@@ -1406,7 +1406,7 @@ fn web_request(
         }
     };
     let offer_sdp = offer.to_sdp_string();
-    if role == Role::Viewer && shard::offer_sends_media(&offer_sdp) {
+    if role == Role::Viewer && aerodesk_protocol::util::offer_sends_media(&offer_sdp) {
         warn!("拒绝 viewer 发布媒体：room={room}（#12）");
         return Response::text("viewer cannot publish media").with_status_code(403);
     }

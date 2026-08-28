@@ -563,15 +563,32 @@ fn run() {
             let sig = signal.clone();
             let r = room.clone();
             let tok = token.clone();
+            // §4.1 升级跟随：1:1 阶段收到升级信号（Err 带 ESCALATE_MARKER
+            // 前缀）→ 同一闭包内立即以会议发布方向重建（同进程无缝切换）；
+            // --reconnect 重连也保持会议方向（conference 为闭包捕获状态）。
+            let mut conference = false;
             run_with_reconnect(
-                move || publisher(&sig, &r, tok.as_deref(), audio, audio_opus),
+                move || loop {
+                    let res = if conference {
+                        publisher_conference(&sig, &r, tok.as_deref(), audio, audio_opus)
+                    } else {
+                        publisher(&sig, &r, tok.as_deref(), audio, audio_opus)
+                    };
+                    match res {
+                        Err(e) if e.starts_with(ESCALATE_MARKER) => {
+                            conference = true;
+                            info!("publisher: 1:1 升级为 SFU 会议（发布方向重建）");
+                        }
+                        other => return other,
+                    }
+                },
                 reconnect,
                 reconnect_max,
             )
         }
         "viewer" => {
             let sig = signal.clone();
-            let r = room.clone();
+            let mut r = room.clone();
             let tok = token.clone();
             let layer = arg(&args, "--layer");
             let si = send_input.clone();
@@ -579,9 +596,12 @@ fn run() {
             let ci = cmd_intent.clone();
             let rf = request_file.clone();
             let sc = arg(&args, "--send-control");
+            // §4.1 观看端跟随：1:1 被升级（BYE cause=302 / 302 无 Contact）→
+            // Err 带 ESCALATE_MARKER 前缀与会议房间名，换目标重拨；--reconnect
+            // 重连也保持会议目标（r 为闭包捕获状态）。
             run_with_reconnect(
-                move || {
-                    viewer(
+                move || loop {
+                    match viewer(
                         &sig,
                         &r,
                         tok.as_deref(),
@@ -597,7 +617,13 @@ fn run() {
                         cmd_json,
                         rf.as_deref(),
                         sc.as_deref(),
-                    )
+                    ) {
+                        Err(e) if e.starts_with(ESCALATE_MARKER) => {
+                            r = e[ESCALATE_MARKER.len()..].to_string();
+                            info!("viewer: 跟随升级重拨会议 AoR（{r}）");
+                        }
+                        other => return other,
+                    }
                 },
                 reconnect,
                 reconnect_max,
@@ -644,7 +670,34 @@ fn connect(
     ),
     String,
 > {
-    connect_inner(signal_url, room, role, None, false, audio, auth, false)
+    connect_inner(
+        signal_url, room, role, None, false, audio, auth, false, false,
+    )
+}
+
+/// §4.1 被控端升级模式连接：与 [`connect`] 同构，但看护线程对媒体期间的新
+/// INVITE 回 302 + BYE(cause=302) 结束当前 1:1，并经 SipSession 推送升级
+/// 通知（pcap 合成发布端专用；screen/vt/x264/ffmpeg 变体保持 1:1 busy 语义）。
+fn connect_escalating(
+    signal_url: &str,
+    room: &str,
+    role: Role,
+    auth: Option<&str>,
+    audio: bool,
+) -> Result<
+    (
+        SipSession,
+        Endpoint,
+        MediaSocket,
+        str0m::media::Mid,
+        Option<str0m::media::Mid>,
+        Option<str0m::media::Mid>,
+    ),
+    String,
+> {
+    connect_inner(
+        signal_url, room, role, None, false, audio, auth, false, true,
+    )
 }
 
 /// SIP 会话句柄（#552：替代 connect 返回的 WsSignalClient——会话循环不消费
@@ -652,6 +705,32 @@ fn connect(
 pub struct SipSession {
     #[allow(dead_code)]
     pub call_id: String,
+    /// §4.1 升级通知通道（看护线程 → 媒体主循环）：被控端触发 302 升级、或
+    /// 主叫侧识别到升级（BYE cause=302 / 302 无 Contact）时，推送会议 AoR
+    /// （`sip:view-<device>@<domain>`）；无事件时 try_recv 返回 None。
+    escalation_rx: std::sync::mpsc::Receiver<String>,
+}
+
+impl SipSession {
+    /// 取升级通知（§4.1）：`Some(aor)` = 已升级，上层按会议 AoR 重拨
+    /// （观看端跟随 / 被控端转会议发布方向）；None = 无。
+    pub fn escalated_to_sfu(&self) -> Option<String> {
+        self.escalation_rx.try_recv().ok()
+    }
+}
+
+/// §4.1 升级跟随标记：Err 前缀，后随会议房间名（view_aor 的 user 部分）。
+/// 由 connect 的应答等待/媒体主循环返回，run() 各 role 闭包据此换目标重建。
+const ESCALATE_MARKER: &str = "escalated-to-sfu:";
+
+/// 会议 AoR（`sip:view-<device>@<domain>`）→ 房间名（user 部分；桌面端
+/// EscalatedToSfu 消费同款逻辑）。
+fn aor_user(aor: &str) -> String {
+    aor.trim_start_matches("sip:")
+        .split('@')
+        .next()
+        .unwrap_or("")
+        .to_string()
 }
 
 /// #552 SIP 环境配置：AERO_SIP_TRANSPORT（udp|tls，默认 udp——e2e/内网）/
@@ -772,6 +851,7 @@ fn connect_h264(
         audio,
         auth,
         false,
+        false,
     )
 }
 
@@ -802,6 +882,7 @@ fn connect_codec(
         audio,
         auth,
         false,
+        false,
     )
 }
 
@@ -825,7 +906,9 @@ fn connect_camera(
     ),
     String,
 > {
-    connect_inner(signal_url, room, role, codec, false, audio, auth, true)
+    connect_inner(
+        signal_url, room, role, codec, false, audio, auth, true, false,
+    )
 }
 
 fn connect_inner(
@@ -837,6 +920,7 @@ fn connect_inner(
     audio: bool,
     auth: Option<&str>,
     camera: bool,
+    escalate: bool,
 ) -> Result<
     (
         SipSession,
@@ -860,11 +944,9 @@ fn connect_inner(
         Role::Viewer => format!("agent-viewer-{}", std::process::id()),
     };
     info!("SIP device_id={device_id} target={room} role={role:?}");
-    let mut link = aerodesk_core::sip_link::SipCallLink::new(sip_env_cfg(
-        signal_url,
-        &device_id,
-        auth.unwrap_or(""),
-    )?);
+    let sip_cfg = sip_env_cfg(signal_url, &device_id, auth.unwrap_or(""))?;
+    let domain = sip_cfg.domain.clone();
+    let mut link = aerodesk_core::sip_link::SipCallLink::new(sip_cfg);
     link.start();
     {
         // 等 Online（10s；口令错/服务器不可达在此显式失败，回 Err 而非 panic——
@@ -1015,6 +1097,26 @@ fn connect_inner(
                         aerodesk_core::sip_link::SipLinkEvent::Ringing { .. } => {
                             info!("SIP 180 Ringing");
                         }
+                        // §4.1 观看端跟随：被控端 302 升级（无 Contact——rsipstack
+                        // reject 限制）→ 主叫侧收敛为 EscalatedToSfu，重拨会议 AoR。
+                        aerodesk_core::sip_link::SipLinkEvent::EscalatedToSfu {
+                            view_aor, ..
+                        } => {
+                            got = Err(format!("{ESCALATE_MARKER}{}", aor_user(&view_aor)));
+                            break 'ans;
+                        }
+                        // #598 P1a 302+Contact（PoP 重定向）：CLI 不跟随（属 #600）；
+                        // 会议升级的 302 由被控端 dialog reject 发出、无 Contact
+                        // （§4.1 确定性推导），故本事件不承载会议语义——记日志后
+                        // 按既有 30s 超时语义退出。
+                        aerodesk_core::sip_link::SipLinkEvent::RedirectedTo {
+                            call_id,
+                            contact,
+                        } => {
+                            warn!(
+                                "SIP 302+Contact 重定向未跟随（PoP 跟随属 #600）：{call_id} {contact}"
+                            );
+                        }
                         _ => {}
                     }
                 }
@@ -1101,19 +1203,61 @@ fn connect_inner(
 
     // 信令看护线程：持有 link 至进程退出（Drop 即 BYE/注销——会话循环只驱动
     // endpoint/socket）；泵事件记 PeerHangup，后到 trickle 候选忽略（候选内联）。
+    // §4.1 升级接线：被控端（escalate 模式）媒体期间的新 INVITE → 302 升级 +
+    // BYE(cause=302) 结束当前 1:1，并推送会议 AoR 通知主循环；主叫侧识别到
+    // 升级（BYE cause=302 / 302 无 Contact）同样推送主循环重拨。
+    let (esc_tx, esc_rx) = std::sync::mpsc::channel::<String>();
     {
         let mut link = link;
+        let esc_tx = esc_tx;
+        // 被控端当前 1:1 对话（升级时 BYE cause=302 通知当前观看者转会议）。
+        let active_call = Some(call_id_out.clone());
+        // 本端会议 AoR（§4.1 确定性推导，与对端一致：sip:view-<device>@<domain>）。
+        let view = aerodesk_core::protocol::sip::view_aor(&device_id, &domain);
         std::thread::Builder::new()
             .name("sip-link-watch".into())
             .spawn(move || {
                 loop {
                     let _ = link.poll();
                     for ev in link.take_events() {
-                        if let aerodesk_core::sip_link::SipLinkEvent::PeerHangup {
-                            call_id, ..
-                        } = ev
-                        {
-                            info!("SIP 对端挂断：{call_id}");
+                        match ev {
+                            aerodesk_core::sip_link::SipLinkEvent::PeerHangup {
+                                call_id, ..
+                            } => {
+                                info!("SIP 对端挂断：{call_id}");
+                            }
+                            // §4.1 被控端升级接线：已有活动对话时收到新 INVITE →
+                            // 302（rsipstack reject 无 Contact——对端按 §4.1 确定性
+                            // 推导 view AoR 重拨）+ BYE(cause=302) 通知当前观看者，
+                            // 并通知主循环转会议发布方向。无活动对话（会话间隙）→
+                            // busy 兜底（避免 302 后无主接应悬死）。
+                            aerodesk_core::sip_link::SipLinkEvent::IncomingCall {
+                                call_id, ..
+                            } => {
+                                if escalate {
+                                    if let Some(v1) = active_call.as_deref() {
+                                        let _ = link.redirect_to_sfu(&call_id);
+                                        let _ = link.hangup(
+                                            v1,
+                                            Some(aerodesk_core::protocol::sip::ESCALATE_BYE_REASON),
+                                        );
+                                        let _ = esc_tx.send(view.clone());
+                                    } else {
+                                        let _ = link.reject(&call_id, "busy");
+                                    }
+                                } else {
+                                    let _ = link.reject(&call_id, "busy");
+                                }
+                            }
+                            // 主叫侧升级识别（BYE cause=302 / 302 无 Contact）：
+                            // 转发主循环按会议 AoR 重拨（观看端跟随，§4.1）。
+                            aerodesk_core::sip_link::SipLinkEvent::EscalatedToSfu {
+                                view_aor,
+                                ..
+                            } => {
+                                let _ = esc_tx.send(view_aor);
+                            }
+                            _ => {}
                         }
                     }
                     std::thread::sleep(Duration::from_millis(200));
@@ -1126,6 +1270,7 @@ fn connect_inner(
     Ok((
         SipSession {
             call_id: call_id_out,
+            escalation_rx: esc_rx,
         },
         endpoint,
         socket,
@@ -1764,7 +1909,9 @@ fn inject_input(seq: u64, event: &InputEvent) {
     }
 }
 
-/// 返回 Err=会话结束需重连（#173）。
+/// 返回 Err=会话结束需重连（#173）。§4.1 1:1 阶段（UAS 等被叫）；媒体期间
+/// 收到升级信号时返回 `ESCALATE_MARKER` 前缀错误，由 run() 的 publisher
+/// 闭包转会议发布方向重建（[`publisher_conference`]）。
 fn publisher(
     signal_url: &str,
     room: &str,
@@ -1772,12 +1919,64 @@ fn publisher(
     audio: bool,
     audio_opus: bool,
 ) -> Result<(), String> {
+    let (session, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
+        connect_escalating(signal_url, room, Role::Publisher, auth, audio)?;
+    publisher_media_loop(
+        Some(&session),
+        &mut endpoint,
+        &mut socket,
+        video_mid,
+        audio_mid,
+        audio_opus,
+    )
+}
+
+/// §4.1 被控端入会（发布方向）：REGISTER（device_id 与 1:1 阶段同身份）→
+/// INVITE 会议 AoR（`sip:view-<device_id>@<domain>` 确定性推导，SFU
+/// role=publisher）→ 媒体循环（pcap 合成源）。会议阶段不再跟随升级。
+fn publisher_conference(
+    signal_url: &str,
+    device_id: &str,
+    auth: Option<&str>,
+    audio: bool,
+    audio_opus: bool,
+) -> Result<(), String> {
+    let (_session, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
+        aerodesk_core::connect::connect_publisher_sip_conference(
+            signal_url,
+            device_id,
+            auth,
+            aerodesk_core::connect::force_relay_env(),
+            audio,
+            None,
+            None,
+        )?;
+    publisher_media_loop(
+        None,
+        &mut endpoint,
+        &mut socket,
+        video_mid,
+        audio_mid,
+        audio_opus,
+    )
+}
+
+/// 被控端媒体循环（pcap 合成源；1:1 与会议发布共用）。`session` 为 Some 时
+/// 每轮检查升级信号（§4.1：被控端触发 302 后返回升级标记，由上层转会议
+/// 发布方向重建——endpoint/socket 随返回 drop，REGISTER 由看护线程保留，
+/// 会议原语以同 AoR 重注册覆盖绑定）；会议阶段传 None（会议内不再升级）。
+fn publisher_media_loop(
+    session: Option<&SipSession>,
+    mut endpoint: &mut Endpoint,
+    socket: &mut MediaSocket,
+    video_mid: str0m::media::Mid,
+    audio_mid: Option<str0m::media::Mid>,
+    audio_opus: bool,
+) -> Result<(), String> {
     let pcap = include_bytes!("../../../crates/aerodesk-core/tests/data/vp8.pcap");
     let frames = parse_vp8_pcap(pcap);
     info!("loaded {} VP8 frames from pcap", frames.len());
 
-    let (_signal, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
-        connect(signal_url, room, Role::Publisher, auth, audio)?;
     let mut connected = false;
     let mut audio_ticker = AudioTicker::new(audio_opus);
     let mut frame_idx = 0usize;
@@ -1788,6 +1987,14 @@ fn publisher(
     let mut last_cursor = Instant::now();
 
     loop {
+        // §4.1 升级检测：看护线程已回 302+BYE 并推送会议 AoR → 退出 1:1
+        // 会话，由上层以会议发布方向重建（publisher_conference）。
+        if let Some(s) = session
+            && let Some(view_aor) = s.escalated_to_sfu()
+        {
+            info!("publisher: 收到升级信号（{view_aor}），1:1 转 SFU 会议");
+            return Err(format!("{ESCALATE_MARKER}{}", aor_user(&view_aor)));
+        }
         // #173 自动重连：ICE 失效时退出会话由主流程重连。
         if !endpoint.is_alive() {
             info!("publisher: ICE session ended, exiting session for reconnect");
@@ -1947,7 +2154,7 @@ fn viewer(
     request_file: Option<&str>,
     send_control: Option<&str>,
 ) -> Result<(), String> {
-    let (_signal, mut endpoint, mut socket, _, _audio_mid, _camera_mid) = if camera {
+    let (session, mut endpoint, mut socket, _, _audio_mid, _camera_mid) = if camera {
         connect_camera(signal_url, room, Role::Viewer, auth, audio, None)?
     } else {
         connect(signal_url, room, Role::Viewer, auth, audio)?
@@ -2029,6 +2236,12 @@ fn viewer(
     const DEAD_AFTER_NO_MEDIA: Duration = aerodesk_core::util::NO_MEDIA_DEADLINE;
 
     loop {
+        // §4.1 观看端跟随：看护线程转发升级事件（BYE cause=302 / 302 无
+        // Contact）→ 结束当前会话，由 run() 闭包按会议 AoR 重拨。
+        if let Some(view_aor) = session.escalated_to_sfu() {
+            info!("viewer: 收到升级信号（{view_aor}），1:1 转 SFU 会议");
+            return Err(format!("{ESCALATE_MARKER}{}", aor_user(&view_aor)));
+        }
         // #173 自动重连：ICE 失效（SFU/网络断开）时退出会话，由主流程重连。
         if !endpoint.is_alive() {
             info!("viewer: ICE session ended, exiting session for reconnect");
@@ -3903,6 +4116,7 @@ fn publisher_capture(
         audio,
         auth,
         camera,
+        false,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -4406,5 +4620,21 @@ mod tests {
         assert_eq!(frame_interval(60).as_nanos(), 16_666_666);
         // fps=0 不应除零
         assert!(frame_interval(0).as_nanos() > 0);
+    }
+
+    /// §4.1 升级标记与会议房间解析：Err 前缀携带 view_aor 的 user 部分
+    /// （会议房间名），viewer/publisher 闭包据此换目标重拨/转发布方向。
+    #[test]
+    fn escalation_marker_and_aor_user() {
+        assert_eq!(aor_user("sip:view-AD-01AB@aerodesk.test"), "view-AD-01AB");
+        assert_eq!(aor_user("sip:AD-01AB@aerodesk.test"), "AD-01AB");
+        assert_eq!(aor_user("sip:view-AD-01AB"), "view-AD-01AB");
+        assert_eq!(aor_user(""), "");
+        let marked = format!(
+            "{ESCALATE_MARKER}{}",
+            aor_user("sip:view-AD-01AB@aerodesk.test")
+        );
+        assert!(marked.starts_with(ESCALATE_MARKER));
+        assert_eq!(&marked[ESCALATE_MARKER.len()..], "view-AD-01AB");
     }
 }

@@ -109,25 +109,27 @@ pub struct SipViewerSession {
     pub call_id: String,
 }
 
-/// #552 移动端观看端 SIP 连接（agent connect_inner 的 viewer 路径收敛到 core，
-/// 三平台共用）：REGISTER → INVITE 房间 → Answered → ICE 收敛。
+/// 客户端 UAC 连接公共实现（`connect_viewer_sip` 与 #598 v0.4 会议发布原语
+/// 共用）：REGISTER → INVITE（目标设备/房间或会议 AoR）→ Answered → ICE
+/// 收敛 → 看护线程持有 link 至进程退出。
 ///
-/// - `server`：信令 URL（`ws://`→SIP/UDP 5060，`wss://`→SIP/TLS 5061；
-///   显式 `sip_transport`/`sip_port` 覆盖）；
-/// - `token`：Digest 口令（= 现有 auth token，§8 迁移期同一凭据）；
-/// - `force_relay`：只通告 TURN 候选（#201 NAT/模拟器语义）；
-/// - `with_audio`/`with_camera`：额外 recvonly 轨（未协商侧 m-line inactive）。
-///
-/// 注册等待覆盖两轮 SIP UDP 事务重传（~75s，见 #578 教训）；INVITE 等待 30s。
-/// 探测本机出接口 IP（绑 0.0.0.0 连公共地址后取 local_addr；失败回退 loopback）。
-
-pub fn connect_viewer_sip(
+/// - `video_sendonly`：true = 发布方向（`add_video`/`add_audio`，SFU 会议
+///   role=publisher）；false = 观看方向（recvonly，SFU role=viewer）；
+/// - `redirect_302`：true = 被控端语义——媒体期间的新 INVITE 一律回 302
+///   （§4.1 被控端已在会议态时后续观看 INVITE 直接 302；无 Contact 由对端
+///   按 §4.1 确定性推导 view AoR 重拨）；false = 仅记日志（观看端无人呼叫
+///   本端 AoR）。
+#[allow(clippy::too_many_arguments)] // 与 connect_viewer_sip 同参数面；内部私有实现
+fn connect_sip_uac(
     server: &str,
-    room: &str,
+    target_device: &str,
+    device_id: &str,
     token: Option<&str>,
     force_relay: bool,
     with_audio: bool,
     with_camera: bool,
+    video_sendonly: bool,
+    redirect_302: bool,
     sip_transport: Option<&str>,
     sip_port: Option<u16>,
 ) -> Result<
@@ -142,8 +144,6 @@ pub fn connect_viewer_sip(
     String,
 > {
     use str0m::net::Protocol;
-
-    let device_id = format!("agent-viewer-{}", std::process::id());
     // 传输推导：显式参数 > URL scheme（wss=TLS/ws=UDP；无 scheme 按 ws）。
     let transport = sip_transport.unwrap_or({
         #[allow(clippy::match_like_matches_macro)]
@@ -217,10 +217,17 @@ pub fn connect_viewer_sip(
         }
     }
 
-    // 观看端轨：recvonly（含可选音频/摄像头）。
-    endpoint.add_video_recvonly();
-    if with_audio {
-        endpoint.add_audio_recvonly();
+    // 媒体轨方向：发布（sendonly 语义，SFU role=publisher）或观看（recvonly）。
+    if video_sendonly {
+        endpoint.add_video();
+        if with_audio {
+            endpoint.add_audio();
+        }
+    } else {
+        endpoint.add_video_recvonly();
+        if with_audio {
+            endpoint.add_audio_recvonly();
+        }
     }
     if with_camera {
         endpoint.add_camera_recvonly();
@@ -235,8 +242,13 @@ pub fn connect_viewer_sip(
     let call_password = std::env::var("AERO_CALL_PASSWORD")
         .ok()
         .filter(|s| !s.is_empty());
-    link.call(room, &call_id, &offer_json, call_password.as_deref())
-        .map_err(|e| format!("SIP INVITE: {e}"))?;
+    link.call(
+        target_device,
+        &call_id,
+        &offer_json,
+        call_password.as_deref(),
+    )
+    .map_err(|e| format!("SIP INVITE: {e}"))?;
     let answer_json = {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let mut got: Result<String, String> = Err("SIP INVITE 无应答（30s）".into());
@@ -307,15 +319,25 @@ pub fn connect_viewer_sip(
     }
 
     // 信令看护线程：持有 link 至进程退出（Drop 即 BYE/注销——会话循环只驱动
-    // endpoint/socket）；后到 trickle 候选忽略（候选内联）。
+    // endpoint/socket）；后到 trickle 候选忽略（候选内联）。被控端会议语义
+    // （redirect_302）：媒体期间新 INVITE 一律 302（§4.1——对端按确定性推导
+    // view AoR 重拨，本端不解析 Contact）。
     std::thread::Builder::new()
         .name("sip-link-watch".into())
         .spawn(move || {
             loop {
                 let _ = link.poll();
                 for ev in link.take_events() {
-                    if let crate::sip_link::SipLinkEvent::PeerHangup { call_id, .. } = ev {
-                        tracing::info!("SIP 对端挂断：{call_id}");
+                    match ev {
+                        crate::sip_link::SipLinkEvent::PeerHangup { call_id, .. } => {
+                            tracing::info!("SIP 对端挂断：{call_id}");
+                        }
+                        crate::sip_link::SipLinkEvent::IncomingCall { call_id, .. }
+                            if redirect_302 =>
+                        {
+                            let _ = link.redirect_to_sfu(&call_id);
+                        }
+                        _ => {}
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -332,6 +354,102 @@ pub fn connect_viewer_sip(
         audio_mid,
         camera_mid,
     ))
+}
+
+/// #552 移动端观看端 SIP 连接（agent connect_inner 的 viewer 路径收敛到 core，
+/// 三平台共用）：REGISTER → INVITE 房间 → Answered → ICE 收敛。
+///
+/// - `server`：信令 URL（`ws://`→SIP/UDP 5060，`wss://`→SIP/TLS 5061；
+///   显式 `sip_transport`/`sip_port` 覆盖）；
+/// - `token`：Digest 口令（= 现有 auth token，§8 迁移期同一凭据）；
+/// - `force_relay`：只通告 TURN 候选（#201 NAT/模拟器语义）；
+/// - `with_audio`/`with_camera`：额外 recvonly 轨（未协商侧 m-line inactive）。
+///
+/// 注册等待覆盖两轮 SIP UDP 事务重传（~75s，见 #578 教训）；INVITE 等待 30s。
+/// 探测本机出接口 IP（绑 0.0.0.0 连公共地址后取 local_addr；失败回退 loopback）。
+pub fn connect_viewer_sip(
+    server: &str,
+    room: &str,
+    token: Option<&str>,
+    force_relay: bool,
+    with_audio: bool,
+    with_camera: bool,
+    sip_transport: Option<&str>,
+    sip_port: Option<u16>,
+) -> Result<
+    (
+        SipViewerSession,
+        crate::Endpoint,
+        crate::media_socket::MediaSocket,
+        str0m::media::Mid,
+        Option<str0m::media::Mid>,
+        Option<str0m::media::Mid>,
+    ),
+    String,
+> {
+    let device_id = format!("agent-viewer-{}", std::process::id());
+    connect_sip_uac(
+        server,
+        room,
+        device_id.as_str(),
+        token,
+        force_relay,
+        with_audio,
+        with_camera,
+        false, // 观看方向（recvonly，SFU role=viewer）
+        false, // 观看端不重定向新 INVITE（无人呼叫观看端 AoR）
+        sip_transport,
+        sip_port,
+    )
+}
+
+/// #598 v0.4 被控端入会（发布方向，§4.1 多方升级时序）：
+/// REGISTER（device_id 即 AoR/用户名，与 1:1 UAS 阶段同身份）→ INVITE 会议
+/// AoR（`sip:view-<device_id>@<domain>` 确定性推导，域与 REGISTER 同源）→
+/// signal 会议桥按 offer 方向判定 role=publisher → SFU 以 UAS 应答 → ICE 收敛。
+///
+/// UAC 形态镜像 [`connect_viewer_sip`]（传输推导/注册等待/ICE 收敛/看护线程
+/// 同一套实现），差异：视频（与可选音频）为**发送方向**；看护线程对媒体期间
+/// 的新 INVITE 回 302（§4.1：被控端已在 SFU 态时后续观看 INVITE 一律直接
+/// 302；rsipstack reject 无 Contact——对端按 §4.1 确定性推导 view AoR 重拨）。
+///
+/// 消费者：agent CLI publisher 升级后的会议阶段。返回（会话句柄, endpoint,
+/// socket, video_mid, audio_mid, camera_mid=None）。
+pub fn connect_publisher_sip_conference(
+    server: &str,
+    device_id: &str,
+    token: Option<&str>,
+    force_relay: bool,
+    with_audio: bool,
+    sip_transport: Option<&str>,
+    sip_port: Option<u16>,
+) -> Result<
+    (
+        SipViewerSession,
+        crate::Endpoint,
+        crate::media_socket::MediaSocket,
+        str0m::media::Mid,
+        Option<str0m::media::Mid>,
+        Option<str0m::media::Mid>,
+    ),
+    String,
+> {
+    // 会议 AoR user 部分（§4.1 确定性推导）；域由 from_parts
+    // （AERO_SIP_DOMAIN/缺省）统一决定，与 REGISTER/路由同源。
+    let target = format!("view-{device_id}");
+    connect_sip_uac(
+        server,
+        &target,
+        device_id,
+        token,
+        force_relay,
+        with_audio,
+        false,
+        true, // 发布方向（sendonly 语义，SFU role=publisher）
+        true, // 被控端已在会议态：新 INVITE 一律 302
+        sip_transport,
+        sip_port,
+    )
 }
 
 /// #598 P1a 被控端 SIP 连接原语（UAS 形态，替代 `connect_live_role` Publisher 路径）：
