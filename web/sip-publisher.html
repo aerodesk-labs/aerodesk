@@ -441,6 +441,8 @@ async function escalateToConference() {
         rtc = confRtc;
         callId = cid;
         phase = 'conference';
+        ws.onmessage = onSignalingMessage;   // 防御：升级后确保消息分发在位
+
         setStatus('会议发布中（SFU，' + viewAor + '）');
         log('会议发布已建立（200 OK + ACK）');
     } catch (err) {
@@ -454,6 +456,7 @@ async function escalateToConference() {
 // 全局消息分发：REGISTER 事务由 register() 自处理；这里只接 INVITE/BYE。
 function onSignalingMessage(e) {
     const text = typeof e.data === 'string' ? e.data : '';
+
     if (!text.startsWith('INVITE') && !text.startsWith('BYE') && !text.startsWith('ACK')) return;
     const lines = text.split('\r\n');
     const method = lines[0].split(' ')[0];
@@ -587,7 +590,7 @@ async function connect() {
                 try { cleanupCall(); } catch (_) {}
             }
         };
-        ws.addEventListener('message', onSignalingMessage);
+        ws.onmessage = onSignalingMessage;   // 属性式：唯一绑定，重连/升级后无残留
         phase = 'waiting';
         setStatus('等待观看端拨入（设备 ID=' + deviceId() + '）…');
         log('等待 INVITE…');

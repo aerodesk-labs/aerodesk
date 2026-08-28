@@ -784,6 +784,21 @@ impl DialogInner {
         headers: Option<Vec<crate::sip::Header>>,
         body: Option<Vec<u8>>,
     ) -> crate::sip::Response {
+        self.make_response_impl(request, status, headers, body, true)
+    }
+
+    /// `make_response` 的 Contact 可控版（#598 v0.4 多方）：`include_contact=false`
+    /// 时不追加本端 local_contact——302 重定向的 Contact 是**被叫提供的重定向目标**，
+    /// 代理转发时插入自己的 Contact 会污染语义（观看端把它当 PoP 目标，会议
+    /// AoR 丢失）。会议场景靠 §4.1 确定性推导，无 Contact 反而正确。
+    pub(super) fn make_response_impl(
+        &self,
+        request: &Request,
+        status: StatusCode,
+        headers: Option<Vec<crate::sip::Header>>,
+        body: Option<Vec<u8>>,
+        include_contact: bool,
+    ) -> crate::sip::Response {
         let mut resp_headers = crate::sip::Headers::default();
 
         for header in request.headers.iter() {
@@ -826,8 +841,10 @@ impl DialogInner {
             }
         }
 
-        if let Some(c) = self.local_contact.as_ref() {
-            resp_headers.push(Contact::from(c.clone()).into())
+        if include_contact {
+            if let Some(c) = self.local_contact.as_ref() {
+                resp_headers.push(Contact::from(c.clone()).into())
+            }
         }
 
         if let Some(headers) = headers {

@@ -134,6 +134,23 @@ impl InviteDialog {
     /// Reject the incoming INVITE (default `603 Decline`).
     /// No-op for UAC dialogs.
     pub fn reject(&self, code: Option<StatusCode>, reason: Option<String>) -> Result<()> {
+        self.reject_impl(code, reason, true)
+    }
+
+    /// `reject` 的 Contact 可控版（#598 v0.4 多方）：`include_contact=false` 时
+    /// 302 响应不携带本端 Contact——代理转发重定向时插入自己的 Contact 会污染
+    /// 语义（被叫提供的重定向目标丢失，观看端误判为 PoP 目标）。会议 AoR 由
+    /// §4.1 确定性推导，无 Contact 客户端同样收敛。
+    pub fn reject_no_contact(&self, code: Option<StatusCode>, reason: Option<String>) -> Result<()> {
+        self.reject_impl(code, reason, false)
+    }
+
+    fn reject_impl(
+        &self,
+        code: Option<StatusCode>,
+        reason: Option<String>,
+        include_contact: bool,
+    ) -> Result<()> {
         if self.role() != TransactionRole::Server {
             return Ok(());
         }
@@ -142,11 +159,12 @@ impl InviteDialog {
         }
         debug!(id = %self.id(), ?code, ?reason, "rejecting dialog");
         let headers = reason.map(|reason| vec![Header::Reason(reason.into())]);
-        let resp = self.inner.make_response(
+        let resp = self.inner.make_response_impl(
             &self.initial_request(),
             code.unwrap_or(StatusCode::Decline),
             headers,
             None,
+            include_contact,
         );
         self.inner
             .tu_sender

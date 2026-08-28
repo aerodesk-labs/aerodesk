@@ -24,7 +24,7 @@ cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 echo "== 启动服务（LAN-IP 配方）"
 RECORD_DIR="$REC" SFU_HOST_ADDRESS=127.0.0.1 ./target/debug/aerodesk-sfu >/tmp/webconf-sfu.log 2>&1 &
 SFU=$!
-SIP_UDP_PORT=5060 SIP_WSS_PORT=3061 ./target/debug/aerodesk-signal >/tmp/webconf-sig.log 2>&1 &
+RUST_LOG=debug SIP_UDP_PORT=5060 SIP_WSS_PORT=3061 ./target/debug/aerodesk-signal >/tmp/webconf-sig.log 2>&1 &
 SIG=$!
 (cd "$ROOT/web" && python3 -m http.server "$WEB_SERVE_PORT" --bind 127.0.0.1 >/tmp/webconf-http.log 2>&1) &
 HTTP=$!
@@ -66,8 +66,21 @@ const ROOM = process.argv[2];
     })).catch(() => null);
     if (st && st.status.includes('会议发布')) {
       console.log('PASS page escalated to conference');
-      console.log('--- log tail ---');
-      console.log(st.log);
+      // 升级后继续观察 60s：页面事件循环是否存活（DEBUG ws-heartbeat /
+      // INVITE 到达日志出现即证明存活）
+      const obsEnd = Date.now() + 60000;
+      let sawAlive = false;
+      while (Date.now() < obsEnd) {
+        const s2 = await page.evaluate(() => ({
+          log: document.getElementById('log').innerText.slice(-400),
+        })).catch(() => null);
+        if (s2 && /DEBUG INVITE rx \(phase=conference/.test(s2.log)) { sawAlive = true; break; }
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      console.log('PAGE_ALIVE=' + sawAlive);
+      const fin = await page.evaluate(() => document.getElementById('log').innerText).catch(() => '');
+      console.log('--- page log (final) ---');
+      console.log(fin.slice(-2500));
       await browser.close();
       console.log('E2E DONE');
       return;
@@ -91,7 +104,7 @@ done
 grep -q "PASS page registered" /tmp/webconf-pub.log || { echo "FAIL 页面未注册"; tail -6 /tmp/webconf-pub.log; exit 1; }
 
 echo "== viewer1 拨入（1:1）"
-./target/debug/aerodesk-agent --role viewer --signal "ws://$LAN_IP:3061" --room "$ROOM" \
+./target/debug/aerodesk-agent --role viewer --reconnect --signal "ws://$LAN_IP:3061" --room "$ROOM" \
   >/tmp/webconf-v1.log 2>&1 &
 V1=$!
 OK=0
@@ -103,7 +116,7 @@ done
 echo "PASS V1 1:1 收帧"
 
 echo "== viewer2 拨入（触发升级）"
-./target/debug/aerodesk-agent --role viewer --signal "ws://$LAN_IP:3061" --room "$ROOM" \
+./target/debug/aerodesk-agent --role viewer --reconnect --signal "ws://$LAN_IP:3061" --room "$ROOM" \
   >/tmp/webconf-v2.log 2>&1 &
 V2=$!
 

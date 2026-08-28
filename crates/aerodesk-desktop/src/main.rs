@@ -3051,7 +3051,9 @@ fn start_publisher_ui_peer(ui: &AppWindow, p2p: P2pCall, video_mid: str0m::media
 /// 停止被控端（UI 入口）。
 fn stop_publisher_ui(ui: &AppWindow) {
     ACTIVE_CALLEE.store(false, std::sync::atomic::Ordering::SeqCst);
-    *ACTIVE_CALL_ID.lock().unwrap_or_else(aerodesk_core::util::lock_recover) = None;
+    *ACTIVE_CALL_ID
+        .lock()
+        .unwrap_or_else(aerodesk_core::util::lock_recover) = None;
     aerodesk_session::generic_publisher::stop_publisher(publisher_event_sink(&ui.as_weak()));
 }
 
