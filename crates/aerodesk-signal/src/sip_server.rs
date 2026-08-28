@@ -1136,8 +1136,16 @@ async fn conference_bridge(
             }
         });
     }
+    // #598 v0.4 会议方向：offer 带媒体发送（被控端发布方向）→ publisher，
+    // 否则（观看端 recvonly）→ viewer（§4.1 全员 SFU；与 SFU 准入同构判定）。
+    let role = if aerodesk_protocol::util::offer_sends_media(&offer) {
+        "publisher"
+    } else {
+        "viewer"
+    };
+    info!(%room, %role, "SIP 会议 INVITE → SFU 桥（方向判定）");
     let answer = match tokio::task::spawn_blocking(move || {
-        sfu_proxy_start(&sfu_urls, sfu_token.as_deref(), &room, &offer)
+        sfu_proxy_start(&sfu_urls, sfu_token.as_deref(), &room, &offer, role)
     })
     .await
     {
@@ -1171,11 +1179,12 @@ pub(crate) fn sfu_proxy_start(
     sfu_token: Option<&str>,
     room: &str,
     offer: &str,
+    role: &str,
 ) -> Result<String, String> {
     let candidates = crate::sfu_candidates(sfu_urls, room);
     let mut last_err = String::new();
     for idx in candidates.into_iter().take(2) {
-        match post_start(&sfu_urls[idx], sfu_token, room, offer) {
+        match post_start(&sfu_urls[idx], sfu_token, room, offer, role) {
             Ok(answer) => return Ok(answer),
             Err(SfuProxyError::Fatal(e)) => return Err(e),
             Err(SfuProxyError::Transient(e)) => last_err = e,
@@ -1198,8 +1207,9 @@ fn post_start(
     sfu_token: Option<&str>,
     room: &str,
     offer: &str,
+    role: &str,
 ) -> Result<String, SfuProxyError> {
-    let mut full = format!("{url}/start?room={room}&role=viewer");
+    let mut full = format!("{url}/start?room={room}&role={role}");
     full.push_str("&dc_ready=1");
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(10))
@@ -1917,7 +1927,7 @@ mod tests {
             }
             let req = String::from_utf8_lossy(&buf).to_string();
             assert!(
-                req.contains("/start?room=meet-123&role=viewer"),
+                req.contains("/start?room=meet-123&role=viewer") || req.contains("/start?room=meet-123&role=publisher"),
                 "room/role 应透传 SFU：{req}"
             );
             let body = r#"{"type":"answer","sdp":"v=0\r\nmock-sfu-answer\r\n"}"#;

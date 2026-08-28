@@ -1333,7 +1333,7 @@ mod tests {
         if sfu_for_room(&urls, "room-fo") != 0 {
             urls.swap(0, 1);
         }
-        let answer = sip_server::sfu_proxy_start(&urls, None, "room-fo", "OFFER");
+        let answer = sip_server::sfu_proxy_start(&urls, None, "room-fo", "OFFER", "viewer");
         assert_eq!(answer, Ok("ANSWER-BODY".to_string()), "5xx 应转移次选");
         assert!(bad_rx.recv_timeout(Duration::from_secs(5)).is_ok());
         assert!(good_rx.recv_timeout(Duration::from_secs(5)).is_ok());
@@ -1345,7 +1345,7 @@ mod tests {
         if sfu_for_room(&urls, "room-fo") != 0 {
             urls.swap(0, 1);
         }
-        let r = sip_server::sfu_proxy_start(&urls, None, "room-fo", "OFFER");
+        let r = sip_server::sfu_proxy_start(&urls, None, "room-fo", "OFFER", "viewer");
         assert!(r.is_err(), "4xx 应原样失败");
         assert!(fatal_rx.recv_timeout(Duration::from_secs(5)).is_ok());
         assert!(

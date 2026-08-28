@@ -1709,7 +1709,7 @@ impl Client {
     /// "第一个打开的通道"，跨 stream 无顺序保证，可能写错通道被对端当业务数据丢弃。
     fn handle_offer(&mut self, offer: str0m::change::SdpOffer, reply_cid: ChannelId) {
         // #12：viewer 禁止通过重协商发布媒体（初始 offer 在 /start 处同样校验）。
-        if self.role == Role::Viewer && offer_sends_media(&offer.to_sdp_string()) {
+        if self.role == Role::Viewer && aerodesk_protocol::util::offer_sends_media(&offer.to_sdp_string()) {
             warn!(
                 "Client ({}) role=viewer 尝试发布媒体，按 #12 断开",
                 *self.id
@@ -1873,36 +1873,6 @@ impl LayerRequest {
 /// 判断 offer SDP 是否包含发送方向（sendonly/sendrecv）的媒体 m-line。
 ///
 /// `m=application`（数据通道）不算媒体。viewer 的 offer 不允许出现媒体发送方向。
-pub(crate) fn offer_sends_media(sdp: &str) -> bool {
-    // RFC 3264：m-line 无方向属性时缺省为 sendrecv。
-    // 因此媒体 m-line 必须显式 a=recvonly / a=inactive 才视为“不发送”。
-    let mut in_media = false; // 当前是否位于媒体 m-line 内
-    let mut seen_direction = false; // 当前 m-line 是否已有方向属性
-    for line in sdp.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("m=") {
-            // 进入新 m-line：上一个媒体 m-line 若缺省方向 → sendrecv（发送）。
-            if in_media && !seen_direction {
-                return true;
-            }
-            let mtype = rest.split_whitespace().next().unwrap_or("");
-            in_media = mtype != "application";
-            seen_direction = false;
-            continue;
-        }
-        if !in_media {
-            continue;
-        }
-        if line.starts_with("a=sendonly") || line.starts_with("a=sendrecv") {
-            return true;
-        }
-        if line.starts_with("a=recvonly") || line.starts_with("a=inactive") {
-            seen_direction = true;
-        }
-    }
-    // 文件末尾：最后一个媒体 m-line 缺省方向 → sendrecv（发送）。
-    in_media && !seen_direction
-}
 
 /// 判断 offer 的全部 ICE 候选是否都是回环地址（127.0.0.0/8、::1）。
 ///
@@ -2157,38 +2127,38 @@ mod tests {
     #[test]
     fn sendonly_video_detected() {
         let s = sdp("m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=sendonly\r\n");
-        assert!(offer_sends_media(&s));
+        assert!(aerodesk_protocol::util::offer_sends_media(&s));
     }
 
     #[test]
     fn sendrecv_video_detected() {
         let s = sdp("m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=sendrecv\r\n");
-        assert!(offer_sends_media(&s));
+        assert!(aerodesk_protocol::util::offer_sends_media(&s));
     }
 
     #[test]
     fn recvonly_not_detected() {
         let s = sdp("m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=recvonly\r\n");
-        assert!(!offer_sends_media(&s));
+        assert!(!aerodesk_protocol::util::offer_sends_media(&s));
     }
 
     #[test]
     fn inactive_not_detected() {
         let s = sdp("m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=inactive\r\n");
-        assert!(!offer_sends_media(&s));
+        assert!(!aerodesk_protocol::util::offer_sends_media(&s));
     }
 
     #[test]
     fn data_channel_only_not_detected() {
         let s = sdp("m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n");
-        assert!(!offer_sends_media(&s));
+        assert!(!aerodesk_protocol::util::offer_sends_media(&s));
     }
 
     #[test]
     fn directionless_media_defaults_to_sendrecv() {
         // RFC 3264：无方向属性 → sendrecv，viewer 应被拒绝。
         let s = sdp("m=video 9 UDP/TLS/RTP/SAVPF 96\r\n");
-        assert!(offer_sends_media(&s), "缺省方向媒体 m-line 应视为发送");
+        assert!(aerodesk_protocol::util::offer_sends_media(&s), "缺省方向媒体 m-line 应视为发送");
     }
 
     #[test]
@@ -2197,7 +2167,7 @@ mod tests {
         let s = sdp(
             "m=video 9 UDP/TLS/RTP/SAVPF 96\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=recvonly\r\n",
         );
-        assert!(offer_sends_media(&s));
+        assert!(aerodesk_protocol::util::offer_sends_media(&s));
     }
 
     #[test]
@@ -2206,7 +2176,7 @@ mod tests {
         let s = sdp(
             "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=recvonly\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n",
         );
-        assert!(offer_sends_media(&s));
+        assert!(aerodesk_protocol::util::offer_sends_media(&s));
     }
 
     #[test]
@@ -2215,12 +2185,12 @@ mod tests {
         let s = sdp(
             "m=video 9 UDP/TLS/RTP/SAVPF 96\r\na=recvonly\r\n             m=video 9 UDP/TLS/RTP/SAVPF 97\r\na=sendonly\r\n",
         );
-        assert!(offer_sends_media(&s));
+        assert!(aerodesk_protocol::util::offer_sends_media(&s));
     }
 
     #[test]
     fn empty_sdp_not_detected() {
-        assert!(!offer_sends_media(""));
+        assert!(!aerodesk_protocol::util::offer_sends_media(""));
     }
 
     // ---------- #513 回环候选按 offer 判定 ----------
