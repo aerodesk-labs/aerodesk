@@ -697,6 +697,9 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
                 let binding = callee
                     .as_deref()
                     .and_then(|a| registrar.lock().unwrap().lookup(a).cloned());
+                // 本端 Contact 按入站传输挑选（#598 v0.4 多方：对话内 BYE/INFO
+                // 的可达性依赖它——被控端升级时对 1:1 观看者发 BYE cause=302）。
+                let local_contact = contact_for_request(&dialog_layer, &tx);
                 match binding {
                     None => {
                         let user = callee.clone().unwrap_or_default();
@@ -758,10 +761,12 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
                                     let urls = cfg.sfu_urls.clone();
                                     let token = cfg.sfu_token.clone();
                                     let dl = dialog_layer.clone();
+                                    let contact = local_contact.clone();
                                     tokio::spawn(async move {
-                                        if let Err(e) =
-                                            conference_bridge(dl, tx, user, offer, urls, token)
-                                                .await
+                                        if let Err(e) = conference_bridge(
+                                            dl, tx, user, offer, urls, token, contact,
+                                        )
+                                        .await
                                         {
                                             warn!(error=%e, "conference_bridge 失败");
                                         }
@@ -802,8 +807,11 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
                                 let dl = dialog_layer.clone();
                                 let m = metrics.clone();
                                 let br = bye_reasons.clone();
+                                let contact = local_contact.clone();
                                 tokio::spawn(async move {
-                                    if let Err(e) = proxy_call(dl, tx, binding, m, br).await {
+                                    if let Err(e) =
+                                        proxy_call(dl, tx, binding, m, br, contact).await
+                                    {
                                         warn!(error=%e, "proxy_call 失败");
                                     }
                                 });
@@ -868,6 +876,78 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
     Ok(())
 }
 
+/// 按入站请求构造本端 Contact（RFC 3261 §8.1.1.8：Contact 必须对端可达）。
+/// 默认 `DialogLayer::build_local_contact` 取 `get_addrs().first()`——TLS 监听
+/// 先注册时会给 UDP 客户端回 TLS Contact，且监听为 0.0.0.0 通配时 host 本身
+/// 不可达——被叫/主叫的对话内 BYE/INFO 永远发不出（#598 v0.4 多方升级的
+/// 被控端 BYE cause=302 实测悬死："no connection, will retry on timer"）。
+/// 本函数按 Via 的传输挑同传输监听地址，通配 host 以环回地址替代（本地/e2e
+/// 可达；公网部署监听真实 IP 无需替代）。Via 传输无法判定（如 WSS）时回退
+/// build_local_contact（原行为）。
+fn contact_for_request(dl: &DialogLayer, tx: &Transaction) -> rsipstack::sip::Uri {
+    use rsipstack::sip::{Host, Param, Scheme, Transport};
+    // Via 头形如 "SIP/2.0/UDP 127.0.0.1:52325;rport;branch=..."：取传输段。
+    let want = tx
+        .original
+        .via_header()
+        .ok()
+        .map(|v| v.value().to_string())
+        .and_then(|v| {
+            v.split_whitespace()
+                .next()
+                .and_then(|t| t.strip_prefix("SIP/2.0/"))
+                .map(str::to_ascii_uppercase)
+        });
+    let want = match want.as_deref() {
+        Some("UDP") => Some(Transport::Udp),
+        Some("TLS") => Some(Transport::Tls),
+        _ => None,
+    };
+    let addr = want.and_then(|w| {
+        dl.endpoint
+            .transport_layer
+            .get_addrs()
+            .iter()
+            .find(|a| match (&w, &a.r#type) {
+                (Transport::Udp, None) => true, // 无类型标记 = UDP
+                (w2, Some(t)) => w2 == t,
+                _ => false,
+            })
+            .cloned()
+    });
+    let Some(mut addr) = addr else {
+        return dl.build_local_contact(None, None).unwrap_or_default();
+    };
+    // 通配监听（0.0.0.0/::）不可作为 Contact host：以环回替代。
+    match &addr.addr.host {
+        Host::IpAddr(std::net::IpAddr::V4(ip)) if ip.is_unspecified() => {
+            addr.addr.host = Host::IpAddr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        }
+        Host::IpAddr(std::net::IpAddr::V6(ip)) if ip.is_unspecified() => {
+            addr.addr.host = Host::IpAddr(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
+        }
+        _ => {}
+    }
+    let scheme = if matches!(addr.r#type, Some(Transport::Tls)) {
+        Scheme::Sips
+    } else {
+        Scheme::Sip
+    };
+    let mut params = Vec::new();
+    if !matches!(addr.r#type, Some(Transport::Udp) | None) {
+        if let Some(t) = addr.r#type {
+            params.push(Param::Transport(t));
+        }
+    }
+    rsipstack::sip::Uri {
+        scheme: Some(scheme),
+        auth: None,
+        host_with_port: addr.addr,
+        params,
+        ..Default::default()
+    }
+}
+
 /// 透明 Proxy 一通呼叫：A 腿（主叫→proxy，UAS）与 B 腿（proxy→被叫，UAC）配对。
 ///
 /// 端到端透传：Call-ID（`InviteOption.call_id` 复用）、SDP body（字节透传不解析）、
@@ -882,6 +962,7 @@ async fn proxy_call(
     binding: Binding,
     metrics: Arc<SipMetrics>,
     bye_reasons: Arc<Mutex<HashMap<String, String>>>,
+    local_contact: rsipstack::sip::Uri,
 ) -> Result<(), String> {
     let (state_tx, state_rx) = dl.new_dialog_state_channel();
 
@@ -913,14 +994,10 @@ async fn proxy_call(
         });
     }
 
-    // B 腿 client dialog：destination = 注册 flow（可靠复用连接 / UDP 源地址）。
-    let contact = match dl.build_local_contact(None, None) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = server_dlg.reject(Some(StatusCode::ServerInternalError), None);
-            return Err(format!("构造 local contact 失败: {e}"));
-        }
-    };
+    // B 腿 client dialog：destination = 注册 flow（可靠复用连接 / UDP 源地址）；
+    // Contact = 按入站传输挑选的本端 Contact（contact_for_request——否则 UDP
+    // 客户端拿到 TLS 监听地址，对话内 BYE/INFO 发不回来）。
+    let contact = local_contact;
     let opt = InviteOption {
         caller,
         callee,
@@ -1092,6 +1169,17 @@ async fn relay(
 /// 生命周期：BYE 由 dialog 层自动 200+Terminate（SIP 侧）；SFU 会话依赖媒体
 /// 超时回收（无 kick——/start 不返回会话 id，kick 按 room 会误伤同房其他端）。
 /// 会议端 ICE 为内联候选（v1 非 trickle），INFO trickle 不适用。
+/// 从客户端 INVITE 的 offer body 提取真实 SDP：JSON 包装
+/// （`{"type":"offer","sdp":"v=0\r\n..."}`，客户端 `serde_json::to_string(&offer)`
+/// 形态）取 sdp 字段；裸 SDP 原文返回（测试直传形态）。方向判定（SFU 角色）
+/// 必须在真实 SDP 上进行。
+fn offer_sdp_text(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("sdp").and_then(|s| s.as_str()).map(str::to_string))
+        .unwrap_or_else(|| body.to_string())
+}
+
 async fn conference_bridge(
     dl: Arc<DialogLayer>,
     mut tx: Transaction,
@@ -1099,8 +1187,13 @@ async fn conference_bridge(
     offer: Vec<u8>,
     sfu_urls: Vec<String>,
     sfu_token: Option<String>,
+    local_contact: rsipstack::sip::Uri,
 ) -> Result<(), String> {
     let offer = String::from_utf8_lossy(&offer).to_string();
+    // 客户端 offer 为 JSON 包装（{"type":"offer","sdp":"v=0\r\n..."}）：方向
+    // 判定须在真实 SDP 上进行——JSON 转义串无行结构，m= 行匹配必然失败，
+    // 发布端 sendrecv 会被误判为 viewer（SFU 侧 403 拒绝）。
+    let offer_sdp = offer_sdp_text(&offer);
     info!(%room, "SIP 会议 INVITE → SFU 桥");
     // 本函数全部失败出口都回 final response——否则 INVITE 事务悬死，客户端
     // 既无 Answered 也无 Rejected，UI 静默卡住（#576 CI 实测）。dialog 注册表
@@ -1108,7 +1201,8 @@ async fn conference_bridge(
     let (state_tx, mut state_rx) = dl.new_dialog_state_channel();
     // A 腿 server dialog：自动 100 Trying/吸收 ACK/BYE（Contact/to-tag 由
     // dialog 机制生成——裸 reply_with 缺 Contact 客户端建不了 dialog）。
-    let server_dlg = match dl.get_or_create_server_invite(&tx, state_tx, None, None) {
+    let server_dlg = match dl.get_or_create_server_invite(&tx, state_tx, None, Some(local_contact))
+    {
         Ok(d) => d,
         Err(e) => {
             // 腿未建（如缺 Contact）：事务仍在手——直接回 500，不悬死。
@@ -1138,7 +1232,7 @@ async fn conference_bridge(
     }
     // #598 v0.4 会议方向：offer 带媒体发送（被控端发布方向）→ publisher，
     // 否则（观看端 recvonly）→ viewer（§4.1 全员 SFU；与 SFU 准入同构判定）。
-    let role = if aerodesk_protocol::util::offer_sends_media(&offer) {
+    let role = if aerodesk_protocol::util::offer_sends_media(&offer_sdp) {
         "publisher"
     } else {
         "viewer"
@@ -1927,7 +2021,8 @@ mod tests {
             }
             let req = String::from_utf8_lossy(&buf).to_string();
             assert!(
-                req.contains("/start?room=meet-123&role=viewer") || req.contains("/start?room=meet-123&role=publisher"),
+                req.contains("/start?room=meet-123&role=viewer")
+                    || req.contains("/start?room=meet-123&role=publisher"),
                 "room/role 应透传 SFU：{req}"
             );
             let body = r#"{"type":"answer","sdp":"v=0\r\nmock-sfu-answer\r\n"}"#;
@@ -2031,6 +2126,37 @@ mod tests {
         mock.join().expect("mock sfu 线程");
         server_cancel.cancel();
         let _ = server.join();
+    }
+
+    /// #598 v0.4 回归：会议方向判定必须在真实 SDP 上进行——客户端 INVITE 的
+    /// offer 是 JSON 包装（serde_json 序列化的 str0m SdpOffer），其转义串没有
+    /// 行结构，m= 行匹配必然失败，发布端 sendrecv 会被误判为 viewer（SFU 侧
+    /// 403 拒绝，e2e 实测）。
+    #[test]
+    fn conference_direction_uses_real_sdp_not_json_wrapper() {
+        // 客户端形态：{"type":"offer","sdp":"v=0\r\n..."}（\r\n 为转义字面量）。
+        let wrapped_pub = r#"{"type":"offer","sdp":"v=0\r\no=caller 1 1 IN IP4 127.0.0.1\r\ns=call\r\nt=0 0\r\nm=video 5004 RTP/AVP 96\r\na=sendrecv\r\n"}"#;
+        let sdp = offer_sdp_text(wrapped_pub);
+        assert!(sdp.contains("m=video"), "应取出真实 SDP");
+        assert!(
+            aerodesk_protocol::util::offer_sends_media(&sdp),
+            "sendrecv 发布端 → publisher"
+        );
+        // recvonly 观看端 → viewer。
+        let wrapped_viewer = r#"{"type":"offer","sdp":"v=0\r\no=caller 1 1 IN IP4 127.0.0.1\r\ns=call\r\nt=0 0\r\nm=video 5004 RTP/AVP 96\r\na=recvonly\r\n"}"#;
+        let sdp = offer_sdp_text(wrapped_viewer);
+        assert!(
+            !aerodesk_protocol::util::offer_sends_media(&sdp),
+            "recvonly 观看端 → viewer"
+        );
+        // 裸 SDP（测试直传形态）原样返回。
+        let raw = "v=0\r\no=caller 1 1 IN IP4 127.0.0.1\r\ns=call\r\nt=0 0\r\nm=video 5004 RTP/AVP 96\r\n";
+        assert_eq!(offer_sdp_text(raw), raw);
+        // 回归锚点：在 JSON 包装串上直接判定必然误判（sendrecv 被当作无媒体）。
+        assert!(
+            !aerodesk_protocol::util::offer_sends_media(wrapped_pub),
+            "JSON 包装串判定应失败——方向判定必须经 offer_sdp_text"
+        );
     }
 
     /// §8 迁移期同一凭据：未列设备以首个 AUTH_TOKEN 为 Digest 口令——
