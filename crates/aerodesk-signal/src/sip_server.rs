@@ -2079,23 +2079,53 @@ mod tests {
 
     /// 全呼叫面场景主体（传输无关）：启动 server（监听差异由 `server_cfg` 注入）、
     /// 双客户端注册、呼叫 1-4（全流程/拒接/302/BYE-302）、关停。
-    /// 收事件（跳过非目标种类，5s 兜底）。模块级：呼叫面场景与 P2P 媒体
-    /// e2e 共用（近重复不可留两处，改事件集只改这一处）。
+    /// 事件携带的 Call-ID（Registered/EndpointStopped 无）。
+    fn call_id_of(ev: &aerodesk_protocol::sip_client::SipEvent) -> Option<&str> {
+        use aerodesk_protocol::sip_client::SipEvent;
+        match ev {
+            SipEvent::IncomingCall { call_id, .. }
+            | SipEvent::Ringing { call_id }
+            | SipEvent::Answered { call_id, .. }
+            | SipEvent::Rejected { call_id, .. }
+            | SipEvent::PeerHangup { call_id, .. }
+            | SipEvent::EscalatedToSfu { call_id, .. }
+            | SipEvent::RedirectedTo { call_id, .. }
+            | SipEvent::Trickle { call_id, .. } => Some(call_id),
+            SipEvent::Registered { .. }
+            | SipEvent::RegisterFailed { .. }
+            | SipEvent::EndpointStopped => None,
+        }
+    }
+
+    /// 收事件（跳过非目标种类与 call_id 不匹配的事件，30s 兜底）。模块级：
+    /// 呼叫面场景与 P2P 媒体 e2e 共用（近重复不可留两处，改事件集只改这一处）。
+    /// `want_call_id`：全部 UA 事件共用一条通道，多步/多呼叫测试在 CI 调度
+    /// 抖动下可能收到跨步骤的迟到事件——种类命中后再按 call_id 过滤，
+    /// 防误交付把断言引向错误状态；不匹配事件记入诊断序列，超时时一并带出
+    /// （把「静默超时」变成可定位日志）。
     fn recv_until(
         h: &aerodesk_protocol::sip_client::SipClientHandle,
         want: &str,
+        want_call_id: Option<&str>,
     ) -> aerodesk_protocol::sip_client::SipEvent {
         use aerodesk_protocol::sip_client::SipEvent;
         // #553 验收前置：窗口从 5s 放宽到 15s——TLS 传输（呼叫 + 302 升级）在
         // CI 慢 runner 偶发超 5s/15s（本地 0.5s 内完成；UDP 302 升级链路在
         // 负载 runner 上可超 15s）；测试为顺序等待，放宽无损。
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        // 已收到但不匹配的事件序列（种类#call_id）：超时诊断用。
+        let mut seen_mismatch: Vec<String> = Vec::new();
         loop {
             let remain = deadline.saturating_duration_since(std::time::Instant::now());
-            assert!(!remain.is_zero(), "等 {want} 超时");
+            assert!(
+                !remain.is_zero(),
+                "等 {want}（call_id={want_call_id:?}）超时；已收到但不匹配：{seen_mismatch:?}"
+            );
             // None 两种含义：窗口内超时（重试至 deadline）或对端通道关闭（UA 已停）。
             let Some(ev) = h.recv_event(remain) else {
-                panic!("等 {want}：窗口内无事件或 UA 通道已关闭");
+                panic!(
+                    "等 {want}（call_id={want_call_id:?}）：窗口内无事件或 UA 通道已关闭；已收到但不匹配：{seen_mismatch:?}"
+                );
             };
             let hit = matches!(
                 (&ev, want),
@@ -2108,8 +2138,16 @@ mod tests {
                     | (SipEvent::EscalatedToSfu { .. }, "EscalatedToSfu")
                     | (SipEvent::Trickle { .. }, "Trickle")
             );
-            if hit {
-                return ev;
+            if !hit {
+                continue;
+            }
+            // 种类命中后再比对 call_id（Registered/EndpointStopped 无 call_id）。
+            match (want_call_id, call_id_of(&ev)) {
+                (Some(want_id), Some(got_id)) if got_id != want_id => {
+                    seen_mismatch.push(format!("{want}#{got_id}"));
+                    continue;
+                }
+                _ => return ev,
             }
         }
     }
@@ -2130,11 +2168,11 @@ mod tests {
         let callee = start_sip_client(client_cfg("AD-CALLEE")).expect("callee 启动");
 
         assert!(matches!(
-            recv_until(&caller, "Registered"),
+            recv_until(&caller, "Registered", None),
             SipEvent::Registered { .. }
         ));
         assert!(matches!(
-            recv_until(&callee, "Registered"),
+            recv_until(&callee, "Registered", None),
             SipEvent::Registered { .. }
         ));
 
@@ -2147,7 +2185,7 @@ mod tests {
                 call_password: Some("tok-callee".into()),
             })
             .unwrap();
-        match recv_until(&callee, "IncomingCall") {
+        match recv_until(&callee, "IncomingCall", Some("c-1")) {
             SipEvent::IncomingCall {
                 call_id,
                 from_device,
@@ -2165,7 +2203,7 @@ mod tests {
             })
             .unwrap();
         assert!(
-            matches!(recv_until(&caller, "Ringing"), SipEvent::Ringing { ref call_id } if call_id == "c-1")
+            matches!(recv_until(&caller, "Ringing", Some("c-1")), SipEvent::Ringing { ref call_id } if call_id == "c-1")
         );
         callee
             .send(SipCommand::Accept {
@@ -2173,7 +2211,7 @@ mod tests {
                 answer_sdp: CALLEE_SDP.into(),
             })
             .unwrap();
-        match recv_until(&caller, "Answered") {
+        match recv_until(&caller, "Answered", Some("c-1")) {
             SipEvent::Answered {
                 call_id,
                 answer_sdp,
@@ -2195,7 +2233,7 @@ mod tests {
                 },
             })
             .unwrap();
-        match recv_until(&callee, "Trickle") {
+        match recv_until(&callee, "Trickle", Some("c-1")) {
             SipEvent::Trickle {
                 call_id, candidate, ..
             } => {
@@ -2213,7 +2251,7 @@ mod tests {
             })
             .unwrap();
         assert!(
-            matches!(recv_until(&caller, "PeerHangup"), SipEvent::PeerHangup { ref call_id, .. } if call_id == "c-1")
+            matches!(recv_until(&caller, "PeerHangup", Some("c-1")), SipEvent::PeerHangup { ref call_id, .. } if call_id == "c-1")
         );
 
         // ---- 呼叫 2：拒接（busy → 486）----
@@ -2225,14 +2263,14 @@ mod tests {
                 call_password: Some("tok-callee".into()),
             })
             .unwrap();
-        let _ = recv_until(&callee, "IncomingCall");
+        let _ = recv_until(&callee, "IncomingCall", Some("c-2"));
         callee
             .send(SipCommand::Reject {
                 call_id: "c-2".into(),
                 error_code: "busy".into(),
             })
             .unwrap();
-        match recv_until(&caller, "Rejected") {
+        match recv_until(&caller, "Rejected", Some("c-2")) {
             SipEvent::Rejected {
                 call_id,
                 status,
@@ -2254,13 +2292,13 @@ mod tests {
                 call_password: Some("tok-callee".into()),
             })
             .unwrap();
-        let _ = recv_until(&callee, "IncomingCall");
+        let _ = recv_until(&callee, "IncomingCall", Some("c-3"));
         callee
             .send(SipCommand::RedirectToSfu {
                 call_id: "c-3".into(),
             })
             .unwrap();
-        match recv_until(&caller, "EscalatedToSfu") {
+        match recv_until(&caller, "EscalatedToSfu", Some("c-3")) {
             SipEvent::EscalatedToSfu { call_id, view_aor } => {
                 assert_eq!(call_id, "c-3");
                 assert_eq!(view_aor, format!("sip:view-AD-CALLEE@{REALM}"));
@@ -2277,21 +2315,21 @@ mod tests {
                 call_password: Some("tok-callee".into()),
             })
             .unwrap();
-        let _ = recv_until(&callee, "IncomingCall");
+        let _ = recv_until(&callee, "IncomingCall", Some("c-4"));
         callee
             .send(SipCommand::Accept {
                 call_id: "c-4".into(),
                 answer_sdp: CALLEE_SDP.into(),
             })
             .unwrap();
-        let _ = recv_until(&caller, "Answered");
+        let _ = recv_until(&caller, "Answered", Some("c-4"));
         callee
             .send(SipCommand::Hangup {
                 call_id: "c-4".into(),
                 reason: Some(ESCALATE_BYE_REASON.into()),
             })
             .unwrap();
-        match recv_until(&caller, "EscalatedToSfu") {
+        match recv_until(&caller, "EscalatedToSfu", Some("c-4")) {
             SipEvent::EscalatedToSfu { call_id, view_aor } => {
                 assert_eq!(call_id, "c-4");
                 assert_eq!(view_aor, format!("sip:view-AD-CALLEE@{REALM}"));
@@ -2447,11 +2485,11 @@ mod tests {
         let caller = start_sip_client(client_cfg("AD-CALLER")).expect("caller 启动");
         let callee = start_sip_client(client_cfg("AD-CALLEE")).expect("callee 启动");
         assert!(matches!(
-            recv_until(&caller, "Registered"),
+            recv_until(&caller, "Registered", None),
             SipEvent::Registered { .. }
         ));
         assert!(matches!(
-            recv_until(&callee, "Registered"),
+            recv_until(&callee, "Registered", None),
             SipEvent::Registered { .. }
         ));
 
@@ -2482,7 +2520,9 @@ mod tests {
             })
             .unwrap();
         // 被叫收到 offer（端到端字节一致），出 answer。
-        let SipEvent::IncomingCall { offer_sdp, .. } = recv_until(&callee, "IncomingCall") else {
+        let SipEvent::IncomingCall { offer_sdp, .. } =
+            recv_until(&callee, "IncomingCall", Some("c-p2p"))
+        else {
             unreachable!()
         };
         assert_eq!(offer_sdp, offer.sdp, "P2P offer 应经 SIP 端到端字节一致");
@@ -2493,7 +2533,8 @@ mod tests {
                 answer_sdp: answer.clone(),
             })
             .unwrap();
-        let SipEvent::Answered { answer_sdp, .. } = recv_until(&caller, "Answered") else {
+        let SipEvent::Answered { answer_sdp, .. } = recv_until(&caller, "Answered", Some("c-p2p"))
+        else {
             unreachable!()
         };
         assert_eq!(answer_sdp, answer, "P2P answer 应经 SIP 端到端字节一致");
@@ -2632,11 +2673,11 @@ mod tests {
         let caller = start_sip_client(client_cfg("AD-CALLER")).expect("caller 启动");
         let callee = start_sip_client(client_cfg("AD-CALLEE")).expect("callee 启动");
         assert!(matches!(
-            recv_until(&caller, "Registered"),
+            recv_until(&caller, "Registered", None),
             SipEvent::Registered { .. }
         ));
         assert!(matches!(
-            recv_until(&callee, "Registered"),
+            recv_until(&callee, "Registered", None),
             SipEvent::Registered { .. }
         ));
 
@@ -2649,7 +2690,7 @@ mod tests {
                 call_password: None,
             })
             .unwrap();
-        match recv_until(&caller, "Rejected") {
+        match recv_until(&caller, "Rejected", Some("c-auth-1")) {
             SipEvent::Rejected {
                 call_id, status, ..
             } => {
@@ -2668,7 +2709,7 @@ mod tests {
                 call_password: Some("WRONG".into()),
             })
             .unwrap();
-        match recv_until(&caller, "Rejected") {
+        match recv_until(&caller, "Rejected", Some("c-auth-2")) {
             SipEvent::Rejected {
                 call_id, status, ..
             } => {
@@ -2691,24 +2732,30 @@ mod tests {
                 call_password: Some("temp-abc".into()),
             })
             .unwrap();
-        let _ = recv_until(&callee, "IncomingCall");
+        let _ = recv_until(&callee, "IncomingCall", Some("c-auth-3"));
         callee
             .send(SipCommand::Accept {
                 call_id: "c-auth-3".into(),
                 answer_sdp: CALLEE_SDP.into(),
             })
             .unwrap();
-        match recv_until(&caller, "Answered") {
+        match recv_until(&caller, "Answered", Some("c-auth-3")) {
             SipEvent::Answered { call_id, .. } => assert_eq!(call_id, "c-auth-3"),
             other => panic!("临时口令应放行，得 {other:?}"),
         }
-        callee
+        // 收尾挂断走主叫而非被叫：被叫侧 established 唯一由 DialogState::Confirmed
+        // 事件置位，与命令在同一 select! 主循环里按调度公平性竞争——CI 抖动下
+        // 输了竞态会把挂断当「未建立拒接」本地 603 吞掉（无 BYE 上线），主叫
+        // PeerHangup 永久不可达（曾致本测试 CI 侧「等 PeerHangup 超时」红）。
+        // 主叫侧 established 由 2xx→Answered 双通道确定性置位，挂断必发 BYE，
+        // 被叫收 UasBye → PeerHangup 必然产出。授权断言（407/403/放行）不变。
+        caller
             .send(SipCommand::Hangup {
                 call_id: "c-auth-3".into(),
                 reason: None,
             })
             .unwrap();
-        let _ = recv_until(&caller, "PeerHangup");
+        let _ = recv_until(&callee, "PeerHangup", Some("c-auth-3"));
 
         caller.shutdown();
         callee.shutdown();

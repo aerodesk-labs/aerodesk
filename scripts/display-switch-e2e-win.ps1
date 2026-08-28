@@ -65,9 +65,10 @@ try {
         $fail = 1
     }
     # #487：screen 发布端 loopback 必须真出帧（本断点曾因子串未断言而不可见）。
-    # 轮询兜底信令/ICE 协商慢的情况；真零帧（#487 回归）永远等不到，不会掩盖。
+    # 轮询兜底信令/ICE 协商慢的情况（健康路径 ≤4s 出首帧；40×0.5s=20s 给
+    # runner 负载抖动留足余量）；真零帧（#487 回归）永远等不到，不会掩盖。
     $frames = 0
-    foreach ($i in 1..20) {
+    foreach ($i in 1..40) {
         $viewTxt = Get-Content "$logDir\view.err" -Raw -ErrorAction SilentlyContinue
         if ($viewTxt -match 'RECEIVED: ([1-9]\d*) frames') { $frames = [int]$Matches[1]; break }
         Start-Sleep -Milliseconds 500
@@ -76,7 +77,13 @@ try {
         Write-Host "PASS screen publisher loopback frames ($frames, #487)"
     } else {
         Write-Host "FAIL zero frames from screen publisher (#487 regression)"
-        Get-Content "$logDir\pub.err" -Tail 5 -ErrorAction SilentlyContinue
+        # 失败留痕：收发两端都打——viewer 侧此前从不打印（零帧定位盲区）。
+        Write-Host "--- view.err tail ---"
+        Get-Content "$logDir\view.err" -Tail 10 -ErrorAction SilentlyContinue
+        Write-Host "--- pub.err (ICE/帧/编码/心跳相关) ---"
+        Get-Content "$logDir\pub.err" -ErrorAction SilentlyContinue |
+            Select-String -Pattern "ICE connected|next_frame|encode|heartbeat|GDI|screen capture" |
+            Select-Object -Last 10
         $fail = 1
     }
     if (Select-String -Path "$logDir\sfu.log","$logDir\sfu.err","$logDir\pub.err" -Pattern "panic" -Quiet) {

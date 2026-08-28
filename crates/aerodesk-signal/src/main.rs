@@ -662,6 +662,11 @@ fn main() {
     // #551 SIP 信令端点（双栈并存，规范 §8）：任一 SIP_*_PORT 设置即开启，
     // 默认全关 → 生产 JSON 路径不受影响。Digest 口令表由 SIP_DIGEST_USERS 注入。
     {
+        // #598 P2a：WSS/TLS accept 需进程级 rustls CryptoProvider——sip_client 的
+        // ensure_rustls_provider 只在客户端 UA 线程调用，服务端进程（rouille 旧
+        // rustls + rsipstack 0.23 并存）无人安装，首个 WSS 握手即 panic
+        // （Could not automatically determine the process-level CryptoProvider）。
+        aerodesk_protocol::sip_client::ensure_rustls_provider();
         let sip_tls = std::env::var("SIP_TLS_PORT")
             .ok()
             .and_then(|p| p.parse().ok());

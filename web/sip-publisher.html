@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AeroDesk — Web SIP-WSS 观看端（#583）</title>
+<title>AeroDesk — Web SIP-WSS 被控端（#598 P2a）</title>
 <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
@@ -17,9 +17,10 @@
     button.primary { background:#2ea043; border-color:#2ea043; }
     #status { font-size:13px; }
     #ice { font-size:12px; color:#888; }
+    label.chk { font-size:13px; display:inline-flex; align-items:center; gap:6px; }
     .wrap { position:relative; background:#000; border-radius:8px; overflow:hidden; }
-    video { display:block; width:100%; max-height:70vh; background:#000; }
-    .placeholder { display:flex; align-items:center; justify-content:center; height:200px; color:#555; font-size:14px; }
+    video { display:block; width:100%; max-height:60vh; background:#000; }
+    .placeholder { display:flex; align-items:center; justify-content:center; height:160px; color:#555; font-size:14px; }
     #log { margin-top:10px; background:#0d0d0d; border:1px solid #222; border-radius:6px; padding:8px; font: 11px/1.5 ui-monospace, monospace; max-height:160px; overflow:auto; white-space:pre-wrap; color:#9aa; }
     @media (max-width: 600px) {
         body { padding:8px; }
@@ -30,20 +31,20 @@
 </head>
 <body>
     <h1>AeroDesk</h1>
-    <div class="sub">Web SIP-WSS 观看端 · 标准 SIP（RFC 7118）直连原生被控端（#583 骨架）</div>
+    <div class="sub">Web SIP-WSS 被控端 · 浏览器为 UAS（等 INVITE 被拨入，静默接听出流）（#598 P2a）</div>
     <div class="bar">
-        <input id="target" placeholder="被控端设备 ID（被叫 AoR）" value="">
-        <input id="device" placeholder="本端设备 ID（默认自动）" value="">
+        <input id="device" placeholder="本端设备 ID（被叫 AoR，默认自动）" value="">
         <input id="signal" placeholder="信令（默认 wss://host:3061）" value="">
         <input id="token" placeholder="Digest 口令（可选）" type="password" value="">
-        <button id="connect" class="primary">连接</button>
-        <button id="disconnect" disabled>断开</button>
+        <label class="chk"><input id="auto" type="checkbox" checked> 免授权静默接听</label>
+        <button id="connect" class="primary">开始被控</button>
+        <button id="disconnect" disabled>停止</button>
     </div>
-    <div id="status">未连接</div>
+    <div id="status">未开始</div>
     <div id="ice"></div>
     <div class="wrap">
-        <video id="video" autoplay playsinline muted></video>
-        <div id="placeholder" class="placeholder">等待媒体流…（键鼠回传在后续阶段接入）</div>
+        <video id="preview" autoplay playsinline muted></video>
+        <div id="placeholder" class="placeholder">本页预览（发给观看端的内容）</div>
     </div>
     <div id="log"></div>
 
@@ -54,21 +55,20 @@ const params = new URLSearchParams(location.search);
 const byId = (id) => document.getElementById(id);
 const $ = byId;
 
-$('target').value = params.get('target') || '';
 $('device').value = params.get('device') || '';
 $('signal').value = params.get('signal') || '';
 $('token').value = params.get('token') || '';
+if (params.get('auto') === '0' || params.get('auto') === 'false') $('auto').checked = false;
 
 // ---------- 常量与状态 ----------
-// domain 与原生端默认一致（aerodesk.test）；realm 与 signal SIP 面默认一致（aerodesk）。
 const DOMAIN = 'aerodesk.test';
-let ws = null, rtc = null, callId = null, toTag = null, closed = false;
-let regTimer = null, connecting = false, inviteSeq = 0;
-let phase = 'idle';   // idle | registering | calling | in-call
+let ws = null, rtc = null, capture = null, callId = null, toTag = null, closed = false;
+let regTimer = null, connecting = false, phase = 'idle'; // idle | waiting | in-call
 let userDisconnected = false;
 let reconnectAttempts = 0;
 const REGISTER_EXPIRES = 120;
 const MAX_RECONNECT = 5;
+let inputSeq = 0;
 
 function log(msg) {
     const el = $('log');
@@ -78,7 +78,7 @@ function log(msg) {
 function setStatus(s) { $('status').innerText = s; }
 function setIce(s) { $('ice').innerText = 'ICE: ' + s; }
 
-// ---------- 内联 MD5（RFC 1321 参考实现风格；仅用于 SIP Digest） ----------
+// ---------- 内联 MD5（RFC 1321 参考实现风格；仅用于 SIP Digest；与 sip-viewer 同款） ----------
 const MD5 = (() => {
     const S = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
                5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
@@ -105,7 +105,6 @@ const MD5 = (() => {
         const p = bytes.slice();
         p.push(0x80);
         while (p.length % 64 !== 56) p.push(0);
-        // 64 位比特数小端（低 4 字节足够；JS 移位计数取模 32，高 4 字节必须显式 0）
         for (let i = 0; i < 4; i++) p.push((bitLen >>> (8 * i)) & 0xff);
         for (let i = 0; i < 4; i++) p.push(0);
         let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
@@ -125,7 +124,6 @@ const MD5 = (() => {
             }
             a0 = (a0 + A) >>> 0; b0 = (b0 + B) >>> 0; c0 = (c0 + C) >>> 0; d0 = (d0 + D) >>> 0;
         }
-        // 输出按小端字节序（RFC 1321：摘要 = A/B/C/D 各 4 字节小端拼接）。
         return [a0, b0, c0, d0].map((w) => {
             let s = '';
             for (let i = 0; i < 4; i++) s += ((w >>> (8 * i)) & 0xff).toString(16).padStart(2, '0');
@@ -135,9 +133,8 @@ const MD5 = (() => {
     return md5;
 })();
 
-// ---------- SIP 报文构造（与 scripts/sip-accept-wss.py 同构，P0 已验证） ----------
+// ---------- SIP 报文构造（与 sip-viewer.html / sip-accept-wss.py 同构） ----------
 function wsTarget() {
-    // 输入可为空 → 默认 wss://<页面host>:3061
     const v = $('signal').value.trim();
     if (v) return v;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -149,7 +146,7 @@ function wsHostPort() {
 }
 function deviceId() {
     if (!$('device').value.trim()) {
-        $('device').value = 'web-viewer-' + Math.random().toString(16).slice(2, 10);
+        $('device').value = 'web-pub-' + Math.random().toString(16).slice(2, 10);
     }
     return $('device').value.trim();
 }
@@ -161,7 +158,7 @@ function baseHeaders(method, callId, toAor, cseqNum, tag) {
     const n = cseqNum || cseq;
     const { host, port } = wsHostPort();
     const toTag = tag ? `;tag=${tag}` : '';
-    const lines = [
+    return [
         `Via: SIP/2.0/WSS ${host}:${port};branch=${branch()}`,
         'Max-Forwards: 70',
         `From: <sip:${deviceId()}@${DOMAIN}>;tag=${fromTag()}`,
@@ -169,8 +166,7 @@ function baseHeaders(method, callId, toAor, cseqNum, tag) {
         `Call-ID: ${callId}`,
         `CSeq: ${n} ${method}`,
         `Contact: <sip:${deviceId()}@${host}:${port}>`,
-    ];
-    return lines.join('\r\n') + '\r\n';
+    ].join('\r\n') + '\r\n';
 }
 function sendSip(text) { ws.send(text); }
 function byteLen(s) { return new TextEncoder().encode(s).length; }
@@ -180,15 +176,7 @@ function authHeader(nonce, realm, method, uri, user, password) {
     const resp = MD5(`${ha1}:${nonce}:${ha2}`);
     return `Authorization: Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${uri}", response="${resp}", algorithm=MD5\r\n`;
 }
-function proxyAuthHeader(nonce, realm, method, uri, user, password) {
-    // 与 authHeader 同款 Digest，仅头部名不同（#503-4 INVITE 407 质询应答）。
-    const ha1 = MD5(`${user}:${realm}:${password}`);
-    const ha2 = MD5(`${method}:${uri}`);
-    const resp = MD5(`${ha1}:${nonce}:${ha2}`);
-    return `Proxy-Authorization: Digest username="${user}", realm="${realm}", nonce="${nonce}", uri="${uri}", response="${resp}", algorithm=MD5\r\n`;
-}
 function parseResponse(text) {
-    // 返回 { statusLine, status, headers: {name: value(小写名)}, body }
     const idx = text.indexOf('\r\n\r\n');
     const head = idx >= 0 ? text.slice(0, idx) : text;
     const body = idx >= 0 ? text.slice(idx + 4) : '';
@@ -201,51 +189,7 @@ function parseResponse(text) {
     return { statusLine: lines[0], status: parseInt(lines[0].split(' ')[1], 10), headers, body };
 }
 
-// ---------- WebRTC（非 trickle：#17 同款，候选内联——原生端忽略后到 trickle） ----------
-function setupRtc() {
-    rtc = new RTCPeerConnection();
-    rtc.oniceconnectionstatechange = () => {
-        setIce(rtc.iceConnectionState);
-        if (rtc.iceConnectionState === 'connected' || rtc.iceConnectionState === 'completed') {
-            setStatus('已连接（媒体建立）');
-        }
-        if (rtc.iceConnectionState === 'failed') {
-            setStatus('连接中断（ICE failed）');
-            log('ICE failed');
-        }
-    };
-    rtc.onicecandidate = () => { /* 非 trickle：candidate 内嵌 SDP，等 gathering 完成 */ };
-    // 观看端：recvonly 视频 + input data channel（键鼠回传）。
-    rtc.addTransceiver('video', { direction: 'recvonly' });
-    const input = rtc.createDataChannel('input');
-    input.onopen = () => log('input channel open（键鼠回传已接入）');
-    rtc.input = input;
-    rtc.ontrack = (e) => {
-        const video = $('video');
-        video.srcObject = e.streams[0] || new MediaStream([e.track]);
-        video.play().catch(() => {});
-        $('placeholder').style.display = 'none';
-        log('received track: ' + e.track.kind);
-    };
-}
-function waitIceGatheringComplete() {
-    if (rtc.iceGatheringState === 'complete') return Promise.resolve();
-    return new Promise((resolve) => {
-        let done = false;
-        const onState = () => {
-            if (rtc.iceGatheringState === 'complete') { done = true; cleanup(); resolve(); }
-        };
-        // 兜底：10s 后带当前已收集候选继续（非 trickle 的最佳努力）
-        const timer = setTimeout(() => { if (!done) { cleanup(); resolve(); } }, 10000);
-        const cleanup = () => {
-            rtc.removeEventListener('icegatheringstatechange', onState);
-            clearTimeout(timer);
-        };
-        rtc.addEventListener('icegatheringstatechange', onState);
-    });
-}
-
-// ---------- 注册（REGISTER → 401 Digest → REGISTER → 200） ----------
+// ---------- 注册（REGISTER → 401 Digest → REGISTER → 200；与 sip-viewer 同款） ----------
 function register(attempt) {
     return new Promise((resolve, reject) => {
         const rid = 'reg-' + deviceId() + '-' + Date.now();
@@ -255,7 +199,6 @@ function register(attempt) {
         let timer = setTimeout(() => reject(new Error('REGISTER 无响应（10s）')), 10000);
         const onMsg = (e) => {
             const r = parseResponse(e.data);
-            // 只处理本 REGISTER 事务的响应（INVITE 等其它 Call-ID 的报文不得干扰）。
             if (r.headers['call-id'] && r.headers['call-id'] !== rid) return;
             if (r.status === 401) {
                 const ww = r.headers['www-authenticate'] || '';
@@ -268,7 +211,6 @@ function register(attempt) {
                 }
                 ws.removeEventListener('message', onMsg);
                 clearTimeout(timer);
-                // 第二次 REGISTER 带 Authorization；uri 为 REGISTER 的 Request-URI
                 sendSip(`REGISTER ${uri} SIP/2.0\r\n` + baseHeaders('REGISTER', rid)
                     + authHeader(nonce, realm, 'REGISTER', uri, deviceId(), $('token').value || '')
                     + `Expires: ${REGISTER_EXPIRES}\r\nContent-Length: 0\r\n\r\n`);
@@ -288,118 +230,182 @@ function register(attempt) {
     });
 }
 
-// ---------- 呼叫（INVITE → 100/180 → 407(Proxy-Auth) → 200(answer) → ACK） ----------
-function invite() {
-    return new Promise((resolve, reject) => {
-        const target = $('target').value.trim();
-        if (!target) { reject(new Error('请输入被控端设备 ID')); return; }
-        callId = 'call-' + deviceId() + '-' + Date.now();
-        const body = JSON.stringify(rtc.localDescription);
-        const reqUri = 'sip:' + target + '@' + DOMAIN;
-        // #503-4：被叫设备有口令时服务器先 407 质询，重试需带 Proxy-Authorization
-        // （Digest，与 REGISTER 401 同款）。未带凭据/口令错时服务器 407/403。
-        let proxyAuth = '';
-        let retried = false;
-        const sendInvite = () => {
-            sendSip(`INVITE ${reqUri} SIP/2.0\r\n` + baseHeaders('INVITE', callId, target)
-                + proxyAuth
-                + 'Content-Type: application/sdp\r\n'
-                + `Content-Length: ${byteLen(body)}\r\n\r\n${body}`);
-            inviteSeq = cseq;   // 记录 INVITE 的 CSeq（ACK/BYE 沿用同号）
+// ---------- WebRTC（非 trickle：候选内联，等 gathering 完成后整体回 200） ----------
+async function startCapture() {
+    // 屏幕分享（sendonly 视频源；e2e 用 --auto-select-desktop-capture-source）。
+    capture = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 30, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+    });
+    $('preview').srcObject = capture;
+    $('placeholder').style.display = 'none';
+    log('屏幕分享已获取（' + capture.getTracks().length + ' track）');
+}
+function setupRtc() {
+    rtc = new RTCPeerConnection();
+    rtc.oniceconnectionstatechange = () => {
+        setIce(rtc.iceConnectionState);
+        if (rtc.iceConnectionState === 'connected' || rtc.iceConnectionState === 'completed') {
+            setStatus('已连接（媒体建立）');
+        }
+        if (rtc.iceConnectionState === 'failed') {
+            setStatus('连接中断（ICE failed）');
+            log('ICE failed');
+        }
+    };
+    rtc.onicecandidate = () => { /* 非 trickle：candidate 内嵌 SDP，等 gathering 完成 */ };
+    // 屏幕分享轨道进 RTC（否则 answer 的视频 m-line 是 inactive，观看端 0 帧）。
+    if (capture) {
+        capture.getTracks().forEach((t) => rtc.addTrack(t, capture));
+        log('screen track(s) added to RTCPeerConnection');
+    }
+    // 观看端来信令（键鼠回传）：观看端主动开 input 通道。
+    rtc.ondatachannel = (e) => {
+        if (e.channel.label !== 'input') return;
+        log('input channel open（观看端键鼠回传）');
+        e.channel.onmessage = (ev) => {
+            try {
+                const f = JSON.parse(ev.data);
+                // 完整 InputFrame 包装 {version,seq,timestamp_ms,event}。
+                log('input: ' + JSON.stringify(f.event || f));
+            } catch (_) { /* 非 JSON 载荷忽略 */ }
         };
-        let timer = setTimeout(() => reject(new Error('INVITE 无应答（30s）')), 30000);
-        const onMsg = (e) => {
-            const r = parseResponse(e.data);
-            // 只处理本呼叫的响应（60s REGISTER 刷新等其它 Call-ID 的报文不得干扰）。
-            if (r.headers['call-id'] && r.headers['call-id'] !== callId) return;
-            if (r.status === 100 || r.status === 180) {
-                log('SIP ' + r.statusLine);
-                return;   // 继续等 200
-            }
-            if (r.status === 407 && !retried) {
-                const pa = r.headers['proxy-authenticate'] || '';
-                const nonce = (pa.match(/nonce="([^"]+)"/) || [])[1];
-                const realm = (pa.match(/realm="([^"]+)"/) || [])[1] || 'aerodesk';
-                if (!nonce) {
-                    cleanup();
-                    reject(new Error('INVITE Digest 质询失败（无 nonce）'));
-                    return;
-                }
-                retried = true;
-                ws.removeEventListener('message', onMsg);
-                clearTimeout(timer);
-                proxyAuth = proxyAuthHeader(nonce, realm, 'INVITE', reqUri,
-                    deviceId(), $('token').value || '');
-                sendInvite();
-                timer = setTimeout(() => reject(new Error('INVITE 带认证仍无应答（30s）')), 30000);
-                ws.addEventListener('message', onMsg);
-                return;
-            }
-            cleanup();
-            if (r.status === 200) {
-                const to = r.headers['to'] || '';
-                toTag = (to.match(/;tag=([^;>]+)/) || [])[1] || null;
-                try {
-                    const answer = JSON.parse(r.body);
-                    resolve(answer);
-                } catch (err) {
-                    reject(new Error('answer 解析失败: ' + err.message));
-                }
-            } else {
-                reject(new Error('INVITE 被拒: ' + r.statusLine));
-            }
+    };
+}
+function waitIceGatheringComplete() {
+    if (rtc.iceGatheringState === 'complete') return Promise.resolve();
+    return new Promise((resolve) => {
+        let done = false;
+        const onState = () => {
+            if (rtc.iceGatheringState === 'complete') { done = true; cleanup(); resolve(); }
         };
+        const timer = setTimeout(() => { if (!done) { cleanup(); resolve(); } }, 10000);
         const cleanup = () => {
-            ws.removeEventListener('message', onMsg);
+            rtc.removeEventListener('icegatheringstatechange', onState);
             clearTimeout(timer);
         };
-        ws.addEventListener('message', onMsg);
-        sendInvite();
+        rtc.addEventListener('icegatheringstatechange', onState);
     });
-}
-function sendAck() {
-    const target = $('target').value.trim();
-    const reqUri = 'sip:' + target + '@' + DOMAIN;
-    // ACK 与 INVITE 同 CSeq 号（RFC 3261 §13.2.2.4）；To 带对端 to-tag（200 响应回填）。
-    sendSip(`ACK ${reqUri} SIP/2.0\r\n` + baseHeaders('ACK', callId, target, inviteSeq, toTag)
-        + 'Content-Length: 0\r\n\r\n');
-}
-function sendBye() {
-    if (!callId) return;
-    const target = $('target').value.trim();
-    const reqUri = 'sip:' + target + '@' + DOMAIN;
-    // 对话内 BYE：To 带对端 to-tag（RFC 3261 §12.2）。
-    sendSip(`BYE ${reqUri} SIP/2.0\r\n` + baseHeaders('BYE', callId, target, 0, toTag)
-        + 'Reason: SIP;cause=200;text="web viewer hangup"\r\nContent-Length: 0\r\n\r\n');
 }
 
-// ---------- 键鼠回传（InputFrame JSON 经 input 通道；与 MainActivity 同构） ----------
-let inputSeq = 0;
-function sendInput(type, x, y) {
-    const ch = rtc && rtc.input;
-    if (!ch || ch.readyState !== 'open') return;
-    const event = type === 'move'
-        ? { type: 'mouse_move', x, y }
-        : { type: 'mouse_button', button: 'left', state: type, x, y };
-    const frame = JSON.stringify({ version: 1, seq: ++inputSeq, timestamp_ms: Date.now(), event });
-    ch.send(frame);
-}
-function bindInputEvents() {
-    const v = $('video');
-    v.addEventListener('mousemove', (e) => {
-        const r = v.getBoundingClientRect();
-        if (r.width === 0 || r.height === 0) return;
-        sendInput('move', (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+// ---------- UAS 被叫：等 INVITE → 100 → 静默接听（200 + SDP answer）→ ACK ----------
+function answerCall() {
+    return new Promise((resolve, reject) => {
+        // 竞态防护：waitIceGatheringComplete 可能已先消费 complete 事件——
+        // 先查当前状态，已 complete 则直接发 200。
+        if (rtc.iceGatheringState === 'complete') {
+            send200();
+            resolve();
+            return;
+        }
+        let timer = setTimeout(() => reject(new Error('answer 生成超时（15s）')), 15000);
+        const onState = () => {
+            if (rtc.iceGatheringState !== 'complete') return;
+            clearTimeout(timer);
+            rtc.removeEventListener('icegatheringstatechange', onState);
+            try {
+                send200();
+                resolve();
+            } catch (err) {
+                reject(err);
+            }
+        };
+        rtc.addEventListener('icegatheringstatechange', onState);
     });
-    for (const [ev, st] of [['mousedown', 'pressed'], ['mouseup', 'released']]) {
-        v.addEventListener(ev, (e) => {
-            const r = v.getBoundingClientRect();
-            if (r.width === 0 || r.height === 0) return;
-            sendInput(st, (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
-        });
+}
+function send200() {
+    const answer = JSON.stringify(rtc.localDescription);
+    // 200 OK：整包 answer（候选内联），To 带本端 to-tag。
+    sendSip(`SIP/2.0 200 OK\r\n`
+        + `Via: ${lastInvite.via}\r\n`
+        + `From: ${lastInvite.from}\r\n`
+        + `To: ${lastInvite.to};tag=${fromTag()}\r\n`
+        + `Call-ID: ${lastInvite.callId}\r\n`
+        + `CSeq: ${lastInvite.cseq}\r\n`
+        + `Contact: <sip:${deviceId()}@${wsHostPort().host}:${wsHostPort().port}>\r\n`
+        + 'Content-Type: application/sdp\r\n'
+        + `Content-Length: ${byteLen(answer)}\r\n\r\n${answer}`);
+    log('已发送 200 OK（SDP answer，候选内联）');
+}
+// 被叫侧把主叫 INVITE 的头域原样回填到 100/200（RFC 3261 §8.2.6：除 To 外照抄）。
+// 存「值」不存整行——send200 模板已带头名（曾存 "CSeq: 3 INVITE" 整行导致
+// "CSeq: CSeq: ..." 双前缀，rsipstack 报 CSeq: invalid seq 拒收）。
+let lastInvite = null;   // {via, from, to, callId, cseq, reqUri}
+function rememberInvite(text) {
+    const lines = text.split('\r\n');
+    const pick = (n) => {
+        const l = lines.find((x) => x.toLowerCase().startsWith(n.toLowerCase()));
+        return l ? l.slice(n.length).trim() : '';
+    };
+    const reqUri = lines[0].split(' ')[1];
+    lastInvite = {
+        via: pick('Via:'),
+        from: pick('From:'),
+        to: pick('To:'),
+        callId: pick('Call-ID:'),
+        cseq: pick('CSeq:'),
+        reqUri,
+    };
+}
+function viaOf() { return lastInvite.via; }
+function fromOf() { return lastInvite.from; }
+function toOf() { return lastInvite.to; }
+function callIdOf() { return lastInvite.callId; }
+function cseqOf() { return lastInvite.cseq; }
+
+function sendTrying() {
+    sendSip(`SIP/2.0 100 Trying\r\n${lastInvite.via}\r\n${lastInvite.from}\r\n${lastInvite.to}\r\n`
+        + `${lastInvite.callId}\r\n${lastInvite.cseq}\r\nContent-Length: 0\r\n\r\n`);
+}
+
+// 全局消息分发：REGISTER 事务由 register() 自处理；这里只接 INVITE/BYE。
+function onSignalingMessage(e) {
+    const text = typeof e.data === 'string' ? e.data : '';
+    if (!text.startsWith('INVITE') && !text.startsWith('BYE') && !text.startsWith('ACK')) return;
+    const lines = text.split('\r\n');
+    const method = lines[0].split(' ')[0];
+    if (method === 'INVITE') {
+        if (phase === 'in-call' || !$('auto').checked) {
+            // 免授权关闭或已有会话：603 拒接（busy 语义）。
+            rememberInvite(text);
+            sendSip(`SIP/2.0 603 Decline\r\n${lastInvite.via}\r\n${lastInvite.from}\r\n`
+                + `${lastInvite.to};tag=${fromTag()}\r\n${lastInvite.callId}\r\n${lastInvite.cseq}\r\nContent-Length: 0\r\n\r\n`);
+            return;
+        }
+        rememberInvite(text);
+        log('收到 INVITE（call-id=' + lastInvite.callId + ' from=' + lastInvite.from + '）');
+        callId = callIdOf();
+        // To 头取对端 tag（若已带）；无则由 200 应答回填。
+        toTag = (toOf().match(/;tag=([^;>]+)/) || [])[1] || null;
+        const idx = text.indexOf('\r\n\r\n');
+        const offerBody = idx >= 0 ? text.slice(idx + 4) : '';
+        log('收到 INVITE（offer ' + byteLen(offerBody) + 'B）→ 静默接听');
+        sendTrying();
+        (async () => {
+            try {
+                await rtc.setRemoteDescription(JSON.parse(offerBody));
+                const answer = await rtc.createAnswer();
+                await rtc.setLocalDescription(answer);
+                await waitIceGatheringComplete();
+                await answerCall();
+                phase = 'in-call';
+                setStatus('已接听（出流中）');
+            } catch (err) {
+                log('接听失败: ' + err.message);
+                setStatus('接听失败: ' + err.message);
+                try { cleanupCall(); } catch (_) {}
+            }
+        })();
+    } else if (method === 'ACK') {
+        log('收到 ACK — 呼叫建立完成');
+    } else if (method === 'BYE') {
+        log('观看端挂断（BYE）');
+        try { cleanupCall(); } catch (_) {}
+        setStatus('等待下一位观看端…');
+        // 会话结束后回到可接听状态。
+        startRtcForNext();
     }
 }
-bindInputEvents();
 
 // ---------- 自动重连（#175：信令断开 → 退避重连，镜像原生 --reconnect） ----------
 function scheduleReconnect() {
@@ -437,7 +443,6 @@ async function connect() {
             ws.onerror = () => reject(new Error('信令连接失败: ' + wsUrl));
         });
         ws.onclose = () => {
-            // 信令断开后停止注册刷新（60s 定时器），避免在已关闭的 socket 上无限重试。
             if (regTimer) { clearInterval(regTimer); regTimer = null; }
             if (!closed && phase === 'in-call') {
                 setStatus('信令断开（媒体可能仍存活，建议重连）');
@@ -451,31 +456,26 @@ async function connect() {
         await register(1);
         reconnectAttempts = 0;   // 注册成功 = 服务恢复，重连计数复位
         log('REGISTER → 200 OK（SIP-WSS + Digest 认证成功）');
-        // 60s 后刷新注册（Expires: 120，原生端同款 expires/2 节奏）
         regTimer = setInterval(() => {
             register(1).catch((err) => log('注册刷新失败: ' + err.message));
         }, 60000);
 
-        setStatus('建立媒体连接（等 ICE gathering）…');
+        setStatus('获取屏幕分享…');
+        await startCapture();
+
         setupRtc();
-        const offer = await rtc.createOffer();
-        await rtc.setLocalDescription(offer);
-        await waitIceGatheringComplete();
-        const nCand = (rtc.localDescription.sdp.match(/a=candidate:/g) || []).length;
-        log('ICE gathering complete，offer 内联候选 ' + nCand + ' 个，发送 INVITE…');
-
-        phase = 'calling';
-        setStatus('INVITE ' + $('target').value.trim() + ' …');
-        const answer = await invite();
-        await rtc.setRemoteDescription(answer);
-        sendAck();
-        log('SIP 呼叫已接通（200 OK + ACK）');
-
-        phase = 'in-call';
-        setStatus('已连接（等待媒体…）');
-        log('等待媒体流…');
+        rtc.onconnectionstatechange = () => {
+            if (rtc.connectionState === 'failed') {
+                log('RTCPeerConnection failed');
+                try { cleanupCall(); } catch (_) {}
+            }
+        };
+        ws.addEventListener('message', onSignalingMessage);
+        phase = 'waiting';
+        setStatus('等待观看端拨入（设备 ID=' + deviceId() + '）…');
+        log('等待 INVITE…');
     } catch (e) {
-        setStatus('连接失败: ' + e.message);
+        setStatus('启动失败: ' + e.message);
         log('error: ' + e);
         cleanupAll();
     } finally {
@@ -483,34 +483,58 @@ async function connect() {
     }
 }
 
+function startRtcForNext() {
+    // 会话结束后重建 RTC（BYE 后旧连接已关）。
+    if (rtc) { try { rtc.close(); } catch (_) {} }
+    try {
+        setupRtc();
+        phase = 'waiting';
+        setStatus('等待观看端拨入…');
+        log('RTC 重建，等待下一位观看端…');
+    } catch (e) {
+        log('RTC 重建失败: ' + e.message);
+    }
+}
+
 // ---------- 断开 / 清理 ----------
-function cleanupAll() {
-    if (regTimer) { clearInterval(regTimer); regTimer = null; }
+function cleanupCall() {
     if (rtc) { try { rtc.close(); } catch (_) {} }
     rtc = null;
+    callId = null; toTag = null;
+}
+function cleanupAll() {
+    cleanupCall();
+    if (regTimer) { clearInterval(regTimer); regTimer = null; }
     if (ws) { try { ws.close(); } catch (_) {} }
     ws = null;
-    callId = null; toTag = null; phase = 'idle';
-    $('video').srcObject = null;
+    if (capture) {
+        capture.getTracks().forEach((t) => t.stop());
+        capture = null;
+    }
+    $('preview').srcObject = null;
     $('placeholder').style.display = 'flex';
     setIce('');
+    phase = 'idle';
 }
 function disconnect() {
     closed = true;
     userDisconnected = true;
-    if (phase === 'in-call' || phase === 'calling') {
-        try { sendBye(); } catch (_) {}
-        log('BYE 已发送');
+    if (phase === 'in-call' && callId) {
+        // 被叫侧 BYE：To 带对端 to-tag。
+        try {
+            sendSip(`BYE ${lastInvite.reqUri} SIP/2.0\r\n` + baseHeaders('BYE', callId, null, 0, toTag)
+                + 'Reason: SIP;cause=200;text="web publisher hangup"\r\nContent-Length: 0\r\n\r\n');
+            log('BYE 已发送');
+        } catch (_) {}
     }
     cleanupAll();
-    setStatus('已断开');
+    setStatus('已停止');
     $('connect').disabled = false;
     $('disconnect').disabled = true;
 }
 
 $('connect').addEventListener('click', connect);
 $('disconnect').addEventListener('click', disconnect);
-$('target').addEventListener('keydown', (e) => { if (e.key === 'Enter') connect(); });
 </script>
 </body>
 </html>

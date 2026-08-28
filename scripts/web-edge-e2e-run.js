@@ -9,17 +9,19 @@ const ROOM = process.argv[2];
       '--use-fake-device-for-media-stream', // fake 摄像头/屏幕源
       '--auto-accept-this-tab-capture',   // headless 屏幕共享
       '--enable-usermedia-screen-capturing',
+      '--ignore-certificate-errors',      // 3061 为自签 WSS（RFC 7118）
     ],
   });
-  // 发布页（WSS 房间发布，屏幕共享；#552 后 CLI publisher 是 SIP 1:1 被叫，
-  // WSS JSON 面无法对其呼叫，Web viewer 场景改双浏览器闭环）
+  // #598 P2a：JSON WSS 房间面退役——双浏览器 SIP-WSS 闭环
+  // （sip-publisher.html UAS + sip-viewer.html UAC）。
+  const WEB_SERVE_PORT = process.env.WEB_SERVE_PORT || 38083;
   const pub = await browser.newPage();
   pub.on('pageerror', e => console.log('pub pageerror: ' + e.message));
-  await pub.goto(`http://127.0.0.1:3002/?room=${ROOM}&role=publisher&signal=ws://127.0.0.1:3003/ws`);
+  await pub.goto(`http://127.0.0.1:${WEB_SERVE_PORT}/sip-publisher.html?device=${ROOM}&signal=wss://127.0.0.1:3061`);
   await pub.click('#connect');
   let pubReady = false;
   try {
-    await pub.waitForFunction(() => document.getElementById('status').innerText.includes('已连接'), { timeout: 30000 });
+    await pub.waitForFunction(() => document.getElementById('status').innerText.includes('等待观看端拨入'), { timeout: 30000 });
     pubReady = true;
   } catch (e) {}
   console.log('PUBLISHER_READY=' + pubReady);
@@ -30,10 +32,10 @@ const ROOM = process.argv[2];
     await browser.close();
     process.exit(2);
   }
-  // 观看页（同房间收流 + 输入事件经 SFU 转发到发布页）
+  // 观看页（呼入收流 + 输入事件经 data channel 直达被控页）
   const view = await browser.newPage();
   view.on('pageerror', e => console.log('view pageerror: ' + e.message));
-  await view.goto(`http://127.0.0.1:3002/?room=${ROOM}&role=viewer&signal=ws://127.0.0.1:3003/ws`);
+  await view.goto(`http://127.0.0.1:${WEB_SERVE_PORT}/sip-viewer.html?target=${ROOM}&signal=wss://127.0.0.1:3061`);
   await view.click('#connect');
   let videoReady = false;
   try {
@@ -49,10 +51,10 @@ const ROOM = process.argv[2];
       });
       await new Promise(r => setTimeout(r, 100));
     }
-    // 发布页收到输入事件（web/index.html 接收端 log 记 input event）
+    // 被控页收到输入事件（sip-publisher.html ondatachannel 记 "input: {...}"）
     let inputRelayed = false;
     try {
-      await pub.waitForFunction(() => document.getElementById('log').innerText.includes('input event'), { timeout: 15000 });
+      await pub.waitForFunction(() => document.getElementById('log').innerText.includes('input: '), { timeout: 15000 });
       inputRelayed = true;
     } catch (e) {}
     console.log('INPUT_RELAYED=' + inputRelayed);
