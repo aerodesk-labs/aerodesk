@@ -1709,7 +1709,9 @@ impl Client {
     /// "第一个打开的通道"，跨 stream 无顺序保证，可能写错通道被对端当业务数据丢弃。
     fn handle_offer(&mut self, offer: str0m::change::SdpOffer, reply_cid: ChannelId) {
         // #12：viewer 禁止通过重协商发布媒体（初始 offer 在 /start 处同样校验）。
-        if self.role == Role::Viewer && aerodesk_protocol::util::offer_sends_media(&offer.to_sdp_string()) {
+        if self.role == Role::Viewer
+            && aerodesk_protocol::util::offer_sends_media(&offer.to_sdp_string())
+        {
             warn!(
                 "Client ({}) role=viewer 尝试发布媒体，按 #12 断开",
                 *self.id
@@ -2158,7 +2160,10 @@ mod tests {
     fn directionless_media_defaults_to_sendrecv() {
         // RFC 3264：无方向属性 → sendrecv，viewer 应被拒绝。
         let s = sdp("m=video 9 UDP/TLS/RTP/SAVPF 96\r\n");
-        assert!(aerodesk_protocol::util::offer_sends_media(&s), "缺省方向媒体 m-line 应视为发送");
+        assert!(
+            aerodesk_protocol::util::offer_sends_media(&s),
+            "缺省方向媒体 m-line 应视为发送"
+        );
     }
 
     #[test]
