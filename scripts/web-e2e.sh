@@ -76,8 +76,18 @@ SFU=$!
 # #598 P2a：SIP-WSS 面（3061）承载浏览器信令；静态服务 web/（sip-*.html）。
 SIP_WSS_PORT=3061 SIP_UDP_PORT=5060 "$ROOT/target/debug/aerodesk-signal" >/tmp/webe2e-sig.log 2>&1 &
 SIG=$!
-(cd "$ROOT/web" && python3 -m http.server "$WEB_SERVE_PORT" >/tmp/webe2e-http.log 2>&1) &
+# 重试残留清理 + 就绪门：ci-retry 重跑时上轮 http.server 可能占口/半死；
+# 未就绪即跑 node 会被 macOS 丢 SYN（ERR_CONNECTION_TIMED_OUT 实测）。
+pkill -f "http.server $WEB_SERVE_PORT" 2>/dev/null || true
+(cd "$ROOT/web" && python3 -m http.server "$WEB_SERVE_PORT" --bind 127.0.0.1 >/tmp/webe2e-http.log 2>&1) &
 HTTP=$!
+HTTP_OK=0
+for _ in $(seq 1 50); do
+    if (exec 3<>/dev/tcp/127.0.0.1/$WEB_SERVE_PORT) 2>/dev/null; then HTTP_OK=1; break; fi
+    if ! kill -0 "$HTTP" 2>/dev/null; then break; fi
+    sleep 0.5
+done
+[ "$HTTP_OK" = "1" ] || { echo "FAIL: web 静态服务未就绪（$WEB_SERVE_PORT）"; tail -10 /tmp/webe2e-http.log; exit 1; }
 for _ in $(seq 1 50); do
     if grep -q "SIP/UDP 监听已起" /tmp/webe2e-sig.log 2>/dev/null && (exec 3<>/dev/tcp/127.0.0.1/3002) 2>/dev/null; then break; fi
     if ! kill -0 "$SFU" 2>/dev/null; then echo "FAIL sfu died"; tail -20 /tmp/webe2e-sfu.log; exit 1; fi
