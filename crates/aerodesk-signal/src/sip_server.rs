@@ -2279,6 +2279,7 @@ mod tests {
             | SipEvent::Rejected { call_id, .. }
             | SipEvent::PeerHangup { call_id, .. }
             | SipEvent::EscalatedToSfu { call_id, .. }
+            | SipEvent::RedirectedTo { call_id, .. }
             | SipEvent::Trickle { call_id, .. } => Some(call_id),
             SipEvent::Registered { .. }
             | SipEvent::RegisterFailed { .. }
