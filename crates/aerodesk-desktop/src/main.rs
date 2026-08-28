@@ -408,6 +408,14 @@ struct IncomingMedia {
 static PRESENCE: std::sync::Mutex<Option<PresenceHandle>> = std::sync::Mutex::new(None);
 static OUTGOING: std::sync::Mutex<Option<OutgoingCall>> = std::sync::Mutex::new(None);
 static INCOMING_MEDIA: std::sync::Mutex<Option<IncomingMedia>> = std::sync::Mutex::new(None);
+/// §4.1 被控端升级状态：当前是否有活动被控会话（1:1 P2P）。第 2 个 INVITE
+/// 到达时据此回 302（会议 AoR 由对端确定性推导）+ BYE cause=302 通知当前
+/// 观看者。desktop 自身转会议发布（真实采集源）为后续项——升级后观看者
+/// 重拨 view-AoR 走 SFU 会议桥，若被控端未入会则会议无发布源（黑屏），
+/// 与原生端「会议源统一合成」同口径，链路完整性（信令不悬死）先行。
+static ACTIVE_CALLEE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 当前 1:1 会话的 Call-ID（升级 BYE 用）。
+static ACTIVE_CALL_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 /// #552：当前 P2P 会话的 trickle 候选注入通道（presence 线程收 Trickle 事件 →
 /// 媒体线程注入对端候选；媒体启动时建立，挂断/停止时清空）。
 static P2P_TRICKLE_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>> =
@@ -2101,6 +2109,28 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                             offer_sdp,
                         } => {
                             tracing::info!("sip: incoming call from {from_device}");
+                            // §4.1 升级：已有活动被控会话 → 302（无 Contact，对端按
+                            // §4.1 推导 view-AoR 重拨）+ BYE cause=302 通知当前观看者。
+                            // desktop 自身转会议发布（真实采集）为后续项——信令链路
+                            // 先行完整（观看者不悬死）。
+                            if ACTIVE_CALLEE.load(std::sync::atomic::Ordering::SeqCst) {
+                                let _ = link
+                                    .lock()
+                                    .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                    .redirect_to_sfu(&call_id);
+                                if let Ok(guard) = ACTIVE_CALL_ID.lock() {
+                                    if let Some(cur) = guard.as_deref() {
+                                        let _ = link
+                                            .lock()
+                                            .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                            .hangup(cur, Some(aerodesk_core::protocol::sip::ESCALATE_BYE_REASON));
+                                    }
+                                }
+                                tracing::info!(
+                                    "被控端升级：回 302 + BYE(cause=302)，观看者重拨会议 AoR"
+                                );
+                                continue;
+                            }
                             // 预协商：Callee 侧 accept_offer（失败直接拒答）。
                             let mut p2p = match P2pCall::new(P2pCallConfig {
                                 role: P2pRole::Callee,
@@ -2165,6 +2195,8 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                                 } else if ui.get_inc_auto_accept() {
                                     // 免授权：已授权设备直接接听出流。
                                     *PENDING_CALL.lock().unwrap_or_else(aerodesk_core::util::lock_recover) = None;
+                                    ACTIVE_CALLEE.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    *ACTIVE_CALL_ID.lock().unwrap_or_else(aerodesk_core::util::lock_recover) = Some(call_id.clone());
                                     let ok = p.lock()
                                         .unwrap_or_else(aerodesk_core::util::lock_recover)
                                         .accept(&call_id, &answer);
@@ -3018,6 +3050,10 @@ fn start_publisher_ui_peer(ui: &AppWindow, p2p: P2pCall, video_mid: str0m::media
 
 /// 停止被控端（UI 入口）。
 fn stop_publisher_ui(ui: &AppWindow) {
+    ACTIVE_CALLEE.store(false, std::sync::atomic::Ordering::SeqCst);
+    *ACTIVE_CALL_ID
+        .lock()
+        .unwrap_or_else(aerodesk_core::util::lock_recover) = None;
     aerodesk_session::generic_publisher::stop_publisher(publisher_event_sink(&ui.as_weak()));
 }
 

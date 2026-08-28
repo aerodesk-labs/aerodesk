@@ -290,8 +290,10 @@ function register(attempt) {
 
 // ---------- 呼叫（INVITE → 100/180 → 407(Proxy-Auth) → 200(answer) → ACK） ----------
 function invite() {
+    return inviteTo($('target').value.trim());
+}
+function inviteTo(target) {
     return new Promise((resolve, reject) => {
-        const target = $('target').value.trim();
         if (!target) { reject(new Error('请输入被控端设备 ID')); return; }
         callId = 'call-' + deviceId() + '-' + Date.now();
         const body = JSON.stringify(rtc.localDescription);
@@ -345,6 +347,16 @@ function invite() {
                 } catch (err) {
                     reject(new Error('answer 解析失败: ' + err.message));
                 }
+            } else if (r.status === 302) {
+                // §4.1 V2 跟随：302 + Contact → 重拨会议 AoR（non-2xx ACK 后重建）。
+                const contact = r.headers['contact'] || '';
+                const m = contact.match(/sip:([^@>;]+)@/);
+                const next = m ? m[1] : ('view-' + target);
+                sendSip(`ACK ${reqUri} SIP/2.0\r\n` + baseHeaders('ACK', callId, target, inviteSeq, null)
+                    + 'Content-Length: 0\r\n\r\n');
+                log('收到 302 → 重拨会议 AoR（' + next + '）');
+                $('target').value = next;
+                resolve({ redirect: next });
             } else {
                 reject(new Error('INVITE 被拒: ' + r.statusLine));
             }
@@ -420,6 +432,66 @@ function scheduleReconnect() {
 }
 
 // ---------- 连接主流程 ----------
+
+// ---------- 拨号（§4.1 升级跟随复用）：setupRtc → offer → INVITE → 200 → ACK ----------
+// inviteTo 对 302 解析为 { redirect }，由 dial 循环重拨（最多 3 跳防环）。
+async function dial(target) {
+    for (let hop = 0; hop < 3; hop++) {
+        setStatus('建立媒体连接（等 ICE gathering）…');
+        setupRtc();
+        const offer = await rtc.createOffer();
+        await rtc.setLocalDescription(offer);
+        await waitIceGatheringComplete();
+        const nCand = (rtc.localDescription.sdp.match(/a=candidate:/g) || []).length;
+        log('ICE gathering complete，offer 内联候选 ' + nCand + ' 个，发送 INVITE…');
+
+        phase = 'calling';
+        setStatus('INVITE ' + target + ' …');
+        const ans = await inviteTo(target);
+        if (ans && ans.redirect) {
+            target = ans.redirect;
+            $('target').value = target;
+            try { rtc.close(); } catch (_) {}
+            rtc = null;
+            continue;
+        }
+        await rtc.setRemoteDescription(ans);
+        sendAck();
+        log('SIP 呼叫已接通（200 OK + ACK）');
+
+        phase = 'in-call';
+        setStatus('已连接（等待媒体…）');
+        log('等待媒体流…');
+        // 全局消息：in-call 后收 BYE（含 §4.1 升级 cause=302 跟随）。
+        ws.removeEventListener('message', onGlobalMessage);
+        ws.addEventListener('message', onGlobalMessage);
+        return;
+    }
+    throw new Error('重拨跳数超限（302 环）');
+}
+
+// §4.1 V1 跟随：BYE 带 cause=302 → 推导 view-AoR 重拨；普通 BYE → 清理。
+function onGlobalMessage(e) {
+    const text = typeof e.data === 'string' ? e.data : '';
+    if (!text.startsWith('BYE')) return;
+    ws.removeEventListener('message', onGlobalMessage);
+    const cur = $('target').value.trim();
+    if (text.includes('cause=302')) {
+        log('收到 BYE cause=302 → 跟随升级重拨会议 AoR（view-' + cur + '）');
+        cleanupAll();
+        reconnectAttempts = 0;
+        userDisconnected = false;
+        $('target').value = 'view-' + cur;
+        connect();
+    } else {
+        log('观看端挂断（BYE）');
+        cleanupAll();
+        setStatus('已断开');
+        $('connect').disabled = false;
+        $('disconnect').disabled = true;
+    }
+}
+
 async function connect() {
     if (connecting) return;
     connecting = true;
@@ -456,24 +528,7 @@ async function connect() {
             register(1).catch((err) => log('注册刷新失败: ' + err.message));
         }, 60000);
 
-        setStatus('建立媒体连接（等 ICE gathering）…');
-        setupRtc();
-        const offer = await rtc.createOffer();
-        await rtc.setLocalDescription(offer);
-        await waitIceGatheringComplete();
-        const nCand = (rtc.localDescription.sdp.match(/a=candidate:/g) || []).length;
-        log('ICE gathering complete，offer 内联候选 ' + nCand + ' 个，发送 INVITE…');
-
-        phase = 'calling';
-        setStatus('INVITE ' + $('target').value.trim() + ' …');
-        const answer = await invite();
-        await rtc.setRemoteDescription(answer);
-        sendAck();
-        log('SIP 呼叫已接通（200 OK + ACK）');
-
-        phase = 'in-call';
-        setStatus('已连接（等待媒体…）');
-        log('等待媒体流…');
+        await dial($('target').value.trim());
     } catch (e) {
         setStatus('连接失败: ' + e.message);
         log('error: ' + e);
