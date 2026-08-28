@@ -30,7 +30,6 @@ aerodesk-core = { path = "../aerodesk-core" }
 
 # 端侧只依赖平台实现层，平台差异由 cfg 模块收敛。
 aerodesk-platform = { path = "../aerodesk-platform" }
-tungstenite = "0.30"
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
