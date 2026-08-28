@@ -104,8 +104,15 @@ if [ "$OK" != "1" ]; then echo "FAIL: SFU/signal not ready; logs:"; tail -20 /tm
 echo "PASS signal ready (SIP/UDP + SIP/WSS + SFU TCP 3002)"
 
 echo "== [4/7] Web 被控端发布（headless Chrome 屏幕共享）"
+# 浏览器启动诊断前置（ubuntu runner 曾现 launch 挂起、pub.log 全空的盲区）：
+# 版本/通道/模块存在性先落盘，node 挂起时 pub.log 不再是空文件。
+{
+  node --version
+  google-chrome --version 2>&1 || true
+  ls -d node_modules/playwright-core 2>&1 || true
+} > /tmp/linuxui-pub.log 2>&1
 set +e
-WEB_SERVE_PORT="${WEB_SERVE_PORT:-38085}" node "$E2E_DIR/e2e-pub.js" "$ROOM" >/tmp/linuxui-pub.log 2>&1 &
+WEB_SERVE_PORT="${WEB_SERVE_PORT:-38085}" DEBUG=pw:browser DISPLAY="${DISPLAY:-:99}"   node "$E2E_DIR/e2e-pub.js" "$ROOM" >>/tmp/linuxui-pub.log 2>&1 &
 PUB=$!
 set -e
 # UAS 时序：页面注册就绪（≤30s）后才起 UI 拨入（先拨会 503）。
