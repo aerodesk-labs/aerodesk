@@ -11,7 +11,6 @@ str0m = { workspace = true, features = ["rust-crypto"] }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 thiserror = "2"  # #417 wss:// 支持（CLI/UI 连 WSS 信令）
 pcap-file = "2.0.0"
 sha2 = "0.10"

@@ -61,16 +61,22 @@ fn resolve_recv_dir_in(base: Option<&str>) -> Option<std::path::PathBuf> {
     }
 }
 
-/// 启动被控端（外部仅 windows 目标调用；Linux/其他非 macOS 为 no-op 提示）。
-#[cfg(windows)]
-pub fn start_publisher(cfg: PublisherConfig, on_event: PublisherEventSink) {
-    imp::start_publisher(cfg, on_event);
-}
-
-/// 停止被控端（windows 实现）。
+/// 停止被控端发布线程（#598 P4 起 peer 路径为唯一路径；desktop UI 停止钮用）。
 #[cfg(windows)]
 pub fn stop_publisher(on_event: PublisherEventSink) {
     imp::stop_publisher(on_event);
+}
+
+/// macOS 停止转发。
+#[cfg(target_os = "macos")]
+pub fn stop_publisher(on_event: PublisherEventSink) {
+    crate::macos_publisher::stop_publisher(on_event);
+}
+
+/// 其余平台无发布线程，no-op。
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn stop_publisher(on_event: PublisherEventSink) {
+    let _ = on_event;
 }
 
 /// #552：SIP 1:1 P2P 被叫发布入口（windows 实现；P2pCall 已建立）。
@@ -111,34 +117,6 @@ pub fn start_publisher_peer(
     ));
 }
 
-/// macOS 被控端：SCK+VT+CGEvent 实现（#487 互控最高优先级）。
-#[cfg(target_os = "macos")]
-pub fn start_publisher(cfg: PublisherConfig, on_event: PublisherEventSink) {
-    crate::macos_publisher::start_publisher(cfg, on_event);
-}
-
-/// macOS 被控端停止。
-#[cfg(target_os = "macos")]
-pub fn stop_publisher(on_event: PublisherEventSink) {
-    crate::macos_publisher::stop_publisher(on_event);
-}
-
-/// 其余平台（Linux 等）当前未接入被控端发布：提示但不破坏 UI。
-#[cfg(not(any(windows, target_os = "macos")))]
-pub fn start_publisher(_cfg: PublisherConfig, on_event: PublisherEventSink) {
-    on_event(PublisherEvent::StartFailed(
-        "被控端发布当前仅 Windows/macOS 实现".into(),
-    ));
-}
-
-/// 其余平台停止为 no-op（保持调用点对称，见 RULE 可达性）。
-#[cfg(not(any(windows, target_os = "macos")))]
-pub fn stop_publisher(on_event: PublisherEventSink) {
-    on_event(PublisherEvent::StartFailed(
-        "被控端发布当前仅 Windows/macOS 实现".into(),
-    ));
-}
-
 /// Windows 被控端实现。独立 cfg 模块避免在 Linux/macOS 引用 `aerodesk-platform`。
 #[cfg(windows)]
 mod imp {
@@ -150,7 +128,6 @@ mod imp {
 
     use aerodesk_codec::audio::RealAudioSender;
     use aerodesk_core::Endpoint;
-    use aerodesk_core::connect::{LiveSession, connect_live_role_codec_timeout};
     use aerodesk_core::endpoint::ClientEvent;
     use aerodesk_core::media_socket::MediaSocket;
     use aerodesk_core::p2p_call::P2pCall;
@@ -180,42 +157,6 @@ mod imp {
 
     /// 当前发布线程的 stop 句柄（同一时刻只允许一个被控端发布线程）。
     pub(super) static STOP: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
-
-    pub(super) fn start_publisher(cfg: PublisherConfig, on_event: PublisherEventSink) {
-        // 同一时刻仅一个发布线程：先停止旧线程再启动新配置。
-        stop_publisher(on_event.clone());
-
-        let PublisherConfig {
-            server,
-            room: raw_room,
-            token,
-            audio,
-            mouse,
-            view_only,
-        } = cfg;
-        let Some(room) = valid_publisher_room(&raw_room) else {
-            on_event(PublisherEvent::StartFailed(
-                "被控端启动失败：本机 ID 无效".into(),
-            ));
-            return;
-        };
-
-        let stop = Arc::new(AtomicBool::new(false));
-        *STOP.lock().unwrap() = Some(stop.clone());
-        on_event(PublisherEvent::Starting);
-        // 数据通道收发链（str0m/SCTP）调用栈深，放大线程栈防溢出（RULE 数据通道大块传输线程栈需放大默认2MB.md）。
-        let sink = on_event.clone();
-        if std::thread::Builder::new()
-            .stack_size(16 * 1024 * 1024)
-            .spawn(move || run_publisher(server, room, token, sink, audio, mouse, view_only, stop))
-            .is_err()
-        {
-            *STOP.lock().unwrap() = None;
-            on_event(PublisherEvent::StartFailed(
-                "被控端启动失败：无法创建线程".into(),
-            ));
-        }
-    }
 
     /// #552：SIP 1:1 P2P 被叫发布入口——P2pCall 已建立（accept_offer+accept
     /// 由调用方完成），采集/编码/输入注入与 SFU 路径共用同一泵。
@@ -254,31 +195,12 @@ mod imp {
     /// P2P 模式 `poll_event` 以首个 `ChannelOpen` 为会话就绪（DTLS 完成 ⟺ SRTP
     /// 密钥就绪；ICE connected 早于就绪，早写媒体帧被对端静默丢弃）。
     enum PublisherTransport {
-        Sfu(LiveSession),
         Peer(P2pCall),
     }
 
     impl PublisherTransport {
         fn pump(&mut self) {
             match self {
-                Self::Sfu(live) => {
-                    // #211：排空式读取 UDP，保证 SCTP ACK 及时消费。
-                    live.socket
-                        .set_read_timeout(Some(Duration::from_millis(5)))
-                        .ok();
-                    drain_udp_input(&mut live.socket, &mut live.endpoint, 512);
-                    let _ = live.endpoint.handle_timeout(Instant::now());
-                    while let Some(output) = live.endpoint.poll_output() {
-                        match output {
-                            Output::Transmit(t) => {
-                                let _ = live.socket.send_to(&t.contents, t.destination);
-                            }
-                            // 关键：Timeout 必须 break，否则 str0m 反复返回同一 Timeout。
-                            Output::Timeout(_) => break,
-                            Output::Event(_) => {}
-                        }
-                    }
-                }
                 Self::Peer(p2p) => {
                     let _ = p2p.poll();
                 }
@@ -287,14 +209,12 @@ mod imp {
 
         fn poll_event(&mut self) -> Option<ClientEvent> {
             match self {
-                Self::Sfu(live) => live.endpoint.poll_event(),
                 Self::Peer(p2p) => p2p.poll_event(),
             }
         }
 
         fn endpoint(&mut self) -> &mut Endpoint {
             match self {
-                Self::Sfu(live) => &mut live.endpoint,
                 Self::Peer(p2p) => p2p.endpoint(),
             }
         }
@@ -307,61 +227,6 @@ mod imp {
                 }
             }
         }
-    }
-
-    fn run_publisher(
-        server: String,
-        room: String,
-        token: String,
-        on_event: PublisherEventSink,
-        audio: bool,
-        mouse: bool,
-        view_only: bool,
-        stop: Arc<AtomicBool>,
-    ) {
-        let auth = Some(token.as_str()).filter(|t| !t.is_empty());
-
-        // 发布端连接：H.264 视频 + 音频 m-line（core 泛型连接，CLI 同款）。
-        // #487 审查：连接链路（TCP 握手/Join/SDP 交换）在异常网络下可能无限
-        // 阻塞且无法被 stop 中断——子线程 + 30s 总超时（正常约 1-5s），超时
-        // 报错返回，UI 不再「已授权但无媒体」式静默卡死。
-        let live = match connect_live_role_codec_timeout(
-            &server,
-            &room,
-            Role::Publisher,
-            auth,
-            Some(Codec::H264),
-            Duration::from_secs(30),
-        ) {
-            Ok(l) => l,
-            Err(e) => {
-                let msg = format!("被控端连接失败：{e}");
-                on_event(PublisherEvent::Status(msg));
-                return;
-            }
-        };
-        let Some(video_mid) = live.video_mid else {
-            on_event(PublisherEvent::Status("被控端连接失败：无视频 mid".into()));
-            return;
-        };
-        let audio_mid = live.audio_mid;
-        let connected0 = live.ice_connected;
-        // #477：connect 建链阶段的 ICE 泵会消费掉首个 IceConnected 事件——必须
-        // 用状态标志初始化（cli 同款），否则经公网/TURN 建链后事件已被消费、
-        // connected 永远为 false，一帧不发（本地直连靠重协商二次事件掩盖）。
-        run_publisher_pump(
-            PublisherTransport::Sfu(live),
-            video_mid,
-            audio_mid,
-            connected0,
-            room,
-            on_event,
-            audio,
-            mouse,
-            view_only,
-            None,
-            stop,
-        );
     }
 
     /// #552：SIP 1:1 P2P 被叫发布（P2pCall 已由调用方建立并接受）。

@@ -15,7 +15,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aerodesk_codec::audio::RealAudioSender;
-use aerodesk_core::connect::{LiveSession, connect_live_role_codec_timeout};
 use aerodesk_core::endpoint::ClientEvent;
 use aerodesk_core::platform::Codec;
 use aerodesk_core::platform::CursorSource;
@@ -44,43 +43,6 @@ fn now_ms() -> u64 {
 
 /// 当前发布线程的 stop 句柄（同一时刻只允许一个被控端发布线程）。
 static STOP: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
-
-/// 启动 macOS 被控端（SCK 采集 + VT 硬编 + CGEvent 注入 + SCK 系统音频）。
-pub fn start_publisher(cfg: crate::PublisherConfig, on_event: PublisherEventSink) {
-    // 同一时刻仅一个发布线程：先停止旧线程再启动新配置。
-    stop_publisher(on_event.clone());
-
-    let crate::PublisherConfig {
-        server,
-        room: raw_room,
-        token,
-        audio,
-        mouse,
-        view_only,
-    } = cfg;
-    let Some(room) = crate::generic_publisher::valid_publisher_room(&raw_room) else {
-        on_event(PublisherEvent::StartFailed(
-            "被控端启动失败：本机 ID 无效".into(),
-        ));
-        return;
-    };
-
-    let stop = Arc::new(AtomicBool::new(false));
-    *STOP.lock().unwrap() = Some(stop.clone());
-    on_event(PublisherEvent::Starting);
-    // 数据通道收发链（str0m/SCTP）调用栈深，放大线程栈防溢出（RULE 同款）。
-    let sink = on_event.clone();
-    if std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .spawn(move || run_publisher(server, room, token, sink, audio, mouse, view_only, stop))
-        .is_err()
-    {
-        *STOP.lock().unwrap() = None;
-        on_event(PublisherEvent::StartFailed(
-            "被控端启动失败：无法创建线程".into(),
-        ));
-    }
-}
 
 /// #552：SIP 1:1 P2P 被叫发布入口（P2pCall 已建立——accept_offer+accept 由
 /// 调用方完成），SCK 采集/VT 编码/CGEvent 注入与 SFU 路径共用同一泵。
@@ -116,11 +78,10 @@ pub fn stop_publisher(on_event: PublisherEventSink) {
     on_event(PublisherEvent::Stopped);
 }
 
-/// 媒体通道抽象：SFU（LiveSession）与 P2P（P2pCall）共用采集/编码/注入泵
+/// 媒体通道抽象：P2P（P2pCall）采集/编码/注入泵（SFU 变体随 #598 P4 退役）
 /// （与 generic_publisher 的 PublisherTransport 同构；P2P 以首个 ChannelOpen
 /// 为会话就绪——DTLS 完成 ⟺ SRTP 密钥就绪，早写媒体被对端静默丢弃）。
 enum PublisherTransport {
-    Sfu(LiveSession),
     Peer(aerodesk_core::p2p_call::P2pCall),
 }
 
@@ -128,42 +89,6 @@ impl PublisherTransport {
     fn pump(&mut self) {
         use str0m::{Input, Output};
         match self {
-            Self::Sfu(live) => {
-                live.socket
-                    .set_read_timeout(Some(Duration::from_millis(5)))
-                    .ok();
-                let mut buf = [0u8; 2000];
-                for _ in 0..512 {
-                    match live.socket.recv_from(&mut buf) {
-                        Ok((n, source)) => {
-                            let Ok(contents) = buf[..n].try_into() else {
-                                continue;
-                            };
-                            let input = Input::Receive(
-                                Instant::now(),
-                                str0m::net::Receive {
-                                    proto: str0m::net::Protocol::Udp,
-                                    source,
-                                    destination: live.socket.local_addr().unwrap(),
-                                    contents,
-                                },
-                            );
-                            let _ = live.endpoint.handle_input(input);
-                        }
-                        Err(_) => break,
-                    }
-                }
-                let _ = live.endpoint.handle_timeout(Instant::now());
-                while let Some(output) = live.endpoint.poll_output() {
-                    match output {
-                        Output::Transmit(t) => {
-                            let _ = live.socket.send_to(&t.contents, t.destination);
-                        }
-                        Output::Timeout(_) => break,
-                        Output::Event(_) => {}
-                    }
-                }
-            }
             Self::Peer(p2p) => {
                 let _ = p2p.poll();
             }
@@ -172,19 +97,17 @@ impl PublisherTransport {
 
     fn poll_event(&mut self) -> Option<aerodesk_core::endpoint::ClientEvent> {
         match self {
-            Self::Sfu(live) => live.endpoint.poll_event(),
             Self::Peer(p2p) => p2p.poll_event(),
         }
     }
 
     fn endpoint(&mut self) -> &mut aerodesk_core::Endpoint {
         match self {
-            Self::Sfu(live) => &mut live.endpoint,
             Self::Peer(p2p) => p2p.endpoint(),
         }
     }
 
-    /// #552：注入对端后到候选（P2P trickle；SFU 路径 no-op）。
+    /// #552：注入对端后到候选（P2P trickle；SFU 路径已退役）。
     fn add_remote_candidate(&mut self, sdp_candidate: &str) {
         if let Self::Peer(p2p) = self {
             if let Err(e) = p2p.add_remote_candidate(sdp_candidate) {
@@ -194,57 +117,6 @@ impl PublisherTransport {
     }
 }
 
-fn run_publisher(
-    server: String,
-    room: String,
-    token: String,
-    on_event: PublisherEventSink,
-    audio: bool,
-    mouse: bool,
-    view_only: bool,
-    stop: Arc<AtomicBool>,
-) {
-    let auth = Some(token.as_str()).filter(|t| !t.is_empty());
-
-    // #487 审查：连接链路在异常网络下可能无限阻塞且无法被 stop 中断——
-    // 子线程 + 30s 总超时（正常约 1-5s），超时报错返回，不再静默卡死。
-    let live = match connect_live_role_codec_timeout(
-        &server,
-        &room,
-        Role::Publisher,
-        auth,
-        Some(Codec::H264),
-        Duration::from_secs(30),
-    ) {
-        Ok(l) => l,
-        Err(e) => {
-            let msg = format!("被控端连接失败：{e}");
-            on_event(PublisherEvent::Status(msg));
-            return;
-        }
-    };
-    let Some(video_mid) = live.video_mid else {
-        on_event(PublisherEvent::Status("被控端连接失败：无视频 mid".into()));
-        return;
-    };
-    let audio_mid = live.audio_mid;
-    let connected0 = live.ice_connected;
-    run_publisher_pump(
-        PublisherTransport::Sfu(live),
-        video_mid,
-        audio_mid,
-        connected0,
-        room,
-        on_event,
-        audio,
-        mouse,
-        view_only,
-        None,
-        stop,
-    );
-}
-
-/// #552：SIP 1:1 P2P 被叫发布（P2pCall 已由调用方建立并 accept）。
 fn run_publisher_peer(
     p2p: aerodesk_core::p2p_call::P2pCall,
     video_mid: str0m::media::Mid,
