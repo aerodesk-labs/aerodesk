@@ -63,7 +63,7 @@ if (params.get('auto') === '0' || params.get('auto') === 'false') $('auto').chec
 // ---------- 常量与状态 ----------
 const DOMAIN = 'aerodesk.test';
 let ws = null, rtc = null, capture = null, callId = null, toTag = null, closed = false;
-let regTimer = null, connecting = false, phase = 'idle'; // idle | waiting | in-call
+let regTimer = null, connecting = false, phase = 'idle'; // idle | waiting | in-call | conference
 let userDisconnected = false;
 let reconnectAttempts = 0;
 const REGISTER_EXPIRES = 120;
@@ -358,15 +358,131 @@ function sendTrying() {
         + `${lastInvite.callId}\r\n${lastInvite.cseq}\r\nContent-Length: 0\r\n\r\n`);
 }
 
+// ---------- §4.1 多方会议升级（页面侧） ----------
+// 1:1 期间第 2 个观看者入呼 → 302 + BYE(cause=302) 通知 V1 → 本端转会议发布
+// （UAC 向 view-AoR 发发布方向 INVITE，SFU 按 offer 方向判定 role=publisher）。
+
+/// 当前 1:1 观看者 BYE，Reason 头携带升级语义（RFC 3326；对端据此重拨会议 AoR）。
+function sendByeEscalate() {
+    if (!callId) return;
+    const reqUri = 'sip:' + deviceId() + '@' + DOMAIN;
+    sendSip(`BYE ${reqUri} SIP/2.0\r\n` + baseHeaders('BYE', callId, null, 0, toTag)
+        + 'Reason: SIP;cause=302;text="escalated to conference"\r\nContent-Length: 0\r\n\r\n');
+    log('已发送 BYE（cause=302）通知当前观看者升级');
+}
+
+/// 转会议发布：新 RTC（sendonly 屏幕轨）→ INVITE view-AoR → 200 → ACK → ICE。
+async function escalateToConference() {
+    const viewAor = 'view-' + deviceId();
+    const reqUri = 'sip:' + viewAor + '@' + DOMAIN;
+    log('转会议发布：INVITE ' + reqUri + ' …');
+    try {
+        // 旧 1:1 会话拆除（媒体端点 drop；REGISTER 保留——会议 AoR 是独立对话）。
+        if (rtc) { try { rtc.close(); } catch (_) {} }
+        const confRtc = new RTCPeerConnection();
+        confRtc.oniceconnectionstatechange = () => {
+            setIce(confRtc.iceConnectionState);
+            if (confRtc.iceConnectionState === 'connected' || confRtc.iceConnectionState === 'completed') {
+                setStatus('会议发布中（SFU）');
+            }
+        };
+        confRtc.onicecandidate = () => {};
+        if (capture) {
+            capture.getTracks().forEach((t) => confRtc.addTrack(t, capture));
+        }
+        // 数据通道：会议发布端仍需收观看者键鼠回传（SFU 转发）。
+        confRtc.ondatachannel = (e) => {
+            if (e.channel.label !== 'input') return;
+            log('input channel open（会议模式，观看端键鼠回传）');
+        };
+        confRtc.input = null;
+        const offer = await confRtc.createOffer();
+        await confRtc.setLocalDescription(offer);
+        await new Promise((resolve) => {
+            if (confRtc.iceGatheringState === 'complete') return resolve();
+            const timer = setTimeout(() => { cleanup2(); resolve(); }, 10000);
+            const onState = () => {
+                if (confRtc.iceGatheringState === 'complete') { cleanup2(); resolve(); }
+            };
+            const cleanup2 = () => {
+                confRtc.removeEventListener('icegatheringstatechange', onState);
+                clearTimeout(timer);
+            };
+            confRtc.addEventListener('icegatheringstatechange', onState);
+        });
+        const body = JSON.stringify(confRtc.localDescription);
+        const cid = 'conf-' + deviceId() + '-' + Date.now();
+        const invSeq = cseq + 1;
+        sendSip(`INVITE ${reqUri} SIP/2.0\r\n` + baseHeaders('INVITE', cid, viewAor)
+            + 'Content-Type: application/sdp\r\n'
+            + `Content-Length: ${byteLen(body)}\r\n\r\n${body}`);
+        // 等 200（SFU 会议桥应答；30s 兜底）
+        let confToTag = null;
+        const answer = await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error('会议 INVITE 无应答（30s）')), 30000);
+            const onMsg = (e) => {
+                const r = parseResponse(e.data);
+                if (r.headers['call-id'] && r.headers['call-id'] !== cid) return;
+                if (r.status === 100 || r.status === 180) return;
+                clearTimeout(timer);
+                ws.removeEventListener('message', onMsg);
+                if (r.status === 200) {
+                    const toHdr = r.headers['to'] || '';
+                    confToTag = (toHdr.match(/;tag=([^;>]+)/) || [])[1] || null;
+                    resolve(JSON.parse(r.body));
+                } else reject(new Error('会议 INVITE 被拒: ' + r.statusLine));
+            };
+            ws.addEventListener('message', onMsg);
+        });
+        await confRtc.setRemoteDescription(answer);
+        const to = lastInvite ? '' : '';
+        sendSip(`ACK ${reqUri} SIP/2.0\r\n` + baseHeaders('ACK', cid, viewAor, invSeq, null)
+            + 'Content-Length: 0\r\n\r\n');
+        rtc = confRtc;
+        callId = cid;
+        phase = 'conference';
+        ws.onmessage = onSignalingMessage;   // 防御：升级后确保消息分发在位
+
+        setStatus('会议发布中（SFU，' + viewAor + '）');
+        log('会议发布已建立（200 OK + ACK）');
+    } catch (err) {
+        log('转会议失败: ' + err.message);
+        setStatus('转会议失败: ' + err.message);
+        // 失败回退：重建 1:1 待呼状态（旧 rtc 已关）。
+        try { startRtcForNext(); } catch (_) {}
+    }
+}
+
 // 全局消息分发：REGISTER 事务由 register() 自处理；这里只接 INVITE/BYE。
 function onSignalingMessage(e) {
     const text = typeof e.data === 'string' ? e.data : '';
+
     if (!text.startsWith('INVITE') && !text.startsWith('BYE') && !text.startsWith('ACK')) return;
     const lines = text.split('\r\n');
     const method = lines[0].split(' ')[0];
     if (method === 'INVITE') {
-        if (phase === 'in-call' || !$('auto').checked) {
-            // 免授权关闭或已有会话：603 拒接（busy 语义）。
+        if (phase === 'in-call' || phase === 'conference') {
+            // §4.1 升级/会议态：已有活动对话 → 302（Contact = 会议 AoR，
+            // 页面手写报文可带 Contact——V2 直接重拨 view-AoR）；同时
+            // BYE cause=302 通知当前观看者（V1 跟随）+ 本端转会议发布。
+            rememberInvite(text);
+            const viewAor = 'sip:view-' + deviceId() + '@' + DOMAIN;
+            log('收到第 2 个观看者 INVITE → 302 至会议 AoR（' + viewAor + '）');
+            sendSip(`SIP/2.0 302 Moved Temporarily\r\n`
+                + `Via: ${lastInvite.via}\r\n`
+                + `From: ${lastInvite.from}\r\n`
+                + `To: ${lastInvite.to};tag=${fromTag()}\r\n`
+                + `Call-ID: ${lastInvite.callId}\r\n`
+                + `CSeq: ${lastInvite.cseq}\r\n`
+                + `Contact: <${viewAor}>\r\nContent-Length: 0\r\n\r\n`);
+            if (phase === 'in-call') {
+                sendByeEscalate();
+                escalateToConference();
+            }
+            return;
+        }
+        if (!$('auto').checked) {
+            // 免授权关闭：603 拒接（busy 语义）。
             rememberInvite(text);
             sendSip(`SIP/2.0 603 Decline\r\n${lastInvite.via}\r\n${lastInvite.from}\r\n`
                 + `${lastInvite.to};tag=${fromTag()}\r\n${lastInvite.callId}\r\n${lastInvite.cseq}\r\nContent-Length: 0\r\n\r\n`);
@@ -401,9 +517,13 @@ function onSignalingMessage(e) {
     } else if (method === 'BYE') {
         log('观看端挂断（BYE）');
         try { cleanupCall(); } catch (_) {}
-        setStatus('等待下一位观看端…');
-        // 会话结束后回到可接听状态。
-        startRtcForNext();
+        if (phase === 'conference') {
+            setStatus('会议已结束，等待下一位观看端…');
+            startRtcForNext();
+        } else {
+            setStatus('等待下一位观看端…');
+            startRtcForNext();
+        }
     }
 }
 
@@ -470,7 +590,7 @@ async function connect() {
                 try { cleanupCall(); } catch (_) {}
             }
         };
-        ws.addEventListener('message', onSignalingMessage);
+        ws.onmessage = onSignalingMessage;   // 属性式：唯一绑定，重连/升级后无残留
         phase = 'waiting';
         setStatus('等待观看端拨入（设备 ID=' + deviceId() + '）…');
         log('等待 INVITE…');

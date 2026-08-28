@@ -1144,7 +1144,14 @@ async fn relay(
                     TerminatedReason::UasOther(code) | TerminatedReason::UacOther(code)
                         if is_b(&id) =>
                     {
-                        let _ = server_dlg.reject(Some(code), None);
+                        // 302（§4.1 升级/多 PoP 重定向）：不带本端 Contact——代理
+                        // 插入自己的 Contact 会污染重定向语义（被叫提供的目标丢失，
+                        // 观看端误判为 PoP 目标）。会议 AoR 由客户端确定性推导。
+                        if u16::from(code.clone()) == 302 {
+                            let _ = server_dlg.reject_no_contact(Some(code), None);
+                        } else {
+                            let _ = server_dlg.reject(Some(code), None);
+                        }
                     }
                     _ => {}
                 }
