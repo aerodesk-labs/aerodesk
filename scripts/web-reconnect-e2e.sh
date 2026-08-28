@@ -112,9 +112,23 @@ wait_ports() {
 }
 
 echo "== 启动服务"
+# 重试残留清理：ci-retry 3× 重跑时上一轮的 http.server 可能仍占 38087
+# （失败路径不回收后台进程），先按端口特征清掉再起，防 bind 竞争/半死监听。
+pkill -f "http.server $WEB_SERVE_PORT" 2>/dev/null || true
 start_sfu; start_signal
-(cd "$ROOT/web" && python3 -m http.server "$WEB_SERVE_PORT" >/tmp/webrec-http.log 2>&1) &
+(cd "$ROOT/web" && python3 -m http.server "$WEB_SERVE_PORT" --bind 127.0.0.1 >/tmp/webrec-http.log 2>&1) &
 HTTP=$!
+# 静态服务就绪门（此前 macOS 出现 goto ERR_CONNECTION_TIMED_OUT：服务未起
+# 即跑 node，连接被丢 SYN）——TCP 探活 25s，超时 dump http.log。
+HTTP_OK=0
+for _ in $(seq 1 50); do
+    if (exec 3<>/dev/tcp/127.0.0.1/$WEB_SERVE_PORT) 2>/dev/null; then HTTP_OK=1; break; fi
+    if ! kill -0 "$HTTP" 2>/dev/null; then break; fi
+    sleep 0.5
+done
+if [ "$HTTP_OK" != "1" ]; then
+    echo "FAIL: web 静态服务未就绪（$WEB_SERVE_PORT）"; tail -10 /tmp/webrec-http.log; exit 1
+fi
 wait_ports || { echo "FAIL: 服务未就绪"; exit 1; }
 
 echo "== 启动 Playwright（被控页 + 观看页：初始收流 → 观察重连）"
