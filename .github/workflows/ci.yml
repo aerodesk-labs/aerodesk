@@ -10,7 +10,7 @@ on:
 
 concurrency:
   # 同一 PR 新提交自动取消旧 run，防止陈旧 run 堆满 runner 队列（macOS 并发有限）。
-  group: ci-${{ github.event.pull_request.head.sha }}
+  group: ci-${{ github.event.pull_request.head.sha || github.ref }}  # dispatch 兜底 ref，避免多 dispatch 互踩
   cancel-in-progress: true
 
 jobs:
