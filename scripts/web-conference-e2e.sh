@@ -24,7 +24,7 @@ cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 echo "== 启动服务（LAN-IP 配方）"
 RECORD_DIR="$REC" SFU_HOST_ADDRESS=127.0.0.1 ./target/debug/aerodesk-sfu >/tmp/webconf-sfu.log 2>&1 &
 SFU=$!
-RUST_LOG=debug SIP_UDP_PORT=5060 SIP_WSS_PORT=3061 ./target/debug/aerodesk-signal >/tmp/webconf-sig.log 2>&1 &
+SIP_UDP_PORT=5060 SIP_WSS_PORT=3061 ./target/debug/aerodesk-signal >/tmp/webconf-sig.log 2>&1 &
 SIG=$!
 (cd "$ROOT/web" && python3 -m http.server "$WEB_SERVE_PORT" --bind 127.0.0.1 >/tmp/webconf-http.log 2>&1) &
 HTTP=$!

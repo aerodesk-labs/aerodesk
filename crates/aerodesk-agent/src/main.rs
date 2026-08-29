@@ -599,6 +599,7 @@ fn run() {
             // §4.1 观看端跟随：1:1 被升级（BYE cause=302 / 302 无 Contact）→
             // Err 带 ESCALATE_MARKER 前缀与会议房间名，换目标重拨；--reconnect
             // 重连也保持会议目标（r 为闭包捕获状态）。
+            let mut sig = signal.clone();
             run_with_reconnect(
                 move || loop {
                     match viewer(
@@ -621,6 +622,15 @@ fn run() {
                         Err(e) if e.starts_with(ESCALATE_MARKER) => {
                             r = e[ESCALATE_MARKER.len()..].to_string();
                             info!("viewer: 跟随升级重拨会议 AoR（{r}）");
+                        }
+                        // #600 多 PoP 跟随：换拨新信令（host:port）+ 新目标（user）。
+                        Err(e) if e.starts_with(REDIRECT_MARKER) => {
+                            let target = &e[REDIRECT_MARKER.len()..];
+                            let (host_port, user) =
+                                target.split_once('|').unwrap_or((target, target));
+                            sig = format!("ws://{host_port}");
+                            r = user.to_string();
+                            info!("viewer: 跟随 302 换拨 PoP（{sig} user={r}）");
                         }
                         other => return other,
                     }
@@ -722,6 +732,10 @@ impl SipSession {
 /// §4.1 升级跟随标记：Err 前缀，后随会议房间名（view_aor 的 user 部分）。
 /// 由 connect 的应答等待/媒体主循环返回，run() 各 role 闭包据此换目标重建。
 const ESCALATE_MARKER: &str = "escalated-to-sfu:";
+/// #600 多 PoP 302 跟随：——带 Contact 的
+/// 302（POP_SIP_URLS 重定向）换拨目标；run() 闭包据此重建信令（新 server）与
+/// 目标房间（contact user）。
+const REDIRECT_MARKER: &str = "redirected-to:";
 
 /// 会议 AoR（`sip:view-<device>@<domain>`）→ 房间名（user 部分；桌面端
 /// EscalatedToSfu 消费同款逻辑）。
