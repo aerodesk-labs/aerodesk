@@ -245,19 +245,15 @@ jobs:
 
       # #146 多 PoP 房间路由：双 PoP 本地验证信令重定向 + 客户端自动跟随。
       # （#148/#159 重构 ci.yml 时曾丢失该 step，多次恢复于 #154/#160 合并）
-      # P3.1：服务端 302+Contact（POP_SIP_URLS）已实现，脚本服务端断言已锚定
-      # 现实日志；客户端 302 跟随（会话层换拨）未实现——#600 仅落地 core 层
-      # RedirectedTo 事件透传，跟随落地后解冻（目标 PoP 重注册 + 媒体断言）。
+      # #600 客户端 302 跟随已实现（换拨 PoP + 媒体断言），解冻。
       - name: e2e multi-PoP room routing (macOS only)
-        if: false && runner.os == 'macOS'
+        if: runner.os == 'macOS'
         run: ./scripts/multipop-e2e.sh
 
       # #154 多 PoP v2：动态 room→PoP 注册表（首个加入者登记 + 共享文件 + 重定向）。
-      # 客户端 302 跟随（会话层换拨）未实现（#600 仅 core RedirectedTo 事件
-      # 透传）——服务端 INVITE 归属登记/302 已就绪，脚本服务端断言已锚定现实
-      # 日志（registered to pop ... (first inviter)）；跟随落地后解冻。
+      # #600 客户端 302 跟随已实现，解冻。
       - name: e2e multi-PoP dynamic registry (macOS only)
-        if: false && runner.os == 'macOS'
+        if: runner.os == 'macOS'
         run: ./scripts/popreg-e2e.sh
 
       # #160 SFU 按需录制 API：内部接口 start/stop/status + 403 + 产物断言

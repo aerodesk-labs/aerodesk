@@ -995,6 +995,14 @@ fn handle_terminated(
         // 主叫腿终局拒绝（与 invite_final 双通道，先到先报）。
         match &reason {
             TerminatedReason::UasOther(code) | TerminatedReason::UacOther(code) => {
+                // 302 不在此通道报——Contact 头只在 JoinHandle 终局通道
+                // （handle_invite_final）可捕获；此通道先到会丢 Contact
+                // （竞态实测：Terminated 先于 JoinHandle → 带 Contact 的
+                // PoP 302 被误判为无 Contact 会议升级）。跳过等
+                // handle_invite_final 分派（带/无 Contact 两语义都在那）。
+                if u16::from(code.clone()) == 302 {
+                    return;
+                }
                 report_final_status(&call_id, code, cfg, dialogs, event_tx);
             }
             TerminatedReason::UasBusy | TerminatedReason::UacBusy => {

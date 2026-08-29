@@ -600,11 +600,13 @@ fn run() {
             // Err 带 ESCALATE_MARKER 前缀与会议房间名，换目标重拨；--reconnect
             // 重连也保持会议目标（r 为闭包捕获状态）。
             let mut sig = signal.clone();
+            let mut sip_port_override: Option<u16> = None;
             run_with_reconnect(
                 move || loop {
                     match viewer(
                         &sig,
                         &r,
+                        sip_port_override,
                         tok.as_deref(),
                         layer.as_deref(),
                         audio,
@@ -628,9 +630,18 @@ fn run() {
                             let target = &e[REDIRECT_MARKER.len()..];
                             let (host_port, user) =
                                 target.split_once('|').unwrap_or((target, target));
-                            sig = format!("ws://{host_port}");
+                            // 端口显式传递（URL 端口剥离语义：ws://host:port 的
+                            // 端口不进信令面——换拨端口须经 override）。
+                            let (host, port) = host_port
+                                .rsplit_once(':')
+                                .map(|(h, p)| (h.to_string(), p.parse().ok()))
+                                .unwrap_or((host_port.to_string(), None));
+                            sig = format!("ws://{host}");
+                            if let Some(pp) = port {
+                                sip_port_override = Some(pp);
+                            }
                             r = user.to_string();
-                            info!("viewer: 跟随 302 换拨 PoP（{sig} user={r}）");
+                            info!("viewer: 跟随 302 换拨 PoP（{sig} port={port:?} user={r}）");
                         }
                         other => return other,
                     }
@@ -681,13 +692,45 @@ fn connect(
     String,
 > {
     connect_inner(
-        signal_url, room, role, None, false, audio, auth, false, false,
+        signal_url, room, role, None, None, false, audio, auth, false, false,
     )
 }
 
 /// §4.1 被控端升级模式连接：与 [`connect`] 同构，但看护线程对媒体期间的新
 /// INVITE 回 302 + BYE(cause=302) 结束当前 1:1，并经 SipSession 推送升级
 /// 通知（pcap 合成发布端专用；screen/vt/x264/ffmpeg 变体保持 1:1 busy 语义）。
+fn connect_with_port(
+    signal_url: &str,
+    room: &str,
+    role: Role,
+    auth: Option<&str>,
+    audio: bool,
+    sip_port_override: Option<u16>,
+) -> Result<
+    (
+        SipSession,
+        Endpoint,
+        MediaSocket,
+        str0m::media::Mid,
+        Option<str0m::media::Mid>,
+        Option<str0m::media::Mid>,
+    ),
+    String,
+> {
+    connect_inner(
+        signal_url,
+        room,
+        role,
+        sip_port_override,
+        None,
+        false,
+        audio,
+        auth,
+        false,
+        false,
+    )
+}
+
 fn connect_escalating(
     signal_url: &str,
     room: &str,
@@ -706,7 +749,7 @@ fn connect_escalating(
     String,
 > {
     connect_inner(
-        signal_url, room, role, None, false, audio, auth, false, true,
+        signal_url, room, role, None, None, false, audio, auth, false, true,
     )
 }
 
@@ -756,15 +799,30 @@ fn sip_env_cfg(
     device_id: &str,
     token: &str,
 ) -> Result<aerodesk_core::sip_link::SipLinkConfig, String> {
+    sip_env_cfg_with_port(signal_url, device_id, token, 0)
+}
+
+/// `sip_env_cfg` 端口可覆盖版（#600 多 PoP 换拨：302 Contact 目标端口显式传递，
+/// URL 端口剥离语义下 env 是唯一通道）。
+fn sip_env_cfg_with_port(
+    signal_url: &str,
+    device_id: &str,
+    token: &str,
+    port: u16,
+) -> Result<aerodesk_core::sip_link::SipLinkConfig, String> {
     aerodesk_core::sip_link::SipLinkConfig::from_parts(
         signal_url,
         device_id,
         token,
         &std::env::var("AERO_SIP_TRANSPORT").unwrap_or_default(),
-        std::env::var("AERO_SIP_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(0),
+        if port != 0 {
+            port
+        } else {
+            std::env::var("AERO_SIP_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(0)
+        },
         &std::env::var("AERO_SIP_DOMAIN").unwrap_or_default(),
         &std::env::var("AERO_SIP_CA_PEM").unwrap_or_default(),
     )
@@ -860,6 +918,7 @@ fn connect_h264(
         signal_url,
         room,
         role,
+        None,
         Some(Codec::H264),
         simulcast,
         audio,
@@ -891,6 +950,7 @@ fn connect_codec(
         signal_url,
         room,
         role,
+        None,
         Some(codec),
         false,
         audio,
@@ -921,7 +981,7 @@ fn connect_camera(
     String,
 > {
     connect_inner(
-        signal_url, room, role, codec, false, audio, auth, true, false,
+        signal_url, room, role, None, codec, false, audio, auth, true, false,
     )
 }
 
@@ -929,6 +989,7 @@ fn connect_inner(
     signal_url: &str,
     room: &str,
     role: Role,
+    sip_port_override: Option<u16>,
     codec: Option<Codec>,
     simulcast: bool,
     audio: bool,
@@ -958,7 +1019,14 @@ fn connect_inner(
         Role::Viewer => format!("agent-viewer-{}", std::process::id()),
     };
     info!("SIP device_id={device_id} target={room} role={role:?}");
-    let sip_cfg = sip_env_cfg(signal_url, &device_id, auth.unwrap_or(""))?;
+    let mut env_sip_port = std::env::var("AERO_SIP_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    if let Some(p) = sip_port_override {
+        env_sip_port = p;
+    }
+    let sip_cfg = sip_env_cfg_with_port(signal_url, &device_id, auth.unwrap_or(""), env_sip_port)?;
     let domain = sip_cfg.domain.clone();
     let mut link = aerodesk_core::sip_link::SipCallLink::new(sip_cfg);
     link.start();
@@ -1119,17 +1187,24 @@ fn connect_inner(
                             got = Err(format!("{ESCALATE_MARKER}{}", aor_user(&view_aor)));
                             break 'ans;
                         }
-                        // #598 P1a 302+Contact（PoP 重定向）：CLI 不跟随（属 #600）；
-                        // 会议升级的 302 由被控端 dialog reject 发出、无 Contact
-                        // （§4.1 确定性推导），故本事件不承载会议语义——记日志后
-                        // 按既有 30s 超时语义退出。
+                        // #600 多 PoP 302 跟随：带 Contact 的 302 = 服务端 PoP 重定向
+                        // （POP_SIP_URLS）。解析目标 (host:port, user) → marker，
+                        // run() 闭包重建信令到新 PoP 并重拨。会议升级的 302 由
+                        // 被控端 dialog reject 发出、无 Contact（§4.1 推导），不落此臂。
                         aerodesk_core::sip_link::SipLinkEvent::RedirectedTo {
                             call_id,
                             contact,
                         } => {
-                            warn!(
-                                "SIP 302+Contact 重定向未跟随（PoP 跟随属 #600）：{call_id} {contact}"
-                            );
+                            if let Some((host, port, user)) =
+                                aerodesk_core::sip_link::redirect_target(&contact)
+                            {
+                                info!(
+                                    "SIP 302+Contact 跟随换拨：{call_id} → {host}:{port} user={user}"
+                                );
+                                got = Err(format!("{REDIRECT_MARKER}{host}:{port}|{user}"));
+                                break 'ans;
+                            }
+                            warn!("SIP 302+Contact 解析失败（不跟随）：{call_id} {contact}");
                         }
                         _ => {}
                     }
@@ -2154,6 +2229,7 @@ fn rgba_to_png(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
 fn viewer(
     signal_url: &str,
     room: &str,
+    sip_port_override: Option<u16>,
     auth: Option<&str>,
     layer: Option<&str>,
     audio: bool,
@@ -2171,7 +2247,14 @@ fn viewer(
     let (session, mut endpoint, mut socket, _, _audio_mid, _camera_mid) = if camera {
         connect_camera(signal_url, room, Role::Viewer, auth, audio, None)?
     } else {
-        connect(signal_url, room, Role::Viewer, auth, audio)?
+        connect_with_port(
+            signal_url,
+            room,
+            Role::Viewer,
+            auth,
+            audio,
+            sip_port_override,
+        )?
     };
     let mut frames = 0u64;
     let mut bytes = 0u64;
