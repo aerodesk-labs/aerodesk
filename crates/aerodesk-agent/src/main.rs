@@ -4240,6 +4240,7 @@ fn publisher_capture(
         signal_url,
         room,
         Role::Publisher,
+        None,
         Some(codec),
         simulcast,
         audio,
