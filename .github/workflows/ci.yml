@@ -345,12 +345,12 @@ jobs:
           BROWSER: chrome
         run: bash scripts/ci-retry.sh 3 ./scripts/web-reconnect-e2e.sh
 
-      # #180 SFU /start 准入配额：MAX_ROOM_CLIENTS=1 时第 2 个连接被 503。
-      # 冻结：SFU /start 配额的触达路径是 SIP 会议桥（P3.1 已接 D4 failover），
-      # 脚本按 SIP 面更新（旧 SIGNAL_PLAIN_PORT spawn 已退役）并核验会议桥
-      # 客户端路径后启用。SFU 侧配额本体勿动。
+      # #180 SFU /start 准入配额：MAX_ROOM_CLIENTS=1 时同会议房间第 2 个客户端被 503。
+      # #584 恢复（2026-09）：脚本按 SIP 会议桥形态重写——viewer INVITE 非设备
+      # AoR → signal 会议桥代理 SFU /start，配额拒绝全链透传（SFU room full →
+      # signal SIP 503 → 客户端「呼叫被拒（503）」）。SFU 侧配额本体未动。
       - name: e2e SFU start quota (macOS only)
-        if: false && runner.os == 'macOS'
+        if: runner.os == 'macOS'
         run: ./scripts/sfu-quota-e2e.sh
 
       # #191/#201 TURN relay：内嵌 TURN 分配/互操作 + force-relay 观看端媒体经 relay 到达。

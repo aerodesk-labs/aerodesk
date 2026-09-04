@@ -1,53 +1,77 @@
 #!/usr/bin/env bash
-# sfu-quota-e2e.sh —— SFU /start 准入配额（#180）：MAX_ROOM_CLIENTS=1 时第 2 个发布端被 503。
-# 独立端口避免与本机其它 agent 冲突。
+# sfu-quota-e2e.sh —— SFU /start 准入配额（#180；#584 SIP 会议桥形态重写）：
+# MAX_ROOM_CLIENTS=1 时同会议房间的第 2 个客户端被 503。
+# 触达路径（v0.4 §4）：viewer INVITE 非设备 AoR（会议房间）→ signal 会议桥
+# 代理 SFU /start；配额拒绝（room full）由 SFU 以 HTTP 503 回应，signal 透传为
+# SIP 503，客户端报「SIP 呼叫被拒（503）」。
+# 旧 JSON 形态（SIGNAL_PLAIN_PORT + publisher 直连 SFU /start）随 P3 退役；
+# 本版为纯会议路径，无需 publisher（空会议房 recvonly 入会即可触达 /start）。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export RUST_LOG="${RUST_LOG:-info}"
+TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}/debug"
+
+fail() { echo "FAIL: $*"; exit 1; }
+cleanup() {
+  pkill -f 'aerodesk-agent' 2>/dev/null || true
+  [ -n "${SFU_PID:-}" ] && kill "$SFU_PID" 2>/dev/null || true
+  [ -n "${SIG_PID:-}" ] && kill "$SIG_PID" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 echo "== 构建"
 cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 REC="$(mktemp -d)"
 ROOM="sfu-q-$(date +%s)"
+# 独立端口避免与本机其它 agent 冲突（沿用旧版 145xx 段；SIP 面 14560）
+OPS_PORT=14501; SFU_INT=14502; SFU_SIG=14500; SFU_MEDIA=14578; SIP_PORT=14560
 
-echo "== 启动 SFU（MAX_ROOM_CLIENTS=1）+ signal"
+echo "== 启动 SFU（MAX_ROOM_CLIENTS=1）+ signal（SIP_UDP_PORT=${SIP_PORT}）"
 RECORD_DIR="$REC" MAX_ROOM_CLIENTS=1 \
-  SFU_MEDIA_PORT=14578 SFU_SIGNAL_PORT=14500 SFU_INTERNAL_PORT=14502 \
-  ./target/debug/aerodesk-sfu >/tmp/sfuq-sfu.log 2>&1 &
-echo $! > /tmp/sfuq-sfu.pid
-SIGNAL_PORT=14501 SIGNAL_PLAIN_PORT=14503 SFU_URL=http://127.0.0.1:14502 \
-  SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/sfuq-sig.log 2>&1 &
-echo $! > /tmp/sfuq-sig.pid
+  SFU_MEDIA_PORT="$SFU_MEDIA" SFU_SIGNAL_PORT="$SFU_SIG" SFU_INTERNAL_PORT="$SFU_INT" \
+  "$TARGET_DIR/aerodesk-sfu" >/tmp/sfuq-sfu.log 2>&1 &
+SFU_PID=$!
+SIGNAL_OPS_PORT="$OPS_PORT" SFU_URL="http://127.0.0.1:${SFU_INT}" \
+  SIP_UDP_PORT="$SIP_PORT" "$TARGET_DIR/aerodesk-signal" >/tmp/sfuq-sig.log 2>&1 &
+SIG_PID=$!
+ok=0
 for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 14502 2>/dev/null && grep -q "SIP/UDP 监听已起" /tmp/sfuq-sig.log 2>/dev/null; then break; fi
-    sleep 0.2
+  (exec 3<>/dev/tcp/127.0.0.1/"$SFU_INT") 2>/dev/null \
+    && grep -q "SIP/UDP 监听已起" /tmp/sfuq-sig.log 2>/dev/null && { ok=1; break; }
+  sleep 0.2
 done
-sleep 0.3
+[ "$ok" = "1" ] || fail "服务未就绪（见 /tmp/sfuq-sfu.log /tmp/sfuq-sig.log）"
 
-echo "== 第 1 个发布端加入（应成功）"
-./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
-    --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/sfuq-p1.log 2>&1 &
-P1=$!
-for _ in $(seq 1 40); do grep -q 'SDP negotiated' /tmp/sfuq-p1.log 2>/dev/null && break; sleep 0.2; done
-grep -q 'SDP negotiated' /tmp/sfuq-p1.log && echo "PASS 第 1 个加入成功" || { echo "FAIL 第 1 个加入"; tail -5 /tmp/sfuq-p1.log; exit 1; }
+echo "== viewer1 入会（应成功：SFU 房间第 1 个客户端）"
+AERO_SIP_PORT="$SIP_PORT" "$TARGET_DIR/aerodesk-agent" --role viewer \
+  --signal "ws://127.0.0.1:${OPS_PORT}" --room "$ROOM" >/tmp/sfuq-v1.log 2>&1 &
+V1=$!
+ok=0
+for _ in $(seq 1 60); do
+  grep -q "ICE connected" /tmp/sfuq-v1.log 2>/dev/null && { ok=1; break; }
+  grep -q "session error" /tmp/sfuq-v1.log 2>/dev/null && break
+  sleep 0.5
+done
+[ "$ok" = "1" ] || fail "viewer1 未接通会议（见 /tmp/sfuq-v1.log）"
+grep -q "POST /start room=$ROOM" /tmp/sfuq-sfu.log || fail "viewer1 未经会议桥触达 SFU /start"
+echo "  viewer1 已入会（会议桥 → SFU /start → ICE connected）"
 
-echo "== 第 2 个发布端加入（应被 503 拒绝 room full）"
-./target/debug/aerodesk-agent --role publisher --encoder x264 --noisy \
-    --signal ws://127.0.0.1:14503 --room "$ROOM" >/tmp/sfuq-p2.log 2>&1 || true
-P2=$!
-sleep 2
-# SFU 日志有 reject 记录（ureq 错误体不含 body，CLI 只显示 503）
-if grep -q 'reject /start' /tmp/sfuq-sfu.log && grep -q 'room full' /tmp/sfuq-sfu.log \
-   && grep -q '503' /tmp/sfuq-p2.log; then
-    echo "PASS 第 2 个被 503 拒绝（room full）"
-else
-    echo "FAIL 第 2 个未被拒"; tail -5 /tmp/sfuq-p2.log; grep 'reject /start' /tmp/sfuq-sfu.log | tail -2; kill $P1 $P2 2>/dev/null || true
-    kill "$(cat /tmp/sfuq-sfu.pid)" "$(cat /tmp/sfuq-sig.pid)" 2>/dev/null || true
-    exit 1
-fi
+echo "== viewer2 入会（应被配额拒绝：503）"
+AERO_SIP_PORT="$SIP_PORT" "$TARGET_DIR/aerodesk-agent" --role viewer \
+  --signal "ws://127.0.0.1:${OPS_PORT}" --room "$ROOM" >/tmp/sfuq-v2.log 2>&1 &
+V2=$!
+ok=0
+for _ in $(seq 1 60); do
+  grep -q "呼叫被拒（503）" /tmp/sfuq-v2.log 2>/dev/null && { ok=1; break; }
+  sleep 0.5
+done
+[ "$ok" = "1" ] || fail "viewer2 未收到 503（见 /tmp/sfuq-v2.log）"
 
-kill $P1 $P2 2>/dev/null || true
-kill "$(cat /tmp/sfuq-sfu.pid)" "$(cat /tmp/sfuq-sig.pid)" 2>/dev/null || true
-wait 2>/dev/null || true
-echo "E2E DONE"
+echo "== 断言"
+grep -q "reject /start room=$ROOM: room full" /tmp/sfuq-sfu.log \
+  || fail "SFU 未记录配额拒绝（room full）"
+grep -q "SFU 桥接失败" /tmp/sfuq-sig.log || fail "signal 未透传 503（会议桥报错日志缺失）"
+echo "  SFU room full → signal SIP 503 → 客户端「呼叫被拒（503）」全链符合预期"
+
+echo "== SFU /start 准入配额 PASS（MAX_ROOM_CLIENTS=1：第 2 个会议客户端被 503）=="
