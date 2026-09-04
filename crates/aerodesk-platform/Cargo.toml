@@ -81,7 +81,7 @@ windows = { version = "0.58", features = [
 aerodesk-codec = { path = "../aerodesk-codec" }
 x11rb = { version = "0.13", features = ["xtest"] }
 libc = "0.2"
-ffmpeg-next = "8"
+ffmpeg-next = "9"
 v4l = "0.14"
 lamco-portal = { version = "0.4", optional = true }
 lamco-pipewire = { version = "0.4", default-features = false, features = ["audio"], optional = true }
