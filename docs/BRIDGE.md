@@ -1,9 +1,13 @@
 # 跨 PoP 媒体桥接（#216 M1/M2）
 
-> **P3.1 状态（2026-08）**：桥编排器（signal 内 `BRIDGE_CMD` 管理器 + monitor +
-> kick_sfu_room）已随 JSON 信令面退役；本文档保留为 #601「桥双腿 SIP 化重建」的
-> 设计输入（盘点三 B3/C：monitor 数据源换 SFU /session/clients）。重建前跨 PoP
-> 房间由 signal INVITE 302+Contact（POP_SIP_URLS）引导。
+> **现状（2026-09，v0.4.0 后）**：桥编排器（signal 内 `BRIDGE_CMD` 管理器 +
+> monitor + kick_sfu_room）已随 JSON 信令面退役，**未重建**——#601 只迁了桥
+> 双腿信令面（SIP），编排决策保持冻结。多 PoP 默认路径 = signal INVITE
+> 302+Contact（`POP_SIP_URLS`）+ 客户端跟随换拨（#600/#610），回归保护由
+> `multipop-e2e.sh`/`popreg-e2e.sh` 承接。**桥本体保留为手工部署组件**
+> （`multipop-deploy.sh` 安装二进制；按房间手工/systemd 起进程），自动化验收
+> = `scripts/bridge-e2e.sh`（已在 CI 恢复，2026-09）。编排器重建如立项，本文
+> M3 段与部署模板可作设计输入。
 
 ## 目标
 房间成员跨 PoP 实时互通（媒体 + data channel）：viewer 在其 PoP（PoP-B）加入钉在另一
@@ -45,13 +49,17 @@ PoP-A (14600 系)                        PoP-B (14700 系)
 ```sh
 # 1) 起双 PoP（脚本内置端口：PoP-A 14600 系 / PoP-B 14700 系）
 scripts/bridge-e2e.sh          # 全自动：起双 SFU+signal → PoP-A publisher → bridge → PoP-B viewer → 断言
-scripts/bridge-turn-e2e.sh     # M7（#262）：双 PoP 内嵌 TURN + force-relay，桥双腿走 TURN（真实 NAT 就绪）
-scripts/bridge-multiroom-e2e.sh # M9（#272）：多房间并发桥 + BRIDGE_MAX_RUNNING 上限回退
+                               # （SIP 1:1 直连语义：桥双腿 P2P，媒体不经 SFU；M1 媒体/M2 input/M3 文件）
 
 # 手动
 aerodesk-bridge --remote-signal ws://127.0.0.1:14603 --local-signal ws://127.0.0.1:14703 \
-  --room bridge-demo [--codec h264|hevc|vp9|av1|default]
+  --room bridge-demo [--codec h264|default]
 ```
+
+> 旧编排时代三脚本（`bridge-fallback-e2e.sh`/`bridge-turn-e2e.sh`/
+> `bridge-multiroom-e2e.sh`）断言已退役的服务端编排行为（"bridge
+> orchestration enabled"/自动 spawn/BRIDGE_MAX_RUNNING），2026-09 随 #584 桥系
+> 处置删除（git 历史可取）；桥腿 TURN 与延迟 p99 验收如需恢复，按手工桥形态重写。
 
 ## 验证（macOS M4，debug 混合，2026-08-10，连跑 3 次全 PASS）
 
@@ -73,7 +81,11 @@ aerodesk-bridge --remote-signal ws://127.0.0.1:14603 --local-signal ws://127.0.0
 - M3 编排 ✅（`BRIDGE_CMD` 桥优先自动接入 + 失败回退 v1 Redirect，本地双 SFU e2e 全 PASS）
 - M3 延迟 p99 ✅（本地方法学 + 直连基线对比；真实多 PoP 部署按下方 runbook 验收）
 
-## M3：桥接编排（#216，`BRIDGE_CMD`）
+## M3：桥接编排（#216，`BRIDGE_CMD`）——已退役，设计输入
+
+> 以下（本节起至文末的编排验收/回退/回收语义）描述 **P3.1 已退役的编排器**，
+> 保留作未来重建的设计输入；当前 signal 无 BRIDGE_CMD 族环境变量，跨 PoP
+> 走 302+Contact 跟随（见顶部现状横幅）。
 
 PoP-B 信令配置 `BRIDGE_CMD` 后，跨 PoP viewer **无需人工起桥**：
 
@@ -124,7 +136,7 @@ PoP-B signal（BRIDGE_CMD + ROOM_POP_MAP + POP_URLS）
   模板，含 `BRIDGE_CMD`/`BRIDGE_AUTH_TOKEN`/`BRIDGE_IDLE_SECS` 等完整示例；
 - `deploy/prometheus/prometheus.yml`：双 PoP 抓取示例（配合 `sfu-alerts.yml`）。
 
-### 延迟验收（本地/远程方法学，`scripts/bridge-fallback-e2e.sh` 双模式）
+### 延迟验收（本地/远程方法学；原载体 `bridge-fallback-e2e.sh` 已随编排退役删除）
 
 `#8` 光标墙钟法：publisher 每 30Hz 经 cursor 通道带发送时间戳，viewer 计算
 `LATENCY: N ms`（#253 起节流 200ms，~5 样本/s，p99 更快收敛）。脚本采集
@@ -165,8 +177,8 @@ scripts/multipop-deploy.sh \
 - 生成 systemd unit（基于 deploy/systemd 模板，按 PoP 填 env：POP_ID/ROOM_POP_MAP/
   POP_URLS/TURN/BRIDGE_CMD/BRIDGE_AUTH_TOKEN/SFU_TOKEN/INTERNAL_TOKEN），
   安装并 `systemctl enable --now`；
-- 健康等待后调 `bridge-fallback-e2e.sh` 远程模式验收，产出带时间戳报告
-  `/tmp/aerodesk-acceptance-*.log`；
+- 健康等待后完成部署健康检查（P3 起远程桥验收已随编排退役，脚本内
+  `say "远程桥验收已退役…仅完成部署与健康检查"`）；
 - `--dry-run` 只打印全部将执行的命令；`--cleanup` 停止并禁用两端服务。
 
 ### 真实多 PoP 部署验收 runbook（M3 剩余项）

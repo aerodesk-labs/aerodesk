@@ -120,19 +120,16 @@ echo "  bridge: forwarded=${FWD} forwarded_kf=${KF}（stats=${KF_STATS} log=${KF
 [ "${FWD:-0}" -gt 0 ] || fail "bridge 未转发任何媒体"
 [ "${KF:-0}" -ge 1 ] || fail "bridge 未转发关键帧（远端 viewer 无法起流）"
 
-# 双 SFU 客户端数
-clients_of() { curl -s --max-time 2 "http://127.0.0.1:$1/metrics/prometheus" | awk '/^aerodesk_sfu_clients [0-9]+$/{v=$2} END{print v+0}'; }
-for _ in $(seq 1 20); do
-  CA=$(clients_of "$INT_A"); CB=$(clients_of "$INT_B")
-  [ "$CA" -ge 2 ] && [ "$CB" -ge 2 ] && break
-  sleep 0.5
-done
-echo "  PoP-A clients=${CA}（预期 2: publisher+bridge-view） PoP-B clients=${CB}（预期 2: bridge-pub+viewer）"
-[ "${CA:-0}" -ge 2 ] || fail "PoP-A clients=${CA}"
-[ "${CB:-0}" -ge 2 ] || fail "PoP-B clients=${CB}"
+# SIP 1:1 直连语义（#552/#598 P1b）：桥双腿均为 P2P 呼叫，媒体不经 SFU——
+# JSON 时代「双 SFU clients=2」断言随入会模型退役删除。改为断言 PoP-B viewer
+# 本地命中桥 pub 腿（房间 AoR 已被桥注册，registrar 1:1 转发），不触发 302 换拨。
+if grep -q "SIP 302+Contact 跟随换拨" /tmp/bridge-view-b.log 2>/dev/null; then
+  fail "PoP-B viewer 被重定向到它 PoP（应本地命中桥 pub 腿）"
+fi
+echo "  PoP-B viewer 本地接入桥（无 302 重定向），媒体 P2P 直连不经 SFU"
 
 echo "== M2：data channel 桥（input 至少）"
-# PoP-B viewer 默认周期性发合成输入 → SFU-B → bridge → SFU-A → PoP-A publisher
+# PoP-B viewer 默认周期性发合成输入 → data channel → bridge → PoP-A publisher
 ok=0
 for _ in $(seq 1 60); do
   if grep -q "inject:" /tmp/bridge-pub-a.log 2>/dev/null; then ok=1; break; fi
@@ -145,7 +142,10 @@ echo "  bridge data_forwarded=${DF}"
 [ "${DF:-0}" -gt 0 ] || fail "bridge 未转发 data channel"
 
 echo "== M3（文件）：跨 PoP 文件传输（sha256 一致性）"
-kill "$PUB_A" "$VIEW_B" 2>/dev/null || true
+# 桥为单会话语义且无 BYE 处理（会话韧性缺口另立 issue）：原 viewer 死后 pub 腿
+# 仍占线（新 INVITE 486）、view 腿不会重拨新 publisher——M3 整链按 M1 顺序重启。
+kill "$PUB_A" "$VIEW_B" "$BRIDGE" 2>/dev/null || true
+pkill -f 'aerodesk-bridge' 2>/dev/null || true
 sleep 1
 FILESIZE_KB=512
 SRC_FILE="$(mktemp -d)/send-${FILESIZE_KB}kb.bin"
@@ -158,6 +158,25 @@ AERO_SIP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-agent" --role publisher --recv-dir 
   --encoder vt --width 1280 --height 720 --fps 30 --bitrate 2000000 --noisy \
   >/tmp/bridge-pub-a.log 2>&1 &
 PUB_A=$!
+ok=0
+for _ in $(seq 1 60); do
+  grep -q "SIP registered" /tmp/bridge-pub-a.log 2>/dev/null && ok=1 && break
+  sleep 0.5
+done
+[ "$ok" = "1" ] || fail "M3：PoP-A publisher（--recv-dir）未注册"
+echo "  M3 publisher registered"
+"$TARGET_DIR/aerodesk-bridge" --remote-signal "ws://127.0.0.1:${PLAIN_A}" \
+  --local-signal "ws://127.0.0.1:${PLAIN_B}" --room "$ROOM" --codec h264 \
+  --remote-sip-port "$SIP_A" --local-sip-port "$SIP_B" \
+  >/tmp/bridge-m3.log 2>&1 &
+BRIDGE=$!
+ok=0
+for _ in $(seq 1 120); do
+  grep -q "publisher leg:" /tmp/bridge-m3.log 2>/dev/null && ok=1 && break
+  sleep 0.5
+done
+[ "$ok" = "1" ] || fail "M3：bridge 未就绪（见 /tmp/bridge-m3.log）"
+echo "  M3 bridge 双腿已连"
 AERO_SIP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-agent" --role viewer --send-file "$SRC_FILE" \
   --signal "ws://127.0.0.1:${PLAIN_B}" --room "$ROOM" \
   >/tmp/bridge-view-b.log 2>&1 &
@@ -173,11 +192,11 @@ done
 OUT_HASH=$(shasum -a 256 "$OUT_FILE" | awk '{print $1}')
 [ "$OUT_HASH" = "$SRC_HASH" ] || fail "sha256 不一致 src=${SRC_HASH} out=${OUT_HASH}"
 echo "  跨 PoP 文件传输 ${FILESIZE_KB}KB: sha256 一致（${SRC_HASH:0:16}…）"
-DF2=$(grep -oE "data_forwarded=[0-9]+" /tmp/bridge.log | tail -1 | cut -d= -f2)
-echo "  bridge data_forwarded 累计=${DF2}（含 file 块）"
+DF2=$(grep -oE "data_forwarded=[0-9]+" /tmp/bridge-m3.log | tail -1 | cut -d= -f2)
+echo "  bridge data_forwarded=${DF2}（M3 实例，含 file 块）"
 
 # 无 panic/abort
-grep -qiE "panic|abort" /tmp/bridge.log /tmp/bridge-sfu-a.log /tmp/bridge-sfu-b.log \
+grep -qiE "panic|abort" /tmp/bridge.log /tmp/bridge-m3.log /tmp/bridge-sfu-a.log /tmp/bridge-sfu-b.log \
   /tmp/bridge-pub-a.log /tmp/bridge-view-b.log && fail "发现 panic/abort"
 
 kill "$VIEW_B" "$BRIDGE" "$PUB_A" 2>/dev/null || true

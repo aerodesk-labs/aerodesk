@@ -285,33 +285,18 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/session-api-e2e.sh
 
-      # #216 M3 桥接编排：BRIDGE_CMD 桥优先（自动 spawn）+ 失败回退 Redirect +
-      # 延迟 p99（与直连基线对比）。
-      # #257：同一 step 先 local 五场景，再 REMOTE_LOOPBACK（本地双 PoP + remote
-      # 断言流，端到端验证远程验收工具含 BRIDGE_KILL_CMD 恢复）。
-      # P3.1：服务端 JSON 面与桥编排（BRIDGE_CMD）已退役；脚本已做成 merge-ready
-      # （显式 SIP 端口 + --remote-sip-port/--local-sip-port + AERO_SIP_PORT）。
-      # 冻结待 #601 桥双腿 SIP 化合并后翻转。
-      - name: e2e bridge fallback (macOS only)
-        if: false && runner.os == 'macOS'
-        # 复杂网络 e2e 在 macOS runner 偶发瞬时 flake（#280 同类），按仓库
-        # web-reconnect/ios-sim 约定限 3 次重试；真实回归会被 3 连败暴露。
-        run: bash scripts/ci-retry.sh 3 bash -c "
-          ./scripts/bridge-fallback-e2e.sh &&
-          REMOTE_LOOPBACK=1 ./scripts/bridge-fallback-e2e.sh"
-
-      # #216 M7：桥接 TURN 中继路径验收（#262）——双 PoP 内嵌 TURN +
-      # AERODESK_FORCE_RELAY=1，桥双腿走 relay（真实 NAT 就绪）。
-      # 冻结待 #601 桥双腿 SIP 化合并（同 bridge fallback）。
-      - name: e2e bridge TURN relay (macOS only)
-        if: false && runner.os == 'macOS'
-        run: bash scripts/ci-retry.sh 3 ./scripts/bridge-turn-e2e.sh
-
-      # #216 M9：多房间桥并发 + BRIDGE_MAX_RUNNING 上限回退（#272）。
-      # 冻结待 #601 桥双腿 SIP 化合并（同 bridge fallback）。
-      - name: e2e bridge multiroom (macOS only)
-        if: false && runner.os == 'macOS'
-        run: bash scripts/ci-retry.sh 3 ./scripts/bridge-multiroom-e2e.sh
+      # #216 跨 PoP 媒体桥（#584 桥系处置，2026-09）：signal 侧桥编排（BRIDGE_CMD
+      # 族）随 P3.1 JSON 面退役且未重建——多 PoP 回归保护由 multipop/popreg e2e
+      # （302+Contact 跟随）承接。桥本体（手工部署形态，multipop-deploy.sh 安装）
+      # 的媒体/input/文件三链路由 bridge-e2e.sh 覆盖（SIP 1:1 直连语义：桥双腿
+      # P2P，媒体不经 SFU）。旧编排时代三脚本（fallback/turn/multiroom）断言
+      # "bridge orchestration enabled"/"bridge: spawned" 等已不存在的服务端
+      # 行为，随编排退役一并删除（延迟 p99 与桥腿 TURN 覆盖如需再按手工桥重写）。
+      - name: e2e bridge cross-PoP (manual, macOS only)
+        if: runner.os == 'macOS'
+        # 复杂网络 e2e 在 macOS runner 偶发瞬时 flake（#280 同类），限 3 次重试；
+        # 真实回归会被 3 连败暴露。
+        run: bash scripts/ci-retry.sh 3 ./scripts/bridge-e2e.sh
 
       # #264 一键部署脚本：语法与参数解析守卫（真实部署需外部主机，dry-run 验证）。
       # #216：--help 不得泄漏源码行（历史缺陷：sed 固定行号越界打印 set -uo
