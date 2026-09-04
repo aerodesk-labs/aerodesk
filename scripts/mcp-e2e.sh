@@ -20,13 +20,22 @@ echo "== 构建"
 cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 
 REC="$(mktemp -d)"
+# 独立端口（148xx 段，与 bridge/sfu-quota 等脚本错开）：SFU public HTTPS 默认
+# 3000 极易与开发机常驻服务冲突（曾致 SFU 启动即死 → 会议升级 503 → 工具断言
+# 误报为「通道偶发」）。AERO_SIP_PORT 需同时作用于 publisher 与 MCP spawn 的
+# CLI 子进程（经导出环境继承）。
+OPS_PORT=14801; SFU_PUB=14800; SFU_INT=14802; SFU_MEDIA=14878; SIP_PORT=14860
+export AERO_SIP_PORT="$SIP_PORT"
+export AERODESK_SIGNAL="ws://127.0.0.1:${OPS_PORT}"
 echo "== 启动 sfu/signal + publisher（含 --recv-dir 供大文件上传落盘）"
-RECORD_DIR="$REC" ./target/debug/aerodesk-sfu >/tmp/mcp-sfu.log 2>&1 &
+RECORD_DIR="$REC" SFU_SIGNAL_PORT="$SFU_PUB" SFU_INTERNAL_PORT="$SFU_INT" \
+  SFU_MEDIA_PORT="$SFU_MEDIA" ./target/debug/aerodesk-sfu >/tmp/mcp-sfu.log 2>&1 &
 SFU_PID=$!
-SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/mcp-sig.log 2>&1 &
+SIGNAL_OPS_PORT="$OPS_PORT" SFU_URL="http://127.0.0.1:${SFU_INT}" \
+  SIP_UDP_PORT="$SIP_PORT" ./target/debug/aerodesk-signal >/tmp/mcp-sig.log 2>&1 &
 SIG_PID=$!
 for _ in $(seq 1 50); do
-    if grep -q "SIP/UDP 监听已起" /tmp/mcp-sig.log 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then break; fi
+    if grep -q "SIP/UDP 监听已起" /tmp/mcp-sig.log 2>/dev/null && nc -z 127.0.0.1 "$SFU_INT" 2>/dev/null; then break; fi
     sleep 0.2
 done
 sleep 0.3
@@ -34,7 +43,7 @@ DIR="/tmp/aerodesk-mcp-file-$ROOM"
 mkdir -p "$DIR/recv"
 # 用 pcap 发布端（48 帧后停止）：避免连续视频解码与文件传输争 CPU（CI 慢 runner）
 ./target/debug/aerodesk-agent --role publisher \
-    --signal ws://127.0.0.1:3003 --room "$ROOM" --recv-dir "$DIR/recv" >/tmp/mcp-pub.log 2>&1 &
+    --signal "ws://127.0.0.1:${OPS_PORT}" --room "$ROOM" --recv-dir "$DIR/recv" >/tmp/mcp-pub.log 2>&1 &
 PUB_PID=$!
 sleep 2
 
@@ -59,7 +68,6 @@ cat > /tmp/mcp-in.txt <<INEOF
 {"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"download_file","arguments":{"remote_path":"$DIR/recv/upload.bin"}}}
 INEOF
 
-export AERODESK_SIGNAL="ws://127.0.0.1:3003"
 export AERODESK_ROOM="$ROOM"
 export AERODESK_AGENT_BIN="$PWD/target/debug/aerodesk-agent"
 python3 - <<'PYEOF'
