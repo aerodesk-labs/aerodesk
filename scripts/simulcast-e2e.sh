@@ -18,7 +18,16 @@ cd "$ROOT"
 ROOM="${1:-sim-$(date +%s)}"
 OBS="${2:-12}"
 WEB_SERVE_PORT="${WEB_SERVE_PORT:-38088}"
-export FFMPEG_DIR="${FFMPEG_DIR:-/d/tools/ffmpeg81/ffmpeg-n8.1-latest-win64-gpl-shared-8.1}"
+# ffmpeg-sys-next 9 行为：FFMPEG_DIR 一旦「已设置」（含空串/不存在路径）即放弃
+# pkg-config 直查该路径——历史默认值是提交者本机 Windows 路径，曾在 macOS 构建
+# 失败。Windows CI 由 ci.yml 注入 BtbN 路径；本地开发用 AERO_FFMPEG_DIR 回退；
+# 其余情况不导出（走 pkg-config/brew/apt 发现）。
+FFMPEG_DIR="${FFMPEG_DIR:-${AERO_FFMPEG_DIR:-}}"
+if [ -n "$FFMPEG_DIR" ] && [ ! -d "$FFMPEG_DIR" ]; then
+    echo "WARN: FFMPEG_DIR=$FFMPEG_DIR 不存在，忽略（回退 pkg-config 发现）"
+    FFMPEG_DIR=""
+fi
+if [ -n "$FFMPEG_DIR" ]; then export FFMPEG_DIR; else unset FFMPEG_DIR; fi
 LAN_IP=$(python3 - <<'PY'
 import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
