@@ -104,18 +104,18 @@ mod app {
         println!("收流中… Ctrl-C 退出");
         loop {
             // 收 UDP → endpoint
-            if let Ok((n, source)) = socket.recv_from(&mut buf) {
-                if let Ok(contents) = buf[..n].try_into() {
-                    let _ = endpoint.handle_input(Input::Receive(
-                        Instant::now(),
-                        str0m::net::Receive {
-                            proto: str0m::net::Protocol::Udp,
-                            source,
-                            destination: socket.local_addr().map_err(|e| e.to_string())?,
-                            contents,
-                        },
-                    ));
-                }
+            if let Ok((n, source)) = socket.recv_from(&mut buf)
+                && let Ok(contents) = buf[..n].try_into()
+            {
+                let _ = endpoint.handle_input(Input::Receive(
+                    Instant::now(),
+                    str0m::net::Receive {
+                        proto: str0m::net::Protocol::Udp,
+                        source,
+                        destination: socket.local_addr().map_err(|e| e.to_string())?,
+                        contents,
+                    },
+                ));
             }
             let _ = endpoint.handle_timeout(Instant::now());
 
@@ -135,13 +135,13 @@ mod app {
                 if let ClientEvent::Media(data) = ev {
                     // 音频轨：Opus 解码 → 声卡
                     if data.params.spec().codec == str0m::format::Codec::Opus {
-                        if let (Some(sink), Some(dec)) = (&mut audio_sink, &mut opus_decoder) {
-                            if let Ok(Some(pcm)) = dec.decode(&data.data) {
-                                sink.push_mono_i16(&pcm);
-                                audio_frames += 1;
-                                if audio_frames % 100 == 0 {
-                                    println!("音频帧 {}（samples={}）", audio_frames, pcm.len());
-                                }
+                        if let (Some(sink), Some(dec)) = (&mut audio_sink, &mut opus_decoder)
+                            && let Ok(Some(pcm)) = dec.decode(&data.data)
+                        {
+                            sink.push_mono_i16(&pcm);
+                            audio_frames += 1;
+                            if audio_frames.is_multiple_of(100) {
+                                println!("音频帧 {}（samples={}）", audio_frames, pcm.len());
                             }
                         }
                         continue;
@@ -195,7 +195,7 @@ mod app {
                         let _ = fc.send_frame(&bgra, out_w, out_h, out_w * 4, host_time_ns());
                     }
                     frames += 1;
-                    if frames % 60 == 0 {
+                    if frames.is_multiple_of(60) {
                         println!("已推 {frames} 帧（{}x{}）", out_w, out_h);
                     }
                 }
