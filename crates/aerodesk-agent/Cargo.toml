@@ -22,6 +22,13 @@ path = "src/bin/aerodesk-bridge.rs"
 name = "aerodesk-mcp"
 path = "src/bin/aerodesk-mcp.rs"
 
+# 把本 SFU 房间的流灌进本机 vdev 虚拟摄像头/声卡（macOS；见该文件头注释）。
+# 2026-09-10 从 vdev 仓库迁来：它耗 aerodesk 的重依赖，而设备侧接口只是
+# TCP 帧协议 + CoreAudio，因此不依赖任何 vdev crate。
+[[bin]]
+name = "aerodesk-vdev-bridge"
+path = "src/bin/aerodesk-vdev-bridge/main.rs"
+
 [dependencies]
 sha2 = "0.10"
 aerodesk-codec = { path = "../aerodesk-codec" }
