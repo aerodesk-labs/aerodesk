@@ -1,0 +1,56 @@
+# AeroDesk 看板定义（.walgit/board.toml）
+#
+# walgit 是主仓：issue / PR / review / 看板状态都是 `refs/collab/*` 上的签名条目，
+# 看板只是这些线程在下面声明式列定义下的确定性投影。移动卡片 = 追加一条签名
+# `status` 条目（`walgit collab entry --kind status …`），**不是**改这个文件。
+#
+# 投影规则（逐字段继承）：status 取最新一条带字符串 `status` 的 status 条目
+# （`merge_result {"merged":true}` 也可把卡片置成 merged）；owner / worktree / branch / work
+# 各自取最新一条写了该字段的 status 条目，缺字段继承旧值，显式空字符串清除。
+# 只写 `issue` 根条目、没有 `status` 的线程 → 未分配 open 卡片。
+# 因此**建单即认领**：issue 之后立刻补一条带 owner 的 status；纯待办也要 owner，
+# 用 blocked / needs-human 表达。评论里写 owner 不算数。
+#
+# 流程与角色约定见 docs/WALGIT.md。
+
+version = 1
+
+[sort]
+by = "ts"          # ts(默认，按最后活动) | id
+direction = "desc" # desc(默认，新在前) | asc
+
+[[column]]
+name = "open"
+status = "open"
+
+[[column]]
+name = "in-progress"
+status = "in-progress"
+
+[[column]]
+name = "needs-review"
+status = "needs-review"
+
+[[column]]
+name = "blocked"
+status = "blocked"
+
+[[column]]
+name = "needs-human"
+status = "needs-human"
+
+# 终态有三种合法 card_status，都要有列，否则卡片会在合并/结项后从看板上消失：
+#   merged —— merge_result {"merged": true} 置位（本仓库用这个）
+#   done   —— status {"status":"done"}（门禁要求 needs-review + 已验签 approve）
+#   closed —— status {"status":"closed"}（结项归档，可在 merged 之后追加）
+[[column]]
+name = "merged"
+status = "merged"
+
+[[column]]
+name = "done"
+status = "done"
+
+[[column]]
+name = "closed"
+status = "closed"
