@@ -334,12 +334,20 @@ try {
     }
     Write-MirrorLog "镜像循环启动：$WalgitUrl → $GithubUrl（每 $IntervalSeconds 秒，mirror=$MirrorDir）"
     while ($true) {
-        $ok = Invoke-MirrorCycle
+        try {
+            $ok = Invoke-MirrorCycle
+        } catch {
+            Write-MirrorLog "本轮镜像失败：$($_.Exception.Message)" 'ERROR'
+            $ok = $false
+        }
         if ($ok) {
             Write-MirrorLog ("同步完成 main={0}" -f (Get-MirrorTip))
         }
         Start-Sleep -Seconds $IntervalSeconds
     }
+} catch {
+    Write-MirrorLog "镜像失败：$($_.Exception.Message)" 'ERROR'
+    exit 1
 } finally {
     if ($lock) { $lock.Dispose() }
 }
