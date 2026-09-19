@@ -2,11 +2,11 @@
 
 全平台远程桌面的 Rust workspace：**WebRTC SFU 服务端 + 共享协议 + 跨平台客户端核心**。
 
-> 仓库：<https://github.com/aerodesk-labs/aerodesk>
-> 任务跟踪：[Issues](https://github.com/aerodesk-labs/aerodesk/issues) ·
-> [Projects 看板](https://github.com/orgs/aerodesk-labs/projects/1) ·
-> [Discussions](https://github.com/aerodesk-labs/aerodesk/discussions)
-> 产品决策记录（平台角色/选型/风险/踩坑）：[Wiki](https://github.com/aerodesk-labs/aerodesk/wiki)
+> 仓库主源（canonical）：**walgit** `http://127.0.0.1:8081/gqf2008/aerodesk.git` —— issue / PR / 审查 / 看板
+> 都在 `refs/collab/*`（`walgit collab …`，看板 `.walgit/board.toml`）。
+> GitHub <https://github.com/aerodesk-labs/aerodesk> **仅作镜像 + 发版**：Issues / Wiki / Projects /
+> Discussions 已关闭，只跑 Actions（CI/Release）。
+> 托管与协作约定见 [`docs/WALGIT.md`](docs/WALGIT.md)。
 > TURN 中继部署见 [`docs/TURN.md`](docs/TURN.md)。
 > 服务端生产化部署（JWT/TLS/多 PoP/录制审计）见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
 > 运维 dashboard（房间/客户端/录制/负载/TURN 可视化）见 [`docs/ADMIN.md`](docs/ADMIN.md)。
