@@ -193,11 +193,12 @@ function Initialize-Mirror {
 
     # refspec 显式写进 remote 配置：fetch --prune 才会同时裁剪分支与标签，
     # 同时保证 refs/collab/* 不会进入镜像仓（也就没有机会被推到 GitHub）。
-    $current = (Invoke-Git -Arguments @('-C', $MirrorDir, 'config', '--get-all', 'remote.origin.fetch') -AllowFailure).Output
+    # git remote add 会先写一条默认 refspec +refs/heads/*:refs/remotes/origin/*；它不参与推送，
+    # 却让镜像仓每轮多维护一份 refs/remotes/origin/*。所以先清空 remote.origin.fetch 再只写下面
+    # 两条（--unset-all 在键不存在时 exit 5，用 -AllowFailure 吃掉），保证每次都是同一组 refspec。
+    Invoke-Git -Arguments @('-C', $MirrorDir, 'config', '--unset-all', 'remote.origin.fetch') -AllowFailure | Out-Null
     foreach ($spec in @('+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*')) {
-        if ($current -notcontains $spec) {
-            Invoke-Git -Arguments @('-C', $MirrorDir, 'config', '--add', 'remote.origin.fetch', $spec) | Out-Null
-        }
+        Invoke-Git -Arguments @('-C', $MirrorDir, 'config', '--add', 'remote.origin.fetch', $spec) | Out-Null
     }
 }
 
