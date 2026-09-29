@@ -8,7 +8,7 @@
 | 角色 | 位置 | 说明 |
 |---|---|---|
 | **canonical（真源）** | walgit：`http://127.0.0.1:8081/gqf2008/aerodesk.git`（remote 名 `origin`） | 本机 walgit 服务（Windows 托盘，配置 `~/.walgit/walgit.toml`），桶与 macOS 部署共用，mac 侧同样可见 |
-| **镜像 + 发版** | GitHub：<https://github.com/aerodesk-labs/aerodesk>（remote 名 `github`） | 由镜像循环单向同步 `heads` + `tags`；承载 Actions CI 与 Release 产物 |
+| **镜像 + 发版** | GitHub：<https://github.com/aerodesk-labs/aerodesk>（remote 名 `github`） | **发布驱动**：发 tag / 发版时显式 `-Once` 单向同步 `heads` + `tags`；承载 Actions CI 与 Release 产物 |
 | **协作** | walgit `refs/collab/*`（issue / PR / review / 看板 / CI 结果） | 全部是签名条目，读用 `walgit collab ls|thread|pr|board|report`，写用 `walgit collab entry` |
 
 GitHub 侧于 2026-09-19 关闭（`gh api` 实测 `has_issues=false`、`has_wiki=false`、
@@ -102,7 +102,7 @@ walgit --config ~/.walgit/walgit.toml collab report    # 线程/PR/验签/活动
 门禁仍然按 `~/.agents/rules/RULE_*.md`：本地 fmt/clippy/test 为准（CI 仅发版必需）、
 worktree 起步、独立审查后才合并、改行为/命令同步改文档。
 
-## 4. 镜像循环（walgit → GitHub）
+## 4. 镜像同步（walgit → GitHub，发布驱动）
 
 [`scripts/github-mirror.ps1`](../scripts/github-mirror.ps1)：维护裸镜像仓
 `~/.walgit/mirror/aerodesk.git`，每轮 `fetch origin --prune`（walgit → 镜像）后
@@ -112,9 +112,8 @@ worktree 起步、独立审查后才合并、改行为/命令同步改文档。
 （会删除这些 ref，先看 `-Status` 列出的清单）。
 
 ```powershell
-pwsh -File scripts/github-mirror.ps1 -Once          # 手动同步一轮
-pwsh -File scripts/github-mirror.ps1                # 前台常驻循环（Ctrl+C 退出）
-pwsh -File scripts/github-mirror.ps1 -InstallTask   # 不推荐：注册每 60 秒计划任务（会闪控制台窗口）
+pwsh -File scripts/github-mirror.ps1 -Once          # 手动同步一轮（发布驱动的常规入口）
+pwsh -File scripts/github-mirror.ps1                # 前台常驻循环（Ctrl+C 退出；仅调试）
 pwsh -File scripts/github-mirror.ps1 -UninstallTask # 清理历史上装过的计划任务
 pwsh -File scripts/github-mirror.ps1 -Status        # 任务状态 + 日志尾部 + GitHub 独有 ref 清单
 pwsh -File scripts/github-mirror.ps1 -Once -Prune   # 完全对齐（删除 GitHub 独有的分支/标签）
@@ -122,8 +121,8 @@ pwsh -File scripts/github-mirror.ps1 -Once -Prune   # 完全对齐（删除 GitH
 
 **当前机制是发布驱动**：发 tag / 发版收尾时显式跑一次 `-Once`（见 §5），**不装轮询计划任务**。
 用户 2026-09-20 已删除每 60 秒的计划任务 `walgit-sync-github-aerodesk` 并明令不要装回来
-（`-WindowStyle Hidden` 挡不住控制台窗口闪现，依据看板卡 `mirror-ops-quiet`）；脚本里
-`-InstallTask` 现在会直接拒绝。
+（`-WindowStyle Hidden` 挡不住控制台窗口闪现，依据看板卡 `mirror-ops-quiet`）。脚本里的
+`-InstallTask` 入口**已停用：调用会被拒绝**，不要再照旧文档执行；清理历史任务用 `-UninstallTask`。
 
 迁移期 GitHub 上曾留着 13 个 PR 时代的旧分支（`ci/*`、`fix/*`、`release/v0.2.0`、`wip/*`、
 `worktree-wf_*`），它们的提交不在 walgit 里，因此默认保留、不会被镜像覆盖；这批旧分支已于
@@ -147,7 +146,7 @@ pwsh -File scripts/github-mirror.ps1 -Once -Prune   # 完全对齐（删除 GitH
 # 1) 在 walgit 合并 main（含签名 merge_result），推 origin/main
 # 2) 打 tag 并推到 walgit
 git tag v0.5.0 && git push origin v0.5.0
-# 3) 等镜像循环把 tag 推到 GitHub（pwsh -File scripts/github-mirror.ps1 -Once 可立即触发）
+# 3) 显式跑一次 pwsh -File scripts/github-mirror.ps1 -Once 把 tag 推到 GitHub（发布驱动，没有常驻循环）
 # 4) 在 GitHub 建 release —— 这一步才启动全平台打包（macOS DMG / Linux deb / Windows installer）
 gh release create v0.5.0 --generate-notes
 ```
