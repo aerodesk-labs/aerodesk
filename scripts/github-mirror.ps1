@@ -21,7 +21,7 @@
   credential helper（本机是 `gh auth git-credential`）。
 
 .PARAMETER Once
-  只跑一轮后退出（计划任务用这个）。默认是常驻循环，Ctrl+C 结束。
+  只跑一轮后退出（发布驱动的常规入口：发 tag / 发版时显式跑一次）。默认是常驻循环（仅调试），Ctrl+C 结束。
 
 .PARAMETER NoForce
   推送不带 `+`：GitHub 侧一旦有 walgit 没有的提交（例如有人直推 GitHub），
@@ -32,7 +32,7 @@
   默认关闭（迁移前 GitHub 上的历史分支不会被自动删除）；哪些 ref 会被删见 `-Status`。
 
 .PARAMETER InstallTask
-  注册计划任务 walgit-sync-github-aerodesk：每 60 秒跑一轮 `-Once`。
+  已停用：调用会直接拒绝（GitHub 镜像是发布驱动的，见 docs/WALGIT.md §4；清理历史任务用 -UninstallTask）。
 
 .PARAMETER UninstallTask
   注销该计划任务。
@@ -43,7 +43,7 @@
 .EXAMPLE
   pwsh -File scripts/github-mirror.ps1 -Once          # 手动同步一轮
   pwsh -File scripts/github-mirror.ps1                # 前台常驻循环
-  pwsh -File scripts/github-mirror.ps1 -InstallTask   # 装成每分钟一次的定时任务
+  pwsh -File scripts/github-mirror.ps1 -UninstallTask # 清理历史上装过的定时任务
   pwsh -File scripts/github-mirror.ps1 -Status
 #>
 [CmdletBinding()]
@@ -237,23 +237,15 @@ function Invoke-MirrorCycle {
     return $true
 }
 
-function Get-TaskInstallPath {
-    if ($PSCommandPath) { return (Resolve-Path -LiteralPath $PSCommandPath).Path }
-    throw '无法确定脚本自身路径（请用 -File 调用本脚本）'
-}
-
 function Install-MirrorTask {
-    $scriptPath = Get-TaskInstallPath
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-        -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Once' -f $scriptPath)
-    $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) `
-        -RepetitionInterval (New-TimeSpan -Seconds $IntervalSeconds) `
-        -RepetitionDuration (New-TimeSpan -Days 3650)
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-        -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings `
-        -Description 'AeroDesk: mirror walgit heads/tags to the GitHub mirror (see docs/WALGIT.md)' -Force | Out-Null
-    Write-MirrorLog "计划任务已注册：$TaskName（每 $IntervalSeconds 秒一轮，脚本 $scriptPath）"
+    # 用户 2026-09-20 明令：GitHub 镜像改为发布驱动，不接受每 60 秒轮询的计划任务——它在桌面
+    # 会话里每 60 秒拉起一个控制台程序，-WindowStyle Hidden 挡不住窗口闪现（证据见看板卡
+    # mirror-ops-quiet / win-sched-task-console）。这里直接拒绝而不是只打印告警：告警会被忽略，
+    # 拒绝才能让「不要装回来」这条规则可被机器执行。真需要无人值守时，应改用 GUI 子系统
+    # launcher（walgit-service-host.exe 形态），不要把控制台程序交给计划任务。
+    $reason = '-InstallTask 已停用：GitHub 镜像是发布驱动的，请改为发 tag / 发版时显式跑一次 pwsh -File scripts/github-mirror.ps1 -Once（见 docs/WALGIT.md §4）；清理历史任务仍可用 -UninstallTask'
+    Write-MirrorLog $reason 'WARN'
+    throw $reason
 }
 
 function Uninstall-MirrorTask {
@@ -274,7 +266,7 @@ function Show-MirrorStatus {
         Write-Host "last run        : $($info.LastRunTime) exit=$($info.LastTaskResult)"
         Write-Host "next run        : $($info.NextRunTime)"
     } else {
-        Write-Host "task            : $TaskName 未安装（pwsh -File scripts/github-mirror.ps1 -InstallTask）"
+        Write-Host "task            : $TaskName 未安装（发布驱动，无需安装；历史注册用 -UninstallTask 清理）"
     }
     Write-Host "mirror dir      : $MirrorDir"
     Write-Host "walgit remote   : $WalgitUrl"

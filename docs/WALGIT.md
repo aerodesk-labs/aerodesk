@@ -114,17 +114,24 @@ worktree 起步、独立审查后才合并、改行为/命令同步改文档。
 ```powershell
 pwsh -File scripts/github-mirror.ps1 -Once          # 手动同步一轮
 pwsh -File scripts/github-mirror.ps1                # 前台常驻循环（Ctrl+C 退出）
-pwsh -File scripts/github-mirror.ps1 -InstallTask   # 注册计划任务（每 60 秒一轮）
-pwsh -File scripts/github-mirror.ps1 -UninstallTask
+pwsh -File scripts/github-mirror.ps1 -InstallTask   # 不推荐：注册每 60 秒计划任务（会闪控制台窗口）
+pwsh -File scripts/github-mirror.ps1 -UninstallTask # 清理历史上装过的计划任务
 pwsh -File scripts/github-mirror.ps1 -Status        # 任务状态 + 日志尾部 + GitHub 独有 ref 清单
 pwsh -File scripts/github-mirror.ps1 -Once -Prune   # 完全对齐（删除 GitHub 独有的分支/标签）
 ```
 
-迁移前 GitHub 上还留着 13 个 PR 时代的旧分支（`ci/*`、`fix/*`、`release/v0.2.0`、`wip/*`、
-`worktree-wf_*`），它们的提交不在 walgit 里，因此默认保留、不会被镜像循环删除；确认无用后
-用一次 `-Prune` 清理即可（之后计划任务保持默认参数，新分支由 walgit 侧决定）。
+**当前机制是发布驱动**：发 tag / 发版收尾时显式跑一次 `-Once`（见 §5），**不装轮询计划任务**。
+用户 2026-09-20 已删除每 60 秒的计划任务 `walgit-sync-github-aerodesk` 并明令不要装回来
+（`-WindowStyle Hidden` 挡不住控制台窗口闪现，依据看板卡 `mirror-ops-quiet`）；脚本里
+`-InstallTask` 现在会直接拒绝。
 
-- 计划任务：`walgit-sync-github-aerodesk`（每 60 秒跑一次 `-Once`，锁文件防重入）。
+迁移期 GitHub 上曾留着 13 个 PR 时代的旧分支（`ci/*`、`fix/*`、`release/v0.2.0`、`wip/*`、
+`worktree-wf_*`），它们的提交不在 walgit 里，因此默认保留、不会被镜像覆盖；这批旧分支已于
+2026-09-20 清完，实测 `-Status` 输出 `github-only refs: 0 个`，默认参数下无需再 `-Prune`
+（新分支一律由 walgit 侧决定）。
+
+- 发布驱动：**没有常驻计划任务**（用户 2026-09-20 决定不轮询）。发 tag / 发版时显式跑一次
+  `-Once`（见 §5）；`-Once` 与常驻循环都带锁文件防重入，重复触发是幂等的。
 - 日志：`~/.walgit/sync-to-github-aerodesk.log`（超过 5 MiB 自动轮转成 `.log.1`）。
 - 代理：GitHub 走本机 Clash 代理且端口会漂移，脚本按 `-ProxyPort` → `AERODESK_GITHUB_PROXY` /
   `HTTPS_PROXY` → 注册表 `ProxyServer` → 常见端口探测的顺序自动选，并显式用
