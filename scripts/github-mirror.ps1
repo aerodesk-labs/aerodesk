@@ -287,7 +287,24 @@ function Show-GithubOnlyRefs {
         return
     }
     try {
-        $remote = (Invoke-Git -Arguments @('-C', $MirrorDir, 'ls-remote', '--heads', '--tags', 'github') -ViaProxy).Output
+        # --branches/--tags 限定查询范围（本机 git 2.55 的 usage 只列 --branches，--heads 虽仍生效
+        # 但已不文档化）；--exit-code 让「没有任何匹配 ref」以 exit 2 结束，从而把「查询结果为空」
+        # 与「确实没有 github-only ref（0 个）」区分开——这条清单是 -Prune 的安全预览，假绿灯等于
+        # 把预览关掉。
+        $query = Invoke-Git -Arguments @('-C', $MirrorDir, 'ls-remote', '--branches', '--tags', '--exit-code', 'github') -ViaProxy -AllowFailure
+        if ($query.ExitCode -eq 2) {
+            Write-Host 'github-only refs: 查询结果为空（可疑）——GitHub 侧没有任何 branch/tag，先确认远端可达再考虑 -Prune'
+            return
+        }
+        if ($query.ExitCode -ne 0) {
+            $tail = ($query.Output | Select-Object -Last 3) -join ' | '
+            throw "git ls-remote 失败（exit $($query.ExitCode)）：$tail"
+        }
+        $remote = $query.Output
+        if (@($remote).Count -eq 0) {
+            Write-Host 'github-only refs: 查询结果为空（可疑）——ls-remote 退出码 0 却没有任何 ref'
+            return
+        }
         $remoteNames = @{}
         foreach ($line in $remote) {
             $parts = $line -split '\s+', 2
