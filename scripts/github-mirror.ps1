@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  AeroDesk 的 GitHub 镜像循环：walgit 主仓的 heads + tags 单向镜像到 GitHub。
+  AeroDesk 的 GitHub 镜像同步：walgit 主仓的 heads + tags 单向镜像到 GitHub（发布驱动用 -Once；前台常驻循环仅供调试）。
 
 .DESCRIPTION
   canonical 仓库是 walgit（默认 http://127.0.0.1:8081/gqf2008/aerodesk.git）：issue / PR / 看板
@@ -206,9 +206,20 @@ function Initialize-Mirror {
     Invoke-Git -Arguments @('-C', $MirrorDir, 'config', '--unset-all', 'remote.github.fetch') -AllowFailure | Out-Null
     # 旧默认 refspec 留下的 refs/remotes/*（origin/main、origin/HEAD、github/main 等）不再被任何
     # refspec 维护、也不参与推送，是纯死状态；删掉让镜像仓收敛到「只有 refs/heads + refs/tags」。
-    $staleRemoteRefs = (Invoke-Git -Arguments @('-C', $MirrorDir, 'for-each-ref', '--format=%(refname)', 'refs/remotes') -AllowFailure).Output
-    foreach ($ref in $staleRemoteRefs) {
-        Invoke-Git -Arguments @('-C', $MirrorDir, 'update-ref', '-d', $ref) -AllowFailure | Out-Null
+    # **--no-deref 是关键**：refs/remotes/origin/HEAD 是符号引用，若解引用删除，删掉的是它的目标
+    # refs/remotes/origin/main，符号引用文件会以悬空态留在磁盘上——for-each-ref 看不见它（永远清不掉），
+    # git fsck 也会由 exit 0 变 exit 2（invalid sha1 pointer 0000…）。
+    # 只信任形如 refs/remotes/ 的行：for-each-ref 出错时会往 stderr 写 error:…，经 Invoke-Git 合并进 Output。
+    $stale = Invoke-Git -Arguments @('-C', $MirrorDir, 'for-each-ref', '--format=%(refname)', 'refs/remotes') -AllowFailure
+    foreach ($ref in @($stale.Output | Where-Object { $_ -match '^refs/remotes/' })) {
+        Invoke-Git -Arguments @('-C', $MirrorDir, 'update-ref', '--no-deref', '-d', $ref) -AllowFailure | Out-Null
+    }
+    # 兜底：悬空符号引用（例如历史上被解引用删过一次的 origin/HEAD）不会出现在 for-each-ref 里，
+    # 所以再按目录清一次。refs/remotes 是镜像仓的纯死状态缓存，递归删掉即可；packed-refs 已由上面的
+    # --no-deref -d 清空，refs/heads 与 refs/tags 不受影响。不依赖 fsck，天然幂等。
+    $remoteRefsDir = Join-Path (Join-Path $MirrorDir 'refs') 'remotes'
+    if (Test-Path -LiteralPath $remoteRefsDir) {
+        Remove-Item -LiteralPath $remoteRefsDir -Recurse -Force
     }
 }
 
@@ -343,7 +354,7 @@ $lock = $null
 try {
     $lock = [System.IO.File]::Open($LockFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
 } catch {
-    Write-MirrorLog '已有镜像循环在跑（锁被占用），本轮跳过' 'WARN'
+    Write-MirrorLog '已有镜像同步在跑（锁被占用），本轮跳过' 'WARN'
     exit 0
 }
 
