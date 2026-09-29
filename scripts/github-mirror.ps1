@@ -193,12 +193,22 @@ function Initialize-Mirror {
 
     # refspec 显式写进 remote 配置：fetch --prune 才会同时裁剪分支与标签，
     # 同时保证 refs/collab/* 不会进入镜像仓（也就没有机会被推到 GitHub）。
+    # **有意**清空 remote.origin.fetch 后只写下面两条：镜像仓里任何自定义 refspec 都会被丢弃，
+    # 这是刻意的——镜像仓只允许 heads/tags 单向镜像，不接受别的 ref。
     # git remote add 会先写一条默认 refspec +refs/heads/*:refs/remotes/origin/*；它不参与推送，
-    # 却让镜像仓每轮多维护一份 refs/remotes/origin/*。所以先清空 remote.origin.fetch 再只写下面
-    # 两条（--unset-all 在键不存在时 exit 5，用 -AllowFailure 吃掉），保证每次都是同一组 refspec。
+    # 却让镜像仓每轮多维护一份 refs/remotes/origin/*。所以先清空再只写两条
+    #（--unset-all 在键不存在时 exit 5，用 -AllowFailure 吃掉），保证每次都是同一组 refspec。
     Invoke-Git -Arguments @('-C', $MirrorDir, 'config', '--unset-all', 'remote.origin.fetch') -AllowFailure | Out-Null
     foreach ($spec in @('+refs/heads/*:refs/heads/*', '+refs/tags/*:refs/tags/*')) {
         Invoke-Git -Arguments @('-C', $MirrorDir, 'config', '--add', 'remote.origin.fetch', $spec) | Out-Null
+    }
+    # github 只做 push 目标、从不 fetch；它那条默认 refspec 同样是死状态，一并清掉。
+    Invoke-Git -Arguments @('-C', $MirrorDir, 'config', '--unset-all', 'remote.github.fetch') -AllowFailure | Out-Null
+    # 旧默认 refspec 留下的 refs/remotes/*（origin/main、origin/HEAD、github/main 等）不再被任何
+    # refspec 维护、也不参与推送，是纯死状态；删掉让镜像仓收敛到「只有 refs/heads + refs/tags」。
+    $staleRemoteRefs = (Invoke-Git -Arguments @('-C', $MirrorDir, 'for-each-ref', '--format=%(refname)', 'refs/remotes') -AllowFailure).Output
+    foreach ($ref in $staleRemoteRefs) {
+        Invoke-Git -Arguments @('-C', $MirrorDir, 'update-ref', '-d', $ref) -AllowFailure | Out-Null
     }
 }
 
