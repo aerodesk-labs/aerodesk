@@ -138,9 +138,10 @@ ref 列表，与**显式发布集合**（main + 本地 tags）求差集，差集
   「GitHub 有、walgit 没有」的那些。因为镜像仓本地只保留发布集合，**非 main 分支只要出现在
   GitHub 上就会被 `-Prune` 删掉——哪怕它同时还在 walgit 里**；要保住它只能先把它加进发布集合。
 - 删除依据是「本地快照 = 发布集合」，所以快照不完整时**整轮拒绝**：远端有 tag 而本地一个 tag 都
-  没有（walgit 的 tags 全没了？），或本地缺 `refs/heads/main`，脚本报错退出、**本轮既不推送也
-  不删除**——这些 tag / 分支删掉不可恢复。护栏刻意放在 push 之前：宁可这一轮什么都不做，
-  也不在一份坏的快照上做任何远端写操作。
+  没有（walgit 的 tags 全没了？）时脚本报错退出、**本轮既不推送也不删除**——这些 tag 删掉不可
+  恢复。护栏刻意放在 push 之前：宁可这一轮什么都不做，也不在一份坏的快照上做任何远端写操作。
+  分支侧不需要同类护栏：fetch 的显式 refspec 要求 walgit 有 `refs/heads/main`，发布集合也写死
+  包含它，GitHub 的 main 不会进删除集。
 
 ```powershell
 pwsh -File scripts/github-mirror.ps1 -Once          # 手动同步一轮（发布驱动的常规入口）
