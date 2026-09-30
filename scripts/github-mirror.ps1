@@ -60,10 +60,6 @@
 .PARAMETER UninstallTask
   注销该计划任务。
 
-.PARAMETER Branch
-  被镜像的分支，默认 main（Jev 判定 main_and_tags_only）。改成别的分支等于改变发布范围，
-  需要重新判定；保留参数只为在离线 harness 里复现同一套逻辑。
-
 .PARAMETER Status
   打印计划任务状态、发布范围，以及最近的镜像日志与 ref 对齐情况。
 
@@ -79,7 +75,6 @@ param(
     [string]$GithubUrl = 'https://github.com/aerodesk-labs/aerodesk.git',
     [string]$MirrorDir = (Join-Path $env:USERPROFILE '.walgit\mirror\aerodesk.git'),
     [string]$LogFile   = (Join-Path $env:USERPROFILE '.walgit\sync-to-github-aerodesk.log'),
-    [string]$Branch = 'main',
     [int]$ProxyPort = 0,
     [int]$IntervalSeconds = 60,
     [int]$MaxLogBytes = 5242880,
@@ -95,8 +90,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $TaskName = 'walgit-sync-github-aerodesk'
-# 发布范围：只镜像这一个分支（+ 全部 tags）。改它等于改变对外发布范围，先重新判定。
-$script:MirrorBranch = $Branch
+# 发布分支硬编码为 main（+ 全部 tags，Jev 判定 main_and_tags_only）：不是可调参数。
+# 曾经做成 -Branch 开关，但那等于把「不把非 main 分支外流」这条语义变成一次命令行误操作，
+# 而这批存在的全部意义就是堵住它；要改发布范围必须改代码并重新做语义判定。
 $StateDir = Join-Path $env:USERPROFILE '.walgit'
 $LockFile = Join-Path $StateDir 'sync-to-github-aerodesk.lock'
 $script:ResolvedProxyPort = 0
@@ -258,7 +254,7 @@ function Initialize-Mirror {
 }
 
 function Get-MirrorTip {
-    $result = Invoke-Git -Arguments @('-C', $MirrorDir, 'rev-parse', '--verify', '--quiet', "refs/heads/$($script:MirrorBranch)") -AllowFailure
+    $result = Invoke-Git -Arguments @('-C', $MirrorDir, 'rev-parse', '--verify', '--quiet', 'refs/heads/main') -AllowFailure
     if ($result.ExitCode -ne 0 -or $result.Output.Count -eq 0) { return '(none)' }
     return $result.Output[0]
 }
@@ -297,9 +293,9 @@ function Invoke-MirrorCycle {
     $force = '+'
     if ($NoForce) { $force = '' }
     # push refspec 只列 main 一个分支（+ 全部 tags）：walgit 上的其它 heads（在途审查分支等）
-    # 根本不进推送集合，不可能被顺带发布。分支名硬编码为 main，没有可切分支的参数。
+    # 根本不进推送集合，不可能被顺带发布。分支名硬编码，没有可切分支的参数。
     $pushArgs = @('-C', $MirrorDir, 'push', '--porcelain', 'github',
-                  "$($force)refs/heads/$($script:MirrorBranch):refs/heads/$($script:MirrorBranch)",
+                  "$($force)refs/heads/main:refs/heads/main",
                   "$($force)refs/tags/*:refs/tags/*")
     $push = Invoke-Git -Arguments $pushArgs -ViaProxy -AllowFailure
     if ($push.ExitCode -ne 0) {
@@ -371,7 +367,7 @@ function Show-MirrorStatus {
     Write-Host "mirror dir      : $MirrorDir"
     Write-Host "walgit remote   : $WalgitUrl"
     Write-Host "github remote   : $GithubUrl"
-    Write-Host "publish scope   : branch refs/heads/$($script:MirrorBranch) + all refs/tags（其余 walgit heads 不发布）"
+    Write-Host "publish scope   : branch refs/heads/main + all refs/tags（其余 walgit heads 不发布）"
     $script:ResolvedProxyPort = Resolve-ProxyPort -Explicit $ProxyPort
     Write-Host "proxy port      : $($script:ResolvedProxyPort)"
     Show-GithubOnlyRefs
