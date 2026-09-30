@@ -24,7 +24,7 @@
   → 协调者建 issue（worker 随后补一条带 owner 的 `status` 认领）→ 基于 `origin/main` 开 worktree →
   提交 → `patch` 条目 → `status: needs-review` → 另一个 principal 独立审查 → 合并推 `origin/main` →
   `merge_result` + `status: closed`。
-- inbox 卫生（宿主 SKILL.md Housekeeping / D45）：inbox 涨到约 **50 条**、或每完成一两批时，由
+- inbox 卫生（宿主 SKILL.md Housekeeping / D45）：inbox 涨到约 **50 条**（本仓经验值，宿主未规定阈值）、或每完成一两批时，由
   **协调者**跑一次
   `walgit --config ~/.walgit/walgit.toml collab gc --repo . --actor <coordinator> --key ~/.walgit/keys/<coordinator>.ed25519 --push origin`，
   把 append-only inbox 折叠进签名快照 `refs/collab/meta/snapshot`（幂等、可重跑；**不是**必须定期跑的
