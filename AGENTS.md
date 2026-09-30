@@ -21,7 +21,7 @@
 
 - 流程：先同步协作视图（宿主 SKILL.md §0a.5）
   `git fetch origin '+refs/collab/inbox/*:refs/collab/inbox/*' '+refs/collab/meta/*:refs/collab/meta/*'`
-  → walgit 建 issue（随后补一条带 owner 的 `status` 认领）→ 基于 `origin/main` 开 worktree →
+  → 协调者建 issue（worker 随后补一条带 owner 的 `status` 认领）→ 基于 `origin/main` 开 worktree →
   提交 → `patch` 条目 → `status: needs-review` → 另一个 principal 独立审查 → 合并推 `origin/main` →
   `merge_result` + `status: closed`。
 - inbox 卫生（宿主 SKILL.md Housekeeping / D45）：inbox 涨到约 **50 条**、或每完成一两批时，由

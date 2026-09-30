@@ -76,15 +76,16 @@ git fetch origin '+refs/collab/inbox/*:refs/collab/inbox/*' '+refs/collab/meta/*
 ```sh
 W() { walgit --config ~/.walgit/walgit.toml collab entry --repo . "$@"; }
 
-# 1) 建单（issue 根条目）
-W --kind issue --id <thread> --actor <principal> \
-  --body '{"title":"<标题>","body":"目标 / 范围 / 验收标准"}' \
-  --key ~/.walgit/keys/<principal>.ed25519 --push origin
+# 1) 建单（协调者）：建单 = 协调者定义工作单元（目标 / 角色 / owner / 可机器检查的验收）；
+#    worker 从认领开始，不自己建单（宿主 SKILL.md §0b 可复制清单第 1 步）。
+W --kind issue --id <thread> --actor <coordinator> \
+  --body '{"title":"<标题>","body":"目标 / 角色 / owner / 可机器检查的验收"}' \
+  --key ~/.walgit/keys/<coordinator>.ed25519 --push origin
 
-# 2) 建单即认领：issue 之后必须补一条带 owner 的 status，否则看板上是「未分配 open」
-W --kind status --id <thread> --actor <principal> --parent <issue-oid> \
-  --body '{"status":"in-progress","owner":"<principal>","worktree":"wt-<thread>","branch":"feat/<thread>","work":"<一句话计划>"}' \
-  --key ~/.walgit/keys/<principal>.ed25519 --push origin
+# 2) worker 认领：issue 之后必须补一条带 owner 的 status，否则看板上是「未分配 open」
+W --kind status --id <thread> --actor <worker> --parent <issue-oid> \
+  --body '{"status":"in-progress","owner":"<worker>","worktree":"wt-<thread>","branch":"feat/<thread>","work":"<一句话计划>"}' \
+  --key ~/.walgit/keys/<worker>.ed25519 --push origin
 
 # 3) 在 worktree 里干活（基于 origin/main 开，一个单元一个 worktree/branch）
 git worktree add ../aerodesk-wt-<thread> -b feat/<thread> origin/main
