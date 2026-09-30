@@ -91,13 +91,12 @@ W --kind review --id <thread> --actor <reviewer> --parent <status-oid> \
 
 # 6) 合并并在线程里收尾（协调者；先本地 fast-forward，再推 origin）
 git switch main && git merge --ff-only feat/<thread> && git push origin main
+# 合并只记一条 merge_result：它同时记录 oid 并把卡片移到 merged（宿主 SKILL.md §0b）。
+# 不要再写第二条只带 merged:true 的条目。
 W --kind merge_result --id <thread> --actor <coordinator> --parent <review-oid> \
-  --body '{"oid":"<merged-oid>","result":"merged","note":"<合并说明>"}' \
+  --body '{"merged":true,"oid":"<merged-oid>","result":"merged","note":"<合并说明 + 结项摘要>"}' \
   --key ~/.walgit/keys/<coordinator>.ed25519 --push origin
-W --kind merge_result --id <thread> --actor <coordinator> --parent <merge-oid> \
-  --body '{"merged":true,"oid":"<merged-oid>","note":"<结项摘要>"}' \
-  --key ~/.walgit/keys/<coordinator>.ed25519 --push origin
-W --kind status --id <thread> --actor <coordinator> --parent <merged-entry-oid> \
+W --kind status --id <thread> --actor <coordinator> --parent <merge-result-oid> \
   --body '{"status":"closed","owner":"<coordinator>","worktree":"wt-<thread>","branch":"main","work":"已合并并通过验证"}' \
   --key ~/.walgit/keys/<coordinator>.ed25519 --push origin
 
