@@ -114,9 +114,10 @@ worktree 起步、独立审查后才合并、改行为/命令同步改文档。
 `~/.walgit/mirror/aerodesk.git`，每轮两件事：
 
 1. `fetch origin --prune`（walgit → 镜像），refspec = `+refs/heads/*:refs/heads/*` +
-   `+refs/tags/*:refs/tags/*`——**fetch 侧有意不收窄**：镜像仓保留 walgit 全部 heads 的完整快照，
-   `-Status` 的「未发布分支」清单与 `-Prune` 的差集都建立在它之上。这些本地分支副本不参与推送，
-   永远不会出现在 GitHub 上；若把 fetch 也收窄到 main，差集会退化成「远端有就删」，反而更危险。
+   `+refs/tags/*:refs/tags/*`（镜像仓保留 walgit refs 的完整快照）；发布集合只是其中的 main +
+   tags。差集 = GitHub 真实 refs − 本地 refs，因此 `-Status` 的 GitHub-only refs 清单**恰好**
+   就是 `-Prune` 的删除集；反过来，walgit 上未发布的在途分支不在 GitHub 上，本来就不需要
+   （也不应该）出现在那份清单里。
 2. `push github`（镜像 → GitHub），refspec = `+refs/heads/main:refs/heads/main` +
    `+refs/tags/*:refs/tags/*`，默认带 `+` 强制覆盖（纯镜像语义：GitHub 只是副本，不接受任何只
    存在于 GitHub 的提交；需要「有分叉就报错」时加 `-NoForce`）。**只推 main 一个分支**：walgit
@@ -125,9 +126,8 @@ worktree 起步、独立审查后才合并、改行为/命令同步改文档。
 推送**默认不删** GitHub 侧独有的 ref；`-Prune` 才让镜像与 walgit 完全对齐。注意 `-Prune` 的实现
 **不是** `git push --prune`：收窄 refspec 之后 `--prune` 只覆盖 refspec 命中的目的 ref（main 与
 tags），**再也删不掉 GitHub 上 walgit 没有的分支**。所以脚本改为先 `ls-remote github` 取远端真实
-ref 列表，与镜像仓本地 heads+tags（= walgit 的完整快照）求差集，差集非空时对每个 ref 执行显式删除；
-远端不可达、`ls-remote` 查询为空、或差集为空时都不删任何东西。差集清单先看 `-Status`，它同时是
-预览和删除依据。
+ref 列表，与镜像仓本地 refs（= 发布集合 main + tags）求差集，差集非空时对每个 ref 执行显式删除；
+远端不可达、`ls-remote` 查询为空、或差集为空时都不删任何东西。差集清单先看 `-Status`，它同时是预览和删除依据。
 
 ```powershell
 pwsh -File scripts/github-mirror.ps1 -Once          # 手动同步一轮（发布驱动的常规入口）
