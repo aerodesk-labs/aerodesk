@@ -32,10 +32,11 @@
 - walgit 在回环上，不要被代理接管：必要时 `-c http.proxy=` 或 `NO_PROXY=127.0.0.1,localhost`。
 - 本机 git 经 Clash 代理访问 GitHub 时端口会漂移（`7890`/`7897` 都出现过），不要把端口写死进
   git 配置；镜像脚本按次探测，手动访问时用 `-c http.proxy=http://127.0.0.1:<当前端口>`。
-- walgit CLI 用**安装版**：`C:\Users\gxh\AppData\Local\Programs\walgit\walgit.exe`。
-  `walgit` 不在 PATH 上，调用时写全路径；配置仍是 `~/.walgit/walgit.toml`，key 在 `~/.walgit/keys/`。
-  服务、托盘、service-host 都在同一个安装目录里，别去 `~/.walgit/` 找二进制。
-- `C:\Users\gxh\walgit\walgit.exe` 是 **2026-09-19 遗留的孤立旧副本（v0.7.7-accept）**，不要拿它
-  当 CLI。用它跑 `walgit service status` 会误报「端口上在跑的是 v0.8.7，而本二进制是
-  v0.7.7-accept：很可能是升级前的老进程没退」并建议 stop + start —— **该诊断是错的**（跑着的
-  是新版，老的是磁盘上另一个文件的副本），照做解决不了任何问题。
+- walgit CLI 用**安装版**：PowerShell 里 `$env:LOCALAPPDATA\Programs\walgit\walgit.exe`，
+  cmd 里 `%LOCALAPPDATA%\Programs\walgit\walgit.exe`。`walgit` 不在 PATH 上，调用时写全路径；
+  配置仍是 `~/.walgit/walgit.toml`，key 在 `~/.walgit/keys/`。服务、托盘、service-host 都在同一个
+  安装目录里；别去 `~/.walgit/` 找 CLI/服务二进制（那里只有 updater 的安装包）。
+- `$env:USERPROFILE\walgit\walgit.exe` 是 **2026-09-19 遗留的孤立旧副本（v0.7.7-accept）**，不要
+  拿它当 CLI（本机路径，换机需更新）。用它跑 `walgit service status` 会误报「端口上在跑的是
+  v0.8.7，而本二进制是 v0.7.7-accept：很可能是升级前的老进程没退」并建议 stop + start ——
+  **该诊断是错的**（跑着的是新版，老的是磁盘上另一个文件的副本），照做解决不了任何问题。
