@@ -7,9 +7,15 @@
 # 投影规则（逐字段继承）：status 取最新一条带字符串 `status` 的 status 条目
 # （`merge_result {"merged":true}` 也可把卡片置成 merged）；owner / worktree / branch / work
 # 各自取最新一条写了该字段的 status 条目，缺字段继承旧值，显式空字符串清除。
-# 只写 `issue` 根条目、没有 `status` 的线程 → 未分配 open 卡片。
-# 因此**建单即认领**：issue 之后立刻补一条带 owner 的 status；纯待办也要 owner，
-# 用 blocked / needs-human 表达。评论里写 owner 不算数。
+# 只写 `issue` 根条目、没有 `status` 的线程 → 未分配 open 卡片（投影默认即 open + owner 空）。
+# 纯 backlog 可以就停在 open，不必为了"有主"而补 status；真正开工时才**建单即认领**：
+# issue 之后立刻补一条带 owner 的 status（owner 由协调者建卡或 worker 认领时命名），
+# 评论里写 owner 不算数。
+#
+# status 语义（与宿主 SKILL.md §3 一致，勿回退）：
+#   needs-human 仅限**授权 / 优先级 / 外部输入**这三类只有人能给的东西；
+#   能由 owner 判的技术或产品取舍**必须判掉**，把判断与证据记进 comment 并执行——
+#   把可判问题挂起来是停滞，不是状态（"Parking a decidable question is a stall, not a status"）。
 #
 # 流程与角色约定见 docs/WALGIT.md。
 
