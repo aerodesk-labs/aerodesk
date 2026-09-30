@@ -129,6 +129,10 @@ tags），**再也删不掉 GitHub 上 walgit 没有的分支**。所以脚本�
 ref 列表，与镜像仓本地 refs（= 发布集合 main + tags）求差集，差集非空时对每个 ref 执行显式删除；
 远端不可达、`ls-remote` 查询为空、或差集为空时都不删任何东西。差集清单先看 `-Status`，它同时是预览和删除依据。
 
+还有一条边界要记住：删除依据是「镜像仓本地 refs = walgit 的发布集合」，所以本地快照不完整时
+**整体拒绝**：远端有 tag 而本地一个 tag 都没有（walgit 的 tags 全没了？），或本地缺
+`refs/heads/main`，`-Prune` 都会报错退出、不删任何东西——这些 tag / 分支删掉不可恢复。
+
 ```powershell
 pwsh -File scripts/github-mirror.ps1 -Once          # 手动同步一轮（发布驱动的常规入口）
 pwsh -File scripts/github-mirror.ps1                # 前台常驻循环（Ctrl+C 退出；仅调试）

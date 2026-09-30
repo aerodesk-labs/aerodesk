@@ -47,8 +47,8 @@
   再也覆盖不到其它分支。改为先 `ls-remote github` 取远端真实 ref 列表，与镜像仓本地 refs
   （= main + tags 的发布集合）求差集，差集非空时对每个 ref 执行显式删除。
   远端不可达、查询为空、或没有任何 GitHub-only ref 时，都不会删除任何东西。
-  **护栏**：远端有 tag 而镜像仓一个本地 tag 都没有时，拒绝执行 prune
-  （本地快照看起来不完整时绝不拿它当删除依据）。
+  **护栏**：远端有 tag 而镜像仓一个本地 tag 都没有、或镜像仓缺 refs/heads/main 时，
+  拒绝执行 prune（本地快照看起来不完整时绝不拿它当删除依据）。
   注意 `-Prune` 删的是「不在发布集合里的 ref」= GitHub 真实 refs − 发布集合（main + tags），
   **不只是**「GitHub 有、walgit 没有」的那些：非 main 分支只要出现在 GitHub 上就会被删掉，
   哪怕它同时还在 walgit 里；要保住它只能先把它加进发布集合。
@@ -286,6 +286,10 @@ function Invoke-MirrorCycle {
         $localTags = @($localNames | Where-Object { $_ -match '^refs/tags/' })
         if ($remoteTags.Count -gt 0 -and $localTags.Count -eq 0) {
             Write-MirrorLog "prune 护栏：GitHub 有 $($remoteTags.Count) 个 tag 而本地一个都没有（walgit 的 tags 全没了？），拒绝执行 prune——这些 tag 删掉不可恢复" 'ERROR'
+            return $false
+        }
+        if ($localNames -notcontains 'refs/heads/main') {
+            Write-MirrorLog 'prune 护栏：镜像仓本地没有 refs/heads/main（walgit 缺 main），本地快照不完整，拒绝执行 prune' 'ERROR'
             return $false
         }
     }
