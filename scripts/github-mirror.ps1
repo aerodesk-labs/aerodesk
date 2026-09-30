@@ -50,7 +50,8 @@
   （= main + tags 的发布集合）求差集，差集非空时对每个 ref 执行显式删除。
   远端不可达、查询为空、或没有任何 GitHub-only ref 时，都不会删除任何东西。
   **护栏**：远端有 tag 而镜像仓一个本地 tag 都没有、或镜像仓缺 refs/heads/main 时，
-  拒绝执行 prune（本地快照看起来不完整时绝不拿它当删除依据）。
+  本地快照不完整，**整轮同步直接失败**（exit 1，本轮既不推送也不删除）——绝不拿不完整的
+  快照当删除依据，也不在半信半疑的状态下推送。
   注意 `-Prune` 删的是「不在发布集合里的 ref」= GitHub 真实 refs − 发布集合（main + tags），
   **不只是**「GitHub 有、walgit 没有」的那些：非 main 分支只要出现在 GitHub 上就会被删掉，
   哪怕它同时还在 walgit 里；要保住它只能先把它加进发布集合。
@@ -281,9 +282,9 @@ function Invoke-MirrorCycle {
         }
     }
 
-    # -Prune 的护栏放在 push **之前**（它保护的是随后的删除，不是推送）。删除依据是
-    # 「镜像仓本地 refs = 发布集合」，本地快照不完整时会整体误删，所以本地缺 main、
-    # 或远端有 tag 而本地一个 tag 都没有时，整轮直接失败、不做任何删除。
+    # -Prune 的护栏：删除依据是「本地快照 = 发布集合」，快照不完整时会整体误删、且远端 tag
+    # 删掉不可恢复，所以两条护栏命中时**整轮同步直接失败**（exit 1：本轮既不推送也不删除）。
+    # 刻意放在 push 之前：宁可这一轮什么都不做，也不在一份坏的快照上做任何远端写操作。
     $remoteNames = $null
     if ($Prune) {
         $remoteNames = Get-RemoteRefNames
@@ -291,11 +292,14 @@ function Invoke-MirrorCycle {
         $remoteTags = @($remoteNames.Keys | Where-Object { $_ -match '^refs/tags/' })
         $localTags = @($publish | Where-Object { $_ -match '^refs/tags/' })
         if ($remoteTags.Count -gt 0 -and $localTags.Count -eq 0) {
-            Write-MirrorLog "prune 护栏：GitHub 有 $($remoteTags.Count) 个 tag 而本地一个都没有（walgit 的 tags 全没了？），拒绝执行 prune——这些 tag 删掉不可恢复" 'ERROR'
+            Write-MirrorLog "prune 护栏：GitHub 有 $($remoteTags.Count) 个 tag 而本地一个都没有（walgit 的 tags 全没了？），整轮同步失败——本轮不推送也不删除，这些 tag 删掉不可恢复" 'ERROR'
             return $false
         }
+        # 可达性：walgit 缺 main 时，上面的 fetch（显式 refspec +refs/heads/main:…）会先以
+        # exit 128 失败，所以这条护栏在当前实现下经 CLI 走不到；保留它作为 fetch refspec
+        # 将来变化时的兜底（成本极低，且后果太重不值得只靠「fetch 会先失败」来兜）。
         if ($publish -notcontains 'refs/heads/main') {
-            Write-MirrorLog 'prune 护栏：镜像仓本地没有 refs/heads/main（walgit 缺 main），本地快照不完整，拒绝执行 prune' 'ERROR'
+            Write-MirrorLog 'prune 护栏：镜像仓本地没有 refs/heads/main（walgit 缺 main），整轮同步失败——本轮不推送也不删除' 'ERROR'
             return $false
         }
     }
