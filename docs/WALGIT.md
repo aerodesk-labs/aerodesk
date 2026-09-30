@@ -121,6 +121,26 @@ walgit --config ~/.walgit/walgit.toml collab report    # 线程/PR/验签/活动
 门禁仍然按 `~/.agents/rules/RULE_*.md`：本地 fmt/clippy/test 为准（CI 仅发版必需）、
 worktree 起步、独立审查后才合并、改行为/命令同步改文档。
 
+### inbox 折叠（`collab gc`，宿主 SKILL.md Housekeeping / D45）
+
+`refs/collab/inbox/*` 是 append-only 的：每条 entry 新增一个 inbox ref，而聚合读
+（`collab ls` / `board` / `report`）要逐个 ref 读，inbox 越大越慢。`walgit collab gc` 把 inbox
+折叠进签名快照 `refs/collab/meta/snapshot` 并剪掉已折叠的 ref；快照 ∪ 尾巴的每次聚合字节一致，
+所以**幂等、可重跑**。
+
+**谁跑、什么时候跑**：由**协调者**在 inbox 涨到约 **50 条**、或每完成一两批时跑一次
+（**不是**必须定期跑的计划任务）：
+
+```sh
+walgit --config ~/.walgit/walgit.toml collab gc --repo . \
+  --actor <coordinator> --key ~/.walgit/keys/<coordinator>.ed25519 --push origin
+```
+
+**症状辨识**：collab 命令变慢（本机实测 70–90 秒）看起来像服务端/网络慢，实际是 inbox 未折叠
+加上本机单次进程启动昂贵——**先 gc，再怀疑网络**。本机 2026-09-30 实测：104 条 inbox refs 时
+`collab ls` 要 69–80 秒；gc 后 inbox=0，`collab ls` 降到 20.95 秒；折叠后 `collab report` 仍
+104/104 verified、看板列不变。
+
 ## 4. 镜像同步（walgit → GitHub，发布驱动）
 
 [`scripts/github-mirror.ps1`](../scripts/github-mirror.ps1)：维护裸镜像仓
