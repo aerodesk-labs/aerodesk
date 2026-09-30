@@ -47,7 +47,9 @@
   cmd 里 `%LOCALAPPDATA%\Programs\walgit\walgit.exe`。`walgit` 不在 PATH 上，调用时写全路径；
   配置仍是 `~/.walgit/walgit.toml`，key 在 `~/.walgit/keys/`。服务、托盘、service-host 都在同一个
   安装目录里；别去 `~/.walgit/` 找 CLI/服务二进制（那里只有 updater 的安装包）。
-- `$env:USERPROFILE\walgit\walgit.exe` 是 **2026-09-19 遗留的孤立旧副本（v0.7.7-accept）**，不要
-  拿它当 CLI（本机路径，换机需更新）。用它跑 `walgit service status` 会误报「端口上在跑的是
-  v0.8.7，而本二进制是 v0.7.7-accept：很可能是升级前的老进程没退」并建议 stop + start ——
-  **该诊断是错的**（跑着的是新版，老的是磁盘上另一个文件的副本），照做解决不了任何问题。
+- `$env:USERPROFILE\walgit\walgit.exe` 是 **2026-09-19 遗留的孤立旧副本（v0.7.7-accept，105.8 MB）**，
+  已于 **2026-09-30 由协调者删除**（删除前扫过进程 / 计划任务 / 注册表 Run 键 / 文本引用 / 快捷方式，
+  均无引用）——不要再去找这个文件。可迁移的教训：`walgit service status` 若报「端口上在跑的是新版，
+  而本二进制是旧版：很可能是升级前的老进程没退」并建议 stop + start，**先别照做**——用
+  `Get-CimInstance Win32_Process -Filter "Name='walgit.exe'"` 看**服务进程实际的 `ExecutablePath`**，
+  再判断到底有没有老进程。
