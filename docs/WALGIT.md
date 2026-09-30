@@ -147,7 +147,7 @@ walgit --config ~/.walgit/walgit.toml collab gc --repo . \
 **症状辨识**：collab 命令变慢（本机实测 70–90 秒）看起来像服务端/网络慢，实际是 inbox 未折叠
 加上本机单次进程启动昂贵——**先 gc，再怀疑网络**。本机 2026-09-30 实测：104 条 inbox refs 时
 `collab ls` 要 69–80 秒；gc 后 inbox=0，`collab ls` 降到 20.95 秒；折叠后 `collab report` 仍
-104/104 verified、看板列不变。
+104/104 verified、看板列不变（以上性能数字为协调者实测，非本批复测）。
 
 ## 4. 镜像同步（walgit → GitHub，发布驱动）
 

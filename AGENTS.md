@@ -30,7 +30,7 @@
   把 append-only inbox 折叠进签名快照 `refs/collab/meta/snapshot`（幂等、可重跑；**不是**必须定期跑的
   计划任务）。**症状辨识**：collab 命令变慢（本机实测 70–90 秒）看着像服务端/网络慢，其实是 inbox
   未折叠 + 本机单次进程启动昂贵——**先 gc，再怀疑网络**。实测 104 条 inbox 时 `collab ls` 要 69–80 秒，
-  gc 后 inbox=0、`collab ls` 降到 20.95 秒，`collab report` 仍 104/104 verified、看板列不变。
+  gc 后 inbox=0、`collab ls` 降到 20.95 秒，`collab report` 仍 104/104 verified、看板列不变（以上性能数字为协调者实测，非本批复测）。
 - 门禁：本地 `cargo fmt --check` / `cargo clippy -- -D warnings` / 相关 `cargo test`；GitHub CI 只在
   发版节点要求全绿（`RULE_CI常规以本地门禁为准仅发版必需.md`）。
 - Conventional Commits，一个提交一个逻辑变更；改动命令、路径或行为时同步更新 README / `docs/`。
