@@ -67,7 +67,8 @@ git fetch origin '+refs/collab/inbox/*:refs/collab/inbox/*' '+refs/collab/meta/*
 命名与沿用按宿主 §0：新 agent 用 `<proj>-worker-N` / `<proj>-reviewer-N` / `<proj>-coordinator`，
 取该角色**已注册的最大编号 +1**；注册前先 `git for-each-ref refs/collab/meta/principals` 看名单，
 若自己已持有其中某个已注册 principal 的 key 就沿用、不要另起新名，也不要复用别人的名字或 key。
-本仓库现有名单：`aerodesk-dev`、`aerodesk-impl`、`aerodesk-verify`、`aerodesk-triage`、
+本仓库现有名单（截至 **2026-09-30**；以 `git for-each-ref refs/collab/meta/principals` 的实时
+结果为准）：`aerodesk-dev`、`aerodesk-impl`、`aerodesk-verify`、`aerodesk-triage`、
 `aerodesk-coord`、`aerodesk-reviewer`、`agent-codex-win`、`aerodesk-worker-1`——它们继续有效，
 不要重复注册。
 
