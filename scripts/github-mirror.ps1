@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  AeroDesk 的 GitHub 镜像同步：walgit 主仓的 heads + tags 单向镜像到 GitHub（发布驱动用 -Once；前台常驻循环仅供调试）。
+  AeroDesk 的 GitHub 镜像同步：walgit 主仓的 main + tags 单向镜像到 GitHub（发布驱动用 -Once；前台常驻循环仅供调试）。
 
 .DESCRIPTION
   canonical 仓库是 walgit（默认 http://127.0.0.1:8081/gqf2008/aerodesk.git）：issue / PR / 看板
@@ -9,11 +9,24 @@
   （默认 ~/.walgit/mirror/aerodesk.git），每轮做两件事：
 
     1. 从 walgit fetch heads + tags（--prune），镜像仓的引用 = walgit 的现状；
-    2. 把同样的 heads + tags push 到 GitHub（默认带 `+` 强制覆盖 = 纯镜像语义）。
+    2. 只把 main + tags push 到 GitHub（默认带 `+` 强制覆盖 = 纯镜像语义）。
 
-  refs/collab/* 永不外流：两端的 refspec 只覆盖 refs/heads/* 与 refs/tags/*。
-  推送默认**不删** GitHub 侧只存在的分支/标签（迁移前的历史 ref 不会被顺手删掉）；
-  要让镜像与 walgit 完全对齐（含删除），显式加 -Prune。
+  **发布范围 = main + tags**（Jev 判定 main_and_tags_only，p=0.970 / c=0.960）：walgit 上其它
+  heads 一概不外流。项目流程要求实现分支先推 walgit 供独立审查，所以「在途分支被顺带发布到
+  公开镜像」是常态风险；push refspec 只列 main，在途分支根本不进推送集合。（审查期实测旧
+  refspec 会尝试推送在途的 fix/mirror-ops，靠 GitHub 500 才没发出去——纯属运气。）
+  refs/collab/* 永不外流：两端 refspec 只覆盖 refs/heads/main、refs/heads/*（fetch）与 refs/tags/*。
+
+  fetch 侧仍为 +refs/heads/*:refs/heads/*：镜像仓需要是 walgit 全部 heads 的完整快照，
+  `-Status` 的「walgit 未发布分支」清单与 `-Prune` 的差集都建立在它之上；这些本地分支副本
+  不参与推送，永远不会出现在 GitHub。
+
+  推送默认**不删** GitHub 侧只存在的分支/标签（迁移前的历史 ref 不会被顺手删掉），也不删
+  其它分支；
+  要让镜像与 walgit 完全对齐（含删除），显式加 -Prune。**收窄 refspec 后 push --prune 只覆盖
+  refspec 命中的目的 ref（main 与 tags），再也删不掉 GitHub 上 walgit 没有的分支**；所以 -Prune
+  不再依赖它：先 `ls-remote` 取远端真实 ref 列表，与镜像仓本地 heads+tags 求差集，再对差集里的
+  每个 ref 执行显式删除（`push github --delete <ref>`）。远端不可达或查询为空时拒绝删除。
 
   代理：GitHub 走本机 Clash 代理，端口会漂移，所以默认自动探测（-ProxyPort >
   AERODESK_GITHUB_PROXY / HTTPS_PROXY 环境变量 > 注册表 ProxyServer > 常见端口探测）；
@@ -22,14 +35,19 @@
 
 .PARAMETER Once
   只跑一轮后退出（发布驱动的常规入口：发 tag / 发版时显式跑一次）。默认是常驻循环（仅调试），Ctrl+C 结束。
+  只推 main + tags，walgit 上的其它 heads 不会外流。
 
 .PARAMETER NoForce
   推送不带 `+`：GitHub 侧一旦有 walgit 没有的提交（例如有人直推 GitHub），
   推送会被拒绝并在日志里报错，而不是被镜像覆盖。
 
 .PARAMETER Prune
-  推送带 `--prune`：删除 GitHub 上 walgit 已经没有的分支/标签，让镜像完全对齐 walgit。
-  默认关闭（迁移前 GitHub 上的历史分支不会被自动删除）；哪些 ref 会被删见 `-Status`。
+  删除 GitHub 上 walgit 已经没有的分支/标签，让镜像与 walgit 完全对齐。默认关闭。
+  **实现不是 push --prune**：收窄后的 push refspec 只命中 main 与 tags，`push --prune`
+  再也覆盖不到其它分支。改为先 `ls-remote github` 取远端真实 ref 列表，与镜像仓本地
+  heads+tags（walgit 的完整快照）求差集，差集非空时对每个 ref 执行显式删除。
+  远端不可达、查询为空、或没有任何 GitHub-only ref 时，都不会删除任何东西。
+  哪些 ref 会被删见 `-Status`。
 
 .PARAMETER InstallTask
   已停用：调用会直接拒绝（GitHub 镜像是发布驱动的，见 docs/WALGIT.md §4；清理历史任务用 -UninstallTask）。
@@ -37,8 +55,12 @@
 .PARAMETER UninstallTask
   注销该计划任务。
 
+.PARAMETER Branch
+  被镜像的分支，默认 main（Jev 判定 main_and_tags_only）。改成别的分支等于改变发布范围，
+  需要重新判定；保留参数只为在离线 harness 里复现同一套逻辑。
+
 .PARAMETER Status
-  打印计划任务状态与最近的镜像日志。
+  打印计划任务状态、发布范围，以及最近的镜像日志与 ref 对齐情况。
 
 .EXAMPLE
   pwsh -File scripts/github-mirror.ps1 -Once          # 手动同步一轮
@@ -52,6 +74,7 @@ param(
     [string]$GithubUrl = 'https://github.com/aerodesk-labs/aerodesk.git',
     [string]$MirrorDir = (Join-Path $env:USERPROFILE '.walgit\mirror\aerodesk.git'),
     [string]$LogFile   = (Join-Path $env:USERPROFILE '.walgit\sync-to-github-aerodesk.log'),
+    [string]$Branch = 'main',
     [int]$ProxyPort = 0,
     [int]$IntervalSeconds = 60,
     [int]$MaxLogBytes = 5242880,
@@ -67,6 +90,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $TaskName = 'walgit-sync-github-aerodesk'
+# 发布范围：只镜像这一个分支（+ 全部 tags）。改它等于改变对外发布范围，先重新判定。
+$script:MirrorBranch = $Branch
 $StateDir = Join-Path $env:USERPROFILE '.walgit'
 $LockFile = Join-Path $StateDir 'sync-to-github-aerodesk.lock'
 $script:ResolvedProxyPort = 0
@@ -195,6 +220,9 @@ function Initialize-Mirror {
     # 同时保证 refs/collab/* 不会进入镜像仓（也就没有机会被推到 GitHub）。
     # **有意**清空 remote.origin.fetch 后只写下面两条：镜像仓里任何自定义 refspec 都会被丢弃，
     # 这是刻意的——镜像仓只允许 heads/tags 单向镜像，不接受别的 ref。
+    # fetch 侧**有意不收窄**：镜像仓要留一份 walgit 全部 heads 的完整快照，`-Status` 的
+    # 「walgit 未发布分支」与 `-Prune` 的差集都靠它。这些本地分支副本不参与推送（push refspec
+    # 只列 main），所以不会外流；收窄 fetch 反而会让差集退化成「远端有就删」，比现在危险。
     # git remote add 会先写一条默认 refspec +refs/heads/*:refs/remotes/origin/*；它不参与推送，
     # 却让镜像仓每轮多维护一份 refs/remotes/origin/*。所以先清空再只写两条
     #（--unset-all 在键不存在时 exit 5，用 -AllowFailure 吃掉），保证每次都是同一组 refspec。
@@ -224,7 +252,7 @@ function Initialize-Mirror {
 }
 
 function Get-MirrorTip {
-    $result = Invoke-Git -Arguments @('-C', $MirrorDir, 'rev-parse', '--verify', '--quiet', 'refs/heads/main') -AllowFailure
+    $result = Invoke-Git -Arguments @('-C', $MirrorDir, 'rev-parse', '--verify', '--quiet', "refs/heads/$($script:MirrorBranch)") -AllowFailure
     if ($result.ExitCode -ne 0 -or $result.Output.Count -eq 0) { return '(none)' }
     return $result.Output[0]
 }
@@ -242,19 +270,42 @@ function Invoke-MirrorCycle {
 
     $force = '+'
     if ($NoForce) { $force = '' }
-    $pushArgs = @('-C', $MirrorDir, 'push', '--porcelain')
-    if ($Prune) { $pushArgs += '--prune' }
-    $pushArgs += @('github', "$($force)refs/heads/*:refs/heads/*", "$($force)refs/tags/*:refs/tags/*")
+    # push refspec 只列 main 一个分支（+ 全部 tags）：walgit 上的其它 heads（在途审查分支等）
+    # 根本不进推送集合，不可能被顺带发布。发布范围变更需重新做语义判定。
+    $pushArgs = @('-C', $MirrorDir, 'push', '--porcelain', 'github',
+                  "$($force)refs/heads/$($script:MirrorBranch):refs/heads/$($script:MirrorBranch)",
+                  "$($force)refs/tags/*:refs/tags/*")
     $push = Invoke-Git -Arguments $pushArgs -ViaProxy -AllowFailure
     if ($push.ExitCode -ne 0) {
         foreach ($line in $push.Output) { Write-MirrorLog "github push: $line" 'ERROR' }
-        Write-MirrorLog "镜像推送失败（GitHub 侧可能有 walgit 没有的提交；要强制覆盖去掉 -NoForce）" 'ERROR'
+        Write-MirrorLog "镜像推送失败（GitHub 侧可能有 walgit 没有的提交，或 main 分叉；要强制覆盖去掉 -NoForce）" 'ERROR'
         return $false
     }
     foreach ($line in $push.Output) {
         if ($line -match 'up to date') { continue }
         if ($line.Trim().Length -eq 0) { continue }
         Write-MirrorLog "github push: $($line.Trim())"
+    }
+    if ($Prune) {
+        # 收窄 refspec 后 push --prune 只能覆盖 main/tags 这些命中的目的 ref，删不掉 GitHub 上
+        # walgit 没有的分支；所以 -Prune 改为显式删除：远端真实 ref 列表 − 镜像仓本地 heads+tags。
+        # 取列表失败/为空时 Get-GithubOnlyRefs 会抛错，这里就地变成一轮失败，绝不盲删。
+        $only = @(Get-GithubOnlyRefs)
+        if ($only.Count -eq 0) {
+            Write-MirrorLog 'prune: 没有 GitHub-only ref，无需删除'
+        } else {
+            Write-MirrorLog "prune: 删除 $($only.Count) 个 GitHub-only ref"
+            $deleteArgs = @('-C', $MirrorDir, 'push', '--porcelain', 'github', '--delete') + $only
+            $delete = Invoke-Git -Arguments $deleteArgs -ViaProxy -AllowFailure
+            foreach ($line in $delete.Output) {
+                if ($line.Trim().Length -eq 0) { continue }
+                Write-MirrorLog "github prune: $($line.Trim())"
+            }
+            if ($delete.ExitCode -ne 0) {
+                Write-MirrorLog 'prune 删除失败（远端可能已变化，下一轮会重算差集）' 'ERROR'
+                return $false
+            }
+        }
     }
     return $true
 }
@@ -293,6 +344,7 @@ function Show-MirrorStatus {
     Write-Host "mirror dir      : $MirrorDir"
     Write-Host "walgit remote   : $WalgitUrl"
     Write-Host "github remote   : $GithubUrl"
+    Write-Host "publish scope   : branch refs/heads/$($script:MirrorBranch) + all refs/tags（其余 walgit heads 不发布）"
     $script:ResolvedProxyPort = Resolve-ProxyPort -Explicit $ProxyPort
     Write-Host "proxy port      : $($script:ResolvedProxyPort)"
     Show-GithubOnlyRefs
@@ -302,39 +354,52 @@ function Show-MirrorStatus {
     }
 }
 
+function Get-RemoteRefNames {
+    # 取 GitHub 端真实 ref 列表（heads + tags）。--branches/--tags 限定查询范围（本机 git 2.55 的
+    # usage 只列 --branches，--heads 虽仍生效但已不文档化）；--exit-code 让「没有任何匹配 ref」以
+    # exit 2 结束，从而把「查询结果为空」与「确实没有 GitHub-only ref（0 个）」区分开——这条清单
+    # 既是 -Status 的对齐预览，也是 -Prune 的删除依据，假绿灯等于把安全网关掉。
+    # 失败一律抛错：调用方（-Status 打印、-Prune 删除）都不允许在「远端不可达」时把空集当成对齐。
+    $query = Invoke-Git -Arguments @('-C', $MirrorDir, 'ls-remote', '--branches', '--tags', '--exit-code', 'github') -ViaProxy -AllowFailure
+    if ($query.ExitCode -eq 2) {
+        throw 'git ls-remote github 查询结果为空——GitHub 侧没有任何 branch/tag 是可疑状态（远端未初始化或不可达），先确认远端再操作'
+    }
+    if ($query.ExitCode -ne 0) {
+        $tail = ($query.Output | Select-Object -Last 3) -join ' | '
+        throw "git ls-remote github 失败（exit $($query.ExitCode)）：$tail"
+    }
+    if (@($query.Output).Count -eq 0) {
+        throw 'git ls-remote github 退出码 0 却没有任何 ref——结果不可信，拒绝继续'
+    }
+    $names = @{}
+    foreach ($line in $query.Output) {
+        $parts = $line -split '\s+', 2
+        if ($parts.Count -eq 2 -and $parts[1] -notmatch '\^\{\}$') { $names[$parts[1]] = $true }
+    }
+    return $names
+}
+
+function Get-GithubOnlyRefs {
+    # 「GitHub 上有、walgit 没有」的 ref = 远端真实 ref 列表 − 镜像仓本地 heads+tags。
+    # 镜像仓本地 heads 是 walgit 全部 heads 的快照（fetch 侧不收窄），所以这个差集就是
+    # 「walgit 已经没有、但 GitHub 上还在」的 ref，正是 -Prune 要删的集合。
+    # 注意：收窄 push refspec 之后，这个集合**不再等于**「GitHub 上所有 walgit 未发布的 ref」——
+    # 比如 walgit 上的在途分支 fix/* 本来就永远不发布，那不是「GitHub-only」。
+    $remoteNames = Get-RemoteRefNames
+    if ($remoteNames.Count -eq 0) { return @() }
+    $local = @((Invoke-Git -Arguments @('-C', $MirrorDir, 'for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/tags')).Output)
+    return @($remoteNames.Keys | Where-Object { $local -notcontains $_ })
+}
+
 function Show-GithubOnlyRefs {
     if (-not (Test-Path -LiteralPath (Join-Path $MirrorDir 'HEAD'))) {
         Write-Host 'github-only refs: 镜像仓还没建（先跑一次 -Once）'
         return
     }
     try {
-        # --branches/--tags 限定查询范围（本机 git 2.55 的 usage 只列 --branches，--heads 虽仍生效
-        # 但已不文档化）；--exit-code 让「没有任何匹配 ref」以 exit 2 结束，从而把「查询结果为空」
-        # 与「确实没有 github-only ref（0 个）」区分开——这条清单是 -Prune 的安全预览，假绿灯等于
-        # 把预览关掉。
-        $query = Invoke-Git -Arguments @('-C', $MirrorDir, 'ls-remote', '--branches', '--tags', '--exit-code', 'github') -ViaProxy -AllowFailure
-        if ($query.ExitCode -eq 2) {
-            Write-Host 'github-only refs: 查询结果为空（可疑）——GitHub 侧没有任何 branch/tag，先确认远端可达再考虑 -Prune'
-            return
-        }
-        if ($query.ExitCode -ne 0) {
-            $tail = ($query.Output | Select-Object -Last 3) -join ' | '
-            throw "git ls-remote 失败（exit $($query.ExitCode)）：$tail"
-        }
-        $remote = $query.Output
-        if (@($remote).Count -eq 0) {
-            Write-Host 'github-only refs: 查询结果为空（可疑）——ls-remote 退出码 0 却没有任何 ref'
-            return
-        }
-        $remoteNames = @{}
-        foreach ($line in $remote) {
-            $parts = $line -split '\s+', 2
-            if ($parts.Count -eq 2 -and $parts[1] -notmatch '\^\{\}$') { $remoteNames[$parts[1]] = $true }
-        }
-        $local = (Invoke-Git -Arguments @('-C', $MirrorDir, 'for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/tags')).Output
-        $onlyRemote = @($remoteNames.Keys | Where-Object { $local -notcontains $_ })
-        Write-Host "github-only refs: $($onlyRemote.Count) 个（-Prune 会删除这些）"
-        foreach ($name in ($onlyRemote | Sort-Object)) { Write-Host "  - $name" }
+        $onlyRemote = @(Get-GithubOnlyRefs | Sort-Object)
+        Write-Host "github-only refs: $($onlyRemote.Count) 个（walgit 没有但 GitHub 上还在；-Prune 会删除这些）"
+        foreach ($name in $onlyRemote) { Write-Host "  - $name" }
     } catch {
         Write-Host "github-only refs: 查询失败（$($_.Exception.Message)）"
     }

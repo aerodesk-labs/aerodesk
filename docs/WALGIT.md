@@ -8,7 +8,7 @@
 | 角色 | 位置 | 说明 |
 |---|---|---|
 | **canonical（真源）** | walgit：`http://127.0.0.1:8081/gqf2008/aerodesk.git`（remote 名 `origin`） | 本机 walgit 服务（Windows 托盘，配置 `~/.walgit/walgit.toml`），桶与 macOS 部署共用，mac 侧同样可见 |
-| **镜像 + 发版** | GitHub：<https://github.com/aerodesk-labs/aerodesk>（remote 名 `github`） | **发布驱动**：发 tag / 发版时显式 `-Once` 单向同步 `heads` + `tags`；承载 Actions CI 与 Release 产物 |
+| **镜像 + 发版** | GitHub：<https://github.com/aerodesk-labs/aerodesk>（remote 名 `github`） | **发布驱动**：发 tag / 发版时显式 `-Once` 单向同步 `main` + `tags`（**只发布 main 一个分支**）；承载 Actions CI 与 Release 产物 |
 | **协作** | walgit `refs/collab/*`（issue / PR / review / 看板 / CI 结果） | 全部是签名条目，读用 `walgit collab ls|thread|pr|board|report`，写用 `walgit collab entry` |
 
 GitHub 侧于 2026-09-19 关闭（`gh api` 实测 `has_issues=false`、`has_wiki=false`、
@@ -16,7 +16,13 @@ GitHub 侧于 2026-09-19 关闭（`gh api` 实测 `has_issues=false`、`has_wiki
 GitHub 只保留 **Actions（CI/发版）** 与 **Releases**。Pull Request 功能 GitHub 不提供关闭开关，
 按项目政策停用（不要再在 GitHub 上开 PR）。
 
-`refs/collab/*` **永不镜像**：镜像脚本两端的 refspec 只覆盖 `refs/heads/*` 与 `refs/tags/*`。
+`refs/collab/*` **永不镜像**：镜像脚本 pull 侧只覆盖 `refs/heads/*` 与 `refs/tags/*`，push 侧只覆盖
+`refs/heads/main` 与 `refs/tags/*`。
+
+**发布范围 = main + tags，walgit 上的其它 heads 一概不外流**（Jev 判定 `main_and_tags_only`，
+p=0.970 / c=0.960）。项目流程要求实现分支先推 walgit 供独立审查，所以「在途分支被顺带发布到
+公开镜像」是常态风险而不是意外：审查期实测旧 refspec 会尝试把在途的 `fix/mirror-ops` 推上去，
+靠 GitHub 返回 500 才没发出去——纯属运气。收窄 push refspec 后这类分支根本不进推送集合。
 
 ## 2. 克隆与日常拉取
 
@@ -105,18 +111,30 @@ worktree 起步、独立审查后才合并、改行为/命令同步改文档。
 ## 4. 镜像同步（walgit → GitHub，发布驱动）
 
 [`scripts/github-mirror.ps1`](../scripts/github-mirror.ps1)：维护裸镜像仓
-`~/.walgit/mirror/aerodesk.git`，每轮 `fetch origin --prune`（walgit → 镜像）后
-`push github`（镜像 → GitHub），refspec 只覆盖 `heads` + `tags`，默认带 `+` 强制覆盖
-（纯镜像语义：GitHub 只是副本，不接受任何只存在于 GitHub 的提交；需要「有分叉就报错」时加
-`-NoForce`）。推送**默认不删** GitHub 侧独有的 ref，`-Prune` 才让镜像与 walgit 完全对齐
-（会删除这些 ref，先看 `-Status` 列出的清单）。
+`~/.walgit/mirror/aerodesk.git`，每轮两件事：
+
+1. `fetch origin --prune`（walgit → 镜像），refspec = `+refs/heads/*:refs/heads/*` +
+   `+refs/tags/*:refs/tags/*`——**fetch 侧有意不收窄**：镜像仓保留 walgit 全部 heads 的完整快照，
+   `-Status` 的「未发布分支」清单与 `-Prune` 的差集都建立在它之上。这些本地分支副本不参与推送，
+   永远不会出现在 GitHub 上；若把 fetch 也收窄到 main，差集会退化成「远端有就删」，反而更危险。
+2. `push github`（镜像 → GitHub），refspec = `+refs/heads/main:refs/heads/main` +
+   `+refs/tags/*:refs/tags/*`，默认带 `+` 强制覆盖（纯镜像语义：GitHub 只是副本，不接受任何只
+   存在于 GitHub 的提交；需要「有分叉就报错」时加 `-NoForce`）。**只推 main 一个分支**：walgit
+   上的在途审查分支不会被顺带发布到公开镜像。
+
+推送**默认不删** GitHub 侧独有的 ref；`-Prune` 才让镜像与 walgit 完全对齐。注意 `-Prune` 的实现
+**不是** `git push --prune`：收窄 refspec 之后 `--prune` 只覆盖 refspec 命中的目的 ref（main 与
+tags），**再也删不掉 GitHub 上 walgit 没有的分支**。所以脚本改为先 `ls-remote github` 取远端真实
+ref 列表，与镜像仓本地 heads+tags（= walgit 的完整快照）求差集，差集非空时对每个 ref 执行显式删除；
+远端不可达、`ls-remote` 查询为空、或差集为空时都不删任何东西。差集清单先看 `-Status`，它同时是
+预览和删除依据。
 
 ```powershell
 pwsh -File scripts/github-mirror.ps1 -Once          # 手动同步一轮（发布驱动的常规入口）
 pwsh -File scripts/github-mirror.ps1                # 前台常驻循环（Ctrl+C 退出；仅调试）
 pwsh -File scripts/github-mirror.ps1 -UninstallTask # 清理历史上装过的计划任务
-pwsh -File scripts/github-mirror.ps1 -Status        # 任务状态 + 日志尾部 + GitHub 独有 ref 清单
-pwsh -File scripts/github-mirror.ps1 -Once -Prune   # 完全对齐（删除 GitHub 独有的分支/标签）
+pwsh -File scripts/github-mirror.ps1 -Status        # 任务状态 + 发布范围 + 日志尾部 + GitHub-only ref 清单
+pwsh -File scripts/github-mirror.ps1 -Once -Prune   # 完全对齐（显式删除 GitHub-only 的分支/标签）
 ```
 
 **当前机制是发布驱动**：发 tag / 发版收尾时显式跑一次 `-Once`（见 §5），**不装轮询计划任务**。
@@ -126,11 +144,14 @@ pwsh -File scripts/github-mirror.ps1 -Once -Prune   # 完全对齐（删除 GitH
 
 迁移期 GitHub 上曾留着 13 个 PR 时代的旧分支（`ci/*`、`fix/*`、`release/v0.2.0`、`wip/*`、
 `worktree-wf_*`），它们的提交不在 walgit 里，因此默认保留、不会被镜像覆盖；这批旧分支已于
-2026-09-20 清完，实测 `-Status` 输出 `github-only refs: 0 个`，默认参数下无需再 `-Prune`
-（新分支一律由 walgit 侧决定）。
+2026-09-20 清完。收窄发布范围（2026-09-30）之后 GitHub 侧只剩 `main` 与 tag，`-Status` 的
+`github-only refs` 实测为 0 个，默认参数下无需再 `-Prune`；真要清理时 `-Prune` 走上面说的显式
+差集删除，对分支与标签同样有效（旧 refspec 下的 `push --prune` 已经做不到这件事）。
 
 - 发布驱动：**没有常驻计划任务**（用户 2026-09-20 决定不轮询）。发 tag / 发版时显式跑一次
   `-Once`（见 §5）；`-Once` 与常驻循环都带锁文件防重入，重复触发是幂等的。
+- 发布范围：`main` + 全部 tags。改这个范围（例如把某个分支也推上去）等于改变对外发布契约，
+  先重新做语义判定，不要只改脚本里的 refspec。
 - 日志：`~/.walgit/sync-to-github-aerodesk.log`（超过 5 MiB 自动轮转成 `.log.1`）。
 - 代理：GitHub 走本机 Clash 代理且端口会漂移，脚本按 `-ProxyPort` → `AERODESK_GITHUB_PROXY` /
   `HTTPS_PROXY` → 注册表 `ProxyServer` → 常见端口探测的顺序自动选，并显式用

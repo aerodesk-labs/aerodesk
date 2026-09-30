@@ -9,7 +9,8 @@
   （看板定义 `.walgit/board.toml`，完整流程见 `docs/WALGIT.md`）。
 - **GitHub = 镜像 + 发版**：<https://github.com/aerodesk-labs/aerodesk>，remote 名 `github`。
   **发布驱动**：发 tag / 发版时显式跑一次 `pwsh -File scripts/github-mirror.ps1 -Once`（幂等），
-  把 walgit 的 `heads` + `tags` 单向镜像过去，`refs/collab/*` 永不外流；**不要**用
+  把 walgit 的 `main` + `tags` 单向镜像过去（**只发布 main 一个分支**，walgit 上的在途审查分支
+  不外流），`refs/collab/*` 永不外流；**不要**用
   `-InstallTask` 装每分钟轮询的计划任务（用户 2026-09-20 明令，会闪控制台窗口，脚本已直接拒绝）。
 - GitHub 侧 **Issues / Wiki / Projects / Discussions 已关闭**（PR 保留但按政策停用）。不要直推
   GitHub、不要在 GitHub 开 issue/PR/讨论、不要双推；GitHub 上只存在于一侧的提交会被镜像覆盖。
