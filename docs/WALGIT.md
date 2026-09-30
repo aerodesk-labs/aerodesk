@@ -115,8 +115,8 @@ W --kind merge_result --id <thread> --actor <coordinator> --parent <review-oid> 
 W --kind status --id <thread> --actor <coordinator> --parent <merge-result-oid> \
   --body '{"status":"closed","owner":"<coordinator>","worktree":"wt-<thread>","branch":"main","work":"已合并并通过验证"}' \
   --key ~/.walgit/keys/<coordinator>.ed25519 --push origin
-# 7) 收尾清理（协调者，宿主 SKILL.md §0b）：closure 之后立刻删该卡的 worktree 与分支，
-#    并以 git worktree list 复核它已不在列表里；本地分支合并记录后即可删，远端分支确认已合并后再删
+# 7) 收尾清理（协调者）：宿主 SKILL.md §0b 要求 closure 后删该卡的 worktree 与**本地**分支，
+#    并以 git worktree list 复核；下面的**远端分支删除是本仓附加清理**（确认已合并后执行），宿主未要求。
 git worktree remove ../aerodesk-wt-<thread>
 git branch -d feat/<thread>
 git push origin --delete feat/<thread>
