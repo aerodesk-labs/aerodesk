@@ -19,13 +19,17 @@
 
 ## 开发与验收
 
-- 流程：walgit 建 issue（随后补一条带 owner 的 `status` 认领）→ 基于 `origin/main` 开 worktree →
+- 流程：先同步协作视图（宿主 SKILL.md §0a.5）
+  `git fetch origin '+refs/collab/inbox/*:refs/collab/inbox/*' '+refs/collab/meta/*:refs/collab/meta/*'`
+  → walgit 建 issue（随后补一条带 owner 的 `status` 认领）→ 基于 `origin/main` 开 worktree →
   提交 → `patch` 条目 → `status: needs-review` → 另一个 principal 独立审查 → 合并推 `origin/main` →
   `merge_result` + `status: closed`。
 - 门禁：本地 `cargo fmt --check` / `cargo clippy -- -D warnings` / 相关 `cargo test`；GitHub CI 只在
   发版节点要求全绿（`RULE_CI常规以本地门禁为准仅发版必需.md`）。
 - Conventional Commits，一个提交一个逻辑变更；改动命令、路径或行为时同步更新 README / `docs/`。
-- 一个 agent 一个 principal 一把 key，审查者与被审查者必须是不同 principal。
+- 一个 agent 一个 principal 一把 key，审查者与被审查者必须是不同 principal。命名约定：新 agent 用
+  `<proj>-<role>-N`（取该角色已注册的最大编号 +1），先看 `refs/collab/meta/principals` 再取名；
+  若自己已持有某个已注册 principal 的 key 就沿用该身份（宿主 SKILL.md §0/§0a）。
 
 ## 本机注意事项（Windows）
 
