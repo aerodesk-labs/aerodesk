@@ -17,16 +17,18 @@
   refspec 会尝试推送在途的 fix/mirror-ops，靠 GitHub 500 才没发出去——纯属运气。）
   refs/collab/* 永不外流：两端 refspec 都只覆盖 refs/heads/main 与 refs/tags/*。
 
-  上面两步的 refspec 都是 main + tags：镜像仓的本地 refs 就是发布集合本身，在途审查分支
-  连本地副本都不会有，不可能外流。差集 = GitHub 真实 refs − 本地 refs，因此 `-Status` 的
+  上面两步的 refspec 都是 main + tags：fetch 之后镜像仓的本地 refs 就是发布集合，历史上由宽
+  refspec 留下的非 main 本地分支会在 Initialize-Mirror 里被清掉；在途审查分支既不会被推送，
+  也不会留下本地副本。差集 = GitHub 真实 refs − 发布集合（main + tags），因此 `-Status` 的
   GitHub-only refs 清单**恰好**就是 `-Prune` 的删除集；反过来，walgit 上未发布的在途分支
   不会出现在这份清单里（它不在 GitHub 上，本来也无需删除）。
 
   推送默认**不删** GitHub 侧只存在的分支/标签（迁移前的历史 ref 不会被顺手删掉）。要让镜像与
-  walgit 完全对齐（含删除），显式加 -Prune。**收窄 refspec 后 push --prune 只覆盖 refspec 命中
+  发布集合（main + tags）完全对齐（含删除），显式加 -Prune。**收窄 refspec 后 push --prune 只覆盖 refspec 命中
   的目的 ref（main 与 tags），再也删不掉 GitHub 上 walgit 没有的分支**；所以 -Prune 不再依赖它：
-  先 `ls-remote` 取远端真实 ref 列表，与镜像仓本地 refs 求差集，再对差集里的每个 ref 执行显式
-  删除（`push github --delete <ref>`）。远端不可达、查询为空、或下面护栏命中时一律不删。
+  先 `ls-remote` 取远端真实 ref 列表，与**显式发布集合**（main + 本地 tags）求差集，再对差集里
+  的每个 ref 执行显式删除（`push github --delete <ref>`）。远端不可达、查询为空时不做任何删除；
+  下面护栏命中时整轮失败（既不推送也不删除）。
 
   代理：GitHub 走本机 Clash 代理，端口会漂移，所以默认自动探测（-ProxyPort >
   AERODESK_GITHUB_PROXY / HTTPS_PROXY 环境变量 > 注册表 ProxyServer > 常见端口探测）；
@@ -42,7 +44,7 @@
   推送会被拒绝并在日志里报错，而不是被镜像覆盖。
 
 .PARAMETER Prune
-  删除 GitHub 上 walgit 已经没有的分支/标签，让镜像与 walgit 完全对齐。默认关闭。
+  删除 GitHub 上不在发布集合（main + tags）里的分支/标签，让镜像与发布集合完全对齐。默认关闭。
   **实现不是 push --prune**：收窄后的 push refspec 只命中 main 与 tags，`push --prune`
   再也覆盖不到其它分支。改为先 `ls-remote github` 取远端真实 ref 列表，与镜像仓本地 refs
   （= main + tags 的发布集合）求差集，差集非空时对每个 ref 执行显式删除。
@@ -221,16 +223,25 @@ function Initialize-Mirror {
     # 同时保证 refs/collab/* 不会进入镜像仓（也就没有机会被推到 GitHub）。
     # **有意**清空 remote.origin.fetch 后只写下面两条：镜像仓里任何自定义 refspec 都会被丢弃，
     # 这是刻意的——镜像仓只接受 main + tags 的单向镜像，不接受别的 ref。
-    # fetch 侧与 push 侧同窄（main + tags）：镜像仓的本地 refs 就是发布集合本身，
-    # 在途审查分支连本地副本都不留。Get-GithubOnlyRefs = GitHub 真实 refs − 本地 refs，
-    # 因此 `-Status` 的 GitHub-only refs 清单恰好就是 `-Prune` 的删除集；walgit 上未发布的
-    # 在途分支不在 GitHub 上，本来就不需要（也不应该）出现在这份清单里。
+    # fetch 侧与 push 侧同窄（main + tags）：fetch 之后镜像仓的本地 refs 就是发布集合。
+    # 差集 = 远端 refs − 发布集合，因此 `-Status` 打印的 GitHub-only refs 清单恰好就是
+    # `-Prune` 的删除集；walgit 上未发布的在途分支不在 GitHub 上，本来就不需要（也不应该）
+    # 出现在这份清单里。
     # git remote add 会先写一条默认 refspec +refs/heads/*:refs/remotes/origin/*；它不参与推送，
     # 却让镜像仓每轮多维护一份 refs/remotes/origin/*。所以先清空再只写两条
     #（--unset-all 在键不存在时 exit 5，用 -AllowFailure 吃掉），保证每次都是同一组 refspec。
     Invoke-Git -Arguments @('-C', $MirrorDir, 'config', '--unset-all', 'remote.origin.fetch') -AllowFailure | Out-Null
     foreach ($spec in @('+refs/heads/main:refs/heads/main', '+refs/tags/*:refs/tags/*')) {
         Invoke-Git -Arguments @('-C', $MirrorDir, 'config', '--add', 'remote.origin.fetch', $spec) | Out-Null
+    }
+    # 迁移清理：`git fetch --prune` 只裁剪**当前 refspec 命中**的 ref。历史上宽 refspec
+    # （+refs/heads/*:refs/heads/*）在镜像仓里建出的 refs/heads/<非 main> 不会被新的窄
+    # refspec 裁掉，会让「本地 refs = 发布集合」这个前提在既有镜像仓上为假、并让 -Prune
+    # 漏删远端同名 ref。所以重写 refspec 之后在这里显式删掉 refs/heads 下除 main 以外的
+    # ref（写法与上面清 refs/remotes 一致：for-each-ref → update-ref --no-deref -d）。
+    $branchRefs = Invoke-Git -Arguments @('-C', $MirrorDir, 'for-each-ref', '--format=%(refname)', 'refs/heads') -AllowFailure
+    foreach ($ref in @($branchRefs.Output | Where-Object { $_ -match '^refs/heads/' -and $_ -ne 'refs/heads/main' })) {
+        Invoke-Git -Arguments @('-C', $MirrorDir, 'update-ref', '--no-deref', '-d', $ref) -AllowFailure | Out-Null
     }
     # github 只做 push 目标、从不 fetch；它那条默认 refspec 同样是死状态，一并清掉。
     Invoke-Git -Arguments @('-C', $MirrorDir, 'config', '--unset-all', 'remote.github.fetch') -AllowFailure | Out-Null
@@ -274,17 +285,16 @@ function Invoke-MirrorCycle {
     # 「镜像仓本地 refs = 发布集合」，本地快照不完整时会整体误删，所以本地缺 main、
     # 或远端有 tag 而本地一个 tag 都没有时，整轮直接失败、不做任何删除。
     $remoteNames = $null
-    $localNames = $null
     if ($Prune) {
         $remoteNames = Get-RemoteRefNames
-        $localNames = Get-LocalRefNames
+        $publish = Get-PublishSet
         $remoteTags = @($remoteNames.Keys | Where-Object { $_ -match '^refs/tags/' })
-        $localTags = @($localNames | Where-Object { $_ -match '^refs/tags/' })
+        $localTags = @($publish | Where-Object { $_ -match '^refs/tags/' })
         if ($remoteTags.Count -gt 0 -and $localTags.Count -eq 0) {
             Write-MirrorLog "prune 护栏：GitHub 有 $($remoteTags.Count) 个 tag 而本地一个都没有（walgit 的 tags 全没了？），拒绝执行 prune——这些 tag 删掉不可恢复" 'ERROR'
             return $false
         }
-        if ($localNames -notcontains 'refs/heads/main') {
+        if ($publish -notcontains 'refs/heads/main') {
             Write-MirrorLog 'prune 护栏：镜像仓本地没有 refs/heads/main（walgit 缺 main），本地快照不完整，拒绝执行 prune' 'ERROR'
             return $false
         }
@@ -310,10 +320,12 @@ function Invoke-MirrorCycle {
     }
     if ($Prune) {
         # 收窄 refspec 后 push --prune 只能覆盖 main/tags 这些命中的目的 ref，删不掉 GitHub 上
-        # 不在发布集合里的分支；所以 -Prune 改为显式删除：远端真实 ref 列表 − 镜像仓本地 refs。
+        # 不在发布集合里的分支；所以 -Prune 改为显式删除，删除集由 Get-GithubOnlyRefs =
+        # 远端 refs − 显式发布集合（main + 本地 tags）给出。用显式发布集合而不是「全部本地
+        # refs」，迁移镜像仓里的残留本地分支就不会把删除集缩小（漏删）。
         # 远端列表取不到/为空时 Get-RemoteRefNames 会抛错（护栏在 push 前已调用过一次），
         # 这里就地变成一轮失败，绝不盲删。
-        $only = @($remoteNames.Keys | Where-Object { $localNames -notcontains $_ })
+        $only = @(Get-GithubOnlyRefs)
         if ($only.Count -eq 0) {
             Write-MirrorLog 'prune: 没有 GitHub-only ref，无需删除'
         } else {
@@ -402,21 +414,23 @@ function Get-RemoteRefNames {
     return $names
 }
 
-function Get-LocalRefNames {
-    # 镜像仓本地 refs = 发布集合（fetch 侧同窄：main + tags），也是 -Prune 的保留集；
-    # 差集 = 远端 refs − 本地 refs，即「不在发布集合里的 ref」。
-    return @((Invoke-Git -Arguments @('-C', $MirrorDir, 'for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/tags')).Output)
+
+function Get-PublishSet {
+    # -Prune 的保留集 = 显式发布集合 {refs/heads/main} ∪ {本地 refs/tags}，**不用**全部本地
+    # refs：迁移镜像仓里可能残留宽 refspec 时代的 refs/heads/<非 main>（Initialize-Mirror 会
+    # 清掉，这里再兜一层），若把残留当成发布集合，远端同名 ref 就会漏删。
+    return @('refs/heads/main') + @((Invoke-Git -Arguments @('-C', $MirrorDir, 'for-each-ref', '--format=%(refname)', 'refs/tags')).Output)
 }
 
 function Get-GithubOnlyRefs {
-    # 「不在发布集合里」的 ref = 远端真实 ref 列表 − 镜像仓本地 refs。
-    # 镜像仓本地 refs 就是发布集合（main + tags），所以这个差集正是 -Prune 要删的集合，
-    # 也是 `-Status` 打印的那份 GitHub-only refs 清单——预览与删除用的是同一份数据。
-    # 反向不成立：walgit 上的在途分支（未发布、从未去过 GitHub）不属于这个集合。
+    # 「不在发布集合里」的 ref = 远端真实 refs − 显式发布集合（Get-PublishSet）。
+    # 这个差集正是 -Prune 要删的集合，也是 `-Status` 打印的那份 GitHub-only refs 清单——
+    # 预览与删除用的是同一份数据。反向不成立：walgit 上的在途分支（未发布、从未去过
+    # GitHub）不属于这个集合。
     $remoteNames = Get-RemoteRefNames
     if ($remoteNames.Count -eq 0) { return @() }
-    $local = Get-LocalRefNames
-    return @($remoteNames.Keys | Where-Object { $local -notcontains $_ })
+    $publish = Get-PublishSet
+    return @($remoteNames.Keys | Where-Object { $publish -notcontains $_ })
 }
 
 function Show-GithubOnlyRefs {

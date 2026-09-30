@@ -114,38 +114,39 @@ worktree 起步、独立审查后才合并、改行为/命令同步改文档。
 `~/.walgit/mirror/aerodesk.git`，每轮两件事：
 
 1. `fetch origin --prune`（walgit → 镜像），refspec = `+refs/heads/main:refs/heads/main` +
-   `+refs/tags/*:refs/tags/*`——**fetch 侧与 push 侧同窄**：镜像仓的本地 refs 就是发布集合本身，
-   在途审查分支连本地副本都不会有，不可能外流。差集 = GitHub 真实 refs − 本地 refs，因此
-   `-Status` 的 GitHub-only refs 清单**恰好**就是 `-Prune` 的删除集；反过来，walgit 上未发布的
-   在途分支不在 GitHub 上，本来就不需要（也不应该）出现在那份清单里。
+   `+refs/tags/*:refs/tags/*`——**fetch 侧与 push 侧同窄**：fetch 之后镜像仓的本地 refs 就是
+   发布集合，在途审查分支连本地副本都不会有，不可能外流。**迁移清理**：`git fetch --prune`
+   只裁剪当前 refspec 命中的 ref，所以历史上宽 refspec（`+refs/heads/*`）建出的非 main 本地
+   分支不会被自动裁掉——脚本在重写 refspec 后显式删除 `refs/heads` 下除 main 以外的 ref。
+   差集 = GitHub 真实 refs − 发布集合（main + tags），因此 `-Status` 的 GitHub-only refs 清单
+   **恰好**就是 `-Prune` 的删除集；反过来，walgit 上未发布的在途分支不在 GitHub 上，本来就
+   不需要（也不应该）出现在那份清单里。
 2. `push github`（镜像 → GitHub），refspec = `+refs/heads/main:refs/heads/main` +
    `+refs/tags/*:refs/tags/*`，默认带 `+` 强制覆盖（纯镜像语义：GitHub 只是副本，不接受任何只
    存在于 GitHub 的提交；需要「有分叉就报错」时加 `-NoForce`）。**只推 main 一个分支**：walgit
    上的在途审查分支不会被顺带发布到公开镜像。
 
-推送**默认不删** GitHub 侧独有的 ref；`-Prune` 才让镜像与 walgit 完全对齐。注意 `-Prune` 的实现
+推送**默认不删** GitHub 侧独有的 ref；`-Prune` 才让镜像与发布集合（main + tags）完全对齐。注意 `-Prune` 的实现
 **不是** `git push --prune`：收窄 refspec 之后 `--prune` 只覆盖 refspec 命中的目的 ref（main 与
 tags），**再也删不掉 GitHub 上 walgit 没有的分支**。所以脚本改为先 `ls-remote github` 取远端真实
-ref 列表，与镜像仓本地 refs（= 发布集合 main + tags）求差集，差集非空时对每个 ref 执行显式删除；
-远端不可达、`ls-remote` 查询为空、差集为空、或护栏命中时都不删任何东西。差集清单先看 `-Status`，它同时是预览和删除依据。
-
-两条边界要记住：
+ref 列表，与**显式发布集合**（main + 本地 tags）求差集，差集非空时对每个 ref 执行显式删除；
+远端不可达、`ls-remote` 查询为空、或护栏命中时都不删任何东西。差集清单先看 `-Status`，它同时是预览和删除依据。
 
 两条边界要记住：
 
 - `-Prune` 删掉的是「不在发布集合里的 ref」= GitHub 真实 refs − 发布集合（main + tags），**不只是**
   「GitHub 有、walgit 没有」的那些。因为镜像仓本地只保留发布集合，**非 main 分支只要出现在
   GitHub 上就会被 `-Prune` 删掉——哪怕它同时还在 walgit 里**；要保住它只能先把它加进发布集合。
-- 删除依据是「镜像仓本地 refs = walgit 的发布集合」，所以本地快照不完整时**整体拒绝**：远端有 tag
-  而本地一个 tag 都没有（walgit 的 tags 全没了？），或本地缺 `refs/heads/main`，`-Prune` 都会报错
-  退出、不删任何东西——这些 tag / 分支删掉不可恢复。
+- 删除依据是「本地快照 = 发布集合」，所以快照不完整时**整体拒绝**：远端有 tag 而本地一个 tag 都
+  没有（walgit 的 tags 全没了？），或本地缺 `refs/heads/main`，`-Prune` 都会报错退出、不删任何
+  东西——这些 tag / 分支删掉不可恢复。
 
 ```powershell
 pwsh -File scripts/github-mirror.ps1 -Once          # 手动同步一轮（发布驱动的常规入口）
 pwsh -File scripts/github-mirror.ps1                # 前台常驻循环（Ctrl+C 退出；仅调试）
 pwsh -File scripts/github-mirror.ps1 -UninstallTask # 清理历史上装过的计划任务
 pwsh -File scripts/github-mirror.ps1 -Status        # 任务状态 + 发布范围 + 日志尾部 + GitHub-only ref 清单
-pwsh -File scripts/github-mirror.ps1 -Once -Prune   # 完全对齐（显式删除 GitHub-only 的分支/标签）
+pwsh -File scripts/github-mirror.ps1 -Once -Prune   # 与发布集合完全对齐（显式删除不在发布集合里的 ref）
 ```
 
 **当前机制是发布驱动**：发 tag / 发版收尾时显式跑一次 `-Once`（见 §5），**不装轮询计划任务**。
