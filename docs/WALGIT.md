@@ -113,11 +113,11 @@ worktree 起步、独立审查后才合并、改行为/命令同步改文档。
 [`scripts/github-mirror.ps1`](../scripts/github-mirror.ps1)：维护裸镜像仓
 `~/.walgit/mirror/aerodesk.git`，每轮两件事：
 
-1. `fetch origin --prune`（walgit → 镜像），refspec = `+refs/heads/*:refs/heads/*` +
-   `+refs/tags/*:refs/tags/*`（镜像仓保留 walgit refs 的完整快照）；发布集合只是其中的 main +
-   tags。差集 = GitHub 真实 refs − 本地 refs，因此 `-Status` 的 GitHub-only refs 清单**恰好**
-   就是 `-Prune` 的删除集；反过来，walgit 上未发布的在途分支不在 GitHub 上，本来就不需要
-   （也不应该）出现在那份清单里。
+1. `fetch origin --prune`（walgit → 镜像），refspec = `+refs/heads/main:refs/heads/main` +
+   `+refs/tags/*:refs/tags/*`——**fetch 侧与 push 侧同窄**：镜像仓的本地 refs 就是发布集合本身，
+   在途审查分支连本地副本都不会有，不可能外流。差集 = GitHub 真实 refs − 本地 refs，因此
+   `-Status` 的 GitHub-only refs 清单**恰好**就是 `-Prune` 的删除集；反过来，walgit 上未发布的
+   在途分支不在 GitHub 上，本来就不需要（也不应该）出现在那份清单里。
 2. `push github`（镜像 → GitHub），refspec = `+refs/heads/main:refs/heads/main` +
    `+refs/tags/*:refs/tags/*`，默认带 `+` 强制覆盖（纯镜像语义：GitHub 只是副本，不接受任何只
    存在于 GitHub 的提交；需要「有分叉就报错」时加 `-NoForce`）。**只推 main 一个分支**：walgit
