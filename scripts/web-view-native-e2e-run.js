@@ -168,6 +168,8 @@ function fail(msg) { console.error('E2E FAIL:', msg); process.exit(1); }
 
     // #583 音频断言（不再是 NOTE）：观看页建 audio recvonly transceiver 后，answer 必须含
     // m=audio，且音频轨必须有实际 inbound-rtp 计数——present 只证明协商，计数才证明收到 RTP。
+    // 限定：只证明「音频轨已连通（协商成功 + 有 RTP）」，不证明音质/可听；实测 concealedSamples
+    // 偏高（约 57-62% PLC），成因未定性，另开卡。
     const answerHasAudio = /^m=audio\b/m.test(info.answerSdp || '');
     const audioTrack = (info.receivers || []).some(r => r.kind === 'audio');
     const audioRtp = (info.inbound || []).find(r => r.kind === 'audio');

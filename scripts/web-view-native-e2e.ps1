@@ -7,6 +7,39 @@
 # （Windows = WASAPI loopback，失败回退合成音），断言①-b 检查 answer 含 m=audio 且音频轨
 # 有 inbound-rtp packetsReceived>0。
 #
+# 【#583 边界与已知限制（2026-10-01 复审后补录）】
+# (1) 编解码白名单来源与覆盖（web/sip-viewer.html preferAeroCodecs；全局默认生效）：
+#     白名单 = Chromium 能解码 ∩ AeroDesk 发布端会产出。
+#       视频 H264 —— 可产出：--codec h264（默认；Windows screen / desktop 默认 H264）
+#                    ＋ h264_videotoolbox / h264_mf / libx264 / OpenH264
+#                    （agent main.rs:352-371；aerodesk-session/src/generic_publisher.rs:320-344）；白名单 ✅
+#       视频 VP8  —— 可产出：默认合成源 pcap（publisher_media_loop 直接送 VP8 帧）；白名单 ✅
+#       视频 VP9  —— 可产出：--codec vp9（libvpx-vp9，aerodesk-codec/src/encode.rs:38）；白名单 ✅
+#       视频 AV1  —— 可产出：--codec av1（libsvtav1，encode.rs:39）；白名单 ✅
+#       视频 rtx  —— 重传；白名单 ✅
+#       音频 PCMU —— 可产出：Endpoint enable_pcmu（合成 AudioTicker / 真实系统音频）；白名单 ✅
+#       音频 Opus —— 可产出：enable_opus（--audio-opus / RealAudioSender）；白名单 ✅
+#     **已知限制 H265/HEVC**：发布端会产（--codec h265；**macOS 在 VT HEVC 可用时默认优先
+#     h265**，agent main.rs:349-365；hevc_videotoolbox / hevc_mf / libx265），但 Chromium
+#     WebRTC 不收 H265（本机 headless Edge 实测 getCapabilities('video') 无 video/H265）
+#     ⇒ **macOS 原生发布端默认 HEVC ⇒ Web 观看页协商不出视频**（Windows 默认 H264 正常）。
+#     该限制先于本批存在（裁剪前浏览器同样收不了 H265），非本批引入；卡
+#     web-viewer-macos-hevc-no-video 跟踪。未在 macOS 红检。
+#     **有意收窄（本仓无消费者）**：video/red、video/ulpfec、audio/red、audio/G722、
+#     audio/PCMA、audio/CN、audio/telephone-event(DTMF)——全仓 grep 无引用（复审复核）。
+#     白名单 ≠ 页面全能力；将来若有消费者需要这些，须先扩白名单并重核 8192B 预算。
+# (2) 8192B 是**页面侧绕开、根因未修**：vendored rsipstack UDP 收包缓冲仍 8192B，丢弃超限
+#     datagram 时**无任何日志**（「8192 丢包」是常量+代码+阈值跨界实测的强推断）。将来
+#     offer body 再涨过 8192 会再次整通呼叫失败（隐形悬崖）；根因卡已另开。
+# (3) 本批只证明「音频轨已连通（协商出 m=audio + 有 inbound-rtp RTP）」，**不证明音频
+#     可用/音质**：实测 concealedSamples 偏高（约 57-62% PLC），成因未定性，另开卡。
+# (4) 重连语义：本机用 pwsh/Playwright 窄 harness（自用端口、只杀自有进程）验「断信令 →
+#     重连 → 再收流」——head 页与原版页**同样失败**（单次 1s 重试后停在「连接失败」、无
+#     第二次 REGISTER）⇒ 该缺口先于本批存在、非本批回归；现有 web-reconnect-e2e.sh 的判据
+#     只看 video.readyState 未跌，可能观察不到重连失败。scripts/web-e2e.sh:43 与
+#     scripts/web-reconnect-e2e.sh:48 都加载本页——除上述窄 harness 外，这两个 bash 脚本
+#     本批未在本机跑（Git Bash 起子进程会挂）。
+#
 # 参照：
 #   scripts/web-pub-e2e.sh        —— 本方向的镜像（浏览器被控、CLI 观看）；本脚本方向对调。
 #   scripts/web-edge-e2e-win.ps1  —— Windows 原生 web e2e 样板（进程/清理/日志组织沿用）。

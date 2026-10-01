@@ -205,11 +205,21 @@ function parseResponse(text) {
 // 观看页 offer 的编解码白名单（#583）：Chromium 默认视频就有 ~38 个 payload，加音频后
 // offer SDP 7.7KB；观看端 INVITE body 是 JSON 包装的 SDP（CRLF 转义再 +~0.5KB），经
 // signal 透传到原生被叫端走 SIP/UDP——vendored rsipstack 的 UDP 收包缓冲固定 8192B
-// （vendor/rsipstack/src/transport/connection.rs:68 MAX_UDP_BUF_SIZE），超限 datagram 被丢、
-// 被叫端收不到 INVITE。2026-10-01 实测定位：不裁剪时被叫无 incoming call、主叫 30s 超时；
-// 裁剪到 H264/VP8/VP9/AV1+rtx + PCMU/Opus 后 offer 5.5KB、呼叫恢复。
-// 白名单只含 Chromium 能解码、且 AeroDesk 发布端会产出的编码；rtx 与其 apt 码流相邻
-// （getCapabilities 原顺序满足）。
+// （vendor/rsipstack/src/transport/connection.rs:68 MAX_UDP_BUF_SIZE，udp.rs:95-96 用它
+// 做收包缓冲），超限 datagram 被丢。**丢弃无任何日志**：「8192 丢超限包」由「常量 + 收包
+// 缓冲代码」结合 A/B/C 三态实测（A 原版 6943B 通过、B 只加音频 8198B 零到达、C 裁剪后
+// 5883B 通过）推得，是强推断、非日志直证。
+// **本批只在页面侧绕开，根因未修**：将来任何让 offer body 再涨过 8192 的改动（加编解码/
+// extension/attribute）都会让该方向再次整通呼叫失败（隐形悬崖）；根因卡已另开。
+// 白名单 = 「Chromium 能解码 ∩ AeroDesk 发布端会产出」：视频 H264/VP8/VP9/AV1+rtx、
+// 音频 PCMU/Opus。**已知限制**（对照表见 scripts/web-view-native-e2e.ps1 头注）：
+//   - H265/HEVC：发布端会产（--codec h265；macOS 在 VT HEVC 可用时默认优先 h265），
+//     但 Chromium WebRTC 不收 H265（getCapabilities 无 video/H265）⇒ macOS 默认发布端
+//     的 Web 观看页协商不出视频。该限制先于本批存在（裁剪前浏览器同样收不了 H265），
+//     非本批引入；卡 web-viewer-macos-hevc-no-video 跟踪。
+//   - 有意收窄：video/red、video/ulpfec、audio/red、G722、PCMA、CN、telephone-event(DTMF)
+//     本仓无消费者依赖（全仓 grep 无引用），但不代表白名单 = 页面全能力。
+// rtx 与其 apt 码流相邻（getCapabilities 原顺序满足）。
 function preferAeroCodecs(tx) {
     if (!tx || typeof RTCRtpSender === 'undefined' || !RTCRtpSender.getCapabilities) return;
     const kind = tx.receiver.track.kind;
