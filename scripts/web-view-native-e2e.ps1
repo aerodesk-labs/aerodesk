@@ -8,30 +8,22 @@
 # 有 inbound-rtp packetsReceived>0。
 #
 # 【#583 边界与已知限制（2026-10-01 复审后补录）】
-# (1) 编解码白名单来源与覆盖（web/sip-viewer.html preferAeroCodecs；全局默认生效）：
-#     白名单 = Chromium 能解码 ∩ AeroDesk 发布端会产出。
-#       视频 H264 —— 可产出：--codec h264（默认；Windows screen / desktop 默认 H264）
-#                    ＋ h264_videotoolbox / h264_mf / libx264 / OpenH264
-#                    （agent main.rs:352-371；aerodesk-session/src/generic_publisher.rs:320-344）；白名单 ✅
-#       视频 VP8  —— 可产出：默认合成源 pcap（publisher_media_loop 直接送 VP8 帧）；白名单 ✅
-#       视频 VP9  —— 可产出：--codec vp9（libvpx-vp9，aerodesk-codec/src/encode.rs:38）；白名单 ✅
-#       视频 AV1  —— 可产出：--codec av1（libsvtav1，encode.rs:39）；白名单 ✅
-#       视频 rtx  —— 重传；白名单 ✅
-#       音频 PCMU —— 可产出：Endpoint enable_pcmu（合成 AudioTicker / 真实系统音频）；白名单 ✅
-#       音频 Opus —— 可产出：enable_opus（--audio-opus / RealAudioSender）；白名单 ✅
-#     **已知限制 H265/HEVC**：发布端会产（--codec h265；**macOS 在 VT HEVC 可用时默认优先
-#     h265**，agent main.rs:349-365；hevc_videotoolbox / hevc_mf / libx265），但 Chromium
-#     WebRTC 不收 H265（本机 headless Edge 实测 getCapabilities('video') 无 video/H265）
+# (1) [回退记录] 页面编解码白名单已回退（卡 sip-udp-8192-sdp-cliff）：web/sip-viewer.html 曾用
+#     preferAeroCodecs 把 offer 收窄为视频 H264/VP8/VP9/AV1+rtx、音频 PCMU/Opus，以绕开
+#     vendored rsipstack 的 8192B UDP 收包缓冲；本卡修掉该悬崖（缓冲 8192B→65535B）后裁剪的
+#     唯一承重理由消失，故删除该函数与两次调用——共享页恢复浏览器默认编解码面，此前被有意
+#     收窄掉的 video/red、video/ulpfec、audio/red、G722、PCMA、CN、telephone-event(DTMF) 重新可用。
+#     原白名单覆盖对照表随函数一并作废，不再列于此。
+#     回退红检（未裁剪页）：INVITE body 8198B（pcap+--audio，本卡实测）/ 8195B（screen，终审实测），
+#     均 > 旧 8192B 上限，仍接通（agent incoming call；视频解码帧 >0；音频 PCMU 有包）。
+#     **已知限制 H265/HEVC（与裁剪无关，保留）**：发布端会产（--codec h265；**macOS 在 VT HEVC
+#     可用时默认优先 h265**，agent main.rs:349-365；hevc_videotoolbox / hevc_mf / libx265），但
+#     Chromium WebRTC 不收 H265（本机 headless Edge 实测 getCapabilities('video') 无 video/H265）
 #     ⇒ **macOS 原生发布端默认 HEVC ⇒ Web 观看页协商不出视频**（Windows 默认 H264 正常）。
-#     该限制先于本批存在（裁剪前浏览器同样收不了 H265），非本批引入；卡
-#     web-viewer-macos-hevc-no-video 跟踪。未在 macOS 红检。
-#     **有意收窄（本仓无消费者）**：video/red、video/ulpfec、audio/red、audio/G722、
-#     audio/PCMA、audio/CN、audio/telephone-event(DTMF)——全仓 grep 无引用（复审复核）。
-#     白名单 ≠ 页面全能力；将来若有消费者需要这些，须先扩白名单并重核 8192B 预算。
+#     该限制先于本批存在；卡 web-viewer-macos-hevc-no-video 跟踪。未在 macOS 红检。
 # (2) 8192B 悬崖**已修**（卡 sip-udp-8192-sdp-cliff）：vendored rsipstack UDP 收包缓冲由
 #     8192B 提到最大 UDP 载荷 65535B（>8 KiB 的 INVITE 现可完整收下）；收包侧截断/超限记录
-#     warn（含缓冲容量与实际读到的字节数）。页面侧编解码裁剪仍保留，但**不再是 8 KiB 的必需品**，
-#     降为协商面收窄的优化。
+#     warn（含缓冲容量与实际读到的字节数）。**页面侧编解码裁剪已随之回退**（见 (1)）。
 #     直证（非推断，窄 harness 复用 vendored UdpConnection::serve_loop）：body 8198 → 总 8519B
 #     datagram 在 Windows 上触发 WSAEMSGSIZE(os error 10040) 被丢弃；body 6943（总 7264B）与
 #     body 5883（总 6204B）收到。且原 vendored warn 因 agent 的 RUST_LOG=aerodesk_agent=info

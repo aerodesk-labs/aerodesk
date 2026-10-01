@@ -201,37 +201,19 @@ function parseResponse(text) {
 }
 
 // ---------- WebRTC（非 trickle：#17 同款，候选内联——原生端忽略后到 trickle） ----------
-// 观看页 offer 的编解码白名单（#583）：Chromium 默认视频就有 ~38 个 payload，加音频后
-// offer SDP 7.7KB；观看端 INVITE body 是 JSON 包装的 SDP（CRLF 转义再 +~0.5KB），经
-// signal 透传到原生被叫端走 SIP/UDP。**8192B 悬崖已修**（卡 sip-udp-8192-sdp-cliff）：
-// vendored rsipstack 的 UDP 收包缓冲由 8192B 提到 65535B（最大 UDP 载荷，见 connection.rs
-// MAX_UDP_BUF_SIZE），超限 datagram 不再被丢；收包侧截断/超限记录 warn（含缓冲容量与实际
-// 读到的字节数）。
-// 直证（非推断）：8192B 缓冲下 8198B body（总 8519B）触发 WSAEMSGSIZE(os error 10040) 被
-// 丢弃、6943B/5883B 通过；65535B 缓冲下 8519B/60000B/65507B 全收到、65508B 连 sendto 都
-// 失败（RFC 768 上限）。原「丢弃无任何日志」的直因是 agent 的 RUST_LOG=aerodesk_agent=info
-// 把 rsipstack target 过滤掉了；默认过滤器已开 rsipstack::transport=warn。
-// 页面侧白名单裁剪保留，但**不再是 8 KiB 的必需品**，降为协商面收窄的优化。
-// 白名单 = 「Chromium 能解码 ∩ AeroDesk 发布端会产出」：视频 H264/VP8/VP9/AV1+rtx、
-// 音频 PCMU/Opus。**已知限制**（对照表见 scripts/web-view-native-e2e.ps1 头注）：
-//   - H265/HEVC：发布端会产（--codec h265；macOS 在 VT HEVC 可用时默认优先 h265），
-//     但 Chromium WebRTC 不收 H265（getCapabilities 无 video/H265）⇒ macOS 默认发布端
-//     的 Web 观看页协商不出视频。该限制先于本批存在（裁剪前浏览器同样收不了 H265），
-//     非本批引入；卡 web-viewer-macos-hevc-no-video 跟踪。
-//   - 有意收窄：video/red、video/ulpfec、audio/red、G722、PCMA、CN、telephone-event(DTMF)
-//     本仓无消费者依赖（全仓 grep 无引用），但不代表白名单 = 页面全能力。
-// rtx 与其 apt 码流相邻（getCapabilities 原顺序满足）。
-function preferAeroCodecs(tx) {
-    if (!tx || typeof RTCRtpSender === 'undefined' || !RTCRtpSender.getCapabilities) return;
-    const kind = tx.receiver.track.kind;
-    const names = kind === 'video' ? ['H264', 'VP8', 'VP9', 'AV1', 'rtx'] : ['PCMU', 'opus'];
-    const caps = RTCRtpSender.getCapabilities(kind);
-    if (!caps) return;
-    const want = caps.codecs.filter((c) => names.some((n) => c.mimeType.toLowerCase() === (kind + '/' + n).toLowerCase()));
-    if (!want.length) return;
-    try { tx.setCodecPreferences(want); }
-    catch (e) { log('setCodecPreferences(' + kind + ') 失败，保留默认: ' + e.message); }
-}
+// [回退记录] 本页曾给 offer 加编解码白名单（preferAeroCodecs：视频 H264/VP8/VP9/AV1+rtx、
+// 音频 PCMU/Opus），目的是把 INVITE body 压到 vendored rsipstack 的 8192B UDP 收包缓冲之下，
+// 绕开「超 8192B 整通呼叫静默失败」的悬崖。该根因已由卡 sip-udp-8192-sdp-cliff 修复
+// （收包缓冲 8192B→65535B，超限可观测），裁剪的唯一承重理由消失，故回退：不再调用
+// setCodecPreferences，offer 恢复 Chromium 默认全集（此前被有意收窄掉的 video/red、
+// video/ulpfec、audio/red、G722、PCMA、CN、telephone-event(DTMF) 重新可用）。
+// 回退红检（未裁剪页）：INVITE body 8198B（pcap+--audio，本卡实测）/ 8195B（screen，终审实测），
+// 均 > 旧 8192B 上限，仍接通（agent incoming call；视频解码帧 >0；音频 PCMU 有包）。
+// 详见 scripts/web-view-native-e2e.ps1 头注 (2) 与 docs/SIP_SIGNALING.md。
+// **保留的已知限制（与本裁剪无关）**：H265/HEVC——发布端会产（--codec h265；macOS 在
+// VT HEVC 可用时默认优先 h265），但 Chromium WebRTC 不收 H265（getCapabilities 无
+// video/H265）⇒ macOS 默认发布端的 Web 观看页协商不出视频。该限制先于本批存在，
+// 卡 web-viewer-macos-hevc-no-video 跟踪。
 function setupRtc() {
     rtc = new RTCPeerConnection();
     rtc.oniceconnectionstatechange = () => {
@@ -248,10 +230,8 @@ function setupRtc() {
     // 观看端：recvonly 视频 + recvonly 音频（#583 音频缺口补齐）+ input data channel（键鼠回传）。
     // audio 加在 video 之后：与原生 viewer（add_video_recvonly → add_audio_recvonly）同序，
     // 且保持视频 m-line 的 mid/序号不变（SFU 升级路径按视频 m-line 顺序区分 screen/camera）。
-    const videoTx = rtc.addTransceiver('video', { direction: 'recvonly' });
-    const audioTx = rtc.addTransceiver('audio', { direction: 'recvonly' });
-    preferAeroCodecs(videoTx);
-    preferAeroCodecs(audioTx);
+    rtc.addTransceiver('video', { direction: 'recvonly' });
+    rtc.addTransceiver('audio', { direction: 'recvonly' });
     const input = rtc.createDataChannel('input');
     input.onopen = () => log('input channel open（键鼠回传已接入）');
     rtc.input = input;
