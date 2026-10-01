@@ -2,7 +2,10 @@
 #
 # 方向与既有 e2e 相反：既有脚本覆盖「Web 被控 → 原生/Web 观看」；本脚本覆盖
 # 「headless 浏览器观看端（UAC，REGISTER + Digest）→ INVITE 原生 CLI publisher
-# （SIP UAS）→ 1:1 P2P 媒体 + 键鼠经 data channel 回传」。该方向此前无覆盖。
+# （SIP UAS）→ 1:1 P2P 媒体（视频 + 音频）+ 键鼠经 data channel 回传」。该方向此前无覆盖。
+# 2026-10-01 #583 音频缺口补齐：观看页建 audio recvonly transceiver，publisher 加 --audio
+# （Windows = WASAPI loopback，失败回退合成音），断言①-b 检查 answer 含 m=audio 且音频轨
+# 有 inbound-rtp packetsReceived>0。
 #
 # 参照：
 #   scripts/web-pub-e2e.sh        —— 本方向的镜像（浏览器被控、CLI 观看）；本脚本方向对调。
@@ -200,7 +203,7 @@ try {
     $env:AERO_SIP_PORT = '5060'
     $env:RUST_LOG = 'aerodesk_agent=info'
     $pubSignal = 'ws://' + $lanIp + ':3061'
-    $pub = Start-Process -FilePath (Join-Path $BinDir 'aerodesk-agent.exe') -WindowStyle Hidden -ArgumentList '--role', 'publisher', '--encoder', $PubEncoder, '--signal', $pubSignal, '--room', $Room, '--token', $Token -RedirectStandardOutput "$logDir\pub.log" -RedirectStandardError "$logDir\pub.err" -PassThru
+    $pub = Start-Process -FilePath (Join-Path $BinDir 'aerodesk-agent.exe') -WindowStyle Hidden -ArgumentList '--role', 'publisher', '--encoder', $PubEncoder, '--audio', '--signal', $pubSignal, '--room', $Room, '--token', $Token -RedirectStandardOutput "$logDir\pub.log" -RedirectStandardError "$logDir\pub.err" -PassThru
     if (-not (Wait-Log @('pub') ("SIP registered: " + [regex]::Escape($Room)) 25)) {
         Write-Host "--- pub.err ---"; Get-LogText 'pub' | Select-Object -Last 30
         throw "publisher 未在 25s 内注册（device=$Room）"
@@ -231,6 +234,19 @@ try {
     $fail = 0
     if ($nodeRc -eq 0) { Write-Host "PASS ① 浏览器收到可解码视频轨（video.readyState>=2 且 inbound-rtp framesDecoded>0）且候选对非 relay" }
     else { Write-Host "FAIL ① 浏览器侧未通过（见 runner 输出）"; $fail = 1 }
+
+    # ①-b #583 音频：观看页协商出 m=audio 且音频轨有 inbound-rtp 计数。
+    #     与 ① 同看 $nodeRc，但独立复核——避免 runner 判据被改窄后无人发现。
+    $audioPacketMatch = [regex]::Match($nodeText, 'AUDIO_PACKETS=(\d+)')
+    $audioHasAudio = $nodeText -match 'ANSWER_HAS_AUDIO=true'
+    $audioPresent = $nodeText -match 'AUDIO_TRACK=present'
+    $audioCounted = $audioPacketMatch.Success -and ([int]$audioPacketMatch.Groups[1].Value -gt 0)
+    if ($audioHasAudio -and $audioPresent -and $audioCounted) {
+        Write-Host "PASS ①-b 观看页协商出 m=audio 且音频轨有 inbound-rtp：ANSWER_HAS_AUDIO=true AUDIO_TRACK=present AUDIO_PACKETS=$($audioPacketMatch.Groups[1].Value)>0"
+    } else {
+        Write-Host "FAIL ①-b 音频缺口未补：ANSWER_HAS_AUDIO=$audioHasAudio AUDIO_TRACK=$audioPresent AUDIO_PACKETS=$($audioPacketMatch.Groups[1].Value)"
+        $fail = 1
+    }
 
     if ($pubText -match 'input: seq=') { Write-Host "PASS ② 键鼠输入帧抵达 publisher（pub 日志 input: seq=）" }
     else { Write-Host "FAIL ② publisher 未收到 input 帧"; $fail = 1 }

@@ -7,8 +7,9 @@
 // 环境变量：WEB_SERVE_PORT / ROOM / SIGNAL_URL / TOKEN / VIEWER_DEVICE
 //
 // 输出约定（ps1 侧 grep）：VIDEO_READY= / INPUT_CHANNEL_OPEN= / INPUT_SENT= /
-// PEER_CANDIDATE= / PEER_PORT= / RECEIVERS= / OFFER_MLINES= / ANSWER_MLINES=，
-// 失败时打印 ---PAGELOG--- / ---STATUS--- 现场。退出码：0=浏览器侧全部通过。
+// PEER_CANDIDATE= / PEER_PORT= / RECEIVERS= / OFFER_MLINES= / ANSWER_MLINES= /
+// ANSWER_HAS_AUDIO= / AUDIO_TRACK= / AUDIO_PACKETS= / AUDIO_SAMPLES= / AUDIO_CODEC=，
+// 失败时打印 ---PAGELOG--- / ---STATUS--- 现场。退出码：0=浏览器侧全部通过（含音频断言）。
 const { chromium } = require('playwright-core');
 
 const PORT = process.env.WEB_SERVE_PORT || 38084;
@@ -28,6 +29,8 @@ function fail(msg) { console.error('E2E FAIL:', msg); process.exit(1); }
       '--no-sandbox',
       // 3061 为自签 WSS（RFC 7118）：headless 必须忽略证书错误（与 web-edge-e2e-run.js 同法）。
       '--ignore-certificate-errors',
+      // 音频轨到达后观看页解除静音；headless 无用户手势，放开自动播放策略。
+      '--autoplay-policy=no-user-gesture-required',
     ],
   });
   const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 720 } });
@@ -116,7 +119,7 @@ function fail(msg) { console.error('E2E FAIL:', msg); process.exit(1); }
           if (r.type === 'transport') { if (r.selectedCandidatePairId) selectedId = r.selectedCandidatePairId; if (r.dtlsState) dtlsState = r.dtlsState; }
           if (r.type === 'candidate-pair' && r.state === 'succeeded') pairCount++;
           if (r.type === 'codec') codecs.push({ mimeType: r.mimeType, payloadType: r.payloadType, clockRate: r.clockRate });
-          if (r.type === 'inbound-rtp') inbound.push({ kind: r.kind, ssrc: r.ssrc, packetsReceived: r.packetsReceived, bytesReceived: r.bytesReceived, framesReceived: r.framesReceived, framesDecoded: r.framesDecoded, frameWidth: r.frameWidth, frameHeight: r.frameHeight, codecId: r.codecId });
+          if (r.type === 'inbound-rtp') inbound.push({ kind: r.kind, ssrc: r.ssrc, packetsReceived: r.packetsReceived, bytesReceived: r.bytesReceived, framesReceived: r.framesReceived, framesDecoded: r.framesDecoded, frameWidth: r.frameWidth, frameHeight: r.frameHeight, totalSamplesReceived: r.totalSamplesReceived, concealedSamples: r.concealedSamples, totalAudioEnergy: r.totalAudioEnergy, codecId: r.codecId });
         });
         // inbound-rtp 的 codecId → mimeType（判定协商到的编解码器是否与发布端帧格式一致）。
         stats.forEach(r => { if (r.type === 'inbound-rtp' && r.codecId && byId.get(r.codecId)) { const hit = inbound.find(x => x.ssrc === r.ssrc); if (hit) hit.mimeType = byId.get(r.codecId).mimeType; } });
@@ -163,13 +166,19 @@ function fail(msg) { console.error('E2E FAIL:', msg); process.exit(1); }
     console.log('PEER_PORT=' + (rc ? rc.port : ''));
     console.log('PEER_TYPE=' + (rc ? rc.type : ''));
 
+    // #583 音频断言（不再是 NOTE）：观看页建 audio recvonly transceiver 后，answer 必须含
+    // m=audio，且音频轨必须有实际 inbound-rtp 计数——present 只证明协商，计数才证明收到 RTP。
+    const answerHasAudio = /^m=audio\b/m.test(info.answerSdp || '');
     const audioTrack = (info.receivers || []).some(r => r.kind === 'audio');
+    const audioRtp = (info.inbound || []).find(r => r.kind === 'audio');
+    const audioPackets = audioRtp && typeof audioRtp.packetsReceived === 'number' ? audioRtp.packetsReceived : 0;
+    const audioSamples = audioRtp && typeof audioRtp.totalSamplesReceived === 'number' ? audioRtp.totalSamplesReceived : 0;
+    console.log('ANSWER_HAS_AUDIO=' + answerHasAudio);
     console.log('AUDIO_TRACK=' + (audioTrack ? 'present' : 'absent'));
-    if (!audioTrack) {
-      // 不是静默放过：sip-viewer.html 只建 recvonly video transceiver（无 audio m-line），
-      // offer/answer 协商不出音频——这一条应在结论里如实呈现，而不是当作已验证。
-      console.log('NOTE: sip-viewer.html 未建 audio transceiver，本方向不协商音频（见 ANSWER_MLINES）。');
-    }
+    console.log('AUDIO_PACKETS=' + audioPackets);
+    console.log('AUDIO_SAMPLES=' + audioSamples);
+    console.log('AUDIO_CODEC=' + (audioRtp && audioRtp.mimeType ? audioRtp.mimeType : ''));
+    const audioOk = answerHasAudio && audioTrack && audioPackets > 0;
 
     const noRelay = !!rc && rc.type !== 'relay';
     console.log('NO_RELAY=' + noRelay);
@@ -180,7 +189,7 @@ function fail(msg) { console.error('E2E FAIL:', msg); process.exit(1); }
     console.log('FRAMES_DECODED=' + framesDecoded);
     const decoded = framesDecoded > 0;
     console.log('DECODED=' + decoded);
-    const ok = videoReady && decoded && inputOpen && inputSent > 0 && noRelay;
+    const ok = videoReady && decoded && inputOpen && inputSent > 0 && noRelay && audioOk;
     console.log(ok ? 'RUNNER_PASS' : 'RUNNER_FAIL');
     await dumpPage('end');
     await browser.close();
