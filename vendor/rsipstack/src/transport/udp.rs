@@ -92,8 +92,25 @@ impl UdpConnection {
         sender: TransportSender,
         transport_layer_inner: Option<TransportLayerInnerRef>,
     ) -> Result<()> {
-        let mut buf = BytesMut::with_capacity(MAX_UDP_BUF_SIZE);
-        buf.resize(MAX_UDP_BUF_SIZE, 0);
+        self.serve_loop_with_capacity(sender, transport_layer_inner, MAX_UDP_BUF_SIZE)
+            .await
+    }
+
+    /// Same as serve_loop_with_whitelist but with an explicit receive buffer
+    /// capacity.
+    ///
+    /// Production callers use the default (MAX_UDP_BUF_SIZE); the parameter
+    /// exists so the oversize path stays testable: a datagram at or above the
+    /// capacity cannot be read in full, and on Windows the read fails outright.
+    pub async fn serve_loop_with_capacity(
+        &self,
+        sender: TransportSender,
+        transport_layer_inner: Option<TransportLayerInnerRef>,
+        capacity: usize,
+    ) -> Result<()> {
+        let capacity = capacity.max(1);
+        let mut buf = BytesMut::with_capacity(capacity);
+        buf.resize(capacity, 0);
         loop {
             let (len, addr) = tokio::select! {
                 // Check for cancellation on each iteration
@@ -111,9 +128,26 @@ impl UdpConnection {
                 // Receive UDP packets
                 result = self.inner.conn.recv_from(&mut buf) => {
                     match result {
-                        Ok((len, addr)) => (len, addr),
+                        Ok((len, addr)) => {
+                            // A read that fills the buffer may have been
+                            // truncated (Linux returns the truncated length
+                            // without an error); never drop it silently.
+                            if len >= capacity {
+                                warn!(
+                                    capacity,
+                                    len,
+                                    src = %addr,
+                                    "UDP datagram filled the receive buffer; it may have been truncated"
+                                );
+                            }
+                            (len, addr)
+                        }
                         Err(e) => {
-                            warn!(error = %e, "error receiving UDP packet");
+                            warn!(
+                                error = %e,
+                                capacity,
+                                "error receiving UDP packet (datagram larger than the receive buffer?)"
+                            );
                             continue;
                         }
                     }

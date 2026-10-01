@@ -688,7 +688,7 @@ fn main() {
 fn init_log() {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("aerodesk_signal=info"));
+        .unwrap_or_else(|_| EnvFilter::new("aerodesk_signal=info,rsipstack=warn"));
     tracing_subscriber::registry()
         .with(fmt::layer())
         .with(filter)

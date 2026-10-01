@@ -8,6 +8,9 @@
   **桌面/CLI 原生端直连标准 SIP**——TLS(5061) 默认（信令含 Digest 凭据与 SDP，公网必须加密），
   TCP/UDP(5060) 内网/调试可选。UDP 受 RFC 3261 §18.1.1 MTU 约束：含 data channel m-line +
   DTLS fingerprint 的初始 SDP 即使 trickle 瘦身仍可能超 1300B，**超 MTU 必须切 TCP**。
+  **收包侧无 8 KiB 人工上限**（rsipstack 接收缓冲由 8192B 提到最大 UDP 载荷 65535B）：低于该值的报文
+  可完整收下；截断/超限在收包侧记录 warn（含缓冲容量与实际读到的字节数），不再静默。发送侧「超 MTU
+  切 TCP」仍未实现——大报文经 UDP 在 MTU 不足的路径上仍可能被 IP 分片丢弃，且收包侧观察不到。
   SIP 语义与传输解耦，本规范映射表与传输无关；signal 多传输监听（TLS + WSS），
   Contact 按传输分别绑定（RFC 5626 flow）。rsipstack 原生支持 UDP/TCP/TLS/WS/WSS（S1 已确认）。
 

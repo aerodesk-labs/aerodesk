@@ -65,7 +65,19 @@ pub type TransportSender = UnboundedSender<TransportEvent>;
 
 pub const KEEPALIVE_REQUEST: &[u8] = b"\r\n\r\n";
 pub const KEEPALIVE_RESPONSE: &[u8] = b"\r\n";
-pub const MAX_UDP_BUF_SIZE: usize = 8192;
+/// Maximum UDP receive buffer size.
+///
+/// A UDP datagram is delivered atomically: when the receive buffer is smaller
+/// than the datagram, the kernel either fails the read (WSAEMSGSIZE on
+/// Windows) or silently truncates it (Linux) and the datagram is lost. RFC 768
+/// caps a UDP payload at 65507 bytes (IPv4) / 65527 (IPv6), so a buffer of
+/// 65535 can never truncate a valid datagram.
+///
+/// The former value of 8192 was an artificial cliff: any SIP message whose
+/// serialized form exceeded 8 KiB (e.g. an INVITE whose SDP grew past ~8 KiB)
+/// was dropped by the receiver, and the whole call failed with no observable
+/// error at either endpoint.
+pub const MAX_UDP_BUF_SIZE: usize = 65535;
 
 /// SIP Connection
 ///

@@ -28,9 +28,15 @@
 #     **有意收窄（本仓无消费者）**：video/red、video/ulpfec、audio/red、audio/G722、
 #     audio/PCMA、audio/CN、audio/telephone-event(DTMF)——全仓 grep 无引用（复审复核）。
 #     白名单 ≠ 页面全能力；将来若有消费者需要这些，须先扩白名单并重核 8192B 预算。
-# (2) 8192B 是**页面侧绕开、根因未修**：vendored rsipstack UDP 收包缓冲仍 8192B，丢弃超限
-#     datagram 时**无任何日志**（「8192 丢包」是常量+代码+阈值跨界实测的强推断）。将来
-#     offer body 再涨过 8192 会再次整通呼叫失败（隐形悬崖）；根因卡已另开。
+# (2) 8192B 悬崖**已修**（卡 sip-udp-8192-sdp-cliff）：vendored rsipstack UDP 收包缓冲由
+#     8192B 提到最大 UDP 载荷 65535B（>8 KiB 的 INVITE 现可完整收下）；收包侧截断/超限记录
+#     warn（含缓冲容量与实际读到的字节数）。页面侧编解码裁剪仍保留，但**不再是 8 KiB 的必需品**，
+#     降为协商面收窄的优化。
+#     直证（非推断，窄 harness 复用 vendored UdpConnection::serve_loop）：body 8198 → 总 8519B
+#     datagram 在 Windows 上触发 WSAEMSGSIZE(os error 10040) 被丢弃；body 6943（总 7264B）与
+#     body 5883（总 6204B）收到。且原 vendored warn 因 agent 的 RUST_LOG=aerodesk_agent=info
+#     过滤（EnvFilter 未匹配 target 默认关闭）**不可见**——这才是「零日志」的直因；过滤器已放开
+#     rsipstack=warn。
 # (3) 本批只证明「音频轨已连通（协商出 m=audio + 有 inbound-rtp RTP）」，**不证明音频
 #     可用/音质**：实测 concealedSamples 偏高（约 57-62% PLC），成因未定性，另开卡。
 # (4) 重连语义：本机用 pwsh/Playwright 窄 harness（自用端口、只杀自有进程）验「断信令 →
@@ -237,7 +243,7 @@ try {
     Write-Host "== start native publisher (SIP UAS, device AoR = room)"
     # publisher 的 device_id = --room（agent main.rs:1017）：浏览器 INVITE 同值即 1:1 接通。
     $env:AERO_SIP_PORT = '5060'
-    $env:RUST_LOG = 'aerodesk_agent=info'
+    $env:RUST_LOG = 'aerodesk_agent=info,rsipstack=warn'
     $pubSignal = 'ws://' + $lanIp + ':3061'
     $pub = Start-Process -FilePath (Join-Path $BinDir 'aerodesk-agent.exe') -WindowStyle Hidden -ArgumentList '--role', 'publisher', '--encoder', $PubEncoder, '--audio', '--signal', $pubSignal, '--room', $Room, '--token', $Token -RedirectStandardOutput "$logDir\pub.log" -RedirectStandardError "$logDir\pub.err" -PassThru
     if (-not (Wait-Log @('pub') ("SIP registered: " + [regex]::Escape($Room)) 25)) {
