@@ -36,7 +36,7 @@
 #     datagram 在 Windows 上触发 WSAEMSGSIZE(os error 10040) 被丢弃；body 6943（总 7264B）与
 #     body 5883（总 6204B）收到。且原 vendored warn 因 agent 的 RUST_LOG=aerodesk_agent=info
 #     过滤（EnvFilter 未匹配 target 默认关闭）**不可见**——这才是「零日志」的直因；过滤器已放开
-#     rsipstack=warn。
+#     rsipstack::transport=warn（只开传输层，避免 transaction/dialog 重发场景放大日志）。
 # (3) 本批只证明「音频轨已连通（协商出 m=audio + 有 inbound-rtp RTP）」，**不证明音频
 #     可用/音质**：实测 concealedSamples 偏高（约 57-62% PLC），成因未定性，另开卡。
 # (4) 重连语义：本机用 pwsh/Playwright 窄 harness（自用端口、只杀自有进程）验「断信令 →
@@ -243,7 +243,7 @@ try {
     Write-Host "== start native publisher (SIP UAS, device AoR = room)"
     # publisher 的 device_id = --room（agent main.rs:1017）：浏览器 INVITE 同值即 1:1 接通。
     $env:AERO_SIP_PORT = '5060'
-    $env:RUST_LOG = 'aerodesk_agent=info,rsipstack=warn'
+    $env:RUST_LOG = 'aerodesk_agent=info,rsipstack::transport=warn'
     $pubSignal = 'ws://' + $lanIp + ':3061'
     $pub = Start-Process -FilePath (Join-Path $BinDir 'aerodesk-agent.exe') -WindowStyle Hidden -ArgumentList '--role', 'publisher', '--encoder', $PubEncoder, '--audio', '--signal', $pubSignal, '--room', $Room, '--token', $Token -RedirectStandardOutput "$logDir\pub.log" -RedirectStandardError "$logDir\pub.err" -PassThru
     if (-not (Wait-Log @('pub') ("SIP registered: " + [regex]::Escape($Room)) 25)) {

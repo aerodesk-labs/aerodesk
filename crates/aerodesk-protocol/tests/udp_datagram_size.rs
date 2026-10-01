@@ -126,3 +126,30 @@ fn datagram_below_capacity_is_delivered() {
     let (delivered, _) = probe(Some(8192), 6000);
     assert!(delivered);
 }
+
+/// Pins the production log-filter directive: it must surface the vendored
+/// transport warnings while keeping transaction/dialog chatter out.
+#[test]
+fn production_filter_surfaces_transport_warn_only() {
+    use tracing::Level;
+    let filter = "aerodesk_agent=info,rsipstack::transport=warn";
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let sub = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+        .with_ansi(false)
+        .with_writer(SharedBuf(buf.clone()))
+        .finish();
+    tracing::subscriber::with_default(sub, || {
+        tracing::event!(target: "rsipstack::transport::udp", Level::WARN, "PROBE-udp-warn");
+        tracing::event!(target: "rsipstack::transaction", Level::WARN, "PROBE-tx-warn");
+    });
+    let s = String::from_utf8_lossy(&buf.lock().unwrap()).to_string();
+    assert!(
+        s.contains("PROBE-udp-warn"),
+        "transport warn must be visible: {s}"
+    );
+    assert!(
+        !s.contains("PROBE-tx-warn"),
+        "transaction warn must stay filtered: {s}"
+    );
+}

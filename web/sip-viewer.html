@@ -204,13 +204,15 @@ function parseResponse(text) {
 // ---------- WebRTC（非 trickle：#17 同款，候选内联——原生端忽略后到 trickle） ----------
 // 观看页 offer 的编解码白名单（#583）：Chromium 默认视频就有 ~38 个 payload，加音频后
 // offer SDP 7.7KB；观看端 INVITE body 是 JSON 包装的 SDP（CRLF 转义再 +~0.5KB），经
-// signal 透传到原生被叫端走 SIP/UDP——vendored rsipstack 的 UDP 收包缓冲固定 8192B
-// （vendor/rsipstack/src/transport/connection.rs:68 MAX_UDP_BUF_SIZE，udp.rs:95-96 用它
-// 做收包缓冲），超限 datagram 被丢。**丢弃无任何日志**：「8192 丢超限包」由「常量 + 收包
-// 缓冲代码」结合 A/B/C 三态实测（A 原版 6943B 通过、B 只加音频 8198B 零到达、C 裁剪后
-// 5883B 通过）推得，是强推断、非日志直证。
-// **本批只在页面侧绕开，根因未修**：将来任何让 offer body 再涨过 8192 的改动（加编解码/
-// extension/attribute）都会让该方向再次整通呼叫失败（隐形悬崖）；根因卡已另开。
+// signal 透传到原生被叫端走 SIP/UDP。**8192B 悬崖已修**（卡 sip-udp-8192-sdp-cliff）：
+// vendored rsipstack 的 UDP 收包缓冲由 8192B 提到 65535B（最大 UDP 载荷，见 connection.rs
+// MAX_UDP_BUF_SIZE），超限 datagram 不再被丢；收包侧截断/超限记录 warn（含缓冲容量与实际
+// 读到的字节数）。
+// 直证（非推断）：8192B 缓冲下 8198B body（总 8519B）触发 WSAEMSGSIZE(os error 10040) 被
+// 丢弃、6943B/5883B 通过；65535B 缓冲下 8519B/60000B/65507B 全收到、65508B 连 sendto 都
+// 失败（RFC 768 上限）。原「丢弃无任何日志」的直因是 agent 的 RUST_LOG=aerodesk_agent=info
+// 把 rsipstack target 过滤掉了；默认过滤器已开 rsipstack::transport=warn。
+// 页面侧白名单裁剪保留，但**不再是 8 KiB 的必需品**，降为协商面收窄的优化。
 // 白名单 = 「Chromium 能解码 ∩ AeroDesk 发布端会产出」：视频 H264/VP8/VP9/AV1+rtx、
 // 音频 PCMU/Opus。**已知限制**（对照表见 scripts/web-view-native-e2e.ps1 头注）：
 //   - H265/HEVC：发布端会产（--codec h265；macOS 在 VT HEVC 可用时默认优先 h265），
