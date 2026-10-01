@@ -68,7 +68,6 @@ let phase = 'idle';   // idle | registering | calling | in-call
 let userDisconnected = false;
 let reconnectAttempts = 0;
 const REGISTER_EXPIRES = 120;
-const MAX_RECONNECT = 5;
 
 function log(msg) {
     const el = $('log');
@@ -458,20 +457,22 @@ function bindInputEvents() {
 bindInputEvents();
 
 // ---------- 自动重连（#175：信令断开 → 退避重连，镜像原生 --reconnect） ----------
+// 不设「次数上限即放弃」：连接建立前的失败（onerror，未 open）不会有 onclose，必须在
+// connect() 的 catch 里补排下一次；之后按 1s/2s/4s/8s 退避**持续**重试，直到成功或用户
+// 显式断开（userDisconnected）。reconnectTimer 兼作「已有排期」幂等锁。
+let reconnectTimer = null;
 function scheduleReconnect() {
-    if (userDisconnected) return;
-    if (reconnectAttempts >= MAX_RECONNECT) {
-        log('重连次数超限（' + MAX_RECONNECT + '），停止');
-        return;
-    }
-    const delay = Math.min(1000 << reconnectAttempts, 8000);
+    if (userDisconnected || reconnectTimer) return;
+    // 位运算左移在计数 >=32 时会回绕，故先夹住指数再封顶 8s。
+    const delay = Math.min(1000 << Math.min(reconnectAttempts, 3), 8000);
     reconnectAttempts += 1;
-    log('信令断开，' + (delay / 1000) + 's 后自动重连（' + reconnectAttempts + '/' + MAX_RECONNECT + '）');
-    setTimeout(() => {
-        if (!userDisconnected) {
-            cleanupAll();
-            connect();
-        }
+    log('信令断开，' + (delay / 1000) + 's 后自动重连（第 ' + reconnectAttempts + ' 次）');
+    setStatus('信令断开，' + (delay / 1000) + 's 后自动重连…');
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (userDisconnected) return;
+        cleanupAll();
+        connect();
     }, delay);
 }
 
@@ -540,6 +541,7 @@ async function connect() {
     if (connecting) return;
     connecting = true;
     closed = false;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     $('connect').disabled = true;
     $('disconnect').disabled = false;
     setStatus('连接中…');
@@ -547,12 +549,14 @@ async function connect() {
         const { host, port, scheme } = wsHostPort();
         const wsUrl = `${scheme}//${host}:${port}`;
         setStatus('连接信令 ' + wsUrl + ' …');
-        ws = new WebSocket(wsUrl, 'sip');
-        await new Promise((resolve, reject) => {
-            ws.onopen = resolve;
-            ws.onerror = () => reject(new Error('信令连接失败: ' + wsUrl));
-        });
-        ws.onclose = () => {
+        const sock = new WebSocket(wsUrl, 'sip');
+        ws = sock;
+        // onclose 必须紧接构造就挂（不能像旧代码那样等 await onopen 之后再挂）：连不上的
+        // socket 同样会 close，只有在这里才能观察到它——旧写法让「建立前的失败」既不进
+        // onclose 也不排下一次重连，一轮即永久停摆（本卡缺口）。
+        sock.onclose = () => {
+            if (sock !== ws) return;   // 已被 cleanupAll/新一轮 connect 换掉：忽略迟到事件
+            ws = null;
             // 信令断开后停止注册刷新（60s 定时器），避免在已关闭的 socket 上无限重试。
             if (regTimer) { clearInterval(regTimer); regTimer = null; }
             if (!closed && phase === 'in-call') {
@@ -561,6 +565,10 @@ async function connect() {
             }
             scheduleReconnect();
         };
+        await new Promise((resolve, reject) => {
+            sock.onopen = resolve;
+            sock.onerror = () => reject(new Error('信令连接失败: ' + wsUrl));
+        });
         log('signaling connected: ' + wsTarget());
 
         setStatus('REGISTER…');
@@ -574,9 +582,12 @@ async function connect() {
 
         await dial($('target').value.trim());
     } catch (e) {
-        setStatus('连接失败: ' + e.message);
         log('error: ' + e);
         cleanupAll();
+        setStatus('连接失败: ' + e.message);
+        // 建立前的失败（onerror，未 open）不会触发 onclose ⇒ 不在这里补排就永久停摆。
+        // 用户已点「断开」时由 scheduleReconnect 内的 userDisconnected 守卫挡掉。
+        scheduleReconnect();
     } finally {
         connecting = false;
     }
@@ -587,8 +598,13 @@ function cleanupAll() {
     if (regTimer) { clearInterval(regTimer); regTimer = null; }
     if (rtc) { try { rtc.close(); } catch (_) {} }
     rtc = null;
-    if (ws) { try { ws.close(); } catch (_) {} }
-    ws = null;
+    if (ws) {
+        const sock = ws;
+        ws = null;
+        // 摘除处理器：主动关闭不能被 onclose 当成「意外断开」再排一次重连。
+        sock.onopen = null; sock.onerror = null; sock.onclose = null;
+        try { sock.close(); } catch (_) {}
+    }
     callId = null; toTag = null; phase = 'idle';
     $('video').srcObject = null;
     $('placeholder').style.display = 'flex';
@@ -597,6 +613,7 @@ function cleanupAll() {
 function disconnect() {
     closed = true;
     userDisconnected = true;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     if (phase === 'in-call' || phase === 'calling') {
         try { sendBye(); } catch (_) {}
         log('BYE 已发送');
