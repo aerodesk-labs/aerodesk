@@ -45,15 +45,14 @@
 #   scripts/web-edge-e2e-win.ps1  —— Windows 原生 web e2e 样板（进程/清理/日志组织沿用）。
 #   docs/web-sip-wss-design.md §4.1 —— 候选面实测坑与配方。
 #
-# 【CI 接入】本脚本暂未加入 .github/workflows/ci.yml。主路径 --encoder screen 需要交互桌面
-# 会话，外加预装 Edge + npm 拉 playwright-core——与既有 Windows job「e2e web viewer
-# (Windows Edge)」（scripts/web-edge-e2e-win.ps1）同环境。接入即在 ci.yml 的 Windows 段追加：
-#     - name: e2e web viewer -> native publisher (Windows)
-#       if: runner.os == 'Windows'
-#       shell: pwsh
-#       run: ./scripts/web-view-native-e2e.ps1
-# 本批未提交该 job 的理由：walgit 侧无法触发 GitHub Actions，提交一个未经 CI 实跑的 job 会
-# 绕过「发版节点全绿」口径；是否纳入 Windows job 预算、是否套 ci-retry 属协调者决策。
+# 【CI 接入】已加入 .github/workflows/ci.yml 的 Windows 段（test job，
+# 「e2e web viewer -> native publisher pcap (Windows)」，固定
+# AERODESK_PUB_ENCODER=pcap）——合成源不依赖交互桌面，与既有 Windows job
+# 「e2e web viewer (Windows Edge)」（scripts/web-edge-e2e-win.ps1）同环境
+# （Edge 由 runner 预装，playwright-core 由脚本 npm i）。主路径 --encoder screen
+# 仍需交互桌面会话，只用于本机验收。
+# 能接 CI 的前提是 pcap 路径存在可绿路径：断言①（readyState>=2 且
+# framesDecoded>0）此前恒 FAIL，根因与红检证据见下方 pcap 说明。
 #
 # 【候选面：§4.1 记载的是**偶发场景**，不是本 harness 的普遍关键坑】
 #   design §4.1 原文（docs/web-sip-wss-design.md:141-145）：浏览器**偶发**只通告局域网 IP
@@ -97,21 +96,25 @@ $Token = 'secret'
 # 被控端采集源（默认 screen）：
 #   screen = 真实屏幕采集（连续 H264 流 + 响应 KeyframeRequest，design §4.1 实测 readyState=4）。
 #            需要交互桌面会话（Windows 屏幕采集在 headless/服务会话失败）。
-#   pcap   = 内置合成 VP8 单次流（48 帧）。**实测症状**：本方向下浏览器收得到 RTP 但解不出帧
-#            （INBOUND_RTP framesReceived=47 framesDecoded=0、readyState=0；pub.err 有
-#            loaded 48 VP8 frames / starting stream / stream finished (48 frames)）。
-#            **代码事实（已逐条核对）**：agent 1:1 pcap 媒体循环在 ClientEvent::IceConnected
-#            就置 connected（main.rs:2150-2152）并从 :2179 无条件开送；对照屏幕/通用路径在
-#            ChannelOpen 才置 connected（aerodesk-session/src/generic_publisher.rs:400-403）。
-#            该循环的 match（main.rs:2149-2160）无 KeyframeRequest 分支，落到
-#            handle_publisher_input（main.rs:1832-1890；其 match 以 _ => {} 收尾，全函数 0 处
-#            KeyframeRequest）；对照路径确实响应（generic_publisher.rs:412、main.rs:4469-4479）。
-#            **因果推断（未红检，仅为候选解释）**：IceConnected 早于 DTLS/SRTP 就绪导致首帧
-#            关键帧被丢，且该循环无法补关键帧 ⇒ framesDecoded=0。待验方案：给 pcap 路径补
-#            KeyframeRequest 处理（或改到 ChannelOpen 后再开送 / 循环重播）后再看 framesDecoded
-#            是否 >0。AERODESK_PUB_ENCODER=pcap 目前**必然 FAIL 断言①**（runner 判
-#            readyState>=2 且 framesDecoded>0），只用于复现/诊断该缺口；要单看「RTP 到达」
-#            需自行改判据，本脚本没有它的通过路径。
+#   pcap   = 内置合成 VP8 流（vp8.pcap，修复后解析为 101 帧 / 3 关键帧）。
+#            **根因已定性并修复（2026-10-01）**：本方向 framesDecoded=0 的原因不在发布
+#            时序，而是 aerodesk-core 的 pcap 解析读错 RTP 头扩展长度。旧代码
+#            `12 + cc*4 + rtp[12]`：该 pcap 每个 RTP 包都带 0xBEDE 头扩展，rtp[12] 正是
+#            profile 高字节 0xBE(=190)，被当成扩展字节数，于是负载从真实 payload 中间
+#            切开，产出 48 个无法解码的帧（首帧也不是关键帧）。
+#            红检（真实 Rust 解析器 parse_vp8_pcap 导出 IVF → ffmpeg 解码，不依赖浏览器）：
+#              修复前 frame=0（RC=69，Invalid sync code / Decoding error），
+#                     解析得 48 帧、首帧 keyframe=false；
+#              修复后 frame=101（RC=0），解析得 101 帧、首帧 keyframe=true。
+#            卡片里原先「IceConnected 早于 DTLS/SRTP 就绪导致首帧关键帧被丢、且该循环
+#            无法补关键帧 ⇒ framesDecoded=0」的因果推断据此**证伪**：帧本身不可解，
+#            补 KeyframeRequest / 改开送时机 / 循环重播都救不回来。
+#            附（这些代码事实仍成立，修复后不再是瓶颈）：pcap 媒体循环在
+#            ClientEvent::IceConnected 就置 connected（main.rs:2150-2152）并从 :2179
+#            无条件开送；其 match（main.rs:2149-2160）无 KeyframeRequest 分支，落到
+#            handle_publisher_input（main.rs:1832-1890，match 以 _ => {} 收尾，全函数 0 处
+#            KeyframeRequest）。修复后流内关键帧在第 0/2/5 帧（相邻约 33ms），即便首帧
+#            在 DTLS 就绪前被丢，紧随的关键帧也能让解码器起步。
 $PubEncoder = if ($env:AERODESK_PUB_ENCODER) { $env:AERODESK_PUB_ENCODER } else { 'screen' }
 $WebPort = if ($env:WEB_SERVE_PORT) { [int]$env:WEB_SERVE_PORT } else { 38084 }
 

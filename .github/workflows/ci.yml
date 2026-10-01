@@ -458,6 +458,18 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/web-edge-e2e-win.ps1
+      # #583 反向方向：headless Edge 观看端 → 原生 CLI publisher（SIP UAS）1:1 P2P
+      # （signaling→ICE/DTLS→video track→输入 data channel 回传）。固定合成 pcap 源，
+      # 不依赖交互桌面（区别于 display-switch 的 screen 采集）。
+      # 此前未接 CI 的原因正是 pcap 路径断言①恒 FAIL、不存在可绿路径；根因是
+      # crates/aerodesk-core/src/media.rs 的 pcap 解析读错 RTP 头扩展长度（帧不可解），
+      # 修复后 frame=101（ffmpeg 红检）才有可绿路径。
+      - name: e2e web viewer -> native publisher pcap (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          AERODESK_PUB_ENCODER: pcap
+        run: ./scripts/web-view-native-e2e.ps1
       # #58/#408 显示器切换 CLI 接线回归：viewer --display N → control → publisher 重建。
       # #487 同脚本断言 screen 发布端真出帧（RECEIVED>0）——静屏走 #477 心跳。
       # 采集不可用的 runner 自动 SKIP（与 windows_runtime 容错一致）。
