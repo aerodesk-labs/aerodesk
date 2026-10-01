@@ -202,6 +202,25 @@ function parseResponse(text) {
 }
 
 // ---------- WebRTC（非 trickle：#17 同款，候选内联——原生端忽略后到 trickle） ----------
+// 观看页 offer 的编解码白名单（#583）：Chromium 默认视频就有 ~38 个 payload，加音频后
+// offer SDP 7.7KB；观看端 INVITE body 是 JSON 包装的 SDP（CRLF 转义再 +~0.5KB），经
+// signal 透传到原生被叫端走 SIP/UDP——vendored rsipstack 的 UDP 收包缓冲固定 8192B
+// （vendor/rsipstack/src/transport/connection.rs:68 MAX_UDP_BUF_SIZE），超限 datagram 被丢、
+// 被叫端收不到 INVITE。2026-10-01 实测定位：不裁剪时被叫无 incoming call、主叫 30s 超时；
+// 裁剪到 H264/VP8/VP9/AV1+rtx + PCMU/Opus 后 offer 5.5KB、呼叫恢复。
+// 白名单只含 Chromium 能解码、且 AeroDesk 发布端会产出的编码；rtx 与其 apt 码流相邻
+// （getCapabilities 原顺序满足）。
+function preferAeroCodecs(tx) {
+    if (!tx || typeof RTCRtpSender === 'undefined' || !RTCRtpSender.getCapabilities) return;
+    const kind = tx.receiver.track.kind;
+    const names = kind === 'video' ? ['H264', 'VP8', 'VP9', 'AV1', 'rtx'] : ['PCMU', 'opus'];
+    const caps = RTCRtpSender.getCapabilities(kind);
+    if (!caps) return;
+    const want = caps.codecs.filter((c) => names.some((n) => c.mimeType.toLowerCase() === (kind + '/' + n).toLowerCase()));
+    if (!want.length) return;
+    try { tx.setCodecPreferences(want); }
+    catch (e) { log('setCodecPreferences(' + kind + ') 失败，保留默认: ' + e.message); }
+}
 function setupRtc() {
     rtc = new RTCPeerConnection();
     rtc.oniceconnectionstatechange = () => {
@@ -215,15 +234,28 @@ function setupRtc() {
         }
     };
     rtc.onicecandidate = () => { /* 非 trickle：candidate 内嵌 SDP，等 gathering 完成 */ };
-    // 观看端：recvonly 视频 + input data channel（键鼠回传）。
-    rtc.addTransceiver('video', { direction: 'recvonly' });
+    // 观看端：recvonly 视频 + recvonly 音频（#583 音频缺口补齐）+ input data channel（键鼠回传）。
+    // audio 加在 video 之后：与原生 viewer（add_video_recvonly → add_audio_recvonly）同序，
+    // 且保持视频 m-line 的 mid/序号不变（SFU 升级路径按视频 m-line 顺序区分 screen/camera）。
+    const videoTx = rtc.addTransceiver('video', { direction: 'recvonly' });
+    const audioTx = rtc.addTransceiver('audio', { direction: 'recvonly' });
+    preferAeroCodecs(videoTx);
+    preferAeroCodecs(audioTx);
     const input = rtc.createDataChannel('input');
     input.onopen = () => log('input channel open（键鼠回传已接入）');
     rtc.input = input;
     rtc.ontrack = (e) => {
         const video = $('video');
-        video.srcObject = e.streams[0] || new MediaStream([e.track]);
-        video.play().catch(() => {});
+        // 单条 MediaStream 累积全部远端轨：audio 与 video 是两次独立 ontrack，
+        // 若各自新建 stream 覆盖 srcObject 会互相顶掉（先到的轨被封掉）。
+        const stream = (video.srcObject instanceof MediaStream) ? video.srcObject : new MediaStream();
+        if (!stream.getTracks().some((t) => t.id === e.track.id)) stream.addTrack(e.track);
+        if (video.srcObject !== stream) {
+            video.srcObject = stream;
+            video.play().catch(() => {});
+        }
+        // 音频轨到达后解除静音：连接按钮的点击已构成用户手势，声音才真的可闻。
+        if (e.track.kind === 'audio' && video.muted) video.muted = false;
         $('placeholder').style.display = 'none';
         log('received track: ' + e.track.kind);
     };
