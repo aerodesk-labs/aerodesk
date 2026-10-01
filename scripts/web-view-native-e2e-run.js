@@ -173,7 +173,14 @@ function fail(msg) { console.error('E2E FAIL:', msg); process.exit(1); }
 
     const noRelay = !!rc && rc.type !== 'relay';
     console.log('NO_RELAY=' + noRelay);
-    const ok = videoReady && inputOpen && inputSent > 0 && noRelay;
+    // 直接断言解码帧数 >0（不再只靠 readyState>=2 这个等价代理）：有 RTP 但 framesDecoded=0
+    // （pcap 缺口）必须判红，不能被「轨收到了」蒙混过去。
+    const videoRtp = (info.inbound || []).find(r => r.kind === 'video');
+    const framesDecoded = videoRtp && typeof videoRtp.framesDecoded === 'number' ? videoRtp.framesDecoded : 0;
+    console.log('FRAMES_DECODED=' + framesDecoded);
+    const decoded = framesDecoded > 0;
+    console.log('DECODED=' + decoded);
+    const ok = videoReady && decoded && inputOpen && inputSent > 0 && noRelay;
     console.log(ok ? 'RUNNER_PASS' : 'RUNNER_FAIL');
     await dumpPage('end');
     await browser.close();

@@ -19,18 +19,23 @@
 # 本批未提交该 job 的理由：walgit 侧无法触发 GitHub Actions，提交一个未经 CI 实跑的 job 会
 # 绕过「发版节点全绿」口径；是否纳入 Windows job 预算、是否套 ci-retry 属协调者决策。
 #
-# 【关键坑：回环单候选会 ICE 超时（design §4.1 实测 1-3）】
-#   浏览器常只通告局域网/假 IP 候选；对端若绑 127.0.0.1 并只通告回环候选，候选对无法形成。
-#   配方：被叫侧用**非回环**信令 URL —— agent 的 connect_inner 以 signal_url 是否含
-#   127.0.0.1/localhost 决定 bind 127.0.0.1 还是 0.0.0.0，绑 0.0.0.0 时用出接口 IP
-#   （egress_ip）通告 host 候选（crates/aerodesk-agent/src/main.rs:1080、
-#   crates/aerodesk-core/src/connect.rs:201）。故本脚本给 publisher 传
-#   --signal ws://<LAN_IP>:3061，而不是回环 URL。
-#   【与 design §4.1 写法的差异】§4.1 写的是 --signal ws://<LAN-IP>:3003；那是 SIP 迁移
-#   前的 JSON WSS 面遗留写法。现在 agent 仍接受 ws://host:port，但 **URL 端口被剥离**：
+# 【候选面：§4.1 记载的是**偶发场景**，不是本 harness 的普遍关键坑】
+#   design §4.1 原文（docs/web-sip-wss-design.md:141-145）：浏览器**偶发**只通告局域网 IP
+#   （172.19.44.184，无回环）；此时若对端绑 127.0.0.1 且只通告回环候选，候选对无法形成 →
+#   ICE 超时。§4.1 的规避配方是被叫侧用**非回环**信令 URL（绑 0.0.0.0 + 出接口 IP 候选）。
+#   原文限定词是「偶发」+「浏览器没有回环候选」这一特指场景，并非普遍规律。
+#   **本 harness（浏览器与 publisher 同机）2026-10-01 实测：回环 URL 也能通过**——只把
+#   $pubSignal 改成 'ws://127.0.0.1:3061' 重跑 → exit 0、RUNNER_PASS、PEER_CANDIDATE=host|127.0.0.1|60847。
+#   故本脚本沿用非回环配方属**保险措施**（与 §4.1 及跨机/浏览器无回环候选场景一致），
+#   不是本机必需前提；跨机场景仍按 §4.1 处理。
+#   机制（供跨机排查）：agent 的 connect_inner 以 signal_url 是否含 127.0.0.1/localhost 决定
+#   bind 127.0.0.1 还是 0.0.0.0，绑 0.0.0.0 时用出接口 IP（egress_ip）通告 host 候选
+#   （crates/aerodesk-agent/src/main.rs:1080、crates/aerodesk-core/src/connect.rs:201）。
+#   【与 §4.1 写法的差异】§4.1 写的是 --signal ws://<LAN-IP>:3003；那是 SIP 迁移前的 JSON
+#   WSS 面遗留写法。现在 agent 仍接受 ws://host:port，但 **URL 端口被剥离**：
 #   sip_link::from_parts 只用 host，SIP 端口来自 AERO_SIP_PORT（默认 5060 UDP），
-#   所以这里显式设 AERO_SIP_PORT=5060 并保证 host=LAN_IP（非回环）即可；:3061 只是
-#   为了让人一眼看出信号面，实际不进 SIP 端口。浏览器信令本身走 wss://127.0.0.1:3061。
+#   所以这里显式设 AERO_SIP_PORT=5060 并保证 host 非回环即可；:3061 只是为了让人一眼看出
+#   信号面，实际不进 SIP 端口。浏览器信令本身走 wss://127.0.0.1:3061。
 #
 # 【Digest】signal 设 AUTH_TOKENS=secret ⇒ open_register=false、token_password=secret：
 #   REGISTER 走真实 401 + Digest（回退口令），INVITE 走 407 Proxy-Authentication；
@@ -56,12 +61,21 @@ $Token = 'secret'
 # 被控端采集源（默认 screen）：
 #   screen = 真实屏幕采集（连续 H264 流 + 响应 KeyframeRequest，design §4.1 实测 readyState=4）。
 #            需要交互桌面会话（Windows 屏幕采集在 headless/服务会话失败）。
-#   pcap   = 内置合成 VP8 单次流（48 帧）。**实测本方向下浏览器收得到 RTP 但解不出帧**
-#            （INBOUND_RTP framesReceived=47 framesDecoded=0、readyState=0）：agent 的 1:1
-#            pcap 媒体循环在 IceConnected（早于 DTLS/SRTP 就绪）就置 connected 并开送，
-#            首帧关键帧被丢；且该循环不处理 ClientEvent::KeyframeRequest，单次流结束后
-#            无法补关键帧（对照 generic_publisher.rs:412 / 屏幕路径 main.rs:4469）。
-#            用 AERODESK_PUB_ENCODER=pcap 可复现该缺口；它仍可用于只需 RTP 到达的断言。
+#   pcap   = 内置合成 VP8 单次流（48 帧）。**实测症状**：本方向下浏览器收得到 RTP 但解不出帧
+#            （INBOUND_RTP framesReceived=47 framesDecoded=0、readyState=0；pub.err 有
+#            loaded 48 VP8 frames / starting stream / stream finished (48 frames)）。
+#            **代码事实（已逐条核对）**：agent 1:1 pcap 媒体循环在 ClientEvent::IceConnected
+#            就置 connected（main.rs:2150-2152）并从 :2179 无条件开送；对照屏幕/通用路径在
+#            ChannelOpen 才置 connected（aerodesk-session/src/generic_publisher.rs:400-403）。
+#            该循环的 match（main.rs:2149-2160）无 KeyframeRequest 分支，落到
+#            handle_publisher_input（main.rs:1832-1890；其 match 以 _ => {} 收尾，全函数 0 处
+#            KeyframeRequest）；对照路径确实响应（generic_publisher.rs:412、main.rs:4469-4479）。
+#            **因果推断（未红检，仅为候选解释）**：IceConnected 早于 DTLS/SRTP 就绪导致首帧
+#            关键帧被丢，且该循环无法补关键帧 ⇒ framesDecoded=0。待验方案：给 pcap 路径补
+#            KeyframeRequest 处理（或改到 ChannelOpen 后再开送 / 循环重播）后再看 framesDecoded
+#            是否 >0。AERODESK_PUB_ENCODER=pcap 目前**必然 FAIL 断言①**（runner 判
+#            readyState>=2 且 framesDecoded>0），只用于复现/诊断该缺口；要单看「RTP 到达」
+#            需自行改判据，本脚本没有它的通过路径。
 $PubEncoder = if ($env:AERODESK_PUB_ENCODER) { $env:AERODESK_PUB_ENCODER } else { 'screen' }
 $WebPort = if ($env:WEB_SERVE_PORT) { [int]$env:WEB_SERVE_PORT } else { 38084 }
 
@@ -215,7 +229,7 @@ try {
 
     Write-Host "== 断言"
     $fail = 0
-    if ($nodeRc -eq 0) { Write-Host "PASS ① 浏览器收到视频轨（video.readyState>=2）且候选对非 relay" }
+    if ($nodeRc -eq 0) { Write-Host "PASS ① 浏览器收到可解码视频轨（video.readyState>=2 且 inbound-rtp framesDecoded>0）且候选对非 relay" }
     else { Write-Host "FAIL ① 浏览器侧未通过（见 runner 输出）"; $fail = 1 }
 
     if ($pubText -match 'input: seq=') { Write-Host "PASS ② 键鼠输入帧抵达 publisher（pub 日志 input: seq=）" }
@@ -231,14 +245,20 @@ try {
     $peerPort = $null
     if ($nodeText -match 'PEER_PORT=(\d+)') { $peerPort = $Matches[1] }
     if ($pubPort -and $peerPort -and $pubPort -eq $peerPort) {
-        Write-Host "PASS ③ 浏览器 ICE 选中候选端口 = publisher 媒体 socket 端口（$pubPort）⇒ 1:1 直连，未经 SFU"
+        Write-Host "PASS ③ 承重证据：浏览器 ICE 选中候选端口 = publisher 媒体 socket 端口（$pubPort）⇒ 1:1 直连，未经 SFU"
     } else {
         Write-Host "FAIL ③ 端口不一致（pub=$pubPort peer=$peerPort）⇒ 无法证明直连"
         $fail = 1
     }
     if ($pubText -match '升级为 SFU 会议') { Write-Host "FAIL publisher 升级为 SFU 会议"; $fail = 1 }
-    if ($sfuText -match [regex]::Escape($Room)) { Write-Host "FAIL SFU 日志出现本房间 $Room（媒体/信令经 SFU）"; $fail = 1 }
-    else { Write-Host "PASS SFU 日志无本房间记录（SFU 不参与）" }
+    # 否定式断言必须带前置：日志缺失/读不到时「日志里没有」会空过。故先要求日志存在且非空。
+    if ($sfuText.Length -eq 0) {
+        Write-Host "FAIL ③-b SFU 日志为空——否定式断言空过（无法排除媒体经 SFU）"; $fail = 1
+    } elseif ($sfuText -match [regex]::Escape($Room)) {
+        Write-Host "FAIL ③-b SFU 日志出现本房间 $Room（媒体/信令经 SFU）"; $fail = 1
+    } else {
+        Write-Host "PASS ③-b SFU 日志非空且无本房间记录（辅助证据；承重证据是上面的端口相等）"
+    }
 
     if ($fail -ne 0) {
         Write-Host "--- node.out (tail) ---"; if (Test-Path "$logDir\node.out") { Get-Content "$logDir\node.out" | Select-Object -Last 40 }
