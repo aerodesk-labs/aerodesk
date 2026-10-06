@@ -1719,11 +1719,21 @@ impl Client {
             self.rtc.disconnect();
             return;
         }
-        let answer = self
-            .rtc
-            .sdp_api()
-            .accept_offer(offer)
-            .expect("offer to be accepted");
+        let answer = match self.rtc.sdp_api().accept_offer(offer) {
+            Ok(answer) => answer,
+            Err(e) => {
+                // 畸形/不可接受的重协商 offer（房间内任意客户端可发）不得 panic——
+                // 那会杀死整个分片线程，同分片所有房间一起挂。accept_offer 的校验
+                // 与修改交错进行，失败时会话可能已被部分改动、无法回退到干净状态，
+                // 故直接断开该客户端（只影响它自己），分片继续服务其它客户端。
+                warn!(
+                    "Client ({}) room={} 畸形重协商 offer 被 accept_offer 拒绝（断开该客户端）：{e:?}",
+                    *self.id, self.room
+                );
+                self.rtc.disconnect();
+                return;
+            }
+        };
         for track in &mut self.tracks_out {
             match track.state {
                 TrackOutState::Negotiating(_) => track.state = TrackOutState::ToOpen,
@@ -1731,11 +1741,23 @@ impl Client {
                 _ => {}
             }
         }
-        let mut channel = self.rtc.channel(reply_cid).expect("channel to be open");
-        let json = serde_json::to_string(&answer).unwrap();
-        channel
-            .write(false, json.as_bytes())
-            .expect("to write answer");
+        let Some(mut channel) = self.rtc.channel(reply_cid) else {
+            warn!(
+                "Client ({}) 重协商 answer 的目标通道不可用（cid={reply_cid:?}），丢弃",
+                *self.id
+            );
+            return;
+        };
+        let json = match serde_json::to_string(&answer) {
+            Ok(json) => json,
+            Err(e) => {
+                warn!("Client ({}) 重协商 answer 序列化失败：{e}", *self.id);
+                return;
+            }
+        };
+        if let Err(e) = channel.write(false, json.as_bytes()) {
+            warn!("Client ({}) 回写重协商 answer 失败：{e:?}", *self.id);
+        }
     }
 
     fn handle_answer(&mut self, answer: str0m::change::SdpAnswer) {
@@ -2730,5 +2752,125 @@ fn stale_answer_is_dropped_without_panic() {
             .iter()
             .all(|t| matches!(t.state, TrackOutState::ToOpen)),
         " Negotiating 应复位为 ToOpen 待重协商"
+    );
+}
+
+// ---------- handle_offer 健壮性回归（看板卡 sfu-handle-offer-panic） ----------
+//
+// 房间内任意客户端都能在 offer/answer data channel 发一个能反序列化成 SdpOffer、
+// 但 SDP 不被 accept_offer 接受的重协商 offer。旧实现
+// `accept_offer(..).expect(..)` 会 panic 杀死整个分片线程（同分片所有房间一起挂），
+// 比 /start 那次只杀一个 rouille 请求线程更严重。下列用例锁定：畸形 offer 只收敛
+// （断开该客户端），正常 offer 路径不变（仍回 answer）。
+
+/// 构造「可反序列化成 SdpOffer、但被 accept_offer 拒绝」的重协商 offer：
+/// 无 m-line 的 SDP（str0m 能解析，accept_offer 返回 Err）。
+#[cfg(test)]
+fn malformed_offer() -> str0m::change::SdpOffer {
+    let sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n";
+    let json = format!(r#"{{"type":"offer","sdp":{}}}"#, serde_json::json!(sdp));
+    serde_json::from_str(&json).expect("无 m-line 的 SDP 仍应可解析为 SdpOffer")
+}
+
+/// 判断数据是否为 str0m SdpAnswer JSON（{"type":"answer",...}）。
+#[cfg(test)]
+fn is_sdp_answer_json(d: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(d)
+        .ok()
+        .and_then(|v| {
+            v.get("type")
+                .and_then(|t| t.as_str())
+                .map(|s| s == "answer")
+        })
+        .unwrap_or(false)
+}
+
+/// 用例前提：该 SDP 确实会让 accept_offer 失败（否则下面的回归用例空转）。
+#[test]
+fn malformed_offer_is_rejected_by_accept_offer() {
+    let mut rtc = Rtc::new(Instant::now());
+    assert!(
+        rtc.sdp_api().accept_offer(malformed_offer()).is_err(),
+        "前提：无 m-line 的 offer 必须被 accept_offer 拒绝"
+    );
+}
+
+/// 畸形重协商 offer 不得 panic：走生产同款入口 handle_channel_data（与
+/// Event::ChannelData 的分派一致），应 warn 并断开该客户端，分片不受影响。
+#[test]
+fn malformed_renegotiation_offer_does_not_panic() {
+    let (mut viewer, mut client, sfu_sock, _track) = connect_mini_viewer(true);
+    mini_pump_until(
+        &mut viewer,
+        &mut client,
+        &sfu_sock,
+        |v, c| {
+            v.rtc.is_connected()
+                && c.rtc.is_connected()
+                && v.channel_of("offer/answer").is_some()
+                && c.channels.contains_key("offer/answer")
+        },
+        "连接与 DCEP 完成",
+    );
+    let cid = client.channels["offer/answer"];
+    let data = ChannelData {
+        id: cid,
+        binary: false,
+        data: serde_json::to_vec(&malformed_offer()).expect("offer 可序列化"),
+    };
+    let _ = client.handle_channel_data(data);
+    assert!(
+        !client.rtc.is_alive(),
+        "畸形重协商 offer 应只断开该客户端（不再 panic 杀分片）"
+    );
+}
+
+/// 防修过头：合法重协商 offer 仍被接受并回 answer，客户端不断开。
+#[test]
+fn valid_renegotiation_offer_still_gets_answer() {
+    let (mut viewer, mut client, sfu_sock, _track) = connect_mini_viewer(true);
+    mini_pump_until(
+        &mut viewer,
+        &mut client,
+        &sfu_sock,
+        |v, c| {
+            v.rtc.is_connected()
+                && c.rtc.is_connected()
+                && v.channel_of("offer/answer").is_some()
+                && c.channels.contains_key("offer/answer")
+        },
+        "连接与 DCEP 完成",
+    );
+
+    // 对端（viewer）发起真实重协商：新增一条 recvonly 音频 m-line。
+    let mut change = viewer.rtc.sdp_api();
+    change.add_media(
+        MediaKind::Audio,
+        Direction::RecvOnly,
+        Some("v-sfu-renew".into()),
+        None,
+        None,
+    );
+    let (offer, _pending) = change.apply().expect("viewer 重协商 offer");
+    let cid = client.channels["offer/answer"];
+    let data = ChannelData {
+        id: cid,
+        binary: false,
+        data: serde_json::to_vec(&offer).expect("offer 可序列化"),
+    };
+    let _ = client.handle_channel_data(data);
+    assert!(client.rtc.is_alive(), "合法重协商 offer 不得断开客户端");
+
+    // SFU 的 answer 应经 offer/answer 通道回写、由 viewer 收到。
+    mini_pump_until(
+        &mut viewer,
+        &mut client,
+        &sfu_sock,
+        |v, _| {
+            v.received
+                .iter()
+                .any(|(l, d)| l == "offer/answer" && is_sdp_answer_json(d))
+        },
+        "viewer 在 offer/answer 通道收到重协商 answer",
     );
 }
