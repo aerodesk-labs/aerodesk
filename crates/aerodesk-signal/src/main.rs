@@ -1,7 +1,7 @@
 //! AeroDesk 信令服务（SIP 单栈，P3.1）。
 //!
-//! P3 起本服务为 **SIP 单栈**：REGISTER/INVITE 走 rsipstack 端点（SIP/TLS +
-//! SIP/WSS + SIP/UDP 三传输，默认全开，`off` 显式关闭）；HTTP 仅保留运维面
+//! P3 起本服务为 **SIP 单栈**：REGISTER/INVITE 走 rsipstack 端点（SIP/TCP（客户端默认）+
+//! SIP/TLS + SIP/WSS + SIP/UDP 四传输，默认全开，`off` 显式关闭）；HTTP 仅保留运维面
 //! （/healthz、/devices、/metrics/prometheus、/admin/temp-password）。
 //! 协议见 docs/SIP_SIGNALING.md。
 //!
@@ -525,7 +525,7 @@ fn main() {
     let temp_passwords = Arc::new(Mutex::new(sip_server::TempRegistry::default()));
     let _ = TEMP_PASSWORDS.set(temp_passwords.clone());
 
-    // P3.1 SIP 单栈（D2 默认翻转）：三传输默认全开，off/disabled/none 显式关闭。
+    // P3.1 SIP 单栈（D2 默认翻转）：四传输默认全开（客户端默认走 TCP），off/disabled/none 显式关闭。
     // #598 P2a：WSS/TLS accept 需进程级 rustls CryptoProvider——sip_client 的
     // ensure_rustls_provider 只在客户端 UA 线程调用，服务端进程（rouille 旧
     // rustls + rsipstack 0.23 并存）无人安装，首个 WSS 握手即 panic
@@ -842,7 +842,7 @@ fn ops_router(request: &Request, config: &Config) -> Response {
     Response::text("method not allowed").with_status_code(405)
 }
 
-/// /healthz 的 `sip` 字段：端点开启 → 三传输监听状态；关闭 → null。
+/// /healthz 的 `sip` 字段：端点开启 → 四传输监听状态；关闭 → null。
 fn sip_health_value() -> serde_json::Value {
     sip_health_json(
         SIP_ENDPOINT_ENABLED.load(Ordering::Relaxed),

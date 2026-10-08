@@ -1094,9 +1094,9 @@ mod tests {
         assert_eq!(
             cfg.server,
             "127.0.0.1:5060".parse().unwrap(),
-            "udp 默认 5060"
+            "tcp 默认 5060（sip_transport 缺省 = tcp）"
         );
-        assert!(cfg.tls.is_none(), "udp 无 TLS 配置");
+        assert!(cfg.tls.is_none(), "tcp 无 TLS 配置");
         // tls 传输：默认端口 5061 + 系统根 CA。
         s.sip_transport = "tls".into();
         let cfg2 = s.sip_config().unwrap();

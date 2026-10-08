@@ -163,7 +163,7 @@ TLS 客户端证书
 ## 8. 迁移与兼容约束（#549 已定口径；P3.1 起收敛为 **SIP 单栈**）
 
 - ~~双栈并存 + feature gate；JSON 协议在 SIP parity 前不下线~~
-  **P3.1 已退役 JSON 信令面**：SIP 三传输默认全开（UDP 5060/TLS 5061/WSS 3061，
+  **P3.1 已退役 JSON 信令面**：SIP 四传输默认全开（**TCP 5060（客户端默认传输）**/UDP 5060/TLS 5061/WSS 3061，
   `off` 显式关闭），HTTP 仅保留运维面（/healthz /devices /metrics /admin/*）
 - `User-Agent` 携带协议版本；option-tag `Require: aerodesk.p2p` 能力协商
 - Digest 迁移：现有 token 即口令，服务端仅存 HA1（迁移期旧 token 一次性登记）

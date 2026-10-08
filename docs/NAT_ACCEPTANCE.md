@@ -35,7 +35,7 @@
 | TURN 凭证 | SIP 无 join 下发一环 → **须本地配置** `AERO_TURN_URLS/USERNAME/CREDENTIAL`（#570）；coturn REST 规范 `username=<expiry>:<userid>`、`credential=base64(HMAC-SHA1(secret, username))` | `main.rs` connect_h264、`aerodesk-core::turn_client::p2p_turn_transport` |
 | TURN 传输 | RFC 5766 Allocate/CreatePermission/ChannelBind/Send/Data/Refresh；`TURN allocation ok` 日志 | `crates/aerodesk-core/src/turn_client.rs:163` |
 | 内嵌 TURN server | `TURN_SECRET` 设置且无显式 `TURN_URLS` 时启动：`SFU_TURN_PORT`（默认 3479，UDP+TCP）+ `SFU_TURN_TLS_PORT`（5349）；relayed 地址=**`SFU_HOST_ADDRESS`:relay_port**（#216 通告地址，公网 VPS 必须显式设公网 IP） | `crates/aerodesk-sfu/src/turn_server.rs`、docs/TURN.md |
-| 信令 | CLI 走标准 SIP：`ws://`→SIP/UDP 5060，`wss://`→SIP/TLS 5061（`AERO_SIP_TRANSPORT`/`AERO_SIP_PORT`/`AERO_SIP_DOMAIN`/`AERO_SIP_CA_PEM`） | `crates/aerodesk-core/src/sip_link.rs` SipLinkConfig::from_parts |
+| 信令 | CLI 走标准 SIP：`ws://`→SIP/**TCP** 5060（默认传输，`AERO_SIP_TRANSPORT=udp` 可改回 UDP）、`wss://`→SIP/TLS 5061（`AERO_SIP_TRANSPORT`/`AERO_SIP_PORT`/`AERO_SIP_DOMAIN`/`AERO_SIP_CA_PEM`） | `crates/aerodesk-core/src/sip_link.rs` SipLinkConfig::from_parts |
 
 **已知边界（决定本实测口径）**：
 
@@ -106,7 +106,7 @@ curl -s http://127.0.0.1:<SFU_INTERNAL_PORT>/metrics/prometheus | grep turn_allo
 | `AERO_TURN_USERNAME` | `<expiry>:<userid>`（见下） | TURN REST 用户名 |
 | `AERO_TURN_CREDENTIAL` | `base64(HMAC-SHA1(...))`（见下） | TURN REST 凭证 |
 | `AERODESK_FORCE_RELAY` | `1`（S3 用） | 只通告 relayed 候选 |
-| `AERO_SIP_TRANSPORT` | `udp`（默认）/`tls` | 信令传输；公网建议 `tls` |
+| `AERO_SIP_TRANSPORT` | `tcp`（默认，空/未设也是它）/`udp`/`tls` | 信令传输；公网建议 `tls` |
 | `AERO_SIP_PORT` | 0=按传输默认（5060/5061） | 覆盖端口 |
 | `AERO_SIP_DOMAIN` | `aerodesk.test`（代码缺省；AoR 报文域。Digest realm 由服务端 401 质询下发——与 domain 无关，误填不影响认证只影响路由域一致性） | AoR 域 |
 | `AERO_SIP_CA_PEM` | CA 路径（自签时） | TLS 校验 |

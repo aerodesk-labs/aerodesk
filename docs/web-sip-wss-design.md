@@ -22,7 +22,7 @@
 `crates/aerodesk-signal/src/sip_server.rs` 已实现（#549/#550/#552，P0 已验收）：
 
 - **传输**：`SIP_WSS_PORT=3061` 开启 WSS（RFC 7118）监听；rsipstack 接受不带 subprotocol 的
-  连接（对 `sec-websocket-protocol: sip` 回显确认）。另有 TLS 5061（原生默认）/ UDP 5060。
+  连接（对 `sec-websocket-protocol: sip` 回显确认）。另有 **TCP 5060（原生端默认）**/ TLS 5061 / UDP 5060。
 - **认证**：REGISTER → `401 Unauthorized`（WWW-Authenticate: Digest, realm 默认 `aerodesk`）→
   REGISTER+Authorization → 200。口令源：`SIP_DIGEST_USERS=user=token,...` 或
   `AUTH_TOKENS` 首个 token（`token_password` 兜底）；两者皆空时 `open_register=true`

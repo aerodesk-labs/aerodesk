@@ -85,7 +85,7 @@ Environment=AUTH_TOKENS=CHANGE_ME
 Restart=on-failure
 ```
 完整可用的 systemd 单元模板见 `deploy/systemd/aerodesk-signal.service` /
-`aerodesk-sfu.service`（P3 SIP 单栈：SIGNAL_OPS_PORT + SIP 三传输 + POP_SIP_URLS 示例，
+`aerodesk-sfu.service`（P3 SIP 单栈：SIGNAL_OPS_PORT + SIP **四**传输 + POP_SIP_URLS 示例，
 #246）。Prometheus 双 PoP 抓取示例见 `deploy/prometheus/prometheus.yml`。
 
 Caddy 示例：
@@ -168,7 +168,7 @@ server {
 - **健康检查**：`GET /healthz` 返回 JSON（`status: ok|draining` + shards/clients）；
   正常 200，**draining 中 503**，供 LB/探活与滚动发布判断。
 - **信号服务器探活/指标**（P3 ops HTTPS 面，默认 :3001）：`GET /healthz`
-  （JSON `status`/`pop`/`sip`——`sip` 为三传输监听状态对象，SIP 端点关闭时为
+  （JSON `status`/`pop`/`sip`——`sip` 为**四**传输监听状态对象（tls/wss/udp/tcp），SIP 端点关闭时为
   `null`）与 `GET /metrics/prometheus`（`sip_registrations` gauge、
   `sip_calls_established`/`sip_calls_terminated` counter）供探活与 Prometheus 抓取。
 - **优雅关闭**：`SIGTERM`/`SIGINT` → 拒绝新房间（`/start` 503）→ 限时 3s drain
@@ -237,7 +237,7 @@ export RECORD_DIR=/tmp/aerodesk-rec
 export TURN_SECRET=<共享 secret>  # 未设 TURN_URLS 时 SFU 内嵌 TURN（#191）
 
 cargo run -p aerodesk-sfu &        # 媒体 3478 + HTTPS 3000 + /healthz + /metrics[/prometheus]
-cargo run -p aerodesk-signal &     # SIP/UDP 5060 + SIP/TLS 5061 + SIP/WSS 3061（默认全开）
+cargo run -p aerodesk-signal &     # SIP/TCP 5060（客户端默认）+ SIP/UDP 5060 + SIP/TLS 5061 + SIP/WSS 3061（默认全开）
                                    # ops HTTPS 3001（/healthz /devices /metrics /admin/*）
 ```
 
