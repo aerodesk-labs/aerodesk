@@ -290,8 +290,11 @@ cargo run -p aerodesk-agent -- --role viewer --signal ws://127.0.0.1:5060   --ro
 > **部署内容声明（已更正）**：本节原写「部署内容 = walgit main 源码树
 > `e0ab71b2d101c9f8c84bab54623a433d04441e58`」——对**当前**节点**不成立**：现跑的二进制的
 > `/healthz` 带 `sip.tcp`、unit 有 `SIP_TCP_PORT=15060`，而这两样在 main（`35ad688`）里都不存在
-> （只在未合并的 `feat/sip-default-tcp`）。独立评审实测：`bin/`+unit mtime **13:09**、进程 **13:09:35**
-> 启动，当前二进制 sha256 ≠ 备份里的 `sha256-after.txt`，11:47 那版已被覆盖到
+> （只在未合并的 `feat/sip-default-tcp`）。独立评审 + 本轮复核的**逐文件** mtime（`stat -c '%y | %n'`）：
+> `bin/aerodesk-signal` = **10-08 13:09:35**、`bin/aerodesk-sfu` = **13:09:35**、
+> `systemd/aerodesk-signal.service` = **13:09:35**，而 **`systemd/aerodesk-sfu.service` 仍是 08-12 14:05:24**
+> （13:09 那次只换了 signal 的 unit）；两个进程都启于 13:09:35。当前二进制 sha256 ≠ 备份里的
+> `sha256-after.txt`，11:47 那版已被覆盖到
 > `~/aerodesk-redeploy-20261008-b/*.prev`（**该目录的内容在下面「备份目录实况」里已列全**）。
 > 备份目录实况（2026-10-08 复核 `ls -la`）：
 > - `~/aerodesk-redeploy-20261008/`（11:47）= 重部署**前**的旧件：`aerodesk-signal.orig`、
@@ -309,9 +312,11 @@ cargo run -p aerodesk-agent -- --role viewer --signal ws://127.0.0.1:5060   --ro
 >
 > ```sh
 > # 【回滚前必做】13:09 那版在跑且**无备份**——先自己留一份，否则回滚后不可逆：
-> # 目标目录必须先建（cp 到不存在的目录会 exit=1；这条保险丝曾经写坏过）。
-> sudo mkdir -p ~/aerodesk-pre-rollback-$(date +%Y%m%d-%H%M)
-> sudo cp -a /opt/aerodesk/bin/aerodesk-signal /opt/aerodesk/bin/aerodesk-sfu ~/aerodesk-pre-rollback-$(date +%Y%m%d-%H%M)/
+> # 时间戳**只取一次**（两行各自展开 $(date …) 会跨分钟边界各算一个 → 目标目录与 cp 落点不一致，
+> # cp 又会 exit=1）；目标目录须先建（cp 到不存在的目录会 exit=1；这条保险丝曾经写坏过）。
+> ts=$(date +%Y%m%d-%H%M)
+> sudo mkdir -p ~/aerodesk-pre-rollback-$ts
+> sudo cp -a /opt/aerodesk/bin/aerodesk-signal /opt/aerodesk/bin/aerodesk-sfu ~/aerodesk-pre-rollback-$ts/
 >
 > # A) 回到 11:47 之前（最旧的一版：二进制 Aug 23 22:33；unit 各自 Aug 12 / Aug 23 22:35）
 > sudo cp -p ~/aerodesk-redeploy-20261008/aerodesk-signal.orig         /opt/aerodesk/bin/aerodesk-signal
