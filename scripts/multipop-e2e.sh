@@ -2,7 +2,7 @@
 # multipop-e2e.sh —— 多 PoP 房间路由 SIP 302+Contact 版（#600，#146/#154 延续）。
 #
 # 拓扑（双 PoP 显式端口，避免默认 TLS/WSS 互撞与残留进程污染）：
-#   PoP A: sfu-a(media 3478/internal 3002) + signal-a(SIP UDP 5060 / TLS 5061 /
+#   PoP A: sfu-a(media 3478/internal 3002) + signal-a(SIP UDP/TCP $SIP_PORT（默认 5060）/ TLS 5061 /
 #          WSS 3061 / ops 3001)
 #   PoP B: sfu-b(media 3479/internal 3007) + signal-b(SIP UDP 5070 / TLS 5071 /
 #          WSS 3071 / ops 3006)
@@ -62,8 +62,10 @@ done
 sleep 0.3
 
 echo "== viewer 经 signal-a 拨房间（应被 302 引导到 pop-b）"
-AERO_SIP_PORT=5060 ./target/debug/aerodesk-agent --role viewer --reconnect \
-    --signal ws://127.0.0.1:5060 --room "$ROOM" >/tmp/mpop-view.log 2>&1 &
+# 客户端端口必须跟服务端同一个 override（此前写成字面 5060：服务端起在 $SIP_PORT、
+# 客户端却拨 5060 → 本机 5060 被别的 SIP 服务占用时全线假红）。
+AERO_SIP_PORT="$SIP_PORT" ./target/debug/aerodesk-agent --role viewer --reconnect \
+    --signal "ws://127.0.0.1:${SIP_PORT}" --room "$ROOM" >/tmp/mpop-view.log 2>&1 &
 VIEW=$!
 sleep 10
 kill "$VIEW" "$SFU_A" "$SFU_B" "$SIG_A" "$SIG_B" 2>/dev/null || true
