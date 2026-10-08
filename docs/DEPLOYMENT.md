@@ -264,11 +264,86 @@ cargo run -p aerodesk-agent -- --role viewer --signal ws://127.0.0.1:5060   --ro
 | 端口 | 协议 | 用途 |
 |---|---|---|
 | 15060 | UDP | signal SIP/UDP（客户端连接口，最关键；P3 单栈） |
-| 15061 | TCP | signal SIP/TLS（可选；公网证书就绪后启用） |
+| 15060 | TCP | signal SIP/TCP（**当前运行中的进程在听**；2026-10-08 复核 `ss -lntu` 见 `0.0.0.0:15060 tcp LISTEN`） |
+| 5061 | TCP | signal SIP/TLS |
+| 3061 | TCP | signal SIP/WSS（RFC 7118） |
+| 14700 | TCP | SFU 公共 HTTPS/浏览器面（`SFU_SIGNAL_PORT`，实测 `0.0.0.0:14700` 在听；2026-10-08 补录——上一稿漏了这一行且标签写成「运维面」，运维面是 14701 / 回环 14702） |
 | 14701 | TCP | signal ops HTTPS（/healthz /devices /metrics/prometheus /admin/*） |
 | 14778 | UDP + TCP | SFU 媒体（WebRTC RTP/RTCP，**UDP 必须放行**） |
 | 14779 | UDP + TCP | TURN 中继 |
-| 15449 | TCP | TURN TLS（可选） |
+| 15449 | TCP | TURN TLS |
+
+> 2026-10-08 实测重部署：该机上另有一个 FreeSWITCH 占着 `5060`（实测绑在**私网 `10.3.0.9:5060`**
+> 与 `[::1]:5060`，TCP+UDP；**该机没有 `127.0.0.1:5060`**），因此 SIP/UDP 显式错开到 `15060`
+> （systemd `Environment=SIP_UDP_PORT=15060`）。SIP/TLS 与 WSS 用默认 `5061`/`3061`。
+>
+> 注：「内核把回包交给更具体的 `127.0.0.1:5060`」那个机制说的是**本开发机**（macOS 上 FreeSWITCH
+> 绑 `127.0.0.1:5060`），不是本服务器——服务器侧只是端口已被占。两句不要混用。
+>
+> **授权要求（评审 must_fix）**：重启/回滚这台**共享**服务器（"systemctl restart"、拷回旧件、
+> 改 unit）属影响他方的动作，**必须先经用户授权**。
+>
+> **留痕实况（2026-10-08 第三轮评审复核后更正）**：walgit 线程 `ops-prod-node-redeploy` 里
+> **只有 11:47 那次**部署的第一方记录与其授权依据；**13:09 那次没有第一方「部署」与「授权」记录**
+> ——该线程里带「13:09」的条目只有评审条目（reviewer-2 / reviewer-4）与实现方**转引评审结论**的
+> comment（本句已按逐条 actor 核对：`kind`+`actor` 列出来看过），台账 `docs/DELIVERY_WEEK_2026-10.md`
+> 至今仍写「重启/回滚共享服务器…**仍需用户授权**」。上一稿写「两者都已在 walgit 线程留痕」**不成立**，已删。
+> → 13:09 那次的授权**待用户确认**；在确认前，本节 13:09 相关内容只作**现状描述**（描述现在跑什么），
+> 不构成「已授权」的声明。
+>
+> **部署内容声明（已更正）**：本节原写「部署内容 = walgit main 源码树
+> `e0ab71b2d101c9f8c84bab54623a433d04441e58`」——对**当前**节点**不成立**：现跑的二进制的
+> `/healthz` 带 `sip.tcp`、unit 有 `SIP_TCP_PORT=15060`，而这两样在 main（`35ad688`）里都不存在
+> （只在未合并的 `feat/sip-default-tcp`）。独立评审 + 本轮复核的**逐文件** mtime（`stat -c '%y | %n'`）：
+> `bin/aerodesk-signal` = **10-08 13:09:35**、`bin/aerodesk-sfu` = **13:09:35**、
+> `systemd/aerodesk-signal.service` = **13:09:35**，而 **`systemd/aerodesk-sfu.service` 仍是 08-12 14:05:24**
+> （13:09 那次只换了 signal 的 unit）；两个进程都启于 13:09:35。当前二进制 sha256 ≠ 备份里的
+> `sha256-after.txt`，11:47 那版已被覆盖到
+> `~/aerodesk-redeploy-20261008-b/*.prev`（**该目录的内容在下面「备份目录实况」里已列全**）。
+> 备份目录实况（2026-10-08 复核 `ls -la`）：
+> - `~/aerodesk-redeploy-20261008/`（11:47）= 重部署**前**的旧件：`aerodesk-signal.orig`、
+>   `aerodesk-sfu.orig`、`aerodesk-signal.service.orig`（**unit 的 mtime 不同**：`aerodesk-sfu.service.orig` = Aug 12 14:05、`aerodesk-signal.service.orig` = **Aug 23 22:35**；两份**二进制**都是 Aug 23 22:33）、
+>   `aerodesk-sfu.service.orig`，另有 `healthz-before.json`、`ports-before.txt`、`sha256-before/after.txt`；
+> - `~/aerodesk-redeploy-20261008-b/`（13:09）= **11:47 那次**的二进件快照：`aerodesk-signal.prev`、
+>   `aerodesk-sfu.prev`，以及 unit 副本 `aerodesk-signal.service`（**这个没有后缀**）。
+>   ⚠ **上一稿把这份的标签写反了**（把它叫成「13:09 版」）——实测 `-b/*.prev` 的 sha256 与
+>   `sha256-after.txt` **逐字相同**（= 11:47 产物）；而**当前在跑的**才是 13:09（`9f5fc2cf…`），
+>   **它没有任何备份**。
+>
+> **回滚（需授权）——备份件名带后缀，必须按目标名重命名后落盘**（上一稿写「把 `*.orig`/`*.prev`
+> 拷回 `/opt/aerodesk/bin/` 与 `/etc/systemd/system/`」，按字面执行会得到 `aerodesk-signal.orig`
+> 这种没人执行的文件、且同一 glob 混了二进制与 unit 两种落点 ⇒ **假回滚**。独立评审实测指出，已改）：
+>
+> ```sh
+> # 【回滚前必做】13:09 那版在跑且**无备份**——先自己留一份，否则回滚后不可逆：
+> # 时间戳**只取一次**（两行各自展开 $(date …) 会跨分钟边界各算一个 → 目标目录与 cp 落点不一致，
+> # cp 又会 exit=1）；目标目录须先建（cp 到不存在的目录会 exit=1；这条保险丝曾经写坏过）。
+> ts=$(date +%Y%m%d-%H%M)
+> sudo mkdir -p ~/aerodesk-pre-rollback-$ts
+> sudo cp -a /opt/aerodesk/bin/aerodesk-signal /opt/aerodesk/bin/aerodesk-sfu ~/aerodesk-pre-rollback-$ts/
+>
+> # A) 回到 11:47 之前（最旧的一版：二进制 Aug 23 22:33；unit 各自 Aug 12 / Aug 23 22:35）
+> sudo cp -p ~/aerodesk-redeploy-20261008/aerodesk-signal.orig         /opt/aerodesk/bin/aerodesk-signal
+> sudo cp -p ~/aerodesk-redeploy-20261008/aerodesk-sfu.orig            /opt/aerodesk/bin/aerodesk-sfu
+> sudo cp -p ~/aerodesk-redeploy-20261008/aerodesk-signal.service.orig /etc/systemd/system/aerodesk-signal.service
+> sudo cp -p ~/aerodesk-redeploy-20261008/aerodesk-sfu.service.orig    /etc/systemd/system/aerodesk-sfu.service
+>
+> # B) 回到 11:47 那次的状态（注意源里 unit 那份**没有后缀**）
+> sudo cp -p ~/aerodesk-redeploy-20261008-b/aerodesk-signal.prev    /opt/aerodesk/bin/aerodesk-signal
+> sudo cp -p ~/aerodesk-redeploy-20261008-b/aerodesk-sfu.prev       /opt/aerodesk/bin/aerodesk-sfu
+> sudo cp -p ~/aerodesk-redeploy-20261008-b/aerodesk-signal.service /etc/systemd/system/aerodesk-signal.service
+>
+> sudo systemctl daemon-reload && sudo systemctl restart aerodesk-signal aerodesk-sfu
+> ```
+>
+> 两处上一稿的错都在这里改掉了：① **cp 必须带 `sudo`**——`/etc/systemd/system` 是 `root:root`
+> 且 unit 是 `0600`，不带 sudo 会得到「二进制回滚了、unit 没回滚」的**半回滚**；② 源文件名与目标名
+> 必须逐条对上（见各组注释），不能拿 `*.orig` 一把 glob 括过去。
+>
+> **回滚也要核验**（不是「拷回去就算回滚了」）：`sha256sum /opt/aerodesk/bin/aerodesk-*`
+> 与 `~/aerodesk-redeploy-20261008/sha256-before.txt` / `sha256-after.txt` 对账（选 A 对
+> `before`、选 B 对 `after`；注意 `-b/` 目录里**没有** sha256 文件，别去那里找），再看
+> `curl -sk https://127.0.0.1:14701/healthz` 的 `sip` 字段是否回到旧形状。
 
 连接示例（信令地址 = SIP 形态 `ws://host:sip-udp-port`）：
 
@@ -281,7 +356,13 @@ cargo run -p aerodesk-agent -- --role publisher --signal ws://129.226.150.174:15
 ```
 
 > 注意：14703 明文 WS 已随 P3 JSON 面退役；14701（ops HTTPS）当前为开发 CA 证书，
-> 浏览器访问需手动信任。节点重部署到 P3 单栈后以本表为准。
+> 浏览器访问需手动信任（`curl -k` 亦然）。节点已重部署到 P3 单栈（2026-10-08），以本表为准；
+> **但节点上跑的不是 main 构建**（详见上节「部署内容声明」）——拿它做验收前必先确认这一点。
+> **客户端侧注意（2026-10-08 实测）**：本机 macOS 若开了 Clash TUN，`route -n get 129.226.150.174`
+> 会指向 `utun4` / fake-IP `198.18.0.1`，UDP 会被代理接管——表现为「TCP（ops 14701）通、SIP/UDP 无应答」。
+> 实测证据：服务器 `tcpdump -i any udp port 15060` 能同时看到入包与出包（源为代理出口 IP），
+> 即服务端正常、回程丢在代理侧。**安全组与服务器侧均无需改动**；本机需为该 IP 加 DIRECT 规则
+> （`IP-CIDR,129.226.150.174/32,DIRECT`）或关闭 TUN，否则媒体 UDP 同样会不通。
 
 ## 7. 验收清单（对应 Issue #5）
 
