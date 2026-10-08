@@ -128,7 +128,9 @@ UAC Secure Desktop（`#472`）；对外多租户与容量承诺（`#8` 压测基
 | **验收对象** | 实际装到机器上的**包**：`v0.4.0`（今晚原计划）或 **`v0.4.1`**（本次新发） | §2.5/§2.6 的实测都是前者之前的状态 |
 
 三者的差异造成的实际后果（客户端独立评审实测）：
-- `v0.4.0` 与 `main` 的 **desktop/host 逐字节相同**，客户端增量只有 `aerodesk-vdev-bridge`（716 行）+ 几行；
+- 客户端评审当天（`main` = `7045a64`）实测 `v0.4.0` 与 main 的 desktop/host **逐字节相同**，客户端增量只有
+  `aerodesk-vdev-bridge`（716 行）+ 几行；**此后 main 已并入 `feat/sip-default-tcp`**，两者**不再相同**
+  （`git diff --stat v0.4.0 660fb14 -- crates/aerodesk-desktop crates/aerodesk-host` = +18/−9，改的正是默认传输 udp→tcp）；
 - `v0.4.0` **缺** SIP/UDP 收包缓冲修复（`8192 → 65535`，`64314f0`）：SIP 报文 >8192B 时曾静默失败；
 - `v0.4.0` 与其后的 `main` 客户端**都只有 `Udp`/`Tls`**，`SipTransport::Tcp` 直到本周 `feat/sip-default-tcp`
   合入才存在 → 所以「验收对象 ≠ 交付对象」时，客户端与服务端的默认传输会对不上。
@@ -150,7 +152,8 @@ UAC Secure Desktop（`#472`）；对外多租户与容量承诺（`#8` 压测基
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| `crates/aerodesk-agent/src/bin/aerodesk-vdev-bridge/`（716 行） | **非交付面**；**零审查历史**，已由客户端独立评审覆盖并记录问题 | 不进包（只有 docs/e2e 引用）；三处静默失效**未修**，登记为债：① 推帧错误被 `let _ =` 丢弃（接管后永久停推流）；② 收流循环不查 `is_alive()`、无断流时限；③ AudioUnit `CURRENT_DEVICE/Start` 返回值被忽略。另它不复用统一配置面（写死 udp/5060，非默认端口接不上） |
+| `crates/aerodesk-agent/src/bin/aerodesk-vdev-bridge/`（716 行） | **非交付面**；**零审查历史**，已由客户端独立评审覆盖并记录问题 | 不进包（只有 docs/e2e 引用）；三处静默失效**未修**，登记为债：① 推帧错误被 `let _ =` 丢弃（接管后永久停推流）；② 收流循环不查 `is_alive()`、无断流时限；③ AudioUnit `CURRENT_DEVICE/Start` 返回值被忽略。另它**当时**不复用统一配置面（`sip_port: None` → 由 URL scheme 推导，当时 `ws→udp/5060`，非默认端口接不上）
+  ——**此条在 sip 合并后已失效**：该推导现在 `ws→tcp`（`connect::derive_sip_transport`，有单测钉住），留痕但标注过期。 |
 | `cmd_exec` 的 info 级日志 | **债（另批）** | `agent info!("cmd request #{}: {:?}")` 会把 `WriteFile{data:base64}` / `Chat{text}` 写进日志（`d8afd42` 起，v0.4.0 亦有）→ 需降级/脱敏 |
 | Windows host 的口令落盘 | **未验** | 明文写 ProgramData，未见 ACL/DPAPI 收紧（客户端评审标 unverified） |
 | Windows 全部行为 | **静态审查** | 本机无法执行 Windows 二进制/服务/登录界面 helper；GNU 交叉 clippy 因缺 Windows FFmpeg 无法跑 |

@@ -263,7 +263,7 @@ cargo run -p aerodesk-agent -- --role viewer --signal ws://127.0.0.1:5060   --ro
 
 | 端口 | 协议 | 用途 |
 |---|---|---|
-| 15060 | UDP | signal SIP/UDP（客户端连接口，最关键；P3 单栈） |
+| 15060 | UDP | signal SIP/UDP（与下行 TCP **同号**；**客户端默认走 TCP**，见下行——上一稿只标 UDP 为「客户端连接口」，已更正） |
 | 15060 | TCP | signal SIP/TCP（**当前运行中的进程在听**；2026-10-08 复核 `ss -lntu` 见 `0.0.0.0:15060 tcp LISTEN`） |
 | 5061 | TCP | signal SIP/TLS |
 | 3061 | TCP | signal SIP/WSS（RFC 7118） |

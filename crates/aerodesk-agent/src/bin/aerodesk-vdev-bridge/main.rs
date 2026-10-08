@@ -57,8 +57,8 @@ mod app {
                 false, // force_relay：默认直连，TURN 由 MediaSocket 按需兜底
                 true,  // with_audio：需要 Opus 音频轨喂虚拟声卡
                 false, // with_camera：不要额外的摄像头轨
-                None,  // sip_transport：由 server scheme 推导（ws→udp / wss→tls）
-                None,  // sip_port
+                None, // sip_transport：由 server scheme 推导（**ws→tcp（默认）** / wss→tls；见 connect::derive_sip_transport）
+                None, // sip_port
             )?;
         println!("已连接：room={room}");
 

@@ -6,8 +6,8 @@
 #   3. 宿主 signal/sfu 由本脚本自启（防火墙放通 3001/TCP + 5060/UDP + 5061/TCP
 #      + 3061/TCP 与 3478/UDP+TCP）
 #   注：P3 起 signal 为 SIP 单栈——WSS 时代工件，本脚本覆盖部分场景
-#   （SIP/UDP 直连；SIP/TLS 5061、SIP/WSS 3061 默认同证书开启）。
-#   SIP/UDP 端口已接 $env:SIP_PORT（默认 5060）可覆盖。
+#   （SIP/UDP+TCP 直连（TCP 为客户端默认传输）；SIP/TLS 5061、SIP/WSS 3061 默认同证书开启）。
+#   SIP 端口（UDP+TCP 同号）已接 $env:SIP_PORT（默认 5060）可覆盖；两者都放行。
 #   ⚠ 未整改的过期点（不在本批次范围）：本脚本给 vm-prelogin 写的 server 是
 #   `ws://…`，即 #598 P4 已退役的 JSON 信令面；viewer 命令行同一形态。
 #   端口参数化不等于本脚本已可用——它需要单独的现代化批次（改 SIP 形态）。
@@ -24,11 +24,13 @@ $SipPort = if ($env:SIP_PORT) { [int]$env:SIP_PORT } else { 5060 }
 $hostIp = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -like '*Default Switch*' } | Select-Object -First 1).IPAddress
 if (-not $hostIp) { $hostIp = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -like '*Ethernet*' } | Select-Object -First 1).IPAddress }
 Write-Host "宿主对 VM 可达 IP: $hostIp"
-foreach ($r in 'AeroDeskMatrix-Signal','AeroDeskMatrix-SipUdp','AeroDeskMatrix-SipTls','AeroDeskMatrix-SipWss','AeroDeskMatrix-SFUudp','AeroDeskMatrix-SFUtcp') {
+foreach ($r in 'AeroDeskMatrix-Signal','AeroDeskMatrix-SipUdp','AeroDeskMatrix-SipTcp','AeroDeskMatrix-SipTls','AeroDeskMatrix-SipWss','AeroDeskMatrix-SFUudp','AeroDeskMatrix-SFUtcp') {
   if (Get-NetFirewallRule -Name $r -ErrorAction SilentlyContinue) { Remove-NetFirewallRule -Name $r }
 }
 New-NetFirewallRule -Name 'AeroDeskMatrix-Signal' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3001 | Out-Null
 New-NetFirewallRule -Name 'AeroDeskMatrix-SipUdp' -Direction Inbound -Action Allow -Protocol UDP -LocalPort $SipPort | Out-Null
+# 客户端默认走 TCP——同号 TCP 必须一并放行，否则默认配置下 VM 拨不进来。
+New-NetFirewallRule -Name 'AeroDeskMatrix-SipTcp' -Direction Inbound -Action Allow -Protocol TCP -LocalPort $SipPort | Out-Null
 New-NetFirewallRule -Name 'AeroDeskMatrix-SipTls' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5061 | Out-Null
 New-NetFirewallRule -Name 'AeroDeskMatrix-SipWss' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3061 | Out-Null
 New-NetFirewallRule -Name 'AeroDeskMatrix-SFUudp' -Direction Inbound -Action Allow -Protocol UDP -LocalPort 3478 | Out-Null
