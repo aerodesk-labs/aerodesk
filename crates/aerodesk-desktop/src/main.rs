@@ -5409,10 +5409,10 @@ struct AppSettings {
     /// 服务器场景开箱即用（#504）；显式带 ws:// / wss:// 前缀的地址不受其影响。
     #[serde(default)]
     server_tls: bool,
-    /// #552 SIP：传输（"udp"=内网/调试默认；"tls"=公网默认加密）。
+    /// #552 SIP：传输（**默认 "tcp"**；"udp"=内网/调试，"tls"=加密）。
     #[serde(default = "default_sip_transport")]
     sip_transport: String,
-    /// #552 SIP：SIP 端口（0 = 按传输默认：udp 5060 / tls 5061）。
+    /// #552 SIP：SIP 端口（0 = 按传输默认：tcp/udp 5060 / tls 5061）。
     #[serde(default)]
     sip_port: u16,
     /// #552 SIP：SIP 域（AoR 域；默认取产品默认域）。
@@ -5435,7 +5435,9 @@ struct AppSettings {
 fn default_sip_transport() -> String {
     // 默认 TCP：SIP 报文集（含大 SDP）在 UDP 上要按 MTU 分片，任一片丢失或被
     // 中间设备/用户态转发截断就整条不可用（实测 5.5KB INVITE 经代理只到 4KB）。
-    // 注意：已落盘的旧设置里若写着 "udp"，本条默认值不会回溯迁移（用户可在设置里改）。
+    // 注意：已落盘的旧设置里若写着 "udp"，本条默认值不会回溯迁移——**而 SIP 配置项
+    // 目前只在配置文件里（UI 入口见下方 `load_settings()` 处注释：SIP 设置项暂只走
+    // 配置文件，UI 后续 slice）**，所以要改得编 ~/.aerodesk-settings.json。
     "tcp".into()
 }
 

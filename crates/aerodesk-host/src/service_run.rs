@@ -50,10 +50,11 @@ pub struct ServiceSettings {
     /// 本地联调固定端口手动起 helper）。
     #[serde(default)]
     pub helper_port: u16,
-    /// #552 SIP 迁移：传输（"udp"=内网/调试默认；"tls"=公网默认加密）。
+    /// #552 SIP 迁移：传输（**默认 "tcp"**——与 desktop / core `sip_link` 一致；
+    /// "udp"=内网/调试，"tls"=公网加密）。
     #[serde(default = "default_sip_transport")]
     pub sip_transport: String,
-    /// #552 SIP 迁移：SIP 端口（0 = 按传输默认：udp 5060 / tls 5061）。
+    /// #552 SIP 迁移：SIP 端口（0 = 按传输默认：tcp/udp 5060 / tls 5061）。
     #[serde(default)]
     pub sip_port: u16,
     /// #552 SIP 迁移：SIP 域（AoR 域；默认取产品默认域）。
@@ -79,7 +80,10 @@ fn default_true() -> bool {
 }
 
 fn default_sip_transport() -> String {
-    "udp".into()
+    // 默认 TCP：与 desktop / `aerodesk-core::sip_link` 的 `"" | "tcp" => Tcp` 对齐。
+    // 旧默认是 udp，导致同一产品里「受控端走 UDP、主控端走 TCP」两个默认值共存
+    // （2026-10-08 独立评审指出）。已落盘的旧设置不会被回溯迁移。
+    "tcp".into()
 }
 
 fn default_sip_domain() -> String {
@@ -1068,7 +1072,7 @@ mod tests {
         assert_eq!(s.token, "");
         assert!(s.spawn_ui, "spawn_ui 缺省应为 true");
         assert_eq!(s.ui_exe, "");
-        assert_eq!(s.sip_transport, "udp", "sip_transport 缺省 udp");
+        assert_eq!(s.sip_transport, "tcp", "sip_transport 缺省 tcp");
         assert_eq!(s.sip_port, 0, "sip_port 缺省 0（=按传输默认）");
         assert_eq!(s.sip_domain, "aerodesk.test");
         assert_eq!(s.sip_ca_pem, "");

@@ -129,8 +129,8 @@ impl SipLinkConfig {
     /// `wss://…`，host 即 SIP 服务器主机）+ 传输/端口/域/CA 设置 →
     /// [`SipLinkConfig`]。
     ///
-    /// - `transport`：`"udp"`（内网/调试）或 `"tls"`（公网默认加密）；
-    /// - `port`：0 = 按传输默认（udp 5060 / tls 5061）；
+    /// - `transport`：`""`/`"tcp"`（**默认，TCP**）| `"udp"`（内网/调试）| `"tls"`（加密）；
+    /// - `port`：0 = 按传输默认（tcp/udp 5060 / tls 5061）；
     /// - `domain`：空 = 产品默认 `aerodesk.test`；
     /// - `ca_pem_path`：空 = 系统根证书包（rsipstack 不自动加载系统根，
     ///   `SipTlsConfig::ca_certs` 空 = 无信任锚）。

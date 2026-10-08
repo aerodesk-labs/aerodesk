@@ -144,11 +144,13 @@ fn connect_sip_uac(
     String,
 > {
     use str0m::net::Protocol;
-    // 传输推导：显式参数 > URL scheme（wss=TLS/ws=UDP；无 scheme 按 ws）。
+    // 传输推导：显式参数 > URL scheme（wss=TLS；**其余默认 TCP**——与
+    // `sip_link::from_parts` 的 `"" | "tcp" => Tcp` 及 desktop/host 默认一致。
+    // 旧实现在此处默认 udp，导致「文档说默认 TCP、CLI 实际走 UDP」。
     let transport = sip_transport.unwrap_or({
         #[allow(clippy::match_like_matches_macro)]
         let tls = server.starts_with("wss");
-        if tls { "tls" } else { "udp" }
+        if tls { "tls" } else { "tcp" }
     });
     let mut cfg = crate::sip_link::SipLinkConfig::from_parts(
         server,
@@ -495,11 +497,11 @@ pub fn connect_publisher_sip(
     ),
     String,
 > {
-    // 传输推导：显式参数 > URL scheme（wss=TLS/ws=UDP；无 scheme 按 ws）。
+    // 传输推导：显式参数 > URL scheme（wss=TLS；**其余默认 TCP**，同上）。
     let transport = sip_transport.unwrap_or({
         #[allow(clippy::match_like_matches_macro)]
         let tls = server.starts_with("wss");
-        if tls { "tls" } else { "udp" }
+        if tls { "tls" } else { "tcp" }
     });
     let mut cfg = crate::sip_link::SipLinkConfig::from_parts(
         server,

@@ -790,7 +790,8 @@ fn aor_user(aor: &str) -> String {
         .to_string()
 }
 
-/// #552 SIP 环境配置：AERO_SIP_TRANSPORT（udp|tls，默认 udp——e2e/内网）/
+/// #552 SIP 环境配置：AERO_SIP_TRANSPORT（tcp|udp|tls，**空/未设 = tcp**——与
+/// `sip_link`/desktop/host 默认一致）/
 /// AERO_SIP_PORT（0=按传输默认）/ AERO_SIP_DOMAIN / AERO_SIP_CA_PEM（TLS CA
 /// 路径，空=系统根）。TURN：AERO_TURN_URLS/USERNAME/CREDENTIAL（SIP 无 join
 /// 下发一环，须本地配置；空=直连）。

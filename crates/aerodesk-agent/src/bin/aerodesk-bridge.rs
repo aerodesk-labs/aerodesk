@@ -324,8 +324,9 @@ fn main() {
         auth.as_deref().unwrap_or(""),
         sip_transport.as_deref().unwrap_or({
             #[allow(clippy::match_like_matches_macro)]
+            // wss=TLS；其余默认 TCP（与 core/desktop 默认一致）。
             let tls = local_signal.starts_with("wss");
-            if tls { "tls" } else { "udp" }
+            if tls { "tls" } else { "tcp" }
         }),
         local_port,
         "",
