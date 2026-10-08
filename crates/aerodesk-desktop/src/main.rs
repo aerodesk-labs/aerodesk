@@ -1510,11 +1510,12 @@ fn open_file_transfer_window(ui: &AppWindow) {
         }
     });
     if let Err(e) = win.show() {
-        show_and_repaint(&win.window());
         unregister_file_window(slot);
         ui.set_file_open(false);
         ui.set_status(format!("打开文件传输窗口失败：{e}").into());
     }
+    // 成功路径同样要强制重绘（Windows hide→show 可能透明）。
+    show_and_repaint(&win.window());
 }
 
 /// #458 把聊天文本发送到窗口关联会话的 chat 通道，并在本地消息列表中回显。
@@ -1601,11 +1602,12 @@ fn open_message_window(ui: &AppWindow) {
         }
     });
     if let Err(e) = win.show() {
-        show_and_repaint(&win.window());
         unregister_message_window(slot);
         ui.set_message_open(false);
         ui.set_status(format!("打开发消息窗口失败：{e}").into());
     }
+    // 成功路径同样要强制重绘（Windows hide→show 可能透明）。
+    show_and_repaint(&win.window());
 }
 
 /// #452 把命令文本发送到终端窗口关联的会话 cmd 通道。
@@ -1704,11 +1706,12 @@ fn open_terminal_window(ui: &AppWindow) {
         }
     });
     if let Err(e) = win.show() {
-        show_and_repaint(&win.window());
         unregister_terminal_window(slot);
         ui.set_terminal_open(false);
         ui.set_status(format!("打开终端窗口失败：{e}").into());
     }
+    // 成功路径同样要强制重绘（Windows hide→show 可能透明）。
+    show_and_repaint(&win.window());
 }
 
 /// 发起观看/控制会话（#441 连接页功能按钮共用一个启动路径）。
@@ -4977,15 +4980,21 @@ mod tests {
                 continue;
             }
             checked += 1;
-            let window: String = lines[i + 1..(i + 6).min(lines.len())].join("\n");
-            if !window.contains("show_and_repaint(") {
+            let show_indent = ln.len() - ln.trim_start().len();
+            // 判据两条：① 10 行内出现调用；② **调用行的缩进不得深于 show 行**——否则说明它落在
+            // `if let Err(e) = win.show() { … }` 这类分支里，成功路径根本不会执行（评审用变异
+            // 证明过：只判"出现过"时，把调用包进 `if false {}` 仍绿）。
+            let ok = lines[i + 1..(i + 11).min(lines.len())].iter().any(|cl| {
+                cl.contains("show_and_repaint(") && cl.len() - cl.trim_start().len() <= show_indent
+            });
+            if !ok {
                 offenders.push((i + 1, ln.trim().to_string()));
             }
         }
         assert!(checked >= 5, "只扫到 {checked} 处 show()，判据可能失效");
         assert!(
             offenders.is_empty(),
-            "以下 show() 之后 5 行内没有 show_and_repaint()：{offenders:?}"
+            "以下 show() 之后 10 行内没有 show_and_repaint()：{offenders:?}"
         );
     }
 
