@@ -7,9 +7,10 @@
 
 ```
                         ┌────────────────────────────┐
- 客户端 ──SIP/UDP:5060─▶│ aerodesk-signal（SIP 单栈） │
-   │   SIP/TLS:5061     │  REGISTER/INVITE + ops HTTP │
-   │   SIP/WSS:3061     │  （房间归属 / SFU 会议桥）    │
+ 客户端 ──SIP/TCP:5060─▶│ aerodesk-signal（SIP 单栈） │
+   │   SIP/UDP:5060     │  REGISTER/INVITE + ops HTTP │
+   │   SIP/TLS:5061     │  （房间归属 / SFU 会议桥）    │
+   │   SIP/WSS:3061     │                          │
    │  WebRTC            └──────────┬─────────────────┘
    │   UDP:3478 / TCP:443          │ 内部 HTTP(S) :3002（SFU_TOKEN 保护）
    │        │                      ▼
@@ -20,6 +21,9 @@
 ```
 > 端口组合（#185 已解决）：SFU 媒体默认 `3478`，内嵌 TURN 默认 `SFU_TURN_PORT=3479`，
 > 互不冲突；显式设置 `TURN_URLS`（外部 coturn）时按外部地址下发。详见 docs/TURN.md。
+>
+> **客户端默认传输是 TCP**（`SIP_TCP_PORT`，默认 5060）；UDP 5060 / TLS 5061 / WSS 3061 默认也开，
+> `off` 可单独关。改端口时 TCP 与 UDP **要一起改**（历史上只改 UDP 会让默认走 TCP 的客户端拨到 5060）。
 
 ## 1. 环境变量总览
 
@@ -269,7 +273,8 @@ cargo run -p aerodesk-agent -- --role viewer --signal ws://127.0.0.1:5060   --ro
 连接示例（信令地址 = SIP 形态 `ws://host:sip-udp-port`）：
 
 ```sh
-# 信令地址：ws://129.226.150.174:15060（agent 解析为 SIP/UDP 到该 host）
+# 信令地址：ws://129.226.150.174:15060（agent 解析为 SIP/**TCP** 到该 host；
+# `AERO_SIP_TRANSPORT=udp` 可改回 UDP）
 # token：从服务器 AUTH_TOKENS 获取
 
 cargo run -p aerodesk-agent -- --role publisher --signal ws://129.226.150.174:15060   --room accept --token <AUTH_TOKENS 值>

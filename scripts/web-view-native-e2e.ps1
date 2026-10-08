@@ -66,8 +66,8 @@
 #   （crates/aerodesk-agent/src/main.rs:1080、crates/aerodesk-core/src/connect.rs:201）。
 #   【与 §4.1 写法的差异】§4.1 写的是 --signal ws://<LAN-IP>:3003；那是 SIP 迁移前的 JSON
 #   WSS 面遗留写法。现在 agent 仍接受 ws://host:port，但 **URL 端口被剥离**：
-#   sip_link::from_parts 只用 host，SIP 端口来自 AERO_SIP_PORT（默认 5060 UDP；本脚本
-#   按 $env:SIP_PORT 显式设），所以这里只需保证 host 非回环即可；:3061 只是为了让人一眼看出
+#   sip_link::from_parts 只用 host，SIP 端口来自 AERO_SIP_PORT（默认 5060；传输默认 **TCP**；
+#   本脚本按 $env:SIP_PORT 显式设，且同时设 SIP_UDP_PORT/SIP_TCP_PORT），所以这里只需保证 host 非回环即可；:3061 只是为了让人一眼看出
 #   信号面，实际不进 SIP 端口。浏览器信令本身走 wss://127.0.0.1:3061。
 #
 # 【Digest】signal 设 AUTH_TOKENS=secret ⇒ open_register=false、token_password=secret：
@@ -208,6 +208,9 @@ try {
     $env:SFU_BIND_ADDRESS = '0.0.0.0'
     $env:SFU_HOST_ADDRESS = '127.0.0.1'
     $env:SIP_UDP_PORT = "$SipPort"
+    # 客户端默认传输是 TCP——必须同号把 TCP 监听也指过来，否则 SIP_PORT 一覆盖，
+    # agent 就拨到 signal 的默认 5060（CI 真跑这个脚本）。
+    $env:SIP_TCP_PORT = "$SipPort"
     $env:SIP_WSS_PORT = '3061'
     # AUTH_TOKENS 非空 ⇒ open_register=false：REGISTER 真实 401+Digest，INVITE 407 质询。
     $env:AUTH_TOKENS = $Token

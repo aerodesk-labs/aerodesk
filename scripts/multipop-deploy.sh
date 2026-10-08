@@ -90,7 +90,7 @@ scp_to() { # $1=host $2=本地 $3=远端
 
 HOST_A="${POP_A##*@}"; HOST_B="${POP_B##*@}"
 # P3 SIP 单栈：客户端信令地址 = SIP 形态 ws://<host>:<SIG_SIP_PORT>（agent 解析
-# 为 SIP/UDP 到该 host:port，AERO_SIP_PORT 可显式覆盖；见前提 5）。
+# 为 SIP/**TCP** 到该 host:port（默认传输），AERO_SIP_PORT 可显式覆盖；见前提 5）。
 SIGNAL_A_URL="${SIGNAL_A_URL:-ws://${HOST_A}:${SIG_SIP_PORT}}"
 SIGNAL_B_URL="${SIGNAL_B_URL:-ws://${HOST_B}:${SIG_SIP_PORT}}"
 
@@ -123,8 +123,9 @@ gen_sfu_env() { # $1=pop-a|pop-b
 gen_signal_env() { # $1=pop-a|pop-b
   OUT=""
   printf -v OUT '%sEnvironment=SIGNAL_OPS_PORT=%s\n' "$OUT" "$SIG_OPS_PORT"
-  # P3 SIP 单栈：SIP/UDP 显式；SIP/TLS 5061 与 SIP/WSS 3061 复用同证书默认开。
+  # P3 SIP 单栈：SIP/UDP 与 SIP/TCP（客户端默认传输）**同号显式**；SIP/TLS 5061 与 SIP/WSS 3061 复用同证书默认开。
   printf -v OUT '%sEnvironment=SIP_UDP_PORT=%s\n' "$OUT" "$SIG_SIP_PORT"
+  printf -v OUT '%sEnvironment=SIP_TCP_PORT=%s\n' "$OUT" "$SIG_SIP_PORT"
   printf -v OUT '%sEnvironment=AUTH_TOKENS=%s\n' "$OUT" "$AUTH"
   printf -v OUT '%sEnvironment=SFU_URL=http://127.0.0.1:%s\n' "$OUT" "$SFU_INT_PORT"
   printf -v OUT '%sEnvironment=SFU_TOKEN=%s\n' "$OUT" "$AUTH"
