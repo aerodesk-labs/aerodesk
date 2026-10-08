@@ -66,8 +66,8 @@
 #   （crates/aerodesk-agent/src/main.rs:1080、crates/aerodesk-core/src/connect.rs:201）。
 #   【与 §4.1 写法的差异】§4.1 写的是 --signal ws://<LAN-IP>:3003；那是 SIP 迁移前的 JSON
 #   WSS 面遗留写法。现在 agent 仍接受 ws://host:port，但 **URL 端口被剥离**：
-#   sip_link::from_parts 只用 host，SIP 端口来自 AERO_SIP_PORT（默认 5060 UDP），
-#   所以这里显式设 AERO_SIP_PORT=5060 并保证 host 非回环即可；:3061 只是为了让人一眼看出
+#   sip_link::from_parts 只用 host，SIP 端口来自 AERO_SIP_PORT（默认 5060 UDP；本脚本
+#   按 $env:SIP_PORT 显式设），所以这里只需保证 host 非回环即可；:3061 只是为了让人一眼看出
 #   信号面，实际不进 SIP 端口。浏览器信令本身走 wss://127.0.0.1:3061。
 #
 # 【Digest】signal 设 AUTH_TOKENS=secret ⇒ open_register=false、token_password=secret：
@@ -125,6 +125,9 @@ $env:PATH = "$env:FFMPEG_DIR\bin;$env:PATH"
 
 $TargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $Root 'target' }
 $BinDir = if ($env:AERODESK_BIN_DIR) { $env:AERODESK_BIN_DIR } else { Join-Path $TargetDir 'debug' }
+# SIP/UDP 端口：可用 $env:SIP_PORT 覆盖（本机 5060 常被别的 SIP 服务占用）。
+# 写死 5060 会让「端口可覆盖」只生效一半（服务端在新端口、客户端仍拨 5060）→ 假红。
+$SipPort = if ($env:SIP_PORT) { [int]$env:SIP_PORT } else { 5060 }
 
 $logDir = Join-Path $env:TEMP ("web-view-native-e2e-" + [DateTime]::Now.ToString('HHmmss'))
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -204,7 +207,7 @@ try {
     Write-Host "== start sfu/signal/web"
     $env:SFU_BIND_ADDRESS = '0.0.0.0'
     $env:SFU_HOST_ADDRESS = '127.0.0.1'
-    $env:SIP_UDP_PORT = '5060'
+    $env:SIP_UDP_PORT = "$SipPort"
     $env:SIP_WSS_PORT = '3061'
     # AUTH_TOKENS 非空 ⇒ open_register=false：REGISTER 真实 401+Digest，INVITE 407 质询。
     $env:AUTH_TOKENS = $Token
@@ -234,7 +237,7 @@ try {
 
     Write-Host "== start native publisher (SIP UAS, device AoR = room)"
     # publisher 的 device_id = --room（agent main.rs:1017）：浏览器 INVITE 同值即 1:1 接通。
-    $env:AERO_SIP_PORT = '5060'
+    $env:AERO_SIP_PORT = "$SipPort"
     $env:RUST_LOG = 'aerodesk_agent=info,rsipstack::transport=warn'
     $pubSignal = 'ws://' + $lanIp + ':3061'
     $pub = Start-Process -FilePath (Join-Path $BinDir 'aerodesk-agent.exe') -WindowStyle Hidden -ArgumentList '--role', 'publisher', '--encoder', $PubEncoder, '--audio', '--signal', $pubSignal, '--room', $Room, '--token', $Token -RedirectStandardOutput "$logDir\pub.log" -RedirectStandardError "$logDir\pub.err" -PassThru

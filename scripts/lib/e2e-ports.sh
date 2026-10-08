@@ -15,7 +15,10 @@
 #
 # 然后：
 #   - 服务端：SIP_UDP_PORT="$SIP_PORT" ./target/debug/aerodesk-signal &
-#   - 客户端：无需逐条传参——AERO_SIP_PORT 已 export，子进程自动继承。
+#   - 客户端：无需逐条传参——AERO_SIP_PORT 已 export，**aerodesk-agent** 直接读它；
+#     **aerodesk-desktop 不读该变量**（它取 `~/.aerodesk-settings.json` 的 sip_port），
+#     所以 UI e2e（macos/linux/windows-ui-e2e.sh）在 seed 设置时用 SIP_PORT 写入
+#     sip_port——不要写死 5060，否则端口覆盖只生效一半。
 #   - 端口冲突时：SIP_PORT=15060 SIGNAL_OPS_PORT=13001 bash scripts/xxx-e2e.sh
 #
 # 不要再在 e2e 里写死 5060 / 3001。
@@ -25,5 +28,5 @@ SIGNAL_OPS_PORT="${SIGNAL_OPS_PORT:-3001}"
 
 export SIP_PORT
 export SIGNAL_OPS_PORT
-# 客户端（aerodesk-agent / aerodesk-desktop）取 SIP 端口的通道。
+# aerodesk-agent 取 SIP 端口的通道（aerodesk-desktop 不读这个变量，见上）。
 export AERO_SIP_PORT="$SIP_PORT"

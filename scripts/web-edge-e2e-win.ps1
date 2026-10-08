@@ -11,6 +11,9 @@ $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 $Room = if ($args.Count -gt 0) { $args[0] } else { "webedge-win-$([DateTime]::Now.ToString('HHmmss'))" }
 $env:RUST_LOG = if ($env:RUST_LOG) { $env:RUST_LOG } else { "info" }
+# SIP/UDP 端口：可用 $env:SIP_PORT 覆盖（本机 5060 常被别的 SIP 服务占用）。
+# 写死 5060 会让「端口可覆盖」只生效一半（服务端在新端口、客户端仍拨 5060）→ 假红。
+$SipPort = if ($env:SIP_PORT) { [int]$env:SIP_PORT } else { 5060 }
 if (-not $env:FFMPEG_DIR) { throw "FFMPEG_DIR 未设置（CI 已配；本地需指向 FFmpeg 8.1 开发包根目录）" }
 
 $logDir = Join-Path $env:TEMP ("web-edge-e2e-" + [DateTime]::Now.ToString('HHmmss'))
@@ -39,7 +42,7 @@ try {
     $env:SFU_BIND_ADDRESS = "0.0.0.0"
     $env:SFU_HOST_ADDRESS = "127.0.0.1"
     # #552：CLI 客户端走 SIP UDP 面；#598 P2a：浏览器信令走 SIP-WSS 面（3061）。
-    $env:SIP_UDP_PORT = "5060"
+    $env:SIP_UDP_PORT = "$SipPort"
     $env:SIP_WSS_PORT = "3061"
     $sfu = Start-Process -FilePath ".\target\debug\aerodesk-sfu.exe" -WindowStyle Hidden `
         -RedirectStandardOutput "$logDir\sfu.log" -RedirectStandardError "$logDir\sfu.err" -PassThru
