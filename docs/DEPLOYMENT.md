@@ -260,11 +260,21 @@ cargo run -p aerodesk-agent -- --role viewer --signal ws://127.0.0.1:5060   --ro
 | 端口 | 协议 | 用途 |
 |---|---|---|
 | 15060 | UDP | signal SIP/UDP（客户端连接口，最关键；P3 单栈） |
-| 15061 | TCP | signal SIP/TLS（可选；公网证书就绪后启用） |
+| 5061 | TCP | signal SIP/TLS |
+| 3061 | TCP | signal SIP/WSS（RFC 7118） |
 | 14701 | TCP | signal ops HTTPS（/healthz /devices /metrics/prometheus /admin/*） |
 | 14778 | UDP + TCP | SFU 媒体（WebRTC RTP/RTCP，**UDP 必须放行**） |
 | 14779 | UDP + TCP | TURN 中继 |
-| 15449 | TCP | TURN TLS（可选） |
+| 15449 | TCP | TURN TLS |
+
+> 2026-10-08 实测重部署：该机上另有一个 FreeSWITCH 绑在私网 `10.3.0.9:5060`，
+> 若 signal 用默认 `5060`，内核会把 REGISTER 的回包交给更具体的 `127.0.0.1:5060`，
+> 客户端收到 **403** 并误以为口令错——因此 SIP/UDP 显式用 `15060`（systemd
+> `Environment=SIP_UDP_PORT=15060`）。SIP/TLS 与 WSS 用默认 `5061`/`3061`。
+> 本次部署的内核内容 = walgit main 源码树 `e0ab71b2d101c9f8c84bab54623a433d04441e58`；
+> 旧件与 unit 备份在服务器 `~/aerodesk-redeploy-20261008/`（回滚：把 `*.orig`
+> 拷回 `/opt/aerodesk/bin/` 与 `/etc/systemd/system/`，`systemctl daemon-reload &&
+> systemctl restart aerodesk-signal aerodesk-sfu`）。
 
 连接示例（信令地址 = SIP 形态 `ws://host:sip-udp-port`）：
 
@@ -276,7 +286,10 @@ cargo run -p aerodesk-agent -- --role publisher --signal ws://129.226.150.174:15
 ```
 
 > 注意：14703 明文 WS 已随 P3 JSON 面退役；14701（ops HTTPS）当前为开发 CA 证书，
-> 浏览器访问需手动信任。节点重部署到 P3 单栈后以本表为准。
+> 浏览器访问需手动信任（`curl -k` 亦然）。节点已重部署到 P3 单栈（2026-10-08），以本表为准。
+> **待办（需云控制台）**：安全组放行 **UDP 15060**——重部署后从外网对 `15060` 发 SIP
+> `OPTIONS` 仍无应答，而服务器本机与自身公网 IP 均返回 `SIP/2.0 200 OK`，即链路只差
+> 安全组放行（14778/14779 八月已通，应已放行）。
 
 ## 7. 验收清单（对应 Issue #5）
 
