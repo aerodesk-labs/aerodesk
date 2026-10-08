@@ -8,6 +8,7 @@
 # 用法: scripts/web-pub-e2e.sh [room]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/lib/e2e-ports.sh"   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 cd "$ROOT"
 
 ROOM="${1:-webpub-$(date +%s)}"
@@ -79,7 +80,7 @@ REC="$(mktemp -d)"
 RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu" >/tmp/webpub-sfu.log 2>&1 &
 SFU=$!
 # #598 P2a：SIP-WSS 面（3061）承载浏览器信令；静态服务 web/。
-SIP_WSS_PORT=3061 SIP_UDP_PORT=5060 "$ROOT/target/debug/aerodesk-signal" >/tmp/webpub-sig.log 2>&1 &
+SIP_WSS_PORT=3061 SIP_UDP_PORT="$SIP_PORT" "$ROOT/target/debug/aerodesk-signal" >/tmp/webpub-sig.log 2>&1 &
 SIG=$!
 # 重试残留清理 + 就绪门：ci-retry 重跑时上轮 http.server 可能占口/半死；
 # 未就绪即跑 node 会被 macOS 丢 SYN（ERR_CONNECTION_TIMED_OUT 实测）。
@@ -92,7 +93,7 @@ for _ in $(seq 1 50); do
     if ! kill -0 "$HTTP" 2>/dev/null; then break; fi
     sleep 0.5
 done
-[ "$HTTP_OK" = "1" ] || { echo "FAIL: web 静态服务未就绪（$WEB_SERVE_PORT）"; tail -10 /tmp/webpub-http.log; exit 1; }
+[ "$HTTP_OK" = "1" ] || { echo "FAIL: web 静态服务未就绪（${WEB_SERVE_PORT}）"; tail -10 /tmp/webpub-http.log; exit 1; }
 # HTTP 静态服务就绪门（此前无探活——node goto 撞上启动空窗即白跑）。
 WEB_OK=0
 for _ in $(seq 1 50); do

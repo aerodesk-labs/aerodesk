@@ -8,6 +8,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/lib/e2e-ports.sh"   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 cd "$ROOT"
 
 ROOMS="${1:-1}"
@@ -27,7 +28,7 @@ REC="$(mktemp -d /tmp/bench-rec.XXXX)"
 echo "== 启动 sfu/signal"
 RECORD_DIR="$REC" ./target/release/aerodesk-sfu >"$REPORT_DIR/sfu.log" 2>&1 &
 SFU_PID=$!
-SIP_UDP_PORT=5060 ./target/release/aerodesk-signal >"$REPORT_DIR/signal.log" 2>&1 &
+SIP_UDP_PORT="$SIP_PORT" ./target/release/aerodesk-signal >"$REPORT_DIR/signal.log" 2>&1 &
 SIG_PID=$!
 for _ in $(seq 1 50); do
   if grep -q "SIP/UDP 监听已起" $REPORT_DIR/signal.log 2>/dev/null; then break; fi

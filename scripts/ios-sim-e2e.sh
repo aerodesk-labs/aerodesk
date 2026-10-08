@@ -8,6 +8,7 @@
 # 用法: scripts/ios-sim-e2e.sh [room]   （PUBLISHER_ENCODER=h265|x264|screen，默认 h265）
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/lib/e2e-ports.sh   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 ROOM="${1:-iossim-$(date +%s)}"
 WORK="$(mktemp -d)"
 trap 'pkill -f "aerodesk-(sfu|signal|cli)" 2>/dev/null || true; xcrun simctl terminate booted io.aerodesk.viewer 2>/dev/null || true' EXIT
@@ -50,7 +51,7 @@ SFU_MEDIA_PORT="${SFU_MEDIA_PORT:-3478}" SFU_SIGNAL_PORT="${SFU_SIGNAL_PORT:-300
 SFU=$!
 SIGNAL_OPS_PORT="${SIGNAL_OPS_PORT:-3001}" \
   SFU_URL="http://127.0.0.1:${SFU_INTERNAL_PORT:-3002}" \
-  SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/iossim-sig.log 2>&1 &
+  SIP_UDP_PORT="$SIP_PORT" ./target/debug/aerodesk-signal >/tmp/iossim-sig.log 2>&1 &
 SIG=$!
 # 等 SFU/signal 就绪再起 publisher（此前固定 sleep 1.5，CI 负载下 SFU /start 会超时）
 for _ in $(seq 1 50); do

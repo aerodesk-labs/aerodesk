@@ -19,6 +19,7 @@
 # 只杀自有 PID）抽取本文件的**同一份 runner JS** 验证。端口可用 WEB_SERVE_PORT / SIGNAL_URL 覆盖。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/lib/e2e-ports.sh"   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 cd "$ROOT"
 export RUST_LOG="${RUST_LOG:-info}"
 
@@ -216,7 +217,7 @@ start_sfu() {
 start_signal() {
     # #598 P2a：浏览器信令走 SIP-WSS（3061）；UDP 5060 供 CLI（本脚本不用）。
     SIGNAL_PORT=14501 SFU_URL=http://127.0.0.1:14502 \
-      SIP_UDP_PORT=5060 SIP_WSS_PORT=3061 ./target/debug/aerodesk-signal >/tmp/webrec-sig.log 2>&1 &
+      SIP_UDP_PORT="$SIP_PORT" SIP_WSS_PORT=3061 ./target/debug/aerodesk-signal >/tmp/webrec-sig.log 2>&1 &
     echo $! > /tmp/webrec-sig.pid
 }
 stop_services() {
@@ -252,7 +253,7 @@ for _ in $(seq 1 50); do
     sleep 0.5
 done
 if [ "$HTTP_OK" != "1" ]; then
-    echo "FAIL: web 静态服务未就绪（$WEB_SERVE_PORT）"; tail -10 /tmp/webrec-http.log; exit 1
+    echo "FAIL: web 静态服务未就绪（${WEB_SERVE_PORT}）"; tail -10 /tmp/webrec-http.log; exit 1
 fi
 wait_ports || { echo "FAIL: 服务未就绪"; exit 1; }
 
