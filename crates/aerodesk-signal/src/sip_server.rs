@@ -1,7 +1,7 @@
 //! SIP 信令端点（#551 / 规范 docs/SIP_SIGNALING.md）。
 //!
 //! P3.1 起本端点是 signal 的**唯一信令面**（SIP 单栈）：JSON/rouille 面已退役。
-//! 传输：SIP/TLS（原生端默认）+ SIP/WSS（Web，RFC 7118）+ SIP/UDP（内网/调试）；
+//! 传输：**SIP/TCP（原生端默认）** + SIP/TLS + SIP/WSS（Web，RFC 7118）+ SIP/UDP（内网/调试）；
 //! TLS 身份复用 signal 证书加载，SIGHUP 证书轮换由 supervisor 重启端点承接
 //! （注册表经 SipConfig.registrar 外置，轮换不丢注册）。
 //!
@@ -24,7 +24,7 @@
 //! - 严格子集（规范 §6）：SUBSCRIBE/NOTIFY/REFER/UPDATE/… 一律 501（ACK/CANCEL 由
 //!   rsipstack 事务层吸收，不进分发循环）；
 //! - 指标 `sip_registrations`/`sip_calls_established`/`sip_calls_terminated`（/metrics）
-//!   与三传输监听状态（/healthz `sip` 字段）。
+//!   与**四**传输监听状态（/healthz `sip` 字段）。
 //!
 //! 硬化项（后续，不影响线上互通）：HA1-at-rest、nonce stale 防重放、连接关闭时清理
 //! 注册 flow（transport inspector janitor）、dialog 层 302+Contact（客户端跟随待 #600）。
@@ -1815,6 +1815,50 @@ mod tests {
         let port = probe.local_addr().unwrap().port();
         drop(probe);
         port
+    }
+
+    /// 回归（独立评审 A.2 / 覆盖缺口）：signal 必须**真的在配置的 TCP 端口上监听**。
+    /// 「客户端默认切 TCP」之后，e2e 与部署姿态全靠这一点，而此前这条路径零自动化覆盖。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn serve_listens_sip_tcp_on_configured_port() {
+        let _serial = serve_e2e_guard();
+        let port = free_tcp_port();
+        let cancel = CancellationToken::new();
+        let cfg = SipConfig {
+            realm: REALM.into(),
+            tls_addr: None,
+            wss_addr: None,
+            udp_addr: None,
+            tcp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+            passwords: Arc::new(passwords()),
+            tls_identity: None,
+            sfu_urls: vec![],
+            sfu_token: None,
+            token_password: None,
+            open_register: true,
+            temp_passwords: Arc::default(),
+            registrar: Arc::new(Mutex::new(Registrar::default())),
+            pop_id: "pop-a".into(),
+            pop_registry: None,
+            pop_sip_urls: vec![],
+        };
+        let sc = cancel.clone();
+        let server = tokio::spawn(async move { serve(cfg, sc).await });
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let mut connected = false;
+        for _ in 0..40 {
+            if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
+                connected = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(connected, "signal 未在配置的 TCP 端口 {port} 上监听");
+        let up = listeners_up().expect("SIP 端点应已开启");
+        assert!(up.3, "四传输状态里 tcp 应为 true，实得 {up:?}");
+        assert!(!up.2, "未配置 UDP，udp 应为 false，实得 {up:?}");
+        cancel.cancel();
+        let _ = server.await;
     }
 
     use aerodesk_protocol::sip_client::SipClientConfig;

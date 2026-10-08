@@ -120,6 +120,25 @@ pub struct SipViewerSession {
 ///   按 §4.1 确定性推导 view AoR 重拨）；false = 仅记日志（观看端无人呼叫
 ///   本端 AoR）。
 #[allow(clippy::too_many_arguments)] // 与 connect_viewer_sip 同参数面；内部私有实现
+/// 由信令 URL + 显式参数推导 SIP 传输：`wss://` → TLS，**其余默认 TCP**。
+///
+/// 抽成纯函数是为了能单测「默认到底走什么」——本文件与 `aerodesk-bridge` 曾各写一份
+/// `if tls { "tls" } else { "udp" }`，与 `sip_link::from_parts` 的 `"" | "tcp" => Tcp`
+/// 及 desktop/host 默认互不一致（2026-10-08 独立评审 A.2）。
+/// 显式值原样透传（含未知值——由 `from_parts` 报「未知传输」错，不在这里吞掉）。
+fn derive_sip_transport(server: &str, explicit: Option<&str>) -> String {
+    match explicit {
+        Some(t) if !t.trim().is_empty() => t.to_string(),
+        _ => {
+            if server.starts_with("wss") {
+                "tls".into()
+            } else {
+                "tcp".into()
+            }
+        }
+    }
+}
+
 fn connect_sip_uac(
     server: &str,
     target_device: &str,
@@ -144,19 +163,12 @@ fn connect_sip_uac(
     String,
 > {
     use str0m::net::Protocol;
-    // 传输推导：显式参数 > URL scheme（wss=TLS；**其余默认 TCP**——与
-    // `sip_link::from_parts` 的 `"" | "tcp" => Tcp` 及 desktop/host 默认一致。
-    // 旧实现在此处默认 udp，导致「文档说默认 TCP、CLI 实际走 UDP」。
-    let transport = sip_transport.unwrap_or({
-        #[allow(clippy::match_like_matches_macro)]
-        let tls = server.starts_with("wss");
-        if tls { "tls" } else { "tcp" }
-    });
+    let transport = derive_sip_transport(server, sip_transport);
     let mut cfg = crate::sip_link::SipLinkConfig::from_parts(
         server,
         &device_id,
         token.unwrap_or(""),
-        transport,
+        &transport,
         sip_port.unwrap_or(0),
         "",
         "",
@@ -497,17 +509,12 @@ pub fn connect_publisher_sip(
     ),
     String,
 > {
-    // 传输推导：显式参数 > URL scheme（wss=TLS；**其余默认 TCP**，同上）。
-    let transport = sip_transport.unwrap_or({
-        #[allow(clippy::match_like_matches_macro)]
-        let tls = server.starts_with("wss");
-        if tls { "tls" } else { "tcp" }
-    });
+    let transport = derive_sip_transport(server, sip_transport);
     let mut cfg = crate::sip_link::SipLinkConfig::from_parts(
         server,
         device_id,
         token.unwrap_or(""),
-        transport,
+        &transport,
         sip_port.unwrap_or(0),
         "",
         "",
@@ -635,4 +642,29 @@ pub fn connect_publisher_sip(
         .ok();
 
     Ok((p2p, video_mid, audio_mid))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_sip_transport;
+
+    /// 回归（独立评审 A.2）：默认传输必须是 TCP——此前 CLI 路径默认 udp，与文档/desktop 矛盾。
+    #[test]
+    fn default_sip_transport_is_tcp_except_wss() {
+        assert_eq!(derive_sip_transport("ws://127.0.0.1:3003/ws", None), "tcp");
+        assert_eq!(
+            derive_sip_transport("ws://127.0.0.1:3003/ws", Some("")),
+            "tcp"
+        );
+        assert_eq!(
+            derive_sip_transport("ws://127.0.0.1:3003/ws", Some("   ")),
+            "tcp"
+        );
+        assert_eq!(derive_sip_transport("wss://host:443/ws", None), "tls");
+        // 显式参数优先于 scheme。
+        assert_eq!(derive_sip_transport("ws://host/ws", Some("udp")), "udp");
+        assert_eq!(derive_sip_transport("wss://host/ws", Some("udp")), "udp");
+        // 未知值透传，由 from_parts 报错，不在这里静默改写。
+        assert_eq!(derive_sip_transport("ws://host/ws", Some("bogus")), "bogus");
+    }
 }

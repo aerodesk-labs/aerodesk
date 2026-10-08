@@ -104,7 +104,7 @@ pub struct SipLinkConfig {
     pub password: String,
     /// signal 的 SIP 监听地址（实际投递目标）。
     pub server: SocketAddr,
-    /// 传输（UDP=内网/调试；TLS=公网默认加密）。
+    /// 传输（**TCP=默认**；UDP=内网/调试；TLS=公网加密）。
     pub transport: SipTransport,
     /// TLS 配置（[`SipTransport::Tls`] 时必填）。
     pub tls: Option<SipTlsConfig>,
@@ -732,9 +732,14 @@ mod tests {
         assert_eq!(cfg.device_id, "AD-TEST");
         assert_eq!(cfg.domain, "aerodesk.test", "域缺省");
         assert_eq!(
+            cfg.transport,
+            SipTransport::Tcp,
+            "空传输 = 默认 TCP（回归：旧默认是 udp，与 desktop/host 不一致）"
+        );
+        assert_eq!(
             cfg.server,
             "127.0.0.1:5060".parse().unwrap(),
-            "udp 默认 5060"
+            "tcp 默认 5060（空传输 = 默认 TCP）"
         );
         assert!(cfg.tls.is_none());
         // tls：默认端口 5061 + 系统根 CA + SNI。
