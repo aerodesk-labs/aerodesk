@@ -167,9 +167,12 @@ TLS 客户端证书
   `off` 显式关闭），HTTP 仅保留运维面（/healthz /devices /metrics /admin/*）
 - `User-Agent` 携带协议版本；option-tag `Require: aerodesk.p2p` 能力协商
 - Digest 迁移：现有 token 即口令，服务端仅存 HA1（迁移期旧 token 一次性登记）
-- TURN 凭证不进 SIP 面：旧 `/config` HTTP 签发随 JSON 面退役；客户端经
+- ~~TURN 凭证不进 SIP 面：旧 `/config` HTTP 签发随 JSON 面退役；客户端经
   `AERO_TURN_URLS/USERNAME/CREDENTIAL` 静态注入（内嵌 TURN 用 `SFU_TURN_SECRET`
-  静态 secret，外部 coturn 用 `TURN_URLS`）
+  静态 secret，外部 coturn 用 `TURN_URLS`）~~
+  **2026-10-08 起改为随 SIP 下发**（见 §2 的 `Joined.turn` 一格）：`REGISTER` 的 200 OK 带
+  `X-AeroDesk-Turn-{Urls,User,Cred}` 三个头（signal 从 SFU `/config` 取，30s 缓存、按 URL 分键），
+  客户端解析进 `SipEvent::Registered.turn`，`resolve_turn()` **下发优先、本地 `AERO_TURN_*`／settings 为覆盖**
 - **媒体核心不 import SIP 类型**（#552 约束）：SIP UA 收敛在 protocol/core 信令层，
   对媒体层只暴露 SDP/ICE 参数
 

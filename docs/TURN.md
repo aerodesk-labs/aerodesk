@@ -72,7 +72,7 @@ native 客户端（aerodesk-core）：**注册即得**——`REGISTER` 的 `200 
 `X-AeroDesk-Turn-Urls/-User/-Cred`（见上），客户端在 `SipEvent::Registered.turn` 收下，
 起呼/接听前经 `turn_client::resolve_turn()` 建立 TURN 传输（**下发优先**；本地
 `AERO_TURN_*`／settings 为覆盖兜底）。旧 JSON 面的 `Joined.turn` 已随 P3 退役。
-（`TurnTransport`）并把 relayed 候选加入 offer（`typ relay`）；`MediaSocket` 双路
+建立 `TurnTransport` 并把 relayed 候选加入 offer（`typ relay`）；`MediaSocket` 双路
 收发——ICE 直连优先、TURN 兜底，无 TURN 配置时行为不变。
 
 > **force-relay（#201）**：某些 NAT/模拟器（qemu slirp）下直连候选"假通"
