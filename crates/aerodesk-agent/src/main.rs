@@ -1092,8 +1092,10 @@ fn connect_inner(
     let addr = direct.local_addr().map_err(|e| e.to_string())?;
     info!("local UDP addr: {addr}");
 
-    // TURN：SIP 无 join 下发一环——AERO_TURN_* 环境配置（失败仅告警直连兜底）。
-    let turn_transport = aerodesk_core::turn_client::p2p_turn_transport(
+    // TURN：**优先用服务端随 REGISTER 200 下发的**（此前只能靠 AERO_TURN_* 手配，见
+    // `turn_client.rs` 的 resolve_turn 说明）；本地环境变量为覆盖兜底。
+    let turn_transport = aerodesk_core::turn_client::resolve_turn(
+        link.dispatched_turn(),
         &std::env::var("AERO_TURN_URLS").unwrap_or_default(),
         &std::env::var("AERO_TURN_USERNAME").unwrap_or_default(),
         &std::env::var("AERO_TURN_CREDENTIAL").unwrap_or_default(),
