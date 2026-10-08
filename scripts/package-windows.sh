@@ -14,7 +14,7 @@ VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 
 echo "== [1/3] 校验产物"
 for b in target/release/aerodesk-desktop.exe target/release/aerodesk-agent.exe; do
-  [ -f "$b" ] || { echo "缺少 $b（先 cargo build --release -p aerodesk-desktop -p aerodesk-agent）"; exit 1; }
+  [ -f "$b" ] || { echo "缺少 ${b}（先 cargo build --release -p aerodesk-desktop -p aerodesk-agent）"; exit 1; }
 done
 [ -d "$FFMPEG_DIR/bin" ] || { echo "FFMPEG_DIR/bin 不存在: $FFMPEG_DIR"; exit 1; }
 
@@ -28,7 +28,7 @@ cp target/release/aerodesk-agent.exe "$STAGE/"
 cp "$FFMPEG_DIR"/bin/*.dll "$STAGE/"
 cp app-assets/icon-1024.png "$STAGE/aerodesk.png"
 cat > "$STAGE/README.txt" <<EOF
-AeroDesk Windows 便携包（$VERSION）
+AeroDesk Windows 便携包（${VERSION}）
 - 观看/主控端：双击 aerodesk-desktop.exe（连接服务器/房间，支持 Windows 被控端双角色）
 - 命令行：aerodesk-agent.exe --role publisher|viewer --signal ws://<host>:3003 --room <room>
 - 被控端示例：aerodesk-agent.exe --role publisher --encoder screen --signal ws://<host>:3003 --room demo

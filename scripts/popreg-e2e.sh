@@ -23,6 +23,7 @@ taskkill //F //IM aerodesk-sfu.exe 2>/dev/null || true
 pkill -f 'target/debug/aerodesk-signal' 2>/dev/null || true
 pkill -f 'target/debug/aerodesk-sfu' 2>/dev/null || true
 cd "$(dirname "$0")/.."
+source scripts/lib/e2e-ports.sh   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 
 ROOM="dyn-room-$(date +%s)"
 REG="/tmp/popreg-e2e-$(date +%s).json"
@@ -37,7 +38,7 @@ RECORD_DIR="$REC/a" ./target/debug/aerodesk-sfu >/tmp/popreg-sfu-a.log 2>&1 &
 SFU_A=$!
 SFU_MEDIA_PORT=3479 SFU_SIGNAL_PORT=3005 SFU_INTERNAL_PORT=3007 RECORD_DIR="$REC/b" ./target/debug/aerodesk-sfu >/tmp/popreg-sfu-b.log 2>&1 &
 SFU_B=$!
-SIGNAL_OPS_PORT=3001 SIP_UDP_PORT=5060 SIP_TLS_PORT=5061 SIP_WSS_PORT=3061 POP_ID=pop-a \
+SIGNAL_OPS_PORT=3001 SIP_UDP_PORT="$SIP_PORT" SIP_TLS_PORT=5061 SIP_WSS_PORT=3061 POP_ID=pop-a \
   POP_REGISTRY_FILE="$REG" SFU_URL=http://127.0.0.1:3002 \
   ./target/debug/aerodesk-signal >/tmp/popreg-sig-a.log 2>&1 &
 SIG_A=$!

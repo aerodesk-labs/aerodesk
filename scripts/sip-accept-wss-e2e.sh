@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # #598 P0：标准 SIP 客户端（RFC 7118 WSS）端到端验收线。
-# 起signal（SIP_WSS_PORT=3061 + SIP_UDP_PORT=5060 + 显式 Digest 用户），
+# 起signal（SIP_WSS_PORT=3061 + SIP_UDP_PORT=<SIP_PORT> + 显式 Digest 用户），
 # 跑 scripts/sip-accept-wss.py 完整呼叫闭环：REGISTER(Digest)×2 → INVITE →
 # 100+200(SDP answer) → ACK。此前该脚本零调用方（web-sip-wss-design.md §5 任务8
 # 前置）——浏览器 SIP 化（P2）依赖此线的报文形态背书。
 # 依赖：python3 + websockets 包（缺失时自动 pip 安装）、nc。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/lib/e2e-ports.sh"   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 cd "$ROOT"
 
 echo "== [1/4] 构建 signal"
 cargo build -q -p aerodesk-signal
 
 echo "== [2/4] 启动 signal（SIP 双传输 + 显式 Digest 用户）"
-SIP_WSS_PORT=3061 SIP_UDP_PORT=5060 \
+SIP_WSS_PORT=3061 SIP_UDP_PORT="$SIP_PORT" \
   SIP_DIGEST_USERS="accept-wss-a=pass-a,accept-wss-b=pass-b" \
   "$ROOT/target/debug/aerodesk-signal" >/tmp/sip-accept-wss-sig.log 2>&1 &
 SIG=$!

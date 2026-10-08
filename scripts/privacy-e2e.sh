@@ -9,6 +9,7 @@
 # 用法: scripts/privacy-e2e.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/lib/e2e-ports.sh"   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 REC="$(mktemp -d)"
 # Git Bash 启动 Windows exe 时须用 POSIX 路径注入 DLL 搜索路径（msys 转换）。
 case "$(uname -s)" in
@@ -22,7 +23,7 @@ echo "== 构建"
 cargo build --release -q -p aerodesk-agent -p aerodesk-signal
 
 echo "== 启动 signal（SIP UDP 5060）"
-SIP_UDP_PORT=5060 ./target/release/aerodesk-signal >"$REC/sig.log" 2>&1 &
+SIP_UDP_PORT="$SIP_PORT" ./target/release/aerodesk-signal >"$REC/sig.log" 2>&1 &
 SIG_PID=$!
 sleep 1
 
@@ -36,7 +37,7 @@ run_phase() { # $1=阶段名 $2=房间 $3=viewer 控制消息 $4=落盘名 $5=�
         --signal ws://127.0.0.1:3003 --room "$room" >"$REC/pub-$tag-$attempt.log" 2>&1 &
     local pub_pid=$!
     sleep 2
-    echo "== [$tag] attempt $attempt: viewer（--send-control $ctl，第 120 帧落盘）"
+    echo "== [$tag] attempt $attempt: viewer（--send-control ${ctl}，第 120 帧落盘）"
     AERODESK_DUMP_FRAME="$REC/$dump" AERODESK_DUMP_AFTER=120 \
         ./target/release/aerodesk-agent --role viewer \
         --signal ws://127.0.0.1:3003 --room "$room" \

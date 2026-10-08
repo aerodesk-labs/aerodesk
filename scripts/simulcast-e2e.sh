@@ -13,6 +13,7 @@
 # 用法: scripts/simulcast-e2e.sh [房间] [观察秒数]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/lib/e2e-ports.sh"   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 cd "$ROOT"
 
 ROOM="${1:-sim-$(date +%s)}"
@@ -70,7 +71,7 @@ cd "$ROOT"
 echo "== 启动 sfu/signal"
 RECORD_DIR="$REC" SFU_HOST_ADDRESS=127.0.0.1 ./target/debug/aerodesk-sfu >/tmp/sim-sfu.log 2>&1 &
 SFU_PID=$!
-SIP_UDP_PORT=5060 SIP_WSS_PORT=3061 ./target/debug/aerodesk-signal >/tmp/sim-sig.log 2>&1 &
+SIP_UDP_PORT="$SIP_PORT" SIP_WSS_PORT=3061 ./target/debug/aerodesk-signal >/tmp/sim-sig.log 2>&1 &
 SIG_PID=$!
 (cd "$ROOT/web" && python3 -m http.server "$WEB_SERVE_PORT" --bind 127.0.0.1 >/tmp/sim-http.log 2>&1) &
 HTTP=$!

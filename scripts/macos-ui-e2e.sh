@@ -10,6 +10,7 @@
 set -euo pipefail
 export PYTHONIOENCODING=utf-8
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/lib/e2e-ports.sh"   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 cd "$ROOT"
 ROOM="${1:-macosui-$(date +%s)}"
 
@@ -75,7 +76,7 @@ RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu" >/tmp/macosui-sfu.log 2>&1 &
 SFU=$!
 # SIP 会议桥链路（WSS 兜底已删 #576——desktop 观看必经 SIP）。
 # #598 P2a：浏览器被控页走 SIP-WSS（3061）；DIGEST_USERS 含房间（页面 REGISTER）。
-SIP_UDP_PORT=5060 SIP_WSS_PORT=3061 \
+SIP_UDP_PORT="$SIP_PORT" SIP_WSS_PORT=3061 \
   SIP_DIGEST_USERS="AD-E2EUI=e2e-token,${ROOM}=e2e-token" "$ROOT/target/debug/aerodesk-signal" >/tmp/macosui-sig.log 2>&1 &
 SIG=$!
 (cd "$ROOT/web" && python3 -m http.server "${WEB_SERVE_PORT:-38084}" >/tmp/macosui-http.log 2>&1) &
@@ -121,7 +122,7 @@ if [ "$OK" != "1" ]; then
 fi
 
 echo "== [4.5/6] seed SIP 配置（desktop 启动即 REGISTER，观看经会议桥）"
-# 隔离 HOME：seed 与 desktop 启动同用 $E2E_DIR（不碰真实配置）。
+# 隔离 HOME：seed 与 desktop 启动同用 ${E2E_DIR}（不碰真实配置）。
 export AERO_E2E_HOME="$E2E_DIR"
 python3 - <<'PY'
 import json, os

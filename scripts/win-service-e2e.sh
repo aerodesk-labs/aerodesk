@@ -6,7 +6,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 BIN="${AERODESK_HOST:-target/debug/aerodesk-host.exe}"
-[ -f "$BIN" ] || { echo "未找到 $BIN（先 cargo build -p aerodesk-host）" >&2; exit 1; }
+[ -f "$BIN" ] || { echo "未找到 ${BIN}（先 cargo build -p aerodesk-host）" >&2; exit 1; }
 
 echo "== 初始状态（未装应为 not installed）"
 "$BIN" --service-status
