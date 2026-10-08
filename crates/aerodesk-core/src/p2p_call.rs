@@ -387,6 +387,40 @@ pub fn offer_video_mid(offer_sdp: &str) -> Option<str0m::media::Mid> {
 mod tests {
     use super::*;
 
+    /// 回归（独立评审指出「回退链零覆盖」）：绑定地址 → 候选列表的三态语义。
+    /// 不依赖本机具体网卡（枚举结果只做一致性比对 + 不变式校验）。
+    #[test]
+    fn media_candidates_semantics_for_explicit_and_wildcard_binds() {
+        let explicit: SocketAddr = "192.0.2.9:40000".parse().unwrap();
+        let explicit_ip: IpAddr = "192.0.2.9".parse().unwrap();
+        // 1) 显式绑定具体地址 → 只通告它（不看接口枚举，也不管 discover_external）。
+        assert_eq!(media_candidates(explicit, true), vec![explicit_ip]);
+        assert_eq!(media_candidates(explicit, false), vec![explicit_ip]);
+        // 2) 通配绑定 + 不提出接口（回环 bind 的调用方）→ 只回退 loopback。
+        let wildcard: SocketAddr = "0.0.0.0:0".parse().unwrap();
+        assert_eq!(
+            media_candidates(wildcard, false),
+            vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]
+        );
+        // 3) 通配绑定 + 提出接口 → 与 `net_ifaces` 枚举结果一致，且绝不含回环 / fake-IP。
+        let got = media_candidates(wildcard, true);
+        assert_eq!(
+            got,
+            crate::net_ifaces::local_host_candidates(),
+            "通配绑定应直接采用接口枚举结果"
+        );
+        for ip in &got {
+            assert!(!ip.is_loopback(), "候选不得含回环：{ip}");
+            if let IpAddr::V4(v4) = ip {
+                let o = v4.octets();
+                assert!(
+                    !(o[0] == 198 && matches!(o[1], 18 | 19)),
+                    "候选不得含 198.18.0.0/15 fake-IP：{ip}"
+                );
+            }
+        }
+    }
+
     fn call_config(role: P2pRole, device_role: Role, inline: bool) -> P2pCallConfig {
         P2pCallConfig {
             role,
