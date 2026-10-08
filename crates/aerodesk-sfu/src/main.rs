@@ -152,13 +152,51 @@ fn install_signal_handlers() {
 }
 
 /// HTTP server 共享的应用状态（public/internal 各持一份）。
+/// TURN 下发的**签发器**：持有不变的 urls 与 secret，**每次请求现签**限时凭证。
+///
+/// 为什么不存 `TurnConfig`：REST 凭证的 username 首段是**到期时间戳**，存一份「启动时签的」
+/// 就等于下发过期凭证——2026-10-08 真机实测：节点 SFU 起于 13:09，21:40 时 `GET /config`
+/// 仍返回 05:09 签的 `username=1791439776:aerodesk`（**已过期 7.5 小时**），客户端拿去必然 TURN 401。
+#[derive(Clone)]
+struct TurnIssuer {
+    urls: Vec<String>,
+    secret: String,
+    user_id: String,
+    ttl_secs: u64,
+}
+
+impl TurnIssuer {
+    fn issue_at(&self, now_unix: u64) -> TurnConfig {
+        let creds = aerodesk_protocol::turn::generate_turn_credentials(
+            &self.secret,
+            &self.user_id,
+            self.ttl_secs,
+            now_unix,
+        );
+        TurnConfig {
+            urls: self.urls.clone(),
+            username: creds.username,
+            credential: creds.credential,
+        }
+    }
+
+    /// 现签（系统时钟）。
+    fn issue(&self) -> TurnConfig {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_secs();
+        self.issue_at(now)
+    }
+}
+
 struct AppState {
     /// 对外通告的 ICE host 候选地址（SFU_HOST_ADDRESS 覆盖；默认=自动选择）。
     candidate_udp_addr: SocketAddr,
     candidate_tcp_addr: SocketAddr,
     shard_txs: Vec<mpsc::Sender<ShardCommand>>,
     router: Arc<Mutex<router::ShardRouter>>,
-    turn: Option<TurnConfig>,
+    turn: Option<TurnIssuer>,
     /// 内嵌 TURN server 句柄（#220：暴露 allocation 指标；外部 TURN_URLS 时为 None）。
     turn_server: Option<Arc<turn_server::TurnServer>>,
     shared: Shared,
@@ -178,7 +216,7 @@ fn public_handler(request: &Request) -> Response {
         state.candidate_tcp_addr,
         state.shard_txs.clone(),
         state.router.clone(),
-        state.turn.clone(),
+        state.turn.as_ref(),
         state.turn_server.clone(),
         state.shared.clone(),
         false,
@@ -202,7 +240,7 @@ fn internal_handler(request: &Request) -> Response {
         state.candidate_tcp_addr,
         state.shard_txs.clone(),
         state.router.clone(),
-        state.turn.clone(),
+        state.turn.as_ref(),
         state.turn_server.clone(),
         state.shared.clone(),
         true,
@@ -520,16 +558,12 @@ pub fn main() {
                 }
             }
         };
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time")
-            .as_secs();
-        let creds =
-            aerodesk_protocol::turn::generate_turn_credentials(secret, "aerodesk", 3600, now);
-        Some(TurnConfig {
+        // 只存不可变部分（urls + secret），凭证在 /config 请求时现签。
+        Some(TurnIssuer {
             urls,
-            username: creds.username,
-            credential: creds.credential,
+            secret: secret.clone(),
+            user_id: "aerodesk".to_string(),
+            ttl_secs: 3600,
         })
     });
     if turn.is_some() {
@@ -1225,13 +1259,22 @@ fn session_kick_room(
     )
 }
 
+/// `/config` 的响应体：**每次调用现签** TURN 凭证。
+///
+/// 抽成函数是为了让测试能直接钉住「端点每次都给新凭证」——只测 `TurnIssuer::issue_at`
+/// 是测不到端点行为的（首版就这么错过一次，变异没红）。
+fn config_payload(turn: Option<&TurnIssuer>) -> serde_json::Value {
+    let turn = turn.map(TurnIssuer::issue);
+    serde_json::json!({ "turn": turn })
+}
+
 fn web_request(
     request: &Request,
     udp_addr: SocketAddr,
     tcp_addr: SocketAddr,
     shard_txs: Vec<mpsc::Sender<ShardCommand>>,
     router: Arc<Mutex<router::ShardRouter>>,
-    turn: Option<TurnConfig>,
+    turn: Option<&TurnIssuer>,
     turn_server: Option<Arc<turn_server::TurnServer>>,
     shared: Shared,
     internal: bool,
@@ -1350,8 +1393,7 @@ fn web_request(
     }
 
     if request.method() == "GET" && request.url() == "/config" {
-        let body =
-            serde_json::to_vec(&serde_json::json!({ "turn": turn })).expect("serialize config");
+        let body = serde_json::to_vec(&config_payload(turn)).expect("serialize config");
         return Response::from_data("application/json", body);
     }
 
@@ -1973,5 +2015,119 @@ mod tests {
         );
         DRAINING.store(false, Ordering::Relaxed);
         assert_eq!(resp.status_code, 503);
+    }
+}
+
+#[cfg(test)]
+mod turn_issuer_tests {
+    use super::*;
+
+    fn issuer() -> TurnIssuer {
+        TurnIssuer {
+            urls: vec!["turn:example.invalid:3478?transport=udp".into()],
+            secret: "s3cret".into(),
+            user_id: "aerodesk".into(),
+            ttl_secs: 3600,
+        }
+    }
+
+    /// 回归（2026-10-08 真机缺陷）：下发凭证必须**从签发时刻**起算有效期。
+    /// 旧实现把启动时签的那份存起来反复下发 → 进程跑过 1h 后，`/config` 返回的就是过期凭证
+    /// （实测节点上过期 7.5 小时），客户端拿去必然 TURN 401。
+    #[test]
+    fn issued_credentials_expire_from_now_not_from_startup() {
+        let iss = issuer();
+        let early = iss.issue_at(1_000_000);
+        // 8 小时后再签一次：到期时间必须随之前移，且凭证不同（HMAC 覆盖 username）。
+        let late = iss.issue_at(1_000_000 + 8 * 3600);
+        assert_eq!(early.username, "1003600:aerodesk");
+        assert_eq!(
+            late.username,
+            format!("{}:aerodesk", 1_000_000 + 8 * 3600 + 3600)
+        );
+        assert_ne!(
+            early.credential, late.credential,
+            "不同签发时刻必须不同凭证"
+        );
+        // 与协议侧同一函数的结果一致（不自己拼 HMAC）。
+        let expect = aerodesk_protocol::turn::generate_turn_credentials(
+            "s3cret", "aerodesk", 3600, 1_000_000,
+        );
+        assert_eq!(early.credential, expect.credential);
+        assert_eq!(
+            early.urls,
+            vec!["turn:example.invalid:3478?transport=udp".to_string()]
+        );
+    }
+
+    /// 每次下发都必须是「刚好有效」的：`expiry > now`（这条在旧实现下会随进程存活时间变红）。
+    #[test]
+    fn every_issue_is_still_valid_at_issue_time() {
+        let iss = issuer();
+        for t in [1_000_000u64, 1_000_000 + 3600, 1_000_000 + 24 * 3600] {
+            let c = iss.issue_at(t);
+            let expiry: u64 = c.username.split(':').next().unwrap().parse().unwrap();
+            assert!(
+                expiry > t,
+                "签发时刻 {t} 拿到的凭证已过期（expiry={expiry}）"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod config_endpoint_tests {
+    use super::*;
+
+    fn issuer() -> TurnIssuer {
+        TurnIssuer {
+            urls: vec!["turn:example.invalid:3478?transport=udp".into()],
+            secret: "s3cret".into(),
+            user_id: "aerodesk".into(),
+            ttl_secs: 3600,
+        }
+    }
+
+    /// 回归（2026-10-08 真机缺陷）：`/config` **每次调用**都必须给一份「从现在起有效」的凭证。
+    /// 旧实现把启动时签的那份存下来反复下发 → 进程活过 1h 后 /config 就发过期凭证（实测过期 7.5h）。
+    /// 这条断言在「固定用启动时刻签发」的变异下必红（expiry 会远小于 now）。
+    #[test]
+    fn config_endpoint_mints_credentials_valid_from_now() {
+        let iss = issuer();
+        let v = config_payload(Some(&iss));
+        let username = v["turn"]["username"].as_str().expect("username");
+        let expiry: u64 = username.split(':').next().unwrap().parse().unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_secs();
+        assert!(
+            expiry > now && expiry <= now + iss.ttl_secs + 2,
+            "端点签发的凭证有效期必须从现在起算：expiry={expiry} now={now}"
+        );
+        assert_eq!(
+            v["turn"]["urls"][0].as_str().unwrap(),
+            "turn:example.invalid:3478?transport=udp"
+        );
+    }
+
+    /// 隔 1 秒再取一次，凭证必须变化（username 里的 expiry 是秒级）。
+    #[test]
+    fn config_endpoint_issues_fresh_credentials_on_each_call() {
+        let iss = issuer();
+        let a = config_payload(Some(&iss));
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let b = config_payload(Some(&iss));
+        assert_ne!(
+            a["turn"]["credential"], b["turn"]["credential"],
+            "两次调用必须给出不同凭证（否则就是缓存了启动时那份）"
+        );
+    }
+
+    /// 未配置 TURN（无 secret）时，`turn` 必须是 null 而不是伪造一份。
+    #[test]
+    fn config_payload_is_null_without_turn() {
+        let v = config_payload(None);
+        assert!(v["turn"].is_null());
     }
 }
