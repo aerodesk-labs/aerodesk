@@ -263,7 +263,7 @@ cargo run -p aerodesk-agent -- --role viewer --signal ws://127.0.0.1:5060   --ro
 | 15060 | TCP | signal SIP/TCP（**当前运行中的进程在听**；2026-10-08 复核 `ss -lntu` 见 `0.0.0.0:15060 tcp LISTEN`） |
 | 5061 | TCP | signal SIP/TLS |
 | 3061 | TCP | signal SIP/WSS（RFC 7118） |
-| 14700 | TCP | SFU 运维面/Web 换页（实测 `0.0.0.0:14700` 在听；2026-10-08 补录——上一稿漏了这一行） |
+| 14700 | TCP | SFU 公共 HTTPS/浏览器面（`SFU_SIGNAL_PORT`，实测 `0.0.0.0:14700` 在听；2026-10-08 补录——上一稿漏了这一行且标签写成「运维面」，运维面是 14701 / 回环 14702） |
 | 14701 | TCP | signal ops HTTPS（/healthz /devices /metrics/prometheus /admin/*） |
 | 14778 | UDP + TCP | SFU 媒体（WebRTC RTP/RTCP，**UDP 必须放行**） |
 | 14779 | UDP + TCP | TURN 中继 |
@@ -277,9 +277,15 @@ cargo run -p aerodesk-agent -- --role viewer --signal ws://127.0.0.1:5060   --ro
 > 绑 `127.0.0.1:5060`），不是本服务器——服务器侧只是端口已被占。两句不要混用。
 >
 > **授权要求（评审 must_fix）**：重启/回滚这台**共享**服务器（"systemctl restart"、拷回旧件、
-> 改 unit）属影响他方的动作，**必须先经用户授权**；本节记录两次部署：11:47 那次用户明确授权，
-> 13:09 那次为同一批次内的续做（用户对「重部署 + 换 SIP 端口」的授权覆盖），两者都已在
-> walgit 线程 `ops-prod-node-redeploy` 留痕。
+> 改 unit）属影响他方的动作，**必须先经用户授权**。
+>
+> **留痕实况（2026-10-08 第三轮评审复核后更正）**：walgit 线程 `ops-prod-node-redeploy` 里
+> **只有 11:47 那次**部署的第一方记录与其授权依据；**13:09 那次没有第一方「部署」与「授权」记录**
+> ——该线程里带「13:09」的条目只有评审条目（reviewer-2 / reviewer-4）与实现方**转引评审结论**的
+> comment（本句已按逐条 actor 核对：`kind`+`actor` 列出来看过），台账 `docs/DELIVERY_WEEK_2026-10.md`
+> 至今仍写「重启/回滚共享服务器…**仍需用户授权**」。上一稿写「两者都已在 walgit 线程留痕」**不成立**，已删。
+> → 13:09 那次的授权**待用户确认**；在确认前，本节 13:09 相关内容只作**现状描述**（描述现在跑什么），
+> 不构成「已授权」的声明。
 >
 > **部署内容声明（已更正）**：本节原写「部署内容 = walgit main 源码树
 > `e0ab71b2d101c9f8c84bab54623a433d04441e58`」——对**当前**节点**不成立**：现跑的二进制的
@@ -288,31 +294,44 @@ cargo run -p aerodesk-agent -- --role viewer --signal ws://127.0.0.1:5060   --ro
 > 启动，当前二进制 sha256 ≠ 备份里的 `sha256-after.txt`，11:47 那版已被覆盖到
 > `~/aerodesk-redeploy-20261008-b/*.prev`（该目录本节未提）。
 > 备份目录实况（2026-10-08 复核 `ls -la`）：
-> - `~/aerodesk-redeploy-20261008/`（11:47）= 重部署**前**的旧件（Aug 23）：`aerodesk-signal.orig`、
->   `aerodesk-sfu.orig`、`aerodesk-signal.service.orig`、`aerodesk-sfu.service.orig`，
->   另有 `healthz-before.json`、`ports-before.txt`、`sha256-before/after.txt`；
-> - `~/aerodesk-redeploy-20261008-b/`（13:09）= 11:47 那版的二进件：`aerodesk-signal.prev`、
+> - `~/aerodesk-redeploy-20261008/`（11:47）= 重部署**前**的旧件：`aerodesk-signal.orig`、
+>   `aerodesk-sfu.orig`、`aerodesk-signal.service.orig`（这两份 unit 的 mtime 是 **Aug 12**，不是 Aug 23）、
+>   `aerodesk-sfu.service.orig`，另有 `healthz-before.json`、`ports-before.txt`、`sha256-before/after.txt`；
+> - `~/aerodesk-redeploy-20261008-b/`（13:09）= **11:47 那次**的二进件快照：`aerodesk-signal.prev`、
 >   `aerodesk-sfu.prev`，以及 unit 副本 `aerodesk-signal.service`（**这个没有后缀**）。
+>   ⚠ **上一稿把这份的标签写反了**（把它叫成「13:09 版」）——实测 `-b/*.prev` 的 sha256 与
+>   `sha256-after.txt` **逐字相同**（= 11:47 产物）；而**当前在跑的**才是 13:09（`9f5fc2cf…`），
+>   **它没有任何备份**。
 >
 > **回滚（需授权）——备份件名带后缀，必须按目标名重命名后落盘**（上一稿写「把 `*.orig`/`*.prev`
 > 拷回 `/opt/aerodesk/bin/` 与 `/etc/systemd/system/`」，按字面执行会得到 `aerodesk-signal.orig`
 > 这种没人执行的文件、且同一 glob 混了二进制与 unit 两种落点 ⇒ **假回滚**。独立评审实测指出，已改）：
 >
 > ```sh
-> # 回到 11:47 之前（最旧的一版）：
-> cp -p ~/aerodesk-redeploy-20261008/aerodesk-signal.orig           /opt/aerodesk/bin/aerodesk-signal
-> cp -p ~/aerodesk-redeploy-20261008/aerodesk-sfu.orig              /opt/aerodesk/bin/aerodesk-sfu
-> cp -p ~/aerodesk-redeploy-20261008/aerodesk-signal.service.orig   /etc/systemd/system/aerodesk-signal.service
-> cp -p ~/aerodesk-redeploy-20261008/aerodesk-sfu.service.orig      /etc/systemd/system/aerodesk-sfu.service
-> # 回到 11:47 那次的状态（13:09 版）——注意第三个源文件**没有后缀**：
-> cp -p ~/aerodesk-redeploy-20261008-b/aerodesk-signal.prev         /opt/aerodesk/bin/aerodesk-signal
-> cp -p ~/aerodesk-redeploy-20261008-b/aerodesk-sfu.prev            /opt/aerodesk/bin/aerodesk-sfu
-> cp -p ~/aerodesk-redeploy-20261008-b/aerodesk-signal.service      /etc/systemd/system/aerodesk-signal.service
+> # 【回滚前必做】13:09 那版在跑且**无备份**——先自己留一份，否则回滚后不可逆：
+> sudo cp -a /opt/aerodesk/bin/aerodesk-signal /opt/aerodesk/bin/aerodesk-sfu ~/aerodesk-pre-rollback-$(date +%Y%m%d-%H%M)/
+>
+> # A) 回到 11:47 之前（最旧的一版：Aug 23 二进制 + Aug 12 unit）
+> sudo cp -p ~/aerodesk-redeploy-20261008/aerodesk-signal.orig         /opt/aerodesk/bin/aerodesk-signal
+> sudo cp -p ~/aerodesk-redeploy-20261008/aerodesk-sfu.orig            /opt/aerodesk/bin/aerodesk-sfu
+> sudo cp -p ~/aerodesk-redeploy-20261008/aerodesk-signal.service.orig /etc/systemd/system/aerodesk-signal.service
+> sudo cp -p ~/aerodesk-redeploy-20261008/aerodesk-sfu.service.orig    /etc/systemd/system/aerodesk-sfu.service
+>
+> # B) 回到 11:47 那次的状态（注意源里 unit 那份**没有后缀**）
+> sudo cp -p ~/aerodesk-redeploy-20261008-b/aerodesk-signal.prev    /opt/aerodesk/bin/aerodesk-signal
+> sudo cp -p ~/aerodesk-redeploy-20261008-b/aerodesk-sfu.prev       /opt/aerodesk/bin/aerodesk-sfu
+> sudo cp -p ~/aerodesk-redeploy-20261008-b/aerodesk-signal.service /etc/systemd/system/aerodesk-signal.service
+>
 > sudo systemctl daemon-reload && sudo systemctl restart aerodesk-signal aerodesk-sfu
 > ```
 >
+> 两处上一稿的错都在这里改掉了：① **cp 必须带 `sudo`**——`/etc/systemd/system` 是 `root:root`
+> 且 unit 是 `0600`，不带 sudo 会得到「二进制回滚了、unit 没回滚」的**半回滚**；② 源文件名与目标名
+> 必须逐条对上（见各组注释），不能拿 `*.orig` 一把 glob 括过去。
+>
 > **回滚也要核验**（不是「拷回去就算回滚了」）：`sha256sum /opt/aerodesk/bin/aerodesk-*`
-> 与对应目录里的 `sha256-before.txt` / `sha256-after.txt` 对账，再看
+> 与 `~/aerodesk-redeploy-20261008/sha256-before.txt` / `sha256-after.txt` 对账（选 A 对
+> `before`、选 B 对 `after`；注意 `-b/` 目录里**没有** sha256 文件，别去那里找），再看
 > `curl -sk https://127.0.0.1:14701/healthz` 的 `sip` 字段是否回到旧形状。
 
 连接示例（信令地址 = SIP 形态 `ws://host:sip-udp-port`）：
