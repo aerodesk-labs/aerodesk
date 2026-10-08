@@ -899,27 +899,61 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
 /// 不可达——被叫/主叫的对话内 BYE/INFO 永远发不出（#598 v0.4 多方升级的
 /// 被控端 BYE cause=302 实测悬死："no connection, will retry on timer"）。
 /// 本函数按 Via 的传输挑同传输监听地址，通配 host 以环回地址替代（本地/e2e
-/// 可达；公网部署监听真实 IP 无需替代）。Via 传输无法判定（如 WSS）时回退
-/// build_local_contact（原行为）。
+/// 可达；公网部署监听真实 IP 无需替代）。Via 传输无法判定、或本端没有该传输的
+/// 监听时回退 build_local_contact（原行为），但通配 host 的替换照样执行。
+///
+/// 由 Via 头的传输段映射到 [`Transport`]。
+///
+/// 独立评审发现（2026-10-08）：本函数原先只映射 `UDP`/`TLS`，**TCP**（v0.4 起的
+/// 默认传输）与 WS/WSS/SCTP 一律落 `_ => None` → 回退 `build_local_contact`（取
+/// `get_addrs().first()`＝TLS 监听）→ 明文 TCP 腿回出去的 Contact 成了
+/// `sips:0.0.0.0:15060;transport=TLS`（scheme/host/transport 三处全错，且回退
+/// 路径不经过通配替换，host 就停在 `0.0.0.0`）。对端把 2xx 的 Contact 记为对话
+/// remote target（`invite_dialog` 写 `remote_uri`）→ 对话内 ACK/BYE/INFO 发错地方
+/// ——正是本文件注释里记的 #598「BYE 悬死」同类，且落在默认传输上。
+fn via_transport(via_value: &str) -> Option<rsipstack::sip::Transport> {
+    use rsipstack::sip::Transport;
+    // Via 形如 "SIP/2.0/UDP 127.0.0.1:52325;rport;branch=..."：取传输段。
+    let token = via_value
+        .split_whitespace()
+        .next()?
+        .strip_prefix("SIP/2.0/")?;
+    match token.to_ascii_uppercase().as_str() {
+        "UDP" => Some(Transport::Udp),
+        "TCP" => Some(Transport::Tcp),
+        "TLS" => Some(Transport::Tls),
+        "WS" => Some(Transport::Ws),
+        "WSS" => Some(Transport::Wss),
+        "SCTP" => Some(Transport::Sctp),
+        "TLS-SCTP" => Some(Transport::TlsSctp),
+        _ => None,
+    }
+}
+
+/// 通配监听地址（`0.0.0.0` / `::`）不能当 Contact host：对端拿它作 remote target
+/// 等于发往它自己的通配地址，永远到不了本端。替换为环回（本地与 e2e 可达；
+/// 公网部署监听真实 IP 时该分支不触发）。
+fn localize_host(host: &mut rsipstack::sip::Host) {
+    use rsipstack::sip::Host;
+    match host {
+        Host::IpAddr(std::net::IpAddr::V4(ip)) if ip.is_unspecified() => {
+            *host = Host::IpAddr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        }
+        Host::IpAddr(std::net::IpAddr::V6(ip)) if ip.is_unspecified() => {
+            *host = Host::IpAddr(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
+        }
+        _ => {}
+    }
+}
+
 fn contact_for_request(dl: &DialogLayer, tx: &Transaction) -> rsipstack::sip::Uri {
-    use rsipstack::sip::{Host, Param, Scheme, Transport};
-    // Via 头形如 "SIP/2.0/UDP 127.0.0.1:52325;rport;branch=..."：取传输段。
+    use rsipstack::sip::{Param, Scheme, Transport};
     let want = tx
         .original
         .via_header()
         .ok()
         .map(|v| v.value().to_string())
-        .and_then(|v| {
-            v.split_whitespace()
-                .next()
-                .and_then(|t| t.strip_prefix("SIP/2.0/"))
-                .map(str::to_ascii_uppercase)
-        });
-    let want = match want.as_deref() {
-        Some("UDP") => Some(Transport::Udp),
-        Some("TLS") => Some(Transport::Tls),
-        _ => None,
-    };
+        .and_then(|v| via_transport(&v));
     let addr = want.and_then(|w| {
         dl.endpoint
             .transport_layer
@@ -933,18 +967,13 @@ fn contact_for_request(dl: &DialogLayer, tx: &Transaction) -> rsipstack::sip::Ur
             .cloned()
     });
     let Some(mut addr) = addr else {
-        return dl.build_local_contact(None, None).unwrap_or_default();
+        // 回退路径此前直接 return：Contact 的 host 因此停在 `0.0.0.0`（评审实测
+        // TCP 腿回的正是 `sips:0.0.0.0:…`）。这里补上通配替换。
+        let mut uri = dl.build_local_contact(None, None).unwrap_or_default();
+        localize_host(&mut uri.host_with_port.host);
+        return uri;
     };
-    // 通配监听（0.0.0.0/::）不可作为 Contact host：以环回替代。
-    match &addr.addr.host {
-        Host::IpAddr(std::net::IpAddr::V4(ip)) if ip.is_unspecified() => {
-            addr.addr.host = Host::IpAddr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
-        }
-        Host::IpAddr(std::net::IpAddr::V6(ip)) if ip.is_unspecified() => {
-            addr.addr.host = Host::IpAddr(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
-        }
-        _ => {}
-    }
+    localize_host(&mut addr.addr.host);
     let scheme = if matches!(addr.r#type, Some(Transport::Tls)) {
         Scheme::Sips
     } else {
@@ -1418,6 +1447,66 @@ mod tests {
 
     fn serve_e2e_guard() -> std::sync::MutexGuard<'static, ()> {
         SERVE_E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 回归（2026-10-08 独立评审实测复现）：Via 的 TCP 段必须映射成
+    /// `Transport::Tcp`。缺陷期这里返 `None` → `contact_for_request` 回退
+    /// `build_local_contact`（取监听表第一项＝TLS）→ 明文 TCP 腿回出去的
+    /// Contact 是 `sips:…;transport=TLS`，对端据此发对话内 ACK/BYE/INFO。
+    #[test]
+    fn via_transport_maps_every_transport_including_tcp() {
+        use rsipstack::sip::Transport;
+        for (via, want) in [
+            (
+                "SIP/2.0/UDP 127.0.0.1:52325;rport;branch=z9hG4bK",
+                Transport::Udp,
+            ),
+            ("SIP/2.0/TCP 10.0.0.1:5060;branch=z9hG4bK", Transport::Tcp),
+            ("SIP/2.0/TLS 10.0.0.1:5061;branch=z9hG4bK", Transport::Tls),
+            ("SIP/2.0/WS 10.0.0.1:80;branch=z9hG4bK", Transport::Ws),
+            ("SIP/2.0/WSS 10.0.0.1:443;branch=z9hG4bK", Transport::Wss),
+            ("SIP/2.0/SCTP 10.0.0.1:5060;branch=z9hG4bK", Transport::Sctp),
+            ("SIP/2.0/TLS-SCTP 10.0.0.1:5061", Transport::TlsSctp),
+        ] {
+            assert_eq!(via_transport(via), Some(want), "Via: {via}");
+        }
+        // 大小写不敏感（对端可能发小写传输段）。
+        assert_eq!(
+            via_transport("SIP/2.0/tcp 10.0.0.1:5060"),
+            Some(Transport::Tcp)
+        );
+        // 无法判定：非 SIP/2.0、缺传输段、空串。
+        assert_eq!(via_transport("SIP/3.0/TCP 10.0.0.1:5060"), None);
+        assert_eq!(via_transport("SIP/2.0/ 10.0.0.1:5060"), None);
+        assert_eq!(via_transport(""), None);
+    }
+
+    /// 回归：通配监听地址不能作为 Contact host。这条同时钉住回退路径——
+    /// 旧实现在「Via 传输无法判定」时直接 return，通配替换被整段绕过，
+    /// host 就停在 `0.0.0.0`（评审实测）。
+    #[test]
+    fn wildcard_contact_host_is_replaced_with_loopback() {
+        use rsipstack::sip::Host;
+        let mut v4 = Host::IpAddr(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        localize_host(&mut v4);
+        assert!(
+            matches!(v4, Host::IpAddr(std::net::IpAddr::V4(ip)) if ip == std::net::Ipv4Addr::LOCALHOST),
+            "0.0.0.0 应替换为 127.0.0.1，实得 {v4:?}"
+        );
+        let mut v6 = Host::IpAddr(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED));
+        localize_host(&mut v6);
+        assert!(
+            matches!(v6, Host::IpAddr(std::net::IpAddr::V6(ip)) if ip == std::net::Ipv6Addr::LOCALHOST),
+            ":: 应替换为 ::1，实得 {v6:?}"
+        );
+        // 真实地址（公网/内网监听）不得被改写。
+        let real = std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 19, 53, 160));
+        let mut keep = Host::IpAddr(real);
+        localize_host(&mut keep);
+        assert!(
+            matches!(keep, Host::IpAddr(ip) if ip == real),
+            "真实地址不应被改写，实得 {keep:?}"
+        );
     }
 
     fn register_request(aor: &str, auth_header: Option<&str>, expires: Option<u32>) -> Request {
