@@ -317,10 +317,28 @@ mod tests {
 /// SW_RESTORE 还原（含最小化）+ SetForegroundWindow 置前。传入 Win32
 /// HWND（raw-window-handle `Win32` 的 `hwnd.get()`）。
 pub fn raise_window(hwnd: *mut std::ffi::c_void) {
+    use windows::Win32::Foundation::HWND;
+    // 注意：`RDW_*` 与 `InvalidateRect`/`RedrawWindow` 都在 **Graphics::Gdi**（不是
+    // WindowsAndMessaging）——本仓 windows crate 为 **0.58**；这两点已用「只依赖 windows 的
+    // 探针 crate 交叉编译到 x86_64-pc-windows-gnu」实证过（macOS 上无法直编本文件的
+    // `cfg(windows)` 代码）。
+    use windows::Win32::Graphics::Gdi::{
+        InvalidateRect, RDW_ALLCHILDREN, RDW_INVALIDATE, RDW_UPDATENOW, RedrawWindow,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{SW_RESTORE, SetForegroundWindow, ShowWindow};
-    let hwnd = windows::Win32::Foundation::HWND(hwnd);
+    let hwnd = HWND(hwnd);
     unsafe {
         let _ = ShowWindow(hwnd, SW_RESTORE);
         let _ = SetForegroundWindow(hwnd);
+        // **真正的重绘**：本函数的文档注释一直声称「强制重绘」，但实现只做了 SW_RESTORE——
+        // hide()→show() 后的窗口在 Windows 上可能停在「透明/半绘制」态（Slint/winit 已知，
+        // #487 托盘实测、2026-10-08 用户真机复现）。补 InvalidateRect + RedrawWindow。
+        let _ = InvalidateRect(hwnd, None, true);
+        let _ = RedrawWindow(
+            hwnd,
+            None,
+            None,
+            RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN,
+        );
     }
 }

@@ -954,6 +954,16 @@ pub fn focus_window_to_front(window: &slint::Window) {
     }
 }
 
+/// **所有 `show()` 之后都必须调用**：Windows 上 hide()→show() 的窗口可能不重绘/透明
+/// （Slint/winit 已知；#487 托盘实测、2026-10-08 用户真机再次复现）。非 Windows 平台为空操作。
+///
+/// 由 `repaint_after_show_guard` 单测强制：本文件里任何 `.show()` 之后 5 行内必须出现本函数名。
+fn show_and_repaint(window: &slint::Window) {
+    let _ = window;
+    #[cfg(target_os = "windows")]
+    raise_window_windows(window);
+}
+
 /// Windows：托盘单击/菜单恢复主窗口——隐藏（HideWindow 关窗）后再 show
 /// 的窗口可能不重绘/透明：强制重绘 + SW_RESTORE 置前（#487 托盘实测）。
 #[cfg(target_os = "windows")]
@@ -1312,6 +1322,7 @@ fn open_session_window(
             let kind = SessionWindow::Control(win.as_weak());
             install_session_close_handler(ui.as_weak(), kind.clone(), slot);
             win.show().map_err(|e| e.to_string())?;
+            show_and_repaint(&ui.window());
             Ok(kind)
         }
         ConnectMode::View => {
@@ -1320,6 +1331,7 @@ fn open_session_window(
             let kind = SessionWindow::View(win.as_weak());
             install_session_close_handler(ui.as_weak(), kind.clone(), slot);
             win.show().map_err(|e| e.to_string())?;
+            show_and_repaint(&ui.window());
             Ok(kind)
         }
         ConnectMode::Camera => {
@@ -1330,6 +1342,7 @@ fn open_session_window(
             let kind = SessionWindow::Camera(win.as_weak());
             install_session_close_handler(ui.as_weak(), kind.clone(), slot);
             win.show().map_err(|e| e.to_string())?;
+            show_and_repaint(&ui.window());
             Ok(kind)
         }
     }
@@ -1497,6 +1510,7 @@ fn open_file_transfer_window(ui: &AppWindow) {
         }
     });
     if let Err(e) = win.show() {
+        show_and_repaint(&win.window());
         unregister_file_window(slot);
         ui.set_file_open(false);
         ui.set_status(format!("打开文件传输窗口失败：{e}").into());
@@ -1587,6 +1601,7 @@ fn open_message_window(ui: &AppWindow) {
         }
     });
     if let Err(e) = win.show() {
+        show_and_repaint(&win.window());
         unregister_message_window(slot);
         ui.set_message_open(false);
         ui.set_status(format!("打开发消息窗口失败：{e}").into());
@@ -1689,6 +1704,7 @@ fn open_terminal_window(ui: &AppWindow) {
         }
     });
     if let Err(e) = win.show() {
+        show_and_repaint(&win.window());
         unregister_terminal_window(slot);
         ui.set_terminal_open(false);
         ui.set_status(format!("打开终端窗口失败：{e}").into());
@@ -2273,6 +2289,7 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                                             WINDOW_STATE.lock().unwrap_or_else(aerodesk_core::util::lock_recover).incoming =
                                                 Some(win.as_weak());
                                             let _ = win.show();
+                                            show_and_repaint(&win.window());
                                             ui.set_status(
                                                 format!("收到 {from_device} 的远控请求，等待确认").into(),
                                             );
@@ -3108,6 +3125,7 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(weak) = weak {
                 let _ = weak.upgrade_in_event_loop(|ui| {
                     let _ = ui.show();
+                    show_and_repaint(&ui.window());
                     focus_window_to_front(ui.window());
                 });
             }
@@ -4391,6 +4409,7 @@ fn main() -> Result<(), slint::PlatformError> {
         tray.on_show_window(move || {
             if let Some(ui) = win.upgrade() {
                 let _ = ui.show();
+                show_and_repaint(&ui.window());
                 // “显示主窗口”：已打开时也要把窗口带到最前（含最小化还原）。
                 #[cfg(target_os = "macos")]
                 focus_window_to_front(ui.window());
@@ -4454,6 +4473,7 @@ fn main() -> Result<(), slint::PlatformError> {
             .on_close_requested(move || slint::CloseRequestResponse::HideWindow);
     }
     ui.show()?;
+    show_and_repaint(&ui.window());
     if let Some(tray) = &tray {
         if let Err(e) = tray.show() {
             eprintln!("system tray unavailable: {e:?}");
@@ -4936,6 +4956,37 @@ mod tests {
         assert!(s.to_lowercase().contains("aerodesk"), "{s}");
         #[cfg(all(unix, not(target_os = "macos")))]
         assert!(s.contains("aerodesk"), "{s}");
+    }
+
+    /// 守卫（2026-10-08 真机缺陷「窗口变透明」）：本文件里**任何窗口 `show()`** 之后 5 行内必须
+    /// 调用 `show_and_repaint()`——Windows 上 hide()→show() 可能不重绘/透明，而这个不变量此前
+    /// 只靠人记（缓解只挂在托盘那一条路径上）。托盘图标 `tray.show()` 不属窗口，豁免。
+    ///
+    /// 用 `include_str!` 读本文件自身：**先确认真的读到了**（文件长度与含 `fn main` 自检），
+    /// 否则"扫到 0 处"会变成一个静默通过的假守卫。
+    #[test]
+    fn repaint_after_show_guard() {
+        let src = include_str!("main.rs");
+        assert!(src.len() > 10_000, "自文件读取异常（长度 {}）", src.len());
+        assert!(src.contains("fn main"), "自文件内容异常：找不到 fn main");
+        let lines: Vec<&str> = src.split('\n').collect();
+        let mut offenders: Vec<(usize, String)> = Vec::new();
+        let mut checked = 0usize;
+        for (i, ln) in lines.iter().enumerate() {
+            if !ln.contains(".show()") || ln.contains("tray.show()") || ln.contains("//") {
+                continue;
+            }
+            checked += 1;
+            let window: String = lines[i + 1..(i + 6).min(lines.len())].join("\n");
+            if !window.contains("show_and_repaint(") {
+                offenders.push((i + 1, ln.trim().to_string()));
+            }
+        }
+        assert!(checked >= 5, "只扫到 {checked} 处 show()，判据可能失效");
+        assert!(
+            offenders.is_empty(),
+            "以下 show() 之后 5 行内没有 show_and_repaint()：{offenders:?}"
+        );
     }
 
     /// #576 回归：subset 配置 JSON 可解析（修复前被 unwrap_or_default 静默
