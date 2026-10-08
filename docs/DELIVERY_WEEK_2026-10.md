@@ -26,7 +26,7 @@
 
 | # | 能力 | 状态 | 证据 |
 |---|---|---|---|
-| 1 | 服务端 | 已部署健康，**已有真实流量**；**但跑的不是 main**（见 2.6） | 2026-10-08 15:50 复核：`curl -sk https://129.226.150.174:14701/healthz` → `{"pop":"pop-a","sip":{"tcp":true,"tls":true,"udp":true,"wss":true},"status":"ok"}`；`/metrics/prometheus` → `sip_registrations 4`、`sip_calls_established 5`。（原文引的 `14703` 明文口现已不在监听；`14701` 是 ops **HTTPS**，用 `http://` 探会得空响应 rc=52） |
+| 1 | 服务端 | 已部署健康，**已有真实流量**；**但其构建旧于 main**（见 2.6） | 2026-10-08 15:50 复核：`curl -sk https://129.226.150.174:14701/healthz` → `{"pop":"pop-a","sip":{"tcp":true,"tls":true,"udp":true,"wss":true},"status":"ok"}`；`/metrics/prometheus` → `sip_registrations 4`、`sip_calls_established 5`。（原文引的 `14703` 明文口现已不在监听；`14701` 是 ops **HTTPS**，用 `http://` 探会得空响应 rc=52） |
 | 2 | 安装包 | v0.4.0 全平台产物已在 Release | `AeroDesk-0.4.0.dmg`、`aerodesk-0.4.0-win64.msi/.zip`、`deb/rpm/tar.gz/AppImage` |
 | 3 | 签名/公证流水线 | 可用 | `Build & Release` run `33290049676`（tag v0.4.0）success |
 | 4 | 无人值守（口令面） | 已实现 | `SIP_DIGEST_USERS` 固定口令 + `POST /admin/temp-password`：`docs/SIP_SIGNALING.md` §11 |
@@ -54,15 +54,16 @@ UAC Secure Desktop（`#472`）；对外多租户与容量承诺（`#8` 压测基
 
 ## 2.6 生产节点巡检（2026-10-08；**本节当天 13:09 被重部署推翻，以下为更新后的口径**）
 
-**当前结论（2026-10-08 15:50 复核）：节点已在 13:09 重部署并受理真实流量；但它跑的是未合并分支
-`feat/sip-default-tcp` 的构建，不是 main。**
+**当前结论（2026-10-08 15:50 复核；20:5x 复核后更正）：节点已在 13:09 重部署并受理真实流量；
+它跑的是**旧于 main** 的构建——`feat/sip-default-tcp` 已于 2026-10-08 随 `660fb14` 并入 main，
+而节点二进制仍是当日 13:09 那次部署的产物（sha256 与备份不符，见下表）。**
 
 | 事实 | 证据 |
 |---|---|
 | 已是 SIP 单栈四传输 | `ss -lntu` → `0.0.0.0:15060/udp`、`0.0.0.0:15060/tcp`、`0.0.0.0:5061/tcp`、`0.0.0.0:3061/tcp`（该机另有 FreeSWITCH 占 `10.3.0.9:5060` 与 `[::1]:5060`——注意**不是**本开发机那种 `127.0.0.1:5060` 形态） |
 | `/healthz` 带 `sip` 四传输 | `curl -sk https://129.226.150.174:14701/healthz` → `{"pop":"pop-a","sip":{"tcp":true,"tls":true,"udp":true,"wss":true},"status":"ok"}`（14701 = ops **HTTPS**；14703 明文口已不监听） |
 | 已有真实流量 | `/metrics/prometheus` → `sip_registrations 4`、`sip_calls_established 5` |
-| **跑的不是 main** | `healthz` 里的 `tcp` 键与 unit 的 `SIP_TCP_PORT=15060`，在 main（`35ad688`）里都不存在——它们只在未合并的 `feat/sip-default-tcp`（`087083a`/`4629f39`）。独立评审另测：`bin/`+unit mtime **13:09**、进程 **13:09:35** 启动，当前二进制 sha256 与备份里的 `sha256-after.txt` 不同，11:47 那版已被覆盖到 `~/aerodesk-redeploy-20261008-b/*.prev`（该目录原文档未提） |
+| **构建旧于 main** | `healthz` 里的 `tcp` 键与 unit 的 `SIP_TCP_PORT=15060`，在当时的 main（`35ad688`）里都不存在——它们由 `feat/sip-default-tcp` 的 **`18b5e1b`**（12:22，引入 `SIP_TCP_PORT` 与 healthz `tcp` 键者；被误引的 `087083a`/`4629f39` 晚于该节自己的 13:09 证据）引入，该分支已于 2026-10-08 并入 main。独立评审另测：`bin/`+unit mtime **13:09**、进程 **13:09:35** 启动，当前二进制 sha256 与备份里的 `sha256-after.txt` 不同，11:47 那版已被覆盖到 `~/aerodesk-redeploy-20261008-b/*.prev`（该目录原文档未提） |
 
 **已撤回的旧结论（11:24 版，留痕）**：曾判「跑的是 2026-08-23 构建（`7c2ffc0`）、二进制无 SIP 监听、
 公网 15060 无应答、客户端连不上」——那是对**重部署前**的观测，13:09 后全部失效。
@@ -72,10 +73,10 @@ UAC Secure Desktop（`#472`）；对外多租户与容量承诺（`#8` 压测基
 （`route -n get 129.226.150.174` → `interface utun4`），服务端与安全组都无需改。**同一台机器的同一现象，
 两个线程不得并存相反口径**——以 `85a5fe2` 的实测为准。
 
-**含义**：`docs/DEPLOYMENT.md` §6.1 的公共测试节点表已过期（旧字段形 healthz）。今晚的跨平台/公网验收两条路：
+**含义**：公共测试节点表已按 2026-10-08 复核数据重写（`docs/DEPLOYMENT.md` §6.1，ops 线程 `aac037f`），本节与它口径一致（此前那句「该表已过期」在 ops 合并后已不成立，故删）。今晚的跨平台/公网验收两条路：
 
 - **同局域网**：mac 上起一套服务器（已验证可用），Windows 机直接连它——不经公网，验证互通与无人值守足够。
-- **经公网**：节点已重部署（13:09，`15060` TCP+UDP 已放行），但**其构建来自未合并分支**——要用它做验收，
+- **经公网**：节点已重部署（13:09，`15060` TCP+UDP 已放行），但其构建**旧于 main**——要用它做验收，
   得先把 `feat/sip-default-tcp` 过评审合入 main 并重部署（或接受「验收对象与 main 不一致」并如实记录）。
   **重启/回滚共享服务器属影响他方的动作，需用户授权后执行。**
 
@@ -113,7 +114,7 @@ UAC Secure Desktop（`#472`）；对外多租户与容量承诺（`#8` 压测基
 - **兜底（D4 结束判定）**：若 P0-1 或 P0-2 未闭环 → 建议 ToDesk 续费 1 个月做并行过渡，不硬切。
   该决定涉及花钱，由用户本人拍板，模型不代授权。
 - **Windows 真机不在本机**（本机 macOS / Xcode 26.5）：用户已确认**今晚（10-08）带回机器**，故 D5 的 Windows 部分提前到今晚；仍需确认 Windows 机与 mac 是否同网段（决定走本地服务器还是公网节点）。
-- **生产节点**（见 2.6）：节点已在 13:09 重部署并受理流量，但**跑的是未合并分支的构建**（不是 main），且本仓 `ops/redeploy-main-20261008` 已推翻「需云控制台放行 UDP」的归因（实为本机 Clash TUN）。重启/回滚共享服务器仍需用户授权，是本周最大的外部依赖。
+- **生产节点**（见 2.6）：节点已在 13:09 重部署并受理流量，但**跑的是旧于 main 的构建**，且本仓 `ops/redeploy-main-20261008` 已推翻「需云控制台放行 UDP」的归因（实为本机 Clash TUN）。重启/回滚共享服务器仍需用户授权，是本周最大的外部依赖。
 - **冷编译**：本机 `target-dir` 在数据盘且当前为空，首次全量编译需计入 D1 墙钟。
 - **macOS TCC**：未签名构建会掉屏幕录制权限 → D5 必须用 Release 的已签名+公证包验收。
 
@@ -123,7 +124,7 @@ UAC Secure Desktop（`#472`）；对外多租户与容量承诺（`#8` 压测基
 
 | 对象 | 是什么 | 本文件的相关引用 |
 |---|---|---|
-| **交付对象** | `main`（walgit 权威）= 本周全部合并后的代码线，现为 **`660fb14`** | 本文件全部「已实现/已修复」的判定对象 |
+| **交付对象** | `main`（walgit 权威）= 本周全部合并后的代码线；**本批次时点为 `660fb14`**（其后又有 `944f5c5`/`aac037f`/`6ab5249` 等文档修正提交） | 本文件全部「已实现/已修复」的判定对象 |
 | **审查对象** | 本周四条线程（sip/D1/D2/ops）的 **diff** + 客户端面（`main` + `v0.4.0..main` 差） | 各线程的 review 条目 |
 | **验收对象** | 实际装到机器上的**包**：`v0.4.0`（今晚原计划）或 **`v0.4.1`**（本次新发） | §2.5/§2.6 的实测都是前者之前的状态 |
 
@@ -153,7 +154,7 @@ UAC Secure Desktop（`#472`）；对外多租户与容量承诺（`#8` 压测基
 | 项 | 状态 | 说明 |
 |---|---|---|
 | `crates/aerodesk-agent/src/bin/aerodesk-vdev-bridge/`（716 行） | **非交付面**；**零审查历史**，已由客户端独立评审覆盖并记录问题 | 不进包（只有 docs/e2e 引用）；三处静默失效**未修**，登记为债：① 推帧错误被 `let _ =` 丢弃（接管后永久停推流）；② 收流循环不查 `is_alive()`、无断流时限；③ AudioUnit `CURRENT_DEVICE/Start` 返回值被忽略。另它**当时**不复用统一配置面（`sip_port: None` → 由 URL scheme 推导，当时 `ws→udp/5060`，非默认端口接不上）
-  ——**此条在 sip 合并后已失效**：该推导现在 `ws→tcp`（`connect::derive_sip_transport`，有单测钉住），留痕但标注过期。 |
+  ——**其中「传输那一半」在 sip 合并后已失效**（推导现在 `ws→tcp`，`connect::derive_sip_transport` 有单测钉住）；但「**不复用统一配置面**／不读 `AERO_SIP_PORT`／**非默认端口接不上**」**仍然成立**：`signal_host()` 只取 host、丢弃 URL 里的端口，端口只来自形参（None→0→5060）。 |
 | `cmd_exec` 的 info 级日志 | **债（另批）** | `agent info!("cmd request #{}: {:?}")` 会把 `WriteFile{data:base64}` / `Chat{text}` 写进日志（`d8afd42` 起，v0.4.0 亦有）→ 需降级/脱敏 |
 | Windows host 的口令落盘 | **未验** | 明文写 ProgramData，未见 ACL/DPAPI 收紧（客户端评审标 unverified） |
 | Windows 全部行为 | **静态审查** | 本机无法执行 Windows 二进制/服务/登录界面 helper；GNU 交叉 clippy 因缺 Windows FFmpeg 无法跑 |

@@ -345,7 +345,7 @@ cargo run -p aerodesk-agent -- --role viewer --signal ws://127.0.0.1:5060   --ro
 > `before`、选 B 对 `after`；注意 `-b/` 目录里**没有** sha256 文件，别去那里找），再看
 > `curl -sk https://127.0.0.1:14701/healthz` 的 `sip` 字段是否回到旧形状。
 
-连接示例（信令地址 = SIP 形态 `ws://host:sip-udp-port`）：
+连接示例（信令地址 = SIP 形态 `ws://host:sip-port`）：
 
 ```sh
 # 信令地址：ws://129.226.150.174:15060（agent 解析为 SIP/**TCP** 到该 host；

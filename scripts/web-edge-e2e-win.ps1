@@ -41,7 +41,8 @@ try {
     # runner 有网卡；本机无网卡时 SFU 默认通配绑定同样可回退）。
     $env:SFU_BIND_ADDRESS = "0.0.0.0"
     $env:SFU_HOST_ADDRESS = "127.0.0.1"
-    # #552：CLI 客户端走 SIP UDP 面；#598 P2a：浏览器信令走 SIP-WSS 面（3061）。
+    # #598 P2a：浏览器信令走 SIP-WSS 面（3061）。本脚本是双浏览器拓扑、**不启动任何 CLI 客户端**（见文件头注），
+    # 故下面的 SIP UDP 端口设置只保证 signal 的该监听可用（客户端默认传输已是 TCP，同号自洽）。
     $env:SIP_UDP_PORT = "$SipPort"
     $env:SIP_WSS_PORT = "3061"
     $sfu = Start-Process -FilePath ".\target\debug\aerodesk-sfu.exe" -WindowStyle Hidden `

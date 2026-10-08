@@ -42,7 +42,7 @@ MODE="${NAT_MODE:-auto}"
 BOUND_MS="${NAT_BLACKSCREEN_BOUND:-15000}"
 TURN_SECRET="${TURN_SECRET:-nat-e2e-secret}"
 # 独立端口段（167xx）避免与本机其它 e2e（15xxx/16xxx）与 CI runner 冲突。
-SIP_UDP=16703      # signal SIP UDP 监听 + 客户端 AERO_SIP_PORT
+SIP_UDP=16703      # signal SIP UDP+TCP 监听（同号，见下方 export）+ 客户端 AERO_SIP_PORT
 SIG_WSS=16701      # signal WSS（未用，占位防默认端口冲突）
 SIG_PLAIN=16704    # signal 明文 WS（未用）
 SFU_MEDIA=16778
@@ -98,7 +98,7 @@ if [ "$MODE" = "auto" ]; then
   if have_netns; then MODE=netns; else MODE=host; fi
 fi
 echo "== 模式：$MODE"
-# 双端 agent 共用的固定环境：SIP UDP 端口（signal 的 SIP_UDP_PORT 与之一致）与日志级别。
+# 双端 agent 共用的固定环境：SIP 端口（signal 的 SIP_UDP_PORT 与 SIP_TCP_PORT 与之一致）与日志级别。
 export AERO_SIP_PORT=$SIP_UDP RUST_LOG="$RUST_LOG"
 
 # Windows（Git Bash/MSYS）：x264 编码器不可用（agent 编译门控），host 冒烟用

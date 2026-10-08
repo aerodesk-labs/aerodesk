@@ -3,7 +3,7 @@
 # 前置：
 #   1. E:\aerodesk-vm\WinDev2407Eval.vhdx 已解压（下载：aka.ms/windev_VM_hyperv）
 #   2. E:\aerodesk-vm\bins\ 下已放 aerodesk-host/cli/signal/sfu 四 exe + FFmpeg DLL
-#   3. 宿主 signal/sfu 由本脚本自启（防火墙放通 3001/TCP + 5060/UDP + 5061/TCP
+#   3. 宿主 signal/sfu 由本脚本自启（防火墙放通 3001/TCP + 5060/UDP + **5060/TCP**（客户端默认传输） + 5061/TCP
 #      + 3061/TCP 与 3478/UDP+TCP）
 #   注：P3 起 signal 为 SIP 单栈——WSS 时代工件，本脚本覆盖部分场景
 #   （SIP/UDP+TCP 直连（TCP 为客户端默认传输）；SIP/TLS 5061、SIP/WSS 3061 默认同证书开启）。
@@ -39,7 +39,7 @@ New-NetFirewallRule -Name 'AeroDeskMatrix-SFUtcp' -Direction Inbound -Action All
 $env:SFU_HOST_ADDRESS = $hostIp
 if (-not (Get-NetTCPConnection -LocalPort 3001 -State Listen -ErrorAction SilentlyContinue)) {
   Start-Process -FilePath "$BinDir\aerodesk-signal.exe" -WindowStyle Hidden
-  Write-Host "== signal 已自启(ops 3001 / SIP UDP $SipPort)"
+  Write-Host "== signal 已自启(ops 3001 / SIP UDP+TCP $SipPort)"
 }
 if (-not (Get-NetUDPEndpoint -LocalPort 3478 -ErrorAction SilentlyContinue)) {
   Start-Process -FilePath "$BinDir\aerodesk-sfu.exe" -WindowStyle Hidden
