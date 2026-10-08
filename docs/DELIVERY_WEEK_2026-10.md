@@ -158,3 +158,34 @@ UAC Secure Desktop（`#472`）；对外多租户与容量承诺（`#8` 压测基
 | `cmd_exec` 的 info 级日志 | **债（另批）** | `agent info!("cmd request #{}: {:?}")` 会把 `WriteFile{data:base64}` / `Chat{text}` 写进日志（`d8afd42` 起，v0.4.0 亦有）→ 需降级/脱敏 |
 | Windows host 的口令落盘 | **未验** | 明文写 ProgramData，未见 ACL/DPAPI 收紧（客户端评审标 unverified） |
 | Windows 全部行为 | **静态审查** | 本机无法执行 Windows 二进制/服务/登录界面 helper；GNU 交叉 clippy 因缺 Windows FFmpeg 无法跑 |
+
+## 8. 真机验收第一轮（2026-10-08 晚，Windows 10 + v0.4.1 + 公网节点）
+
+**验收对象**：`aerodesk-0.4.1-win64.msi`（用户真机安装）+ 同批 mac 侧自建（main）。
+
+### 8.1 通过项（均为节点侧/两端日志的独立观测）
+
+| 项 | 证据 |
+|---|---|
+| Windows 客户端注册上公网节点（**默认 TCP 生效**） | 节点日志 `SIP 注册 aor=AD-0BCABE expires=60 online=1`（30s 续注册）；`/devices` → `{"devices":[{"id":"AD-0BCABE","via":["sip"]}]}`；两端均 `TCP …:15060` |
+| **候选枚举修复**生效（不再通告 TUN 假地址） | mac 侧 publisher/viewer 日志 `host candidates: [172.19.29.196:…]`（物理网卡；TUN 的 `198.18.0.1` 被剔除） |
+| 节点内嵌 TURN 公网可达 | UDP 14779 合法 STUN Binding 有应答（32B）、TCP 14779 可连、TLS 15449 在听；mac 侧 `TURN allocation ok … relayed=…` |
+| `14703`/`3003` 确已退役 | 节点上无该监听（用户初试 `14703` 连不上属预期） |
+
+### 8.2 暴露的缺陷与处置（4 条，全部已定位到代码）
+
+| # | 缺陷 | 处置 |
+|---|---|---|
+| 1 | **TURN 下发链断开**：服务端 `GET /config` 早就在发，原生客户端**一处都不取**（SIP 单栈后 join 响应退役） → 跨网只能手抄 `turn_*`，否则 ICE 只直连必失败 | 分支 `fix/turn-cred-dispatch`：signal 随 REGISTER 200 下发三头 → 客户端解析 → 全调用点「下发优先、本地兜底」（含端到端测试与红检） |
+| 2 | **`/config` 发的是过期凭证**：SFU 只在进程启动时签一次（TTL 1h），节点实测过期 **7.5 小时** | 同分支：`TurnIssuer` 按请求现签 + 端点级红检 |
+| 3 | **Windows 窗口变透明**（用户报告「只见部分组件」） | 同分支：统一 `show_and_repaint()` 接到全部 7 处窗口 `show()`；平台侧补 `InvalidateRect`/`RedrawWindow`（此前只 `SW_RESTORE`、注释却称「强制重绘」）；新增守卫测试钉住该不变量 |
+| 4 | **GUI 无日志落盘**（从开始菜单启动=零日志，故障无法取证） | 同分支：日志落 `%LOCALAPPDATA%\AeroDesk\logs`（mac `~/Library/Logs/AeroDesk`），>4MiB 轮转 |
+| 附 | **MSI 里没有 `aerodesk-host.exe`** → P0-3 无人值守在包里无从验证 | 分支 `chore/win-package-host`：打包脚本/wxs/release 流水线补该 exe，并修包内 README 的退役端口 |
+
+### 8.3 未通过项与本轮边界（如实）
+
+- **跨网媒体（P0-1 的核心）本轮未跑通**：手配 TURN 后 mac 侧 allocation 成功，但对端仍只做直连检查 →
+  `ICE 连接超时（直连 5s / TURN 15s 未建立）`。这在缺陷 1/2 修好后需**重跑**（用新构建，不必手抄 TURN）。
+- **P0-3 Windows 无人值守未验**：包内无 `aerodesk-host.exe`（见上）；且登录界面 helper 仍是方案（M1–M4 未做）。
+- **签名维度**：Windows 产物**无代码签名**（仓库口径「证书待补」），安装提示「未知发布者」；签名维只在 macOS 有可验对象。
+- **Windows 侧一切运行时结论均为静态/探针证据**（本机 macOS 无法执行；GNU 交叉编译受 ffmpeg 阻塞）。
