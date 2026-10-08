@@ -233,8 +233,17 @@ pub fn metrics_snapshot() -> Option<(u64, u64, u64)> {
     ))
 }
 
-/// 三传输监听状态（D3）：serve 开头全清 false，各 bind 成功后置 true——
+/// 四传输监听状态（D3）：serve 开头全清 false，各监听**注册完成**后置 true——
 /// supervisor 重启窗口期 /healthz 会短暂报 false（如实反映）。
+///
+/// ⚠ 语义边界（2026-10-08 独立评审提出「未制造占用实测→unverified」，本批按 vendor
+/// 源码确认）：这里的 true 只代表「已交给 rsipstack 的 TransportLayer 注册监听」，
+/// **不等于 bind 成功**——真正 bind 发生在被 spawn 的 `serve_listener` 里，而
+/// `TcpListenerConnection::new` 只构造结构体、不绑定（见
+/// `vendor/rsipstack/src/transport/tcp_listener.rs:22-35` 与同文件 `serve_listener`）。
+/// 因此端口被占时 /healthz 可能报 `tcp: true` 而实际没在监听。修法要么让
+/// `new` 里就 bind（改动 vendored crate），要么给监听加就绪信号；本轮不夹带，
+/// 登记为遗留项。
 static SIP_TLS_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SIP_WSS_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SIP_UDP_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
