@@ -1819,6 +1819,8 @@ mod tests {
 
     /// 回归（独立评审 A.2 / 覆盖缺口）：signal 必须**真的在配置的 TCP 端口上监听**。
     /// 「客户端默认切 TCP」之后，e2e 与部署姿态全靠这一点，而此前这条路径零自动化覆盖。
+    // 串行锁须贯穿整个测试（含 await），属有意持有。
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn serve_listens_sip_tcp_on_configured_port() {
         let _serial = serve_e2e_guard();

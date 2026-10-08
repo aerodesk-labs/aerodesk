@@ -109,17 +109,6 @@ pub struct SipViewerSession {
     pub call_id: String,
 }
 
-/// 客户端 UAC 连接公共实现（`connect_viewer_sip` 与 #598 v0.4 会议发布原语
-/// 共用）：REGISTER → INVITE（目标设备/房间或会议 AoR）→ Answered → ICE
-/// 收敛 → 看护线程持有 link 至进程退出。
-///
-/// - `video_sendonly`：true = 发布方向（`add_video`/`add_audio`，SFU 会议
-///   role=publisher）；false = 观看方向（recvonly，SFU role=viewer）；
-/// - `redirect_302`：true = 被控端语义——媒体期间的新 INVITE 一律回 302
-///   （§4.1 被控端已在会议态时后续观看 INVITE 直接 302；无 Contact 由对端
-///   按 §4.1 确定性推导 view AoR 重拨）；false = 仅记日志（观看端无人呼叫
-///   本端 AoR）。
-#[allow(clippy::too_many_arguments)] // 与 connect_viewer_sip 同参数面；内部私有实现
 /// 由信令 URL + 显式参数推导 SIP 传输：`wss://` → TLS，**其余默认 TCP**。
 ///
 /// 抽成纯函数是为了能单测「默认到底走什么」——本文件与 `aerodesk-bridge` 曾各写一份
@@ -139,6 +128,17 @@ fn derive_sip_transport(server: &str, explicit: Option<&str>) -> String {
     }
 }
 
+/// 客户端 UAC 连接公共实现（`connect_viewer_sip` 与 #598 v0.4 会议发布原语
+/// 共用）：REGISTER → INVITE（目标设备/房间或会议 AoR）→ Answered → ICE
+/// 收敛 → 看护线程持有 link 至进程退出。
+///
+/// - `video_sendonly`：true = 发布方向（`add_video`/`add_audio`，SFU 会议
+///   role=publisher）；false = 观看方向（recvonly，SFU role=viewer）；
+/// - `redirect_302`：true = 被控端语义——媒体期间的新 INVITE 一律回 302
+///   （§4.1 被控端已在会议态时后续观看 INVITE 直接 302；无 Contact 由对端
+///   按 §4.1 确定性推导 view AoR 重拨）；false = 仅记日志（观看端无人呼叫
+///   本端 AoR）。
+#[allow(clippy::too_many_arguments)] // 与 connect_viewer_sip 同参数面；内部私有实现
 fn connect_sip_uac(
     server: &str,
     target_device: &str,
