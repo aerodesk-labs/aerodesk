@@ -30,3 +30,8 @@ export SIP_PORT
 export SIGNAL_OPS_PORT
 # aerodesk-agent 取 SIP 端口的通道（aerodesk-desktop 不读这个变量，见上）。
 export AERO_SIP_PORT="$SIP_PORT"
+# SIP/TCP 口与 UDP 同号。**必须导出**：`sip-default-tcp` 起客户端默认走 TCP，而脚本只把
+# `SIP_UDP_PORT` 指到 $SIP_PORT——不导这个变量的话，agent 会按 TCP 拨到 signal 的*默认*
+# 5060（本机被 FreeSWITCH 占）而假红。两种时代都安全：旧 build 不认识该变量（忽略），
+# 新 build 才会据此把 TCP 监听开到同一端口。
+export SIP_TCP_PORT="$SIP_PORT"
