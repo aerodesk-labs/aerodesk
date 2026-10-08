@@ -15,6 +15,7 @@
 # 用法: scripts/conference-e2e.sh [房间] [观察秒数]
 set -uo pipefail
 cd "$(dirname "$0")/.."
+source scripts/lib/e2e-ports.sh   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 
 ROOM="${1:-AD-CONF1}"
 VROOM="view-$ROOM"
@@ -46,7 +47,7 @@ echo "== 启动 sfu/signal"
 # 客户端 ICE 不可达——Windows 实测 SFU 侧 10049 发送失败、viewer ICE 超时）。
 RECORD_DIR="$REC" SFU_HOST_ADDRESS=127.0.0.1 ./target/debug/aerodesk-sfu >"$SFU_LOG" 2>&1 &
 SFU_PID=$!
-SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >"$SIG_LOG" 2>&1 &
+SIP_UDP_PORT="$SIP_PORT" ./target/debug/aerodesk-signal >"$SIG_LOG" 2>&1 &
 SIG_PID=$!
 for _ in $(seq 1 50); do
     if grep -q "SIP/UDP 监听已起" "$SIG_LOG" 2>/dev/null; then break; fi
@@ -95,8 +96,8 @@ check() {
 }
 check "$PUB_LOG" "publisher: 收到升级信号"
 check "$V1_LOG" "viewer: 收到升级信号"
-check "$V1_LOG" "viewer: 跟随升级重拨会议 AoR（$VROOM）"
-check "$V2_LOG" "viewer: 跟随升级重拨会议 AoR（$VROOM）"
+check "$V1_LOG" "viewer: 跟随升级重拨会议 AoR（${VROOM}）"
+check "$V2_LOG" "viewer: 跟随升级重拨会议 AoR（${VROOM}）"
 # 会议桥方向判定：发布端 sendrecv → publisher、观看端 recvonly → viewer。
 if grep -q "SIP 会议 INVITE → SFU 桥（方向判定）" "$SIG_LOG"; then
     echo "PASS: signal 会议桥方向判定"
@@ -107,7 +108,7 @@ if strip_ansi <"$SIG_LOG" | grep -q "role=publisher"; then echo "PASS: 发布端
 if strip_ansi <"$SIG_LOG" | grep -q "role=viewer"; then echo "PASS: 观看端判定 viewer"; else echo "FAIL: 缺 viewer 判定"; FAIL=1; fi
 # SFU 会议房间三方入会。
 JOINS=$(strip_ansi <"$SFU_LOG" | grep -c "joined room $VROOM" || true)
-if [ "${JOINS:-0}" -ge 3 ]; then echo "PASS: SFU 房间 $VROOM 三方入会（$JOINS）"; else echo "FAIL: SFU 入会不足 3（$JOINS）"; FAIL=1; fi
+if [ "${JOINS:-0}" -ge 3 ]; then echo "PASS: SFU 房间 $VROOM 三方入会（${JOINS}）"; else echo "FAIL: SFU 入会不足 3（${JOINS}）"; FAIL=1; fi
 # 会议内端到端媒体证据：viewer 经 SFU 收到 cursor（data channel 30Hz 轨迹）。
 if strip_ansi <"$V1_LOG" | grep -qE "CURSOR: x="; then echo "PASS: viewer1 经 SFU 收到 cursor"; else echo "FAIL: viewer1 无 cursor（会议媒体未达）"; FAIL=1; fi
 if strip_ansi <"$V2_LOG" | grep -qE "CURSOR: x="; then echo "PASS: viewer2 经 SFU 收到 cursor"; else echo "FAIL: viewer2 无 cursor（会议媒体未达）"; FAIL=1; fi

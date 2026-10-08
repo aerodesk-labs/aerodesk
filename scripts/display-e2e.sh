@@ -5,6 +5,7 @@
 # 用法: scripts/display-e2e.sh [房间]
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/lib/e2e-ports.sh   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 
 ROOM="${1:-disp-$(date +%s)}"
 export RUST_LOG="${RUST_LOG:-info}"
@@ -16,7 +17,7 @@ REC="$(mktemp -d)"
 echo "== 启动 sfu/signal"
 RECORD_DIR="$REC" ./target/debug/aerodesk-sfu >/tmp/disp-sfu.log 2>&1 &
 SFU_PID=$!
-SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/disp-sig.log 2>&1 &
+SIP_UDP_PORT="$SIP_PORT" ./target/debug/aerodesk-signal >/tmp/disp-sig.log 2>&1 &
 SIG_PID=$!
 for _ in $(seq 1 50); do
     if grep -q "SIP/UDP 监听已起" /tmp/disp-sig.log 2>/dev/null; then break; fi

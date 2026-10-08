@@ -4,6 +4,7 @@
 # 用法: scripts/codec-e2e.sh [房间] [每 codec 观察秒数]
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/lib/e2e-ports.sh   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 
 ROOM="${1:-codec-$(date +%s)}"
 OBS="${2:-10}"
@@ -18,7 +19,7 @@ for codec in h264 h265 vp9 av1; do
   REC="$(mktemp -d)"
   RECORD_DIR="$REC" ./target/debug/aerodesk-sfu >"/tmp/codec-$codec-sfu.log" 2>&1 &
   SFU_PID=$!
-  SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >"/tmp/codec-$codec-sig.log" 2>&1 &
+  SIP_UDP_PORT="$SIP_PORT" ./target/debug/aerodesk-signal >"/tmp/codec-$codec-sig.log" 2>&1 &
   SIG_PID=$!
   for _ in $(seq 1 50); do
     if grep -q "SIP/UDP 监听已起" "/tmp/codec-$codec-sig.log" 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then break; fi

@@ -3,6 +3,7 @@
 # 独立端口避免与本机其它 agent 冲突。
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/lib/e2e-ports.sh   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
@@ -17,7 +18,7 @@ RECORD_DIR="$REC" MAX_ROOM_CLIENTS=1 \
   ./target/debug/aerodesk-sfu >/tmp/sfuq-sfu.log 2>&1 &
 echo $! > /tmp/sfuq-sfu.pid
 SIGNAL_PORT=14501 SIGNAL_PLAIN_PORT=14503 SFU_URL=http://127.0.0.1:14502 \
-  SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/sfuq-sig.log 2>&1 &
+  SIP_UDP_PORT="$SIP_PORT" ./target/debug/aerodesk-signal >/tmp/sfuq-sig.log 2>&1 &
 echo $! > /tmp/sfuq-sig.pid
 for _ in $(seq 1 50); do
     if nc -z 127.0.0.1 14502 2>/dev/null && grep -q "SIP/UDP 监听已起" /tmp/sfuq-sig.log 2>/dev/null; then break; fi

@@ -6,6 +6,7 @@
 # (FFmpeg DLL 需在 PATH,见 ci.yml Windows 步骤)。
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/lib/e2e-ports.sh   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 BIN="${AERODESK_HOST:-target/debug/aerodesk-host.exe}"
 # #522 审查：viewer 断言必须用 aerodesk-agent（host 无 --role viewer 入口，旧
 # 脚本用 $BIN 当 viewer 必失败）。
@@ -29,7 +30,7 @@ echo "== 启动 sfu/signal"
 # 本机/CI 网卡环境可能导致自动通告地址不可绑,显式通配绑定。
 SFU_BIND_ADDRESS=0.0.0.0 ./target/debug/aerodesk-sfu.exe >/tmp/logon-sfu.log 2>&1 &
 SFU_PID=$!
-SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal.exe >/tmp/logon-sig.log 2>&1 &
+SIP_UDP_PORT="$SIP_PORT" ./target/debug/aerodesk-signal.exe >/tmp/logon-sig.log 2>&1 &
 SIG_PID=$!
 sleep 2
 

@@ -5,6 +5,7 @@
 # 独立端口避免与本机其它 agent 冲突；PID 文件管理避免误杀他人进程。
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/lib/e2e-ports.sh   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 构建"
@@ -21,7 +22,7 @@ start_sfu() {
 }
 start_signal() {
     SIGNAL_PORT=14501 SFU_URL=http://127.0.0.1:14502 SFU_TOKEN="$SFU_TOK" \
-      SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/rec-sig.log 2>&1 &
+      SIP_UDP_PORT="$SIP_PORT" ./target/debug/aerodesk-signal >/tmp/rec-sig.log 2>&1 &
     echo $! > /tmp/rec-sig.pid
 }
 stop_services() {
