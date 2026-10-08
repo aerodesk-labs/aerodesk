@@ -8,6 +8,12 @@ cd "$(dirname "$0")/.."
 ROOM="${1:-smoke-$(date +%s)}"
 SECONDS="${2:-6}"
 export RUST_LOG="${RUST_LOG:-info}"
+# SIP 端口可覆盖（SIP_PORT 覆盖；两端必须一致）。
+# 本机 127.0.0.1:5060 可能已被别的 SIP 服务占用（实测 2026-10-08：FreeSWITCH 占用时
+# REGISTER 被回 403，冒烟假红且报错指向“口令错”完全误导）——此时用 SIP_PORT=15060 跑。
+SIP_PORT="${SIP_PORT:-5060}"
+# ops HTTPS 端口同样可覆盖（默认 3001；被占时报 “Address already in use”）。
+SIGNAL_OPS_PORT="${SIGNAL_OPS_PORT:-3001}"
 
 echo "== 构建"
 cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
@@ -16,7 +22,7 @@ REC="$(mktemp -d)"
 echo "== 启动 sfu/signal"
 RECORD_DIR="$REC" ./target/debug/aerodesk-sfu >/tmp/smoke-sfu.log 2>&1 &
 SFU_PID=$!
-SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/smoke-sig.log 2>&1 &
+SIP_UDP_PORT="$SIP_PORT" SIGNAL_OPS_PORT="$SIGNAL_OPS_PORT" ./target/debug/aerodesk-signal >/tmp/smoke-sig.log 2>&1 &
 SIG_PID=$!
 # 等待信令服务器就绪（避免负载下启动慢导致 CLI 连接失败；最多 ~10s）。
 for _ in $(seq 1 50); do
@@ -28,10 +34,10 @@ for _ in $(seq 1 50); do
 done
 sleep 0.3
 
-echo "== 启动 publisher + viewer"
-./target/debug/aerodesk-agent --role publisher --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/smoke-pub.log 2>&1 &
+echo "== 启动 publisher + viewer（SIP 端口 ${SIP_PORT}）"
+AERO_SIP_PORT="$SIP_PORT" ./target/debug/aerodesk-agent --role publisher --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/smoke-pub.log 2>&1 &
 PUB_PID=$!
-./target/debug/aerodesk-agent --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/smoke-view.log 2>&1 &
+AERO_SIP_PORT="$SIP_PORT" ./target/debug/aerodesk-agent --role viewer --signal ws://127.0.0.1:3003 --room "$ROOM" >/tmp/smoke-view.log 2>&1 &
 VIEW_PID=$!
 
 sleep "$SECONDS"
