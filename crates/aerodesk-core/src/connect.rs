@@ -583,7 +583,8 @@ pub fn connect_publisher_sip(
         with_camera: false,
         force_relay,
         bind: "0.0.0.0:0".parse().unwrap(),
-        turn: crate::turn_client::p2p_turn_transport(
+        turn: crate::turn_client::resolve_turn(
+            link.dispatched_turn(),
             &std::env::var("AERO_TURN_URLS").unwrap_or_default(),
             &std::env::var("AERO_TURN_USERNAME").unwrap_or_default(),
             &std::env::var("AERO_TURN_CREDENTIAL").unwrap_or_default(),

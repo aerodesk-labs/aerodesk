@@ -203,6 +203,7 @@ fn run_viewer(
 fn create_pub_answer(
     offer_sdp: &str,
     force_relay: bool,
+    dispatched_turn: Option<aerodesk_core::protocol::signal::TurnConfig>,
 ) -> Result<
     (
         P2pCall,
@@ -220,7 +221,8 @@ fn create_pub_answer(
         with_camera: false,
         force_relay,
         bind: "0.0.0.0:0".parse().unwrap(),
-        turn: aerodesk_core::turn_client::p2p_turn_transport(
+        turn: aerodesk_core::turn_client::resolve_turn(
+            dispatched_turn.as_ref(),
             &std::env::var("AERO_TURN_URLS").unwrap_or_default(),
             &std::env::var("AERO_TURN_USERNAME").unwrap_or_default(),
             &std::env::var("AERO_TURN_CREDENTIAL").unwrap_or_default(),
@@ -389,7 +391,11 @@ fn main() {
                         let _ = pub_link.reject(&call_id, "busy");
                         continue;
                     }
-                    match create_pub_answer(&offer_sdp, force_relay) {
+                    match create_pub_answer(
+                        &offer_sdp,
+                        force_relay,
+                        pub_link.dispatched_turn().cloned(),
+                    ) {
                         Ok((p2p, answer, video_mid, audio_mid)) => {
                             if pub_link.accept(&call_id, &answer).is_ok() {
                                 tracing::info!("publisher leg: accepted incoming call");

@@ -145,7 +145,14 @@ pub struct SipClientConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SipEvent {
     /// 注册成功（Joined 同构；aor = 本端 AoR）。
-    Registered { aor: String, expires: u32 },
+    ///
+    /// `turn`：服务端随 200 下发的 TURN 配置（`X-AeroDesk-Turn-*` 三个头；缺省 None）。
+    /// 这是「TURN 由服务端统一管理下发」的落地——客户端不再需要手抄 `AERO_TURN_*`／settings。
+    Registered {
+        aor: String,
+        expires: u32,
+        turn: Option<crate::signal::TurnConfig>,
+    },
     /// 注册失败（status=0 表示传输/内部错误，非 SIP 响应码）。
     RegisterFailed { status: u16, reason: String },
     /// 来电（Call 同构；被叫侧）。
@@ -1107,6 +1114,35 @@ fn report_final_status(
     });
 }
 
+/// 从 REGISTER 的 200 里取服务端下发的 TURN 配置（三个头齐全才算数；缺一即 None）。
+///
+/// 头名与 `aerodesk-signal` 的 `TURN_HDR_*` 是**跨 crate 契约**，两侧各有单测钉住字面量。
+fn turn_from_response(resp: &Response) -> Option<crate::signal::TurnConfig> {
+    fn get(resp: &Response, name: &str) -> Option<String> {
+        resp.headers
+            .iter()
+            .find(|h| h.name().eq_ignore_ascii_case(name))
+            .map(|h| h.value().to_string())
+    }
+    let urls = get(resp, "X-AeroDesk-Turn-Urls")?;
+    let username = get(resp, "X-AeroDesk-Turn-User")?;
+    let credential = get(resp, "X-AeroDesk-Turn-Cred")?;
+    let urls: Vec<String> = urls
+        .split(',')
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(str::to_string)
+        .collect();
+    if urls.is_empty() || username.is_empty() || credential.is_empty() {
+        return None;
+    }
+    Some(crate::signal::TurnConfig {
+        urls,
+        username,
+        credential,
+    })
+}
+
 /// 从响应里取 Contact 头原始值（PoP 重定向目标；无则 None）。
 fn contact_header(resp: &Response) -> Option<String> {
     resp.headers
@@ -1199,10 +1235,19 @@ async fn do_register(
     {
         Ok(resp) if resp.status_code == StatusCode::OK => {
             let granted = registration.expires();
-            info!(%aor, expires = granted, "SIP 注册成功");
+            let turn = turn_from_response(&resp);
+            match &turn {
+                Some(t) => {
+                    info!(%aor, expires = granted, turn_urls = %t.urls.join(","), "SIP 注册成功（服务端已下发 TURN）")
+                }
+                None => {
+                    info!(%aor, expires = granted, "SIP 注册成功（服务端未下发 TURN，回落本地配置）")
+                }
+            }
             let _ = event_tx.send(SipEvent::Registered {
                 aor: aor.to_string(),
                 expires: granted,
+                turn,
             });
         }
         Ok(resp) => {

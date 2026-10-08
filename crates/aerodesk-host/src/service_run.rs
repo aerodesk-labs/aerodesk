@@ -448,7 +448,8 @@ impl Supervisor {
             with_camera: false,
             force_relay: false,
             bind: "0.0.0.0:0".parse().unwrap(),
-            turn: aerodesk_core::turn_client::p2p_turn_transport(
+            turn: aerodesk_core::turn_client::resolve_turn(
+                self.link.as_ref().and_then(|l| l.dispatched_turn()),
                 &self.settings.turn_urls,
                 &self.settings.turn_username,
                 &self.settings.turn_credential,

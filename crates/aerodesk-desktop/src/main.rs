@@ -2029,7 +2029,10 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                                 with_camera: false,
                                 force_relay: false,
                                 bind: "0.0.0.0:0".parse().unwrap(),
-                                turn: aerodesk_core::turn_client::p2p_turn_transport(
+                                turn: aerodesk_core::turn_client::resolve_turn(
+                                    link.lock()
+                                        .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                        .dispatched_turn(),
                                     &turn_urls,
                                     &turn_username,
                                     &turn_credential,
@@ -2140,7 +2143,10 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                                 with_camera: false,
                                 force_relay: false,
                                 bind: "0.0.0.0:0".parse().unwrap(),
-                                turn: aerodesk_core::turn_client::p2p_turn_transport(
+                                turn: aerodesk_core::turn_client::resolve_turn(
+                                    link.lock()
+                                        .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                        .dispatched_turn(),
                                     &turn_urls,
                                     &turn_username,
                                     &turn_credential,

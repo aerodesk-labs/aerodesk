@@ -662,7 +662,7 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
                         metrics.registrations.store(n as u64, Ordering::Relaxed);
                         info!(%aor, expires = DEFAULT_EXPIRES_SECS, online = n, "SIP 注册（开放模式，未验 Digest）");
                     }
-                    let _ = tx.reply(StatusCode::OK).await;
+                    reply_register_ok(&mut tx, &cfg).await;
                     continue;
                 }
                 match decide_register(req, &cfg.realm, &nonce, &password_of) {
@@ -686,7 +686,7 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
                                 .store(registrar.lock().unwrap().len() as u64, Ordering::Relaxed);
                             info!(%aor, existed, "SIP 注销");
                         }
-                        let _ = tx.reply(StatusCode::OK).await;
+                        reply_register_ok(&mut tx, &cfg).await;
                     }
                     RegisterDecision::Registered(expires) => {
                         if let Some(aor) = request_aor(req) {
@@ -713,7 +713,7 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
                             metrics.registrations.store(n as u64, Ordering::Relaxed);
                             info!(%aor, expires, online = n, "SIP 注册");
                         }
-                        let _ = tx.reply(StatusCode::OK).await;
+                        reply_register_ok(&mut tx, &cfg).await;
                     }
                 }
             }
@@ -1357,6 +1357,125 @@ enum SfuProxyError {
     Transient(String),
 }
 
+/// REGISTER 200 下发 TURN 用的三个头名。
+///
+/// **客户端按这三个名字解析**（`crates/aerodesk-protocol/src/sip_client.rs`）——改名即破坏契约，
+/// 两侧各有一条单测钉住字面量。
+pub(crate) const TURN_HDR_URLS: &str = "X-AeroDesk-Turn-Urls";
+pub(crate) const TURN_HDR_USER: &str = "X-AeroDesk-Turn-User";
+pub(crate) const TURN_HDR_CRED: &str = "X-AeroDesk-Turn-Cred";
+
+/// 从 SFU `/config` 的 JSON 里取出可下发的一份 TURN 配置。
+///
+/// 纯函数（不联网）便于单测：真实链路的对应缺陷是「SFU 只发启动时签的过期凭证」，
+/// 见 `aerodesk-sfu` 的 `config_endpoint_tests`；这里只负责**解析格式**。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DispatchedTurn {
+    pub urls: String,
+    pub username: String,
+    pub credential: String,
+}
+
+pub(crate) fn dispatched_turn_from_json(v: &serde_json::Value) -> Option<DispatchedTurn> {
+    let t = v.get("turn")?;
+    if t.is_null() {
+        return None;
+    }
+    let urls = t
+        .get("urls")?
+        .as_array()?
+        .iter()
+        .filter_map(|x| x.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    if urls.is_empty() {
+        return None;
+    }
+    Some(DispatchedTurn {
+        urls,
+        username: t.get("username")?.as_str()?.to_string(),
+        credential: t.get("credential")?.as_str()?.to_string(),
+    })
+}
+
+/// 下发的三个头（顺序固定，便于测试与阅读）。
+pub(crate) fn turn_headers(t: &DispatchedTurn) -> Vec<rsipstack::sip::Header> {
+    use rsipstack::sip::Header;
+    vec![
+        Header::Other(TURN_HDR_URLS.into(), t.urls.clone()),
+        Header::Other(TURN_HDR_USER.into(), t.username.clone()),
+        Header::Other(TURN_HDR_CRED.into(), t.credential.clone()),
+    ]
+}
+
+/// TURN 下发缓存：**按 SFU URL 分键** → (取到时刻, 值)。
+///
+/// ① 注册很频繁（60s × N 台设备），不能每次注册都打一次 SFU；
+/// ② 多 PoP 下各 SFU 的 url/凭证不同，单槽缓存会把 A 的配置发给 B 的客户端
+///    （首版就是单槽，直接把 signal 的两条 e2e 测试串在一起 → 双双变红）。
+type TurnCacheMap = Mutex<std::collections::HashMap<String, (Instant, Option<DispatchedTurn>)>>;
+
+static TURN_CACHE: std::sync::LazyLock<TurnCacheMap> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// 取一份可下发的 TURN 配置（30s 缓存；失败/未配置返回 None——客户端回落本地配置）。
+fn dispatched_turn(cfg: &SipConfig) -> Option<DispatchedTurn> {
+    // 命中任一 url 的新鲜缓存即返回（含「查过但没有 TURN」的空缓存，30s 内不再打它）。
+    for url in &cfg.sfu_urls {
+        let cached = TURN_CACHE
+            .lock()
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
+            .get(url)
+            .filter(|(at, _)| at.elapsed() < Duration::from_secs(30))
+            .map(|(_, v)| v.clone());
+        if let Some(v) = cached {
+            return v;
+        }
+    }
+    let mut got: Option<DispatchedTurn> = None;
+    for url in &cfg.sfu_urls {
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(3))
+            .build();
+        let mut req = agent.get(&format!("{url}/config"));
+        if let Some(token) = cfg.sfu_token.as_deref() {
+            req = req.set("X-Internal-Token", token);
+        }
+        let Ok(resp) = req.call() else { continue };
+        // ureq 此处未开 json feature：先取字符串再解析（与 Cargo.toml 的 features = ["tls"] 一致）。
+        let Ok(body) = resp.into_string() else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else {
+            continue;
+        };
+        if let Some(t) = dispatched_turn_from_json(&v) {
+            got = Some(t);
+            break;
+        }
+    }
+    if got.is_none() {
+        tracing::debug!("TURN 下发：SFU /config 未取到（客户端将回落本地 turn_* 配置）");
+    }
+    let key = cfg.sfu_urls.first().cloned().unwrap_or_default();
+    TURN_CACHE
+        .lock()
+        .unwrap_or_else(aerodesk_protocol::util::lock_recover)
+        .insert(key, (Instant::now(), got.clone()));
+    got
+}
+
+/// REGISTER 成功的 200：**附带 TURN 下发头**（取不到就不带，客户端回落本地 `turn_*` 配置）。
+///
+/// 为什么挂在 REGISTER 上：SIP 单栈后没有 join 响应可挂（`turn_client.rs:971` 自述），
+/// 而注册是**每个客户端都会走、且每 60s 续一次**的唯一稳定通道——顺带解决凭证 1h 过期问题。
+async fn reply_register_ok(tx: &mut Transaction, cfg: &SipConfig) {
+    let headers = dispatched_turn(cfg)
+        .map(|t| turn_headers(&t))
+        .unwrap_or_default();
+    let _ = tx.reply_with(StatusCode::OK, headers, None).await;
+}
+
 /// 单个 SFU 的 POST /start?room=xxx&role=viewer&dc_ready=1（body = SDP offer）。
 fn post_start(
     url: &str,
@@ -1447,14 +1566,14 @@ mod tests {
     use rsipstack::sip::Request;
     use rsipstack::sip::typed::Authorization;
 
-    const REALM: &str = "aerodesk.test";
+    pub(crate) const REALM: &str = "aerodesk.test";
     const NONCE: &str = "testnonce123";
 
     /// serve() 系 e2e 的串行锁：SIP_METRICS 是进程级句柄（serve 启动时替换），
     /// 并发起服的多实例会互相覆盖指标视图，须串行。
     static SERVE_E2E_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn serve_e2e_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn serve_e2e_guard() -> std::sync::MutexGuard<'static, ()> {
         SERVE_E2E_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -1810,7 +1929,7 @@ mod tests {
 
     // -- 端到端：rsipstack 客户端经 UDP 完成 REGISTER→401→REGISTER→200 --
 
-    fn free_udp_port() -> u16 {
+    pub(crate) fn free_udp_port() -> u16 {
         let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
@@ -2143,6 +2262,23 @@ mod tests {
         // mock SFU：接受一次 POST /start，校验 room/role 透传，回固定 answer。
         let sfu = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let sfu_port = sfu.local_addr().unwrap().port();
+        // 2026-10-08 起 REGISTER 200 会顺带 `GET /config` 下发 TURN；本 mock 只 accept **一次**，
+        // 会被那发 /config 抢走 → /start 连接被拒（本批就因此假红一次）。本测试只关心 /start 透传，
+        // 故预先塞一条新鲜缓存，让 signal 不再外呼。
+        TURN_CACHE
+            .lock()
+            .unwrap_or_else(aerodesk_protocol::util::lock_recover)
+            .insert(
+                format!("http://127.0.0.1:{sfu_port}"),
+                (
+                    Instant::now(),
+                    Some(DispatchedTurn {
+                        urls: "turn:mock.invalid:3479?transport=udp".into(),
+                        username: "u".into(),
+                        credential: "c".into(),
+                    }),
+                ),
+            );
         let mock = std::thread::spawn(move || {
             use std::io::{Read, Write};
             let (mut s, _) = sfu.accept().expect("sfu accept");
@@ -2503,9 +2639,11 @@ mod tests {
             .recv_event(Duration::from_secs(5))
             .expect("应收到注册结果事件");
         match ev {
-            SipEvent::Registered { aor, expires } => {
+            SipEvent::Registered { aor, expires, turn } => {
                 assert_eq!(aor, format!("sip:AD-C1@{REALM}"));
                 assert!(expires > 0);
+                // 本测试的 SipConfig 未配 SFU → 服务端无从下发；客户端必须**不伪造**。
+                assert!(turn.is_none(), "无 SFU 配置时不应下发 TURN，实得 {turn:?}");
             }
             other => panic!("应 Registered，实际 {other:?}"),
         }
@@ -3283,5 +3421,170 @@ mod tests {
             .join()
             .expect("server 线程应退出")
             .expect("server 应正常退出");
+    }
+}
+
+#[cfg(test)]
+mod turn_dispatch_tests {
+    use super::*;
+
+    fn body(urls: &[&str]) -> serde_json::Value {
+        serde_json::json!({ "turn": {
+            "urls": urls,
+            "username": "1791473605:aerodesk",
+            "credential": "AncguHMPfp5gafsl9NFswiOQc1Y="
+        }})
+    }
+
+    #[test]
+    fn parses_sfu_config_body() {
+        let got = dispatched_turn_from_json(&body(&[
+            "turn:a:3479?transport=udp",
+            "turn:a:3479?transport=tcp",
+        ]))
+        .expect("应解析出 TURN");
+        assert_eq!(
+            got.urls,
+            "turn:a:3479?transport=udp,turn:a:3479?transport=tcp"
+        );
+        assert_eq!(got.username, "1791473605:aerodesk");
+        assert_eq!(got.credential, "AncguHMPfp5gafsl9NFswiOQc1Y=");
+    }
+
+    /// 未配置 TURN 时 SFU 返回 `{"turn": null}` → 不下发（不能伪造一份空凭证）。
+    #[test]
+    fn null_turn_is_not_dispatched() {
+        assert!(dispatched_turn_from_json(&serde_json::json!({"turn": null})).is_none());
+        assert!(dispatched_turn_from_json(&serde_json::json!({})).is_none());
+        // urls 为空数组同样不下发（空 URL 串会让客户端建出坏传输）。
+        assert!(dispatched_turn_from_json(&body(&[])).is_none());
+        // 缺字段（旧版 SFU）也不崩。
+        assert!(
+            dispatched_turn_from_json(&serde_json::json!({"turn": {"urls": ["turn:a"]}})).is_none()
+        );
+    }
+
+    /// 头名是**跨 crate 契约**：客户端按字面量解析，改名必须同时改两边（两侧各有单测钉住）。
+    #[test]
+    fn header_names_are_the_contract() {
+        let t = DispatchedTurn {
+            urls: "turn:a:3479?transport=udp".into(),
+            username: "u".into(),
+            credential: "c".into(),
+        };
+        let hs = turn_headers(&t);
+        let got: Vec<(String, String)> = hs
+            .iter()
+            .map(|h| (h.name().to_string(), h.value().to_string()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("X-AeroDesk-Turn-Urls".to_string(), t.urls.clone()),
+                ("X-AeroDesk-Turn-User".to_string(), "u".to_string()),
+                ("X-AeroDesk-Turn-Cred".to_string(), "c".to_string()),
+            ]
+        );
+        assert_eq!(TURN_HDR_URLS, "X-AeroDesk-Turn-Urls");
+        assert_eq!(TURN_HDR_USER, "X-AeroDesk-Turn-User");
+        assert_eq!(TURN_HDR_CRED, "X-AeroDesk-Turn-Cred");
+    }
+}
+
+#[cfg(test)]
+mod turn_dispatch_e2e_tests {
+    //! 端到端：signal 的 REGISTER 200 携带的 TURN 头，能否被**真客户端**解析进 `SipEvent`。
+    //!
+    //! 真机背景（2026-10-08）：跨网两端都拿不到 relay → ICE 只能直连 → 必失败，而服务端
+    //! 明明有 TURN（`GET /config`）。这条测试钉住「服务端下发 → 客户端收下」这半截。
+    use super::tests::{REALM, free_udp_port, serve_e2e_guard};
+    use super::*;
+    use aerodesk_protocol::sip_client::{
+        SipClientConfig, SipEvent, SipTransport, start_sip_client,
+    };
+    use std::io::{Read, Write};
+
+    /// 一个只回 `/config` 的假 SFU（真 SFU 用 ureq 取它，格式必须与 `config_payload` 一致）。
+    fn spawn_config_mock() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf);
+                let body = r#"{"turn":{"urls":["turn:mock.invalid:3479?transport=udp"],"username":"1791473605:aerodesk","credential":"AncguHMPfp5gafsl9NFswiOQc1Y="}}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(resp.as_bytes());
+                let _ = s.flush();
+            }
+        });
+        port
+    }
+
+    // 串行锁须贯穿整个测试（含 await），属有意持有。
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn register_response_carries_sfu_turn_to_client() {
+        let _serial = serve_e2e_guard();
+        let mock_port = spawn_config_mock();
+        let sip_port = free_udp_port();
+        let cancel = CancellationToken::new();
+        let cfg = SipConfig {
+            realm: REALM.into(),
+            tls_addr: None,
+            wss_addr: None,
+            udp_addr: Some(format!("127.0.0.1:{sip_port}").parse().unwrap()),
+            tcp_addr: None,
+            passwords: Arc::new(HashMap::new()),
+            tls_identity: None,
+            // 关键：配一个 SFU —— signal 会用它去取 /config 并随 200 下发。
+            sfu_urls: vec![format!("http://127.0.0.1:{mock_port}")],
+            sfu_token: None,
+            token_password: None,
+            open_register: true,
+            temp_passwords: Arc::default(),
+            registrar: Arc::new(Mutex::new(Registrar::default())),
+            pop_id: "pop-a".into(),
+            pop_registry: None,
+            pop_sip_urls: vec![],
+        };
+        let sc = cancel.clone();
+        let server = tokio::spawn(async move { serve(cfg, sc).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let client = start_sip_client(SipClientConfig {
+            device_id: "AD-TURN1".into(),
+            domain: REALM.into(),
+            password: String::new(),
+            server: format!("127.0.0.1:{sip_port}").parse().unwrap(),
+            transport: SipTransport::Udp,
+            tls: None,
+            register_expires: 60,
+        })
+        .expect("client 启动");
+        let mut got: Option<aerodesk_protocol::signal::TurnConfig> = None;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match client.recv_event(Duration::from_secs(1)) {
+                Some(SipEvent::Registered { turn, .. }) => {
+                    got = turn;
+                    break;
+                }
+                Some(_) => continue,
+                None => continue, // 超时：继续等（注册可能在重试）
+            }
+        }
+        let turn = got.expect("REGISTER 200 必须把 SFU 下发的 TURN 带给客户端");
+        assert_eq!(turn.urls, vec!["turn:mock.invalid:3479?transport=udp"]);
+        assert_eq!(turn.username, "1791473605:aerodesk");
+        assert_eq!(turn.credential, "AncguHMPfp5gafsl9NFswiOQc1Y=");
+
+        cancel.cancel();
+        let _ = server.await;
     }
 }
