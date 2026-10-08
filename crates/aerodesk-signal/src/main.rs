@@ -546,7 +546,15 @@ fn main() {
         "SIP_UDP_PORT",
         5060,
     );
-    let sip_enabled = sip_tls.is_some() || sip_wss.is_some() || sip_udp.is_some();
+    // 明文 TCP：客户端默认传输。SDP 变大时 INVITE 会超 MTU，UDP 要分片（任一片丢失或
+    // 被中间设备/用户态转发截断就整条不可用）；TCP 流传输无此问题。可设 `off` 关掉。
+    let sip_tcp = parse_port_or_off(
+        std::env::var("SIP_TCP_PORT").ok().as_deref(),
+        "SIP_TCP_PORT",
+        5060,
+    );
+    let sip_enabled =
+        sip_tls.is_some() || sip_wss.is_some() || sip_udp.is_some() || sip_tcp.is_some();
     SIP_ENDPOINT_ENABLED.store(sip_enabled, Ordering::Relaxed);
     if sip_enabled {
         let realm = std::env::var("SIP_REALM").unwrap_or_else(|_| "aerodesk".into());
@@ -567,6 +575,7 @@ fn main() {
             tls_addr: bind(sip_tls),
             wss_addr: bind(sip_wss),
             udp_addr: bind(sip_udp),
+            tcp_addr: bind(sip_tcp),
             passwords: Arc::new(passwords),
             // §8：未显式配置的设备以首个静态 token 为 Digest 口令。
             token_password: config.auth_tokens.first().cloned(),
@@ -635,7 +644,10 @@ fn main() {
                 }
             })
             .ok();
-        info!(realm, "SIP 信令端点已启动（单栈：TLS/WSS/UDP 默认全开）");
+        info!(
+            realm,
+            "SIP 信令端点已启动（单栈：TCP/TLS/WSS/UDP 默认全开；TCP=客户端默认传输）"
+        );
     } else {
         info!("SIP 端点已按 SIP_*_PORT=off 全部关闭（仅 HTTP 运维面）");
     }
@@ -839,12 +851,12 @@ fn sip_health_value() -> serde_json::Value {
 }
 
 /// `sip` 字段纯构造（可单测，避免测试进程触碰全局端点状态）。
-fn sip_health_json(enabled: bool, up: Option<(bool, bool, bool)>) -> serde_json::Value {
+fn sip_health_json(enabled: bool, up: Option<(bool, bool, bool, bool)>) -> serde_json::Value {
     if !enabled {
         return serde_json::Value::Null;
     }
-    let (tls, wss, udp) = up.unwrap_or((false, false, false));
-    serde_json::json!({ "tls": tls, "udp": udp, "wss": wss })
+    let (tls, wss, udp, tcp) = up.unwrap_or((false, false, false, false));
+    serde_json::json!({ "tls": tls, "udp": udp, "wss": wss, "tcp": tcp })
 }
 
 /// 管理端点统一鉴权：`Authorization: Bearer <token>`（SIP_ADMIN_TOKEN / 首个 AUTH_TOKEN）。
@@ -1287,18 +1299,18 @@ mod tests {
         }
     }
 
-    /// /healthz `sip` 字段形状：关闭 → null；开启 → 三传输布尔。
+    /// /healthz `sip` 字段形状：关闭 → null；开启 → 四传输布尔。
     #[test]
     fn sip_health_json_shape() {
         assert_eq!(sip_health_json(false, None), serde_json::Value::Null);
         assert_eq!(
-            sip_health_json(true, Some((true, true, true))),
-            serde_json::json!({"tls": true, "udp": true, "wss": true})
+            sip_health_json(true, Some((true, true, true, true))),
+            serde_json::json!({"tls": true, "udp": true, "wss": true, "tcp": true})
         );
         // 端点开但状态未上报（极端窗口）→ 全 false 而非 panic。
         assert_eq!(
             sip_health_json(true, None),
-            serde_json::json!({"tls": false, "udp": false, "wss": false})
+            serde_json::json!({"tls": false, "udp": false, "wss": false, "tcp": false})
         );
     }
 

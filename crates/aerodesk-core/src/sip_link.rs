@@ -145,7 +145,11 @@ impl SipLinkConfig {
     ) -> Result<Self, String> {
         let host = signal_host(server_url)?;
         let transport = match transport {
-            "" | "udp" => SipTransport::Udp,
+            // 默认 TCP：SIP 报文集超过 MTU（大 SDP）时在 UDP 上要分片，任一片丢失或
+            // 被中间设备/用户态转发截断就整条不可用（实测 5.5KB INVITE 经 TUN 代理
+            // 只到 4KB）；TCP 是流传输，无此问题（RFC 3261 §18.1.1）。
+            "" | "tcp" => SipTransport::Tcp,
+            "udp" => SipTransport::Udp,
             "tls" => SipTransport::Tls,
             other => return Err(format!("sip_transport 未知：{other}")),
         };
@@ -153,7 +157,7 @@ impl SipLinkConfig {
             port
         } else {
             match transport {
-                SipTransport::Udp => 5060,
+                SipTransport::Udp | SipTransport::Tcp => 5060,
                 SipTransport::Tls => 5061,
             }
         };

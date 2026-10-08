@@ -5433,7 +5433,10 @@ struct AppSettings {
 }
 
 fn default_sip_transport() -> String {
-    "udp".into()
+    // 默认 TCP：SIP 报文集（含大 SDP）在 UDP 上要按 MTU 分片，任一片丢失或被
+    // 中间设备/用户态转发截断就整条不可用（实测 5.5KB INVITE 经代理只到 4KB）。
+    // 注意：已落盘的旧设置里若写着 "udp"，本条默认值不会回溯迁移（用户可在设置里改）。
+    "tcp".into()
 }
 
 fn default_sip_domain() -> String {

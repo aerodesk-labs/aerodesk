@@ -48,6 +48,7 @@ use rsipstack::transaction::transaction::Transaction;
 use rsipstack::transport::TransportLayer;
 use rsipstack::transport::connection::SipConnection;
 use rsipstack::transport::sip_addr::SipAddr;
+use rsipstack::transport::tcp_listener::TcpListenerConnection;
 use rsipstack::transport::tls::{TlsConfig, TlsListenerConnection};
 use rsipstack::transport::websocket::WebSocketListenerConnection;
 use tokio_util::sync::CancellationToken;
@@ -237,13 +238,15 @@ pub fn metrics_snapshot() -> Option<(u64, u64, u64)> {
 static SIP_TLS_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SIP_WSS_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SIP_UDP_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SIP_TCP_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// 当前三传输监听状态（tls, wss, udp）；供 /healthz `sip` 字段。
-pub fn listeners_up() -> Option<(bool, bool, bool)> {
+/// 当前四传输监听状态（tls, wss, udp, tcp）；供 /healthz `sip` 字段。
+pub fn listeners_up() -> Option<(bool, bool, bool, bool)> {
     Some((
         SIP_TLS_UP.load(Ordering::Relaxed),
         SIP_WSS_UP.load(Ordering::Relaxed),
         SIP_UDP_UP.load(Ordering::Relaxed),
+        SIP_TCP_UP.load(Ordering::Relaxed),
     ))
 }
 
@@ -428,6 +431,8 @@ pub struct SipConfig {
     pub wss_addr: Option<SocketAddr>,
     /// SIP over UDP 监听地址（None = 不开；内网/调试用，规范 §0 传输矩阵可选项）。
     pub udp_addr: Option<SocketAddr>,
+    /// 明文 TCP 监听地址（None = 不开）：客户端**默认传输**（大 SDP 不分片）。
+    pub tcp_addr: Option<SocketAddr>,
     /// Digest 口令表：设备 ID → token（显式覆盖，SIP_DIGEST_USERS）。
     pub passwords: Arc<HashMap<String, String>>,
     /// 通用口令回退（规范 §8「迁移期同一凭据」）：未列设备以首个 AUTH_TOKEN
@@ -473,6 +478,7 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
     SIP_TLS_UP.store(false, Ordering::Relaxed);
     SIP_WSS_UP.store(false, Ordering::Relaxed);
     SIP_UDP_UP.store(false, Ordering::Relaxed);
+    SIP_TCP_UP.store(false, Ordering::Relaxed);
     let tl = TransportLayer::new(cancel.clone());
 
     // TLS 监听（原生端）。
@@ -495,6 +501,17 @@ async fn serve(cfg: SipConfig, cancel: CancellationToken) -> Result<(), String> 
         tl.inner.add_listener(SipConnection::from(listener));
         SIP_TLS_UP.store(true, Ordering::Relaxed);
         info!(%addr, "SIP/TLS 监听已起");
+    }
+
+    // 明文 TCP 监听：客户端默认传输。SIP 报文集超过 MTU（大 SDP）时，UDP 要分片，
+    // 任一片丢失/被中间设备或用户态转发截断就整条不可用；TCP 是流传输，无此问题。
+    if let Some(addr) = cfg.tcp_addr {
+        let listener = TcpListenerConnection::new(addr, None)
+            .await
+            .map_err(|e| format!("SIP/TCP 监听 {addr} 失败: {e}"))?;
+        tl.inner.add_listener(SipConnection::from(listener));
+        SIP_TCP_UP.store(true, Ordering::Relaxed);
+        info!(%addr, "SIP/TCP 监听已起");
     }
 
     // UDP 监听（内网/调试，规范 §0 可选项）。
@@ -1756,6 +1773,7 @@ mod tests {
             tls_addr: None,
             wss_addr: None,
             udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+            tcp_addr: None,
             passwords: Arc::new(pw),
             tls_identity: None,
             sfu_urls: vec![],
@@ -1871,6 +1889,7 @@ mod tests {
             tls_addr: None,
             wss_addr: None,
             udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+            tcp_addr: None,
             passwords: Arc::new(pw),
             tls_identity: None,
             sfu_urls: vec![],
@@ -2058,6 +2077,7 @@ mod tests {
             tls_addr: None,
             wss_addr: None,
             udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+            tcp_addr: None,
             passwords: Arc::new(pw),
             tls_identity: None,
             sfu_urls: vec![format!("http://127.0.0.1:{sfu_port}")],
@@ -2220,6 +2240,7 @@ mod tests {
             tls_addr: None,
             wss_addr: None,
             udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+            tcp_addr: None,
             passwords: Arc::new(pw),
             tls_identity: None,
             sfu_urls: vec![format!("http://127.0.0.1:{sfu_port}")],
@@ -2304,6 +2325,7 @@ mod tests {
             tls_addr: None,
             wss_addr: None,
             udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+            tcp_addr: None,
             passwords: Arc::new(pw),
             tls_identity: None,
             sfu_urls: vec![],
@@ -2697,6 +2719,7 @@ mod tests {
             tls_addr: None,
             wss_addr: None,
             udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+            tcp_addr: None,
             passwords: Arc::new(pw),
             tls_identity: None,
             sfu_urls: vec![],
@@ -2742,6 +2765,7 @@ mod tests {
             tls_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
             wss_addr: None,
             udp_addr: None,
+            tcp_addr: None,
             passwords: Arc::new(pw),
             tls_identity: Some(identity),
             sfu_urls: vec![],
@@ -2801,6 +2825,7 @@ mod tests {
                     tls_addr: None,
                     wss_addr: None,
                     udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+                    tcp_addr: None,
                     passwords: Arc::new(pw),
                     tls_identity: None,
                     sfu_urls: vec![],
@@ -2993,6 +3018,7 @@ mod tests {
                     tls_addr: None,
                     wss_addr: None,
                     udp_addr: Some(format!("127.0.0.1:{port}").parse().unwrap()),
+                    tcp_addr: None,
                     passwords: Arc::new(pw),
                     tls_identity: None,
                     sfu_urls: vec![],

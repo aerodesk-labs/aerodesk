@@ -4,14 +4,19 @@
 媒体 P2P 优先 → TURN 中继（SFU 内嵌）→ SFU 兜底（≥3 人全员 SFU，见 §4.1）。本规范是 #550 的入口交付物与验收对照表：
 评审稿（v0.1/v0.2）见 #550 评论，本文件为评审通过后的定稿落盘（v0.3：多方拓扑口径定稿）。
 
-- **传输矩阵（v0.2 定调）**：仅 **Web 端走 SIP-WSS**（RFC 7118，浏览器唯一可用传输）；
-  **桌面/CLI 原生端直连标准 SIP**——TLS(5061) 默认（信令含 Digest 凭据与 SDP，公网必须加密），
-  TCP/UDP(5060) 内网/调试可选。UDP 受 RFC 3261 §18.1.1 MTU 约束：含 data channel m-line +
-  DTLS fingerprint 的初始 SDP 即使 trickle 瘦身仍可能超 1300B，**超 MTU 必须切 TCP**。
+- **传输矩阵（2026-10-08 修订）**：仅 **Web 端走 SIP-WSS**（RFC 7118，浏览器唯一可用传输）；
+  **桌面/CLI 原生端默认 SIP/TCP（明文流传输）**。理由：初始 SDP 含 data channel m-line +
+  DTLS fingerprint，且随编解码/候选变多而增长（实测 offer 4944B、整条 INVITE ≈5.5KB），
+  在 UDP 上要按 MTU 分成多个 IP 分片，任一片丢失或被中间设备/用户态转发缓冲截断，
+  整条 INVITE 即不可用（实测经 TUN 代理只到 4KB，callee 报 `EOF while parsing a string`）；
+  TCP 是流传输，没有可丢的分片（RFC 3261 §18.1.1：报文超路径 MTU 应当用 TCP）。
+  **TLS(5061)** 仍支持，且是公网部署的推荐项——明文 TCP 不加密 Digest 交换与 SDP，
+  **「加密」与「避免分片」是两件正交的事**：需要加密就在 TCP 之上加 TLS（客户端
+  `AERO_SIP_TRANSPORT=tls`）。**UDP(5060)** 降为内网/调试可选（`AERO_SIP_TRANSPORT=udp`）。
   **收包侧无 8 KiB 人工上限**（rsipstack 接收缓冲由 8192B 提到最大 UDP 载荷 65535B）：低于该值的报文
   可完整收下；截断/超限在收包侧记录 warn（含缓冲容量与实际读到的字节数），不再静默。发送侧「超 MTU
   切 TCP」仍未实现——大报文经 UDP 在 MTU 不足的路径上仍可能被 IP 分片丢弃，且收包侧观察不到。
-  SIP 语义与传输解耦，本规范映射表与传输无关；signal 多传输监听（TLS + WSS），
+  SIP 语义与传输解耦，本规范映射表与传输无关；signal 多传输监听（TCP + TLS + WSS + UDP），
   Contact 按传输分别绑定（RFC 5626 flow）。rsipstack 原生支持 UDP/TCP/TLS/WS/WSS（S1 已确认）。
 
 ## 1. 身份与寻址模型

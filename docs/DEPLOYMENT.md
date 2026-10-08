@@ -26,7 +26,7 @@
 | 组件 | 变量 | 说明 |
 |---|---|---|
 | signal | `SIGNAL_OPS_PORT` | HTTP 运维面端口（默认 3001；兼容别名 `SIGNAL_PORT`）：/healthz /devices /metrics/prometheus /admin/temp-password |
-| signal | `SIP_TLS_PORT` / `SIP_WSS_PORT` / `SIP_UDP_PORT` | SIP 三传输端口（P3 默认全开：5061 / 3061 / 5060）；`off`/`disabled`/`none` 显式关闭对应传输 |
+| signal | `SIP_TLS_PORT` / `SIP_WSS_PORT` / `SIP_UDP_PORT` / `SIP_TCP_PORT` | SIP 四传输端口（默认全开：5061 / 3061 / 5060 / 5060）；`off`/`disabled`/`none` 显式关闭对应传输。**`SIP_TCP_PORT` 为客户端默认传输**——SIP 报文集超过 MTU 时 UDP 要分片，任一片丢失或被中间设备/用户态转发截断（实测 5.5KB INVITE 经 TUN 代理只到 4KB）就整条不可用，TCP 流传输无此问题（RFC 3261 §18.1.1） |
 | signal | `SIP_REALM` | SIP Digest 域（默认 `aerodesk`） |
 | signal | `SIP_DIGEST_USERS` | 设备固定密码表（逗号分隔 `user=password`；#503-4） |
 | signal | `SIP_ADMIN_TOKEN` | /admin/temp-password 管理 token（缺省回退首个 `AUTH_TOKEN`） |

@@ -24,8 +24,9 @@
 //!   [`SipEvent::EscalatedToSfu`] 并抑制 PeerHangup）；`SendTrickle`→INFO sdpfrag，
 //!   对端 INFO → [`SipEvent::Trickle`]。
 //!
-//! 传输（规范 §0 传输矩阵）：[`SipTransport::Udp`] 内网/调试可选项、
-//! [`SipTransport::Tls`] 公网默认加密传输——客户端无监听，TLS 连接为
+//! 传输（规范 §0 传输矩阵）：[`SipTransport::Tcp`] **默认**（流传输，大 SDP 不分片）、
+//! [`SipTransport::Udp`] 内网/调试可选项、
+//! [`SipTransport::Tls`] 公网加密传输——客户端无监听，TLS 连接为
 //! 对 signal 的**既出流**（RFC 5923 alias 语义端到端复用：INVITE/BYE/INFO 与
 //! 注册共用同一条长连，in-dialog 请求由服务端沿同一流回推，不需要客户端回连）。
 
@@ -45,6 +46,7 @@ use rsipstack::sip::{Header, HeadersExt, Method, Response, StatusCode};
 use rsipstack::transaction::endpoint::EndpointBuilder;
 use rsipstack::transaction::transaction::Transaction;
 use rsipstack::transport::sip_addr::SipAddr;
+use rsipstack::transport::tcp::TcpConnection;
 use rsipstack::transport::tls::{TlsConfig, TlsConnection};
 use rsipstack::transport::udp::UdpConnection;
 use rsipstack::transport::{SipConnection, TransportLayer};
@@ -57,12 +59,19 @@ use crate::sip::{
     is_escalation_reason, status_to_error_code, view_aor,
 };
 
-/// 信令传输（规范 §0 传输矩阵：UDP=内网/调试可选项，TLS=公网默认加密）。
+/// 信令传输（规范 §0 传输矩阵：**TCP = 默认**，UDP = 内网/调试可选项，TLS = 公网加密）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SipTransport {
     /// UDP（内网/调试；规范 §0 传输矩阵可选项）。
     Udp,
-    /// SIP over TLS（公网默认传输，强制加密；TLS 层不替代 Digest 应用层认证）。
+    /// SIP over TCP（**默认**）：流式传输、报文集不做 IP 分片。
+    ///
+    /// 大 SDP（多方/多编解码/m-line 变多）会让 INVITE 超过 MTU（实测 4944B offer →
+    /// 整条 ≈5.5KB），UDP 下要分成多个 IP 分片；任一分片丢失或被中间设备/用户态
+    /// 转发缓冲截断，整条 INVITE 就废（实测经 TUN 代理只到 4KB → callee 解析
+    /// `EOF while parsing a string`）。RFC 3261 §18.1.1 亦要求报文超过路径 MTU 用 TCP。
+    Tcp,
+    /// SIP over TLS（公网加密传输；TLS 层不替代 Digest 应用层认证）。
     Tls,
 }
 
@@ -124,7 +133,7 @@ pub struct SipClientConfig {
     /// signal 的 SIP 监听地址（实际投递目标，RFC 5626 outbound proxy 语义：
     /// 报文头域保留 domain，UDP 包发往该地址）。
     pub server: SocketAddr,
-    /// 传输（[`SipTransport::Udp`] 或 [`SipTransport::Tls`]）。
+    /// 传输（[`SipTransport::Tcp`] / [`SipTransport::Udp`] 或 [`SipTransport::Tls`]）。
     pub transport: SipTransport,
     /// TLS 配置（[`SipTransport::Tls`] 时必填）。
     pub tls: Option<SipTlsConfig>,
@@ -367,6 +376,19 @@ async fn run_client_inner(
             tl.add_transport(SipConnection::from(conn));
             tl.get_addrs().into_iter().next()
         }
+        SipTransport::Tcp => {
+            // 预连（同 TLS 的理由）：REGISTER 的 Via/Contact 需要本端地址——纯 TCP
+            // 客户端无监听，连接建立即有本端地址。连接一经 add_connection 即进
+            // connections 表：后续 REGISTER/INVITE/BYE 按目标地址命中复用，入站
+            // 报文（INVITE/BYE/INFO）在既有流上到达。
+            let mut server_addr = SipAddr::from(cfg.server);
+            server_addr.r#type = Some(rsipstack::sip::Transport::Tcp);
+            let conn = TcpConnection::connect(&server_addr, Some(transport_cancel.clone()))
+                .await
+                .map_err(|e| format!("SIP/TCP 客户端传输创建失败: {e}"))?;
+            tl.add_connection(SipConnection::from(conn));
+            tl.get_addrs().into_iter().next()
+        }
         SipTransport::Tls => {
             let tls_cfg = cfg
                 .tls
@@ -432,6 +454,7 @@ async fn run_client_inner(
     // 注册逻辑从该参数继承出站目的地的传输类型）。
     let server_uri: rsipstack::sip::Uri = match cfg.transport {
         SipTransport::Udp => format!("sip:{}", cfg.domain),
+        SipTransport::Tcp => format!("sip:{};transport=tcp", cfg.domain),
         SipTransport::Tls => format!("sip:{};transport=tls", cfg.domain),
     }
     .try_into()
@@ -452,6 +475,7 @@ async fn run_client_inner(
     // 显式设置，避免 rsipstack 内部从 Via 构造的裸 `sip:user@addr` 无参数版本。
     let sip_transport = match cfg.transport {
         SipTransport::Udp => rsipstack::sip::Transport::Udp,
+        SipTransport::Tcp => rsipstack::sip::Transport::Tcp,
         SipTransport::Tls => rsipstack::sip::Transport::Tls,
     };
     registration.contact = Some(nat_contact_typed(
@@ -630,6 +654,7 @@ async fn handle_command(cmd: SipCommand, ctx: CmdCtx<'_>) {
             let mut destination = SipAddr::from(cfg.server);
             destination.r#type = Some(match cfg.transport {
                 SipTransport::Udp => rsipstack::sip::Transport::Udp,
+                SipTransport::Tcp => rsipstack::sip::Transport::Tcp,
                 SipTransport::Tls => rsipstack::sip::Transport::Tls,
             });
             let contact = match contact
