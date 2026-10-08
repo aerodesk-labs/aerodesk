@@ -23,7 +23,7 @@ aerodesk/
 ├── crates/
 │   ├── aerodesk-sfu/        # SFU 服务端：8 shard × SO_REUSEPORT + UnifiedSocket(UDP/TCP/SSL-TCP 3478)
 │   │                        #   + BitrateController/simulcast 选层 + /healthz + /metrics[/prometheus] ✅
-│   ├── aerodesk-signal/     # 独立信令（P3 SIP 单栈）：SIP/UDP 5060 + TLS 5061 + WSS 3061 + ops HTTPS 3001，REGISTER/INVITE ✅
+│   ├── aerodesk-signal/     # 独立信令（P3 SIP 单栈）：SIP/TCP 5060（客户端默认）+ UDP 5060 + TLS 5061 + WSS 3061 + ops HTTPS 3001，REGISTER/INVITE ✅
 │   ├── aerodesk-protocol/   # 共享协议：input/signal 消息 + coturn REST 凭证 ✅
 │   ├── aerodesk-core/       # 客户端核心：Endpoint(SDP/ICE/DTLS/数据通道) + 信令客户端 + VP8 解析 ✅
 │   │                        #   platform trait：MediaSource/Encoder/Decoder/Renderer/InputInjector/
@@ -45,7 +45,7 @@ aerodesk/
 # 服务端（SFU：UDP/TCP/SSL-TCP 同端口 3478 + 内部 API 3002）
 TURN_SECRET=<coturn static-auth-secret> cargo run -p aerodesk-sfu
 
-# 独立信令（P3 SIP 单栈：SIP/UDP 5060 + SIP/TLS 5061 + SIP/WSS 3061；ops HTTPS 3001）
+# 独立信令（P3 SIP 单栈：SIP/TCP 5060（客户端默认）+ SIP/UDP 5060 + SIP/TLS 5061 + SIP/WSS 3061；ops HTTPS 3001）
 cargo run -p aerodesk-signal
 
 # 发布端（macOS 真实屏幕采集，需屏幕录制 + 辅助功能权限）

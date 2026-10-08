@@ -125,7 +125,7 @@ $env:PATH = "$env:FFMPEG_DIR\bin;$env:PATH"
 
 $TargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $Root 'target' }
 $BinDir = if ($env:AERODESK_BIN_DIR) { $env:AERODESK_BIN_DIR } else { Join-Path $TargetDir 'debug' }
-# SIP/UDP 端口：可用 $env:SIP_PORT 覆盖（本机 5060 常被别的 SIP 服务占用）。
+# SIP 端口（UDP+TCP 同号）：可用 $env:SIP_PORT 覆盖（本机 5060 常被别的 SIP 服务占用）。
 # 写死 5060 会让「端口可覆盖」只生效一半（服务端在新端口、客户端仍拨 5060）→ 假红。
 $SipPort = if ($env:SIP_PORT) { [int]$env:SIP_PORT } else { 5060 }
 

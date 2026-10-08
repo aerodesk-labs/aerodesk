@@ -20,3 +20,6 @@ __pycache__/
 
 # dev worktrees（.worktrees/<name>，RULE_worktree必须建在当前工程子目录下）
 /.worktrees/
+
+# rpi agent 的本地会话目录（本机状态，随仓库分发无意义）
+/.rpi/

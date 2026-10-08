@@ -43,7 +43,7 @@ xcrun simctl bootstatus "$DEVICE" -b >/dev/null 2>&1 || true
 xcrun simctl boot "$DEVICE" 2>/dev/null || true
 xcrun simctl bootstatus "$DEVICE" -b >/dev/null 2>&1 || true
 
-echo "== [4/7] 启动 SFU/signal/publisher（端口可配，默认 3478/3000/3002 + ops 3001/SIP UDP 5060）"
+echo "== [4/7] 启动 SFU/signal/publisher（端口可配，默认 3478/3000/3002 + ops 3001/SIP UDP/TCP 5060）"
 REC="$(mktemp -d)"
 SFU_MEDIA_PORT="${SFU_MEDIA_PORT:-3478}" SFU_SIGNAL_PORT="${SFU_SIGNAL_PORT:-3000}" \
   SFU_INTERNAL_PORT="${SFU_INTERNAL_PORT:-3002}" RECORD_DIR="$REC" \

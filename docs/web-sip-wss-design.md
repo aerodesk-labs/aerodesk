@@ -82,7 +82,7 @@
 ## 3. 目标架构与呼叫时序
 
 ```
-浏览器观看端 (UAC)              signal (WSS 3061)                原生被控端 agent (UDP 5060)
+浏览器观看端 (UAC)              signal (WSS 3061)                原生被控端 agent (TCP 5060)
    | REGISTER → 401 → REGISTER+Digest → 200 OK                       |
    |----------------------------- INVITE (sip:<设备>@dom) ---------->|   SDP offer 内联候选
    |<----- 100 Trying / 180 Ringing -------------------------------- |

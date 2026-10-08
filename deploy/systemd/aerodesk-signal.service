@@ -15,8 +15,9 @@ Restart=on-failure
 RestartSec=2
 # HTTP 运维面（/healthz /devices /metrics/prometheus /admin/temp-password）
 Environment=SIGNAL_OPS_PORT=3001
-# P3 SIP 三传输默认全开（SIP/UDP 5060、SIP/TLS 5061、SIP/WSS 3061）；
+# P3 SIP **四**传输默认全开（**SIP/TCP 5060 是客户端默认传输**、SIP/UDP 5060、SIP/TLS 5061、SIP/WSS 3061）；
 # 如需显式固定或关闭（off/disabled/none）：
+# Environment=SIP_TCP_PORT=5060
 # Environment=SIP_UDP_PORT=5060
 # Environment=SIP_TLS_PORT=5061
 # Environment=SIP_WSS_PORT=3061

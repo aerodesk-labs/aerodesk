@@ -74,6 +74,7 @@ export RECORD_DIR=/data/rec
 export SIGNAL_OPS_PORT=3001                  # ops HTTPS（/healthz /metrics /admin/*）
 export SIP_TLS_PORT=5061                     # SIP/TLS；SIP/WSS 3061 默认同证书开启
 export SIP_UDP_PORT=5060                     # SIP/UDP（P3 单栈；明文 WS 已退役）
+export SIP_TCP_PORT=5060                     # SIP/TCP（客户端默认传输；与 UDP 同号）
 export TURN_URLS="turn:<VPS 公网 IP>:3479?transport=udp,turn:<VPS 公网 IP>:3479?transport=tcp,turns:<VPS 公网 IP>:5349?transport=tcp"
 ./target/release/aerodesk-signal &
 ```

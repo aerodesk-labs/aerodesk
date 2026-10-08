@@ -7,11 +7,11 @@
 #   1) 本机可免密 ssh 到两台主机且有 sudo（systemd 安装）；
 #   2) 本机可编译（默认 release）；本机有 curl（P3 探活走 ops HTTPS /healthz）；
 #   3) 端口：SFU 媒体 3478/公共 HTTPS 3000/内部 3002；signal ops HTTPS 3001/
-#      SIP/UDP 5060（P3 SIP 单栈，TLS 5061/WSS 3061 默认同证书开启）；
+#      SIP/UDP+TCP 5060（P3 SIP 单栈，TCP 为客户端默认传输；TLS 5061/WSS 3061 默认同证书开启）；
 #      TURN UDP+TCP 3479/TLS 5349（可经 --*-port 覆盖）；
 #   4) 认证：静态 token（AUTH_TOKENS）——即 SIP Digest 口令（规范 §8 迁移期
 #      同一凭据），客户端 --token 直传；
-#   5) 客户端信令地址为 SIP 形态 ws://<host>:<sip-udp-port>（agent 的 ws://
+#   5) 客户端信令地址为 SIP 形态 ws://<host>:<sip-port>（agent 的 ws://
 #      URL 即 SIP 寻址载体，AERO_SIP_PORT 可显式覆盖端口）；跨 PoP 房间由
 #      signal 302+Contact（POP_SIP_URLS）引导；
 #   6) --cert-file/--key-file 指向主机上已存在的证书路径（脚本不负责上传）。

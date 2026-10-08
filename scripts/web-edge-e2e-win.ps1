@@ -11,7 +11,7 @@ $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 $Room = if ($args.Count -gt 0) { $args[0] } else { "webedge-win-$([DateTime]::Now.ToString('HHmmss'))" }
 $env:RUST_LOG = if ($env:RUST_LOG) { $env:RUST_LOG } else { "info" }
-# SIP/UDP 端口：可用 $env:SIP_PORT 覆盖（本机 5060 常被别的 SIP 服务占用）。
+# SIP 端口（UDP+TCP 同号）：可用 $env:SIP_PORT 覆盖（本机 5060 常被别的 SIP 服务占用）。
 # 写死 5060 会让「端口可覆盖」只生效一半（服务端在新端口、客户端仍拨 5060）→ 假红。
 $SipPort = if ($env:SIP_PORT) { [int]$env:SIP_PORT } else { 5060 }
 if (-not $env:FFMPEG_DIR) { throw "FFMPEG_DIR 未设置（CI 已配；本地需指向 FFmpeg 8.1 开发包根目录）" }

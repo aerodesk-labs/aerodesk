@@ -2,7 +2,7 @@
 # popreg-e2e.sh —— 多 PoP v2 动态 room→PoP 注册表（SIP 302+Contact 版，#154/#600）。
 #
 # 双 PoP（无静态钉住，共享注册表文件，各自显式 SIP 端口）：
-#   PoP A: sfu-a(media 3478/internal 3002) + signal-a(SIP UDP 5060 / TLS 5061 /
+#   PoP A: sfu-a(media 3478/internal 3002) + signal-a(SIP UDP/TCP 5060 / TLS 5061 /
 #          WSS 3061 / ops 3001)
 #   PoP B: sfu-b(media 3479/internal 3007) + signal-b(SIP UDP 5070 / TLS 5071 /
 #          WSS 3071 / ops 3006)

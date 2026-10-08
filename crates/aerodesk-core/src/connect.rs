@@ -388,7 +388,7 @@ fn connect_sip_uac(
 /// #552 移动端观看端 SIP 连接（agent connect_inner 的 viewer 路径收敛到 core，
 /// 三平台共用）：REGISTER → INVITE 房间 → Answered → ICE 收敛。
 ///
-/// - `server`：信令 URL（`ws://`→SIP/UDP 5060，`wss://`→SIP/TLS 5061；
+/// - `server`：信令 URL（`ws://`→SIP/**TCP** 5060（默认传输），`wss://`→SIP/TLS 5061；
 ///   显式 `sip_transport`/`sip_port` 覆盖）；
 /// - `token`：Digest 口令（= 现有 auth token，§8 迁移期同一凭据）；
 /// - `force_relay`：只通告 TURN 候选（#201 NAT/模拟器语义）；

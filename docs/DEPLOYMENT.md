@@ -101,8 +101,8 @@ signal.aerodesk.io {
 ```
 
 **nginx 反代 + 限流示例**（生产推荐：TLS 终止在 nginx，signal ops 面只绑内网；
-限流覆盖连接/请求速率，防未授权客户端拉取运维面 DoS。注意 P3 单栈下 SIP/UDP
-5060、SIP/TLS 5061 直连不经反代——反代只服务 ops HTTPS 面）：
+限流覆盖连接/请求速率，防未授权客户端拉取运维面 DoS。注意 P3 单栈下 SIP 四传输
+（TCP/UDP 5060、TLS 5061、WSS 3061）直连不经反代——反代只服务 ops HTTPS 面）：
 
 ```nginx
 # 每 IP 并发连接 + 请求速率

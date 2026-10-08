@@ -167,7 +167,7 @@ start_servers() {
     || { echo "FAIL: SFU 媒体端口未启动"; tail -5 "$LOG_DIR/sfu.log"; exit 1; }
   wait_log "$LOG_DIR/signal.log" 'SIP 信令端点已启动' 30 \
     || { echo "FAIL: signal SIP 端点未启动"; tail -5 "$LOG_DIR/signal.log"; exit 1; }
-  echo "PASS 服务器就绪（SFU+TURN :$TURN_PORT, signal SIP/UDP :${SIP_UDP}）"
+  echo "PASS 服务器就绪（SFU+TURN :$TURN_PORT, signal SIP/UDP+TCP :${SIP_UDP}）"
 }
 
 stop_servers() {

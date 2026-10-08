@@ -116,3 +116,41 @@ UAC Secure Desktop（`#472`）；对外多租户与容量承诺（`#8` 压测基
 - **生产节点**（见 2.6）：节点已在 13:09 重部署并受理流量，但**跑的是未合并分支的构建**（不是 main），且本仓 `ops/redeploy-main-20261008` 已推翻「需云控制台放行 UDP」的归因（实为本机 Clash TUN）。重启/回滚共享服务器仍需用户授权，是本周最大的外部依赖。
 - **冷编译**：本机 `target-dir` 在数据盘且当前为空，首次全量编译需计入 D1 墙钟。
 - **macOS TCC**：未签名构建会掉屏幕录制权限 → D5 必须用 Release 的已签名+公证包验收。
+
+## 6. v0.4.1 发布与「三个对象不一致」（2026-10-08，独立评审提出后补齐）
+
+**必须先读这一节再看任何验收结论**：本周同时存在三个不同的「东西」，此前台账没有把它们分开写：
+
+| 对象 | 是什么 | 本文件的相关引用 |
+|---|---|---|
+| **交付对象** | `main`（walgit 权威）= 本周全部合并后的代码线，现为 **`660fb14`** | 本文件全部「已实现/已修复」的判定对象 |
+| **审查对象** | 本周四条线程（sip/D1/D2/ops）的 **diff** + 客户端面（`main` + `v0.4.0..main` 差） | 各线程的 review 条目 |
+| **验收对象** | 实际装到机器上的**包**：`v0.4.0`（今晚原计划）或 **`v0.4.1`**（本次新发） | §2.5/§2.6 的实测都是前者之前的状态 |
+
+三者的差异造成的实际后果（客户端独立评审实测）：
+- `v0.4.0` 与 `main` 的 **desktop/host 逐字节相同**，客户端增量只有 `aerodesk-vdev-bridge`（716 行）+ 几行；
+- `v0.4.0` **缺** SIP/UDP 收包缓冲修复（`8192 → 65535`，`64314f0`）：SIP 报文 >8192B 时曾静默失败；
+- `v0.4.0` 与其后的 `main` 客户端**都只有 `Udp`/`Tls`**，`SipTransport::Tcp` 直到本周 `feat/sip-default-tcp`
+  合入才存在 → 所以「验收对象 ≠ 交付对象」时，客户端与服务端的默认传输会对不上。
+
+**本次发布（对齐三者）**：
+
+| 项 | 值 |
+|---|---|
+| tag / 发布点 | `v0.4.1` / `main = 660fb14`（+ 其后若干文档修正提交） |
+| 发布仓 | `aerodesk-labs/aerodesk`（main 从 `6c9154d` **快进**到 `660fb14`，无 force） |
+| Release | https://github.com/aerodesk-labs/aerodesk/releases/tag/v0.4.1 |
+| 打包 run | `37764167446`（`release: published` 触发 Build & Release） |
+| Windows 产物 | `aerodesk-0.4.1-win64.msi` / `.zip` —— **无代码签名**（`docs/PACKAGING.md` 自述「证书待补」），安装会提示「未知发布者」 |
+| macOS 产物 | `AeroDesk-0.4.1.dmg` —— Developer ID 签名 + notarytool 公证 + stapler |
+
+> 因此 P0-5「签名包」这一维**只在 macOS 有可验对象**；Windows 侧今天没有可验对象（要补 OV/EV 证书 + 流水线）。
+
+## 7. 非交付面与已登记的技术债（避免被当成"已交付"）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| `crates/aerodesk-agent/src/bin/aerodesk-vdev-bridge/`（716 行） | **非交付面**；**零审查历史**，已由客户端独立评审覆盖并记录问题 | 不进包（只有 docs/e2e 引用）；三处静默失效**未修**，登记为债：① 推帧错误被 `let _ =` 丢弃（接管后永久停推流）；② 收流循环不查 `is_alive()`、无断流时限；③ AudioUnit `CURRENT_DEVICE/Start` 返回值被忽略。另它不复用统一配置面（写死 udp/5060，非默认端口接不上） |
+| `cmd_exec` 的 info 级日志 | **债（另批）** | `agent info!("cmd request #{}: {:?}")` 会把 `WriteFile{data:base64}` / `Chat{text}` 写进日志（`d8afd42` 起，v0.4.0 亦有）→ 需降级/脱敏 |
+| Windows host 的口令落盘 | **未验** | 明文写 ProgramData，未见 ACL/DPAPI 收紧（客户端评审标 unverified） |
+| Windows 全部行为 | **静态审查** | 本机无法执行 Windows 二进制/服务/登录界面 helper；GNU 交叉 clippy 因缺 Windows FFmpeg 无法跑 |

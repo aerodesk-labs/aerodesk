@@ -91,6 +91,8 @@ jobs:
       # #552：脚本启动的 signal 一律继承此 env——SIP UDP 面（5060）开启，
       # CLI 客户端（SIP REGISTER/INVITE）才能连接；#577 曾逐脚本补，仍漏
       # 两个 .ps1，收敛为 job 级注入（脚本内显式设置优先，语义不变）。
+      # 2026-10-08：客户端**默认传输已是 TCP**，脚本若只覆盖 SIP_UDP_PORT 需同时给
+      # SIP_TCP_PORT（各脚本/公共 helper 已对齐；此处 job 级默认 5060 两边同号，自洽）。
       SIP_UDP_PORT: "5060"
     steps:
       - uses: actions/checkout@v4
@@ -515,7 +517,8 @@ jobs:
     runs-on: windows-latest
     env:
       CARGO_TERM_COLOR: always
-      # #552：脚本启动的 signal 需 SIP UDP 面（同 test job env 注释）
+      # #552：脚本启动的 signal 需 SIP UDP 面（同 test job env 注释）；
+      # 2026-10-08 起客户端默认走 TCP，脚本另需按需设 SIP_TCP_PORT（各脚本/helper 已对齐）。
       SIP_UDP_PORT: "5060"
     steps:
       - uses: actions/checkout@v4
@@ -582,7 +585,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
-      # #552：脚本启动的 signal 需 SIP UDP 面（同 test job env 注释）
+      # #552：脚本启动的 signal 需 SIP UDP 面（同 test job env 注释）；
+      # 2026-10-08 起客户端默认走 TCP，脚本另需按需设 SIP_TCP_PORT（各脚本/helper 已对齐）。
       SIP_UDP_PORT: "5060"
     steps:
       - uses: actions/checkout@v4
@@ -624,7 +628,8 @@ jobs:
     runs-on: macos-latest
     env:
       CARGO_TERM_COLOR: always
-      # #552：脚本启动的 signal 需 SIP UDP 面（同 test job env 注释）
+      # #552：脚本启动的 signal 需 SIP UDP 面（同 test job env 注释）；
+      # 2026-10-08 起客户端默认走 TCP，脚本另需按需设 SIP_TCP_PORT（各脚本/helper 已对齐）。
       SIP_UDP_PORT: "5060"
     steps:
       - uses: actions/checkout@v4

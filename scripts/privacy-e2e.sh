@@ -22,7 +22,7 @@ cd "$ROOT"
 echo "== 构建"
 cargo build --release -q -p aerodesk-agent -p aerodesk-signal
 
-echo "== 启动 signal（SIP UDP 5060）"
+echo "== 启动 signal（SIP UDP/TCP 5060）"
 SIP_UDP_PORT="$SIP_PORT" ./target/release/aerodesk-signal >"$REC/sig.log" 2>&1 &
 SIG_PID=$!
 sleep 1
