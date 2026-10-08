@@ -17,3 +17,6 @@ __pycache__/
 
 # e2e 残留：web/ 静态服务器(python -m http.server) stderr 重定向日志
 /web/http.log
+
+# dev worktrees（.worktrees/<name>，RULE_worktree必须建在当前工程子目录下）
+/.worktrees/

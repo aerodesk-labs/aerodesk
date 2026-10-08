@@ -167,7 +167,7 @@ start_servers() {
     || { echo "FAIL: SFU 媒体端口未启动"; tail -5 "$LOG_DIR/sfu.log"; exit 1; }
   wait_log "$LOG_DIR/signal.log" 'SIP 信令端点已启动' 30 \
     || { echo "FAIL: signal SIP 端点未启动"; tail -5 "$LOG_DIR/signal.log"; exit 1; }
-  echo "PASS 服务器就绪（SFU+TURN :$TURN_PORT, signal SIP/UDP :$SIP_UDP）"
+  echo "PASS 服务器就绪（SFU+TURN :$TURN_PORT, signal SIP/UDP :${SIP_UDP}）"
 }
 
 stop_servers() {
@@ -293,14 +293,14 @@ run_pair() {
   # publisher REGISTER 之前，signal 会把它当会议 INVITE 转 SFU 桥（无 SFU_URL → 503）。
   if [ "$MODE" = "netns" ]; then
     PUB_PID=$(launch_agent "$pub_env" publisher "$signal_a" "$room" "$pub_enc --reconnect --reconnect-max 10" "$PUB_LOG" "$NS_A")
-    wait_log "$PUB_LOG" 'SIP registered' 30 || fail "publisher SIP 注册超时（$tag）"
+    wait_log "$PUB_LOG" 'SIP registered' 30 || fail "publisher SIP 注册超时（${tag}）"
     VIEW_PID=$(launch_agent "$view_env" viewer "$signal_b" "$room" "$view_args" "$VIEW_LOG" "$NS_B")
   else
     PUB_PID=$(launch_agent "$pub_env" publisher "$signal_a" "$room" "$pub_enc --reconnect --reconnect-max 10" "$PUB_LOG")
-    wait_log "$PUB_LOG" 'SIP registered' 30 || fail "publisher SIP 注册超时（$tag）"
+    wait_log "$PUB_LOG" 'SIP registered' 30 || fail "publisher SIP 注册超时（${tag}）"
     VIEW_PID=$(launch_agent "$view_env" viewer "$signal_b" "$room" "$view_args" "$VIEW_LOG")
   fi
-  wait_log "$VIEW_LOG" 'SIP registered' 30 || fail "viewer SIP 注册超时（$tag）"
+  wait_log "$VIEW_LOG" 'SIP registered' 30 || fail "viewer SIP 注册超时（${tag}）"
 }
 
 # 杀进程：SIGTERM 后等退出（最多 1s），未退 SIGKILL 兜底。Windows（Git Bash/msys）
@@ -352,14 +352,14 @@ turn_env() {
 
 # ---- 场景 ----
 scenario_s0() { # 直连基线：ICE 直连 + 媒体 + TURN 闲置（A1）
-  echo "== S0 直连基线（$MODE）"
+  echo "== S0 直连基线（${MODE}）"
   allow_direct
   run_pair "" "" "" s0
   local al
   if wait_log "$VIEW_LOG" 'ICE connected' 25 && wait_log "$VIEW_LOG" 'RECEIVED: [1-9]' 25; then
     al=$(turn_alloc)
     if [ "$al" -eq 0 ]; then
-      ok "S0 直连媒体到达 + TURN 闲置（allocations=$al）——媒体不经服务器"
+      ok "S0 直连媒体到达 + TURN 闲置（allocations=${al}）——媒体不经服务器"
     else
       fail "S0 直连成立但 TURN allocation=$al ≠ 0（不应有 relay）"
     fi
@@ -398,7 +398,7 @@ scenario_s2b() { # 双 NAT + TURN：直连失败 → TURN 兜底 → 媒体恢�
     local al
     al=$(turn_alloc)
     if [ "$al" -ge 2 ]; then
-      ok "S2b 打洞失败后 TURN 兜底成功（allocations=$al，媒体恢复）"
+      ok "S2b 打洞失败后 TURN 兜底成功（allocations=${al}，媒体恢复）"
     else
       fail "S2b 媒体到达但 allocations=$al < 2（未走 relay）"
     fi
@@ -421,7 +421,7 @@ scenario_s3() { # relay 强制路径（A4）
     local al
     al=$(turn_alloc)
     if [ "$al" -ge 2 ]; then
-      ok "S3 relay 强制生效（skip host + relayed 候选 + 媒体经 TURN，allocations=$al）"
+      ok "S3 relay 强制生效（skip host + relayed 候选 + 媒体经 TURN，allocations=${al}）"
     else
       fail "S3 媒体到达但 allocations=$al < 2"
     fi
@@ -449,7 +449,7 @@ scenario_s4() { # 回退黑屏时长上限（A5）：直连会话中切断 → T
   local t0 n0
   n0=$(recv_count "$VIEW_LOG")
   t0=$(recv_ts "$VIEW_LOG" last)
-  echo "  T0=$t0 基线最后 RECEIVED（行 #$n0），2s 后切断直连"
+  echo "  T0=$t0 基线最后 RECEIVED（行 #${n0}），2s 后切断直连"
   sleep 2
   block_direct
   local deadline=$((BOUND_MS + 15000)) waited=0
@@ -480,7 +480,7 @@ cleanup() {
   kill_pair 2>/dev/null || true
   stop_servers
   if [ "$MODE" = "netns" ]; then cleanup_nat; fi
-  echo "== 汇总：PASS=$PASS FAIL=$FAILS；日志：$LOG_DIR"
+  echo "== 汇总：PASS=$PASS FAIL=${FAILS}；日志：$LOG_DIR"
 }
 trap cleanup EXIT
 

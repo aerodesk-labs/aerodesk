@@ -10,7 +10,7 @@ MAKE_DMG=0
 for a in "$@"; do
   case "$a" in
     --dmg) MAKE_DMG=1 ;;
-    *) echo "未知参数: $a（支持 --dmg）" >&2; exit 1 ;;
+    *) echo "未知参数: ${a}（支持 --dmg）" >&2; exit 1 ;;
   esac
 done
 

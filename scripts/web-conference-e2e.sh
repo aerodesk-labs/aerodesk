@@ -5,6 +5,7 @@
 # SFU 会议三方入会、双 viewer 收流。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/lib/e2e-ports.sh"   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 cd "$ROOT"
 # ffmpeg-sys-next 9 行为：FFMPEG_DIR 一旦「已设置」（含空串/不存在路径）即放弃
 # pkg-config 直查该路径——历史默认值是提交者本机 Windows 路径，曾在 macOS 构建
@@ -33,7 +34,7 @@ cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 echo "== 启动服务（LAN-IP 配方）"
 RECORD_DIR="$REC" SFU_HOST_ADDRESS=127.0.0.1 ./target/debug/aerodesk-sfu >/tmp/webconf-sfu.log 2>&1 &
 SFU=$!
-SIP_UDP_PORT=5060 SIP_WSS_PORT=3061 ./target/debug/aerodesk-signal >/tmp/webconf-sig.log 2>&1 &
+SIP_UDP_PORT="$SIP_PORT" SIP_WSS_PORT=3061 ./target/debug/aerodesk-signal >/tmp/webconf-sig.log 2>&1 &
 SIG=$!
 (cd "$ROOT/web" && python3 -m http.server "$WEB_SERVE_PORT" --bind 127.0.0.1 >/tmp/webconf-http.log 2>&1) &
 HTTP=$!

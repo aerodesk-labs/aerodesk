@@ -6,6 +6,7 @@
 set -euo pipefail
 export PYTHONIOENCODING=utf-8
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/lib/e2e-ports.sh"   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 cd "$ROOT"
 ROOM="${1:-winui-$(date +%s)}"
 
@@ -71,15 +72,29 @@ echo "== [2/6] 启动 SFU/signal（Windows）"
 # Windows 防火墙可能阻止 SFU UDP 3478 入站（同机回包）→ 放行（runner 有管理员权限）。
 netsh advfirewall firewall add rule name="aerodesk-e2e-udp3478" dir=in action=allow protocol=UDP localport=3478 >/dev/null 2>&1 || true
 netsh advfirewall firewall add rule name="aerodesk-e2e-tcp" dir=in action=allow protocol=TCP localport=3001,3002,3003 >/dev/null 2>&1 || true
+# 失败路径也要收回自己起的进程：此前只有成功路径（脚本末尾）taskkill，任一个 exit 1
+# 都会把 signal/sfu/http/UI 留成孤儿并占住端口——下一次运行就在
+# 「FAIL: SFU/signal not ready」上假红（2026-10-08 macOS 同形脚本实测）。
+SFU=""; SIG=""; HTTP=""; UI_PID=""; PUB=""
+cleanup() {
+  taskkill //F //PID "$UI_PID" 2>/dev/null || true
+  taskkill //F //PID "$PUB" 2>/dev/null || true
+  taskkill //F //PID "$SFU" 2>/dev/null || true
+  taskkill //F //PID "$SIG" 2>/dev/null || true
+  [ -n "$HTTP" ] && taskkill //F //PID "$HTTP" 2>/dev/null || true
+}
+trap cleanup EXIT
 REC="$(mktemp -d)"
 RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu.exe" >/tmp/winui-sfu.log 2>&1 &
 SFU=$!
-# SIP 会议桥链路：SIP/UDP 5060 + Digest 凭证（desktop 侧 settings 同步 seed）。
-SIP_UDP_PORT=5060 SIP_WSS_PORT=3061 \
+# SIP 会议桥链路：SIP/UDP（端口跟 SIP_PORT）+ Digest 凭证（desktop 侧 settings 同步 seed）。
+SIP_UDP_PORT="$SIP_PORT" SIP_WSS_PORT=3061 \
   SIP_DIGEST_USERS="AD-E2EUI=e2e-token,${ROOM}=e2e-token" \
   "$ROOT/target/debug/aerodesk-signal.exe" >/tmp/winui-sig.log 2>&1 &
 SIG=$!
-(cd "$ROOT/web" && python3 -m http.server "${WEB_SERVE_PORT:-38086}" >/tmp/winui-http.log 2>&1) &
+# 必须 exec：$HTTP 要拿到 http.server **自己**的 PID——子壳 PID 杀不掉 python，
+# 会留下占住 WEB_SERVE_PORT 的孤儿（2026-10-08 实测）。
+(cd "$ROOT/web" && exec python3 -m http.server "${WEB_SERVE_PORT:-38086}" >/tmp/winui-http.log 2>&1) &
 HTTP=$!
 export WEB_SERVE_PORT="${WEB_SERVE_PORT:-38086}"
 export WINUI_TMP="$(cygpath -w /tmp)"
@@ -157,7 +172,7 @@ if [ "$OK" != "1" ]; then
 fi
 
 echo "== [3.5/6] seed SIP 配置（desktop 启动即 REGISTER，观看经会议桥）"
-# 隔离 HOME：seed 与 desktop 启动同用 $E2E_DIR（不碰真实配置）。
+# 隔离 HOME：seed 与 desktop 启动同用 ${E2E_DIR}（不碰真实配置）。
 export AERO_E2E_HOME="$E2E_DIR"
 python3 - <<'PY'
 import sys
@@ -172,7 +187,10 @@ settings = {
     "remember_token": True,
     "server_tls": False,
     "sip_transport": "udp",
-    "sip_port": 5060,
+    # 客户端 SIP 端口必须与服务端实际监听端口一致（SIP_PORT 可覆盖）。写死 5060
+    # 会让「端口可覆盖」只生效一半：SIP_PORT=15060 时服务端在 15060、客户端拨 5060
+    # ——正是本批次要消灭的那个假红（本机 5060 常被别的 SIP 服务占用）。
+    "sip_port": int(os.environ.get("SIP_PORT", "5060")),
 }
 import os as _os; path = _os.path.join(_os.environ.get("AERO_E2E_HOME", _os.path.expanduser("~")), ".aerodesk-settings.json")
 open(path, "w").write(json.dumps(settings))

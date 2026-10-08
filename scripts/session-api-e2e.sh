@@ -6,6 +6,7 @@
 #       断言客户端数回落、/healthz 计数回落、audit.log 含 session/kick。
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/lib/e2e-ports.sh   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 ROOT="$(pwd)"
 
 ROOM="sess-$(date +%s)"
@@ -30,7 +31,7 @@ RECORD_DIR="$REC" RECORD_ON_DEMAND=1 INTERNAL_TOKEN="$TOKEN" \
   ./target/debug/aerodesk-sfu >/tmp/sess-sfu.log 2>&1 &
 SFU=$!
 SIGNAL_PORT=14001 SFU_URL=http://127.0.0.1:14002 SFU_TOKEN="$TOKEN" \
-  SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/sess-sig.log 2>&1 &
+  SIP_UDP_PORT="$SIP_PORT" ./target/debug/aerodesk-signal >/tmp/sess-sig.log 2>&1 &
 SIG=$!
 for _ in $(seq 1 50); do
     if nc -z 127.0.0.1 14002 2>/dev/null && grep -q "SIP/UDP 监听已起" /tmp/sess-sig.log 2>/dev/null; then break; fi

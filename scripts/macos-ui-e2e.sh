@@ -10,6 +10,7 @@
 set -euo pipefail
 export PYTHONIOENCODING=utf-8
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/lib/e2e-ports.sh"   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 cd "$ROOT"
 ROOM="${1:-macosui-$(date +%s)}"
 
@@ -70,15 +71,25 @@ JS
 
 echo "== [3/6] 启动 SFU/signal"
 cd "$ROOT"
+# 失败路径也要收回自己起的进程：此前只有成功路径（脚本末尾）kill，任一个 exit 1
+# 都会把 signal/sfu/http/UI 留成孤儿并占住端口（15060/3061/38084）——下一次运行
+# 就在「FAIL: SFU/signal not ready」上假红（2026-10-08 实测：孤儿 signal/sfu PPID=1）。
+SFU=""; SIG=""; HTTP=""; UI_PID=""; PUB=""
+cleanup() {
+  kill "$UI_PID" "$HTTP" "$SFU" "$SIG" "$PUB" 2>/dev/null || true
+}
+trap cleanup EXIT
 REC="$(mktemp -d)"
 RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu" >/tmp/macosui-sfu.log 2>&1 &
 SFU=$!
 # SIP 会议桥链路（WSS 兜底已删 #576——desktop 观看必经 SIP）。
 # #598 P2a：浏览器被控页走 SIP-WSS（3061）；DIGEST_USERS 含房间（页面 REGISTER）。
-SIP_UDP_PORT=5060 SIP_WSS_PORT=3061 \
+SIP_UDP_PORT="$SIP_PORT" SIP_WSS_PORT=3061 \
   SIP_DIGEST_USERS="AD-E2EUI=e2e-token,${ROOM}=e2e-token" "$ROOT/target/debug/aerodesk-signal" >/tmp/macosui-sig.log 2>&1 &
 SIG=$!
-(cd "$ROOT/web" && python3 -m http.server "${WEB_SERVE_PORT:-38084}" >/tmp/macosui-http.log 2>&1) &
+# 必须 exec：$HTTP 要拿到 http.server **自己**的 PID——子壳 PID 杀不掉 python，
+# 会留下占住 WEB_SERVE_PORT 的孤儿（2026-10-08 实测）。
+(cd "$ROOT/web" && exec python3 -m http.server "${WEB_SERVE_PORT:-38084}" >/tmp/macosui-http.log 2>&1) &
 HTTP=$!
 # HTTP 静态服务就绪门（此前无探活——node goto 撞上启动空窗即白跑）。
 WEB_OK=0
@@ -121,7 +132,7 @@ if [ "$OK" != "1" ]; then
 fi
 
 echo "== [4.5/6] seed SIP 配置（desktop 启动即 REGISTER，观看经会议桥）"
-# 隔离 HOME：seed 与 desktop 启动同用 $E2E_DIR（不碰真实配置）。
+# 隔离 HOME：seed 与 desktop 启动同用 ${E2E_DIR}（不碰真实配置）。
 export AERO_E2E_HOME="$E2E_DIR"
 python3 - <<'PY'
 import json, os
@@ -132,7 +143,10 @@ settings = {
     "remember_token": True,
     "server_tls": False,
     "sip_transport": "udp",
-    "sip_port": 5060,
+    # 客户端 SIP 端口必须与服务端实际监听端口一致（SIP_PORT 可覆盖）。写死 5060
+    # 会让「端口可覆盖」只生效一半：SIP_PORT=15060 时服务端在 15060、客户端拨 5060
+    # ——正是本批次要消灭的那个假红（本机 5060 常被别的 SIP 服务占用）。
+    "sip_port": int(os.environ.get("SIP_PORT", "5060")),
 }
 path = os.path.join(os.environ.get("AERO_E2E_HOME", os.path.expanduser("~")), ".aerodesk-settings.json")
 open(path, "w").write(json.dumps(settings))

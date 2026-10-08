@@ -133,6 +133,8 @@ bash scripts/input-e2e.sh   # MouseMove(0.3,0.4)/Button/Wheel/Key/修饰键坐�
 | ICE 一直超时，日志里 host candidate 是 `198.18.x.x`（或 `10.x` 的 TUN/VPN 地址） | 旧版只取**默认路由出接口**那一个地址；默认路由落在 Clash TUN / WireGuard / 企业 VPN 上时，候选就是隧道地址，两端互发到隧道里 | 升级到枚举全部接口的版本（`aerodesk-core::net_ifaces`：物理优先、隧道/网桥排后、剔除 198.18.0.0/15 fake-IP）；临时办法是关 TUN 或在客户端显式指定可达接口 |
 | 被控端无画面 | 无头/服务会话无桌面输出 | 真实桌面会话；X11 需 DISPLAY |
 | 摄像头枚举为空 | 无 /dev/video* 或权限 | 插摄像头 + 用户加入 video 组 |
+| REGISTER 收到 **403 Forbidden**（日志提示“检查 signal 的 SIP 端口/口令”） | 本机 `127.0.0.1:5060` 被别的 SIP 服务占用（实测 FreeSWITCH）：signal 绑 `0.0.0.0:5060` 后，内核把回包交给更具体的 `127.0.0.1:5060`，错误被甩成“口令错” | `lsof -nP -iUDP:5060` 确认占用；e2e 已统一走 `scripts/lib/e2e-ports.sh`，用 `SIP_PORT=15060 SIGNAL_OPS_PORT=13001 bash scripts/xxx-e2e.sh` 绕开 |
+| e2e 报 `VAR: unbound variable`，而变量明明定义了 | macOS 自带 `/bin/bash` 3.2 会把紧跟变量的非 ASCII 字符（中文标点）吃进变量名 | 统一写成 `${VAR}`；`rg '\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]' scripts/` 应无输出 |
 
 ## 4. 关联
 

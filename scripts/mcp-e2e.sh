@@ -10,6 +10,7 @@
 # 用法: scripts/mcp-e2e.sh [房间]
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/lib/e2e-ports.sh   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 
 ROOM="${1:-mcp-$(date +%s)}"
 export RUST_LOG="${RUST_LOG:-info}"
@@ -23,7 +24,7 @@ REC="$(mktemp -d)"
 echo "== 启动 sfu/signal + publisher（含 --recv-dir 供大文件上传落盘）"
 RECORD_DIR="$REC" ./target/debug/aerodesk-sfu >/tmp/mcp-sfu.log 2>&1 &
 SFU_PID=$!
-SIP_UDP_PORT=5060 ./target/debug/aerodesk-signal >/tmp/mcp-sig.log 2>&1 &
+SIP_UDP_PORT="$SIP_PORT" ./target/debug/aerodesk-signal >/tmp/mcp-sig.log 2>&1 &
 SIG_PID=$!
 for _ in $(seq 1 50); do
     if grep -q "SIP/UDP 监听已起" /tmp/mcp-sig.log 2>/dev/null && nc -z 127.0.0.1 3002 2>/dev/null; then break; fi

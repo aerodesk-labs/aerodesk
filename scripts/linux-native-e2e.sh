@@ -6,6 +6,7 @@
 # 用法: scripts/linux-native-e2e.sh [room]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/scripts/lib/e2e-ports.sh"   # e2e 端口统一（SIP_PORT / SIGNAL_OPS_PORT 可覆盖）
 cd "$ROOT"
 ROOM="${1:-linux-native-$(date +%s)}"
 
@@ -22,7 +23,7 @@ REC="$(mktemp -d)"
 # #535 排查：SFU debug 级日志（通道开/轨道增删/键帧请求转发路径）。
 RECORD_DIR="$REC" "$ROOT/target/debug/aerodesk-sfu" >/tmp/linux-native-sfu.log 2>&1 &
 SFU=$!
-SIP_UDP_PORT=5060 "$ROOT/target/debug/aerodesk-signal" >/tmp/linux-native-sig.log 2>&1 &
+SIP_UDP_PORT="$SIP_PORT" "$ROOT/target/debug/aerodesk-signal" >/tmp/linux-native-sig.log 2>&1 &
 SIG=$!
 OK=0
 for _ in $(seq 1 50); do
