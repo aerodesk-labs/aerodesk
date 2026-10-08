@@ -38,14 +38,14 @@ RECORD_DIR="$REC" SFU_HOST_ADDRESS=127.0.0.1 SFU_SIGNAL_PORT=15000 SFU_INTERNAL_
   ./target/debug/aerodesk-sfu >/tmp/mpop-sfu-a.log 2>&1 &
 SFU_A=$!
 RUST_LOG=debug POP_ID=pop-a POP_REGISTRY_FILE=/tmp/mpop-registry.json ROOM_POP_MAP="multipop-=pop-b" POP_SIP_URLS="pop-b=127.0.0.1:15061" \
-  SIP_UDP_PORT=15060 SFU_URL=http://127.0.0.1:15002 \
+  SIP_UDP_PORT=15060 SIP_TCP_PORT=15060 SFU_URL=http://127.0.0.1:15002 \
   ./target/debug/aerodesk-signal >/tmp/mpop-sig-a.log 2>&1 &
 SIG_A=$!
 echo "== 启动 PoP-B（SIP 15061 + 其 SFU 会议桥）"
 RECORD_DIR="$REC" SFU_HOST_ADDRESS=127.0.0.1 SFU_SIGNAL_PORT=15100 SFU_INTERNAL_PORT=15102 \
   ./target/debug/aerodesk-sfu >/tmp/mpop-sfu-b.log 2>&1 &
 SFU_B=$!
-POP_ID=pop-b POP_REGISTRY_FILE=/tmp/mpop-registry.json POP_SIP_URLS=pop-a=127.0.0.1:15060 SIGNAL_OPS_PORT=15062 SIP_UDP_PORT=15061 SFU_URL=http://127.0.0.1:15102 \
+POP_ID=pop-b POP_REGISTRY_FILE=/tmp/mpop-registry.json POP_SIP_URLS=pop-a=127.0.0.1:15060 SIGNAL_OPS_PORT=15062 SIP_UDP_PORT=15061 SIP_TCP_PORT=15061 SFU_URL=http://127.0.0.1:15102 \
   ./target/debug/aerodesk-signal >/tmp/mpop-sig-b.log 2>&1 &
 SIG_B=$!
 OK=0

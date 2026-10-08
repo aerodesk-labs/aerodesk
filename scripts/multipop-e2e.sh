@@ -45,11 +45,11 @@ RECORD_DIR="$REC/a" ./target/debug/aerodesk-sfu >/tmp/mpop-sfu-a.log 2>&1 &
 SFU_A=$!
 SFU_MEDIA_PORT=3479 SFU_SIGNAL_PORT=3005 SFU_INTERNAL_PORT=3007 RECORD_DIR="$REC/b" ./target/debug/aerodesk-sfu >/tmp/mpop-sfu-b.log 2>&1 &
 SFU_B=$!
-SIGNAL_OPS_PORT=3001 SIP_UDP_PORT="$SIP_PORT" SIP_TLS_PORT=5061 SIP_WSS_PORT=3061 POP_ID=pop-a \
+SIGNAL_OPS_PORT=3001 SIP_UDP_PORT="$SIP_PORT" SIP_TCP_PORT="$SIP_PORT" SIP_TLS_PORT=5061 SIP_WSS_PORT=3061 POP_ID=pop-a \
   POP_REGISTRY_FILE="$REG" POP_SIP_URLS="pop-b=127.0.0.1:5070" SFU_URL=http://127.0.0.1:3002 \
   ./target/debug/aerodesk-signal >/tmp/mpop-sig-a.log 2>&1 &
 SIG_A=$!
-SIGNAL_OPS_PORT=3006 SIP_UDP_PORT=5070 SIP_TLS_PORT=5071 SIP_WSS_PORT=3071 POP_ID=pop-b \
+SIGNAL_OPS_PORT=3006 SIP_UDP_PORT=5070 SIP_TCP_PORT=5070 SIP_TLS_PORT=5071 SIP_WSS_PORT=3071 POP_ID=pop-b \
   POP_REGISTRY_FILE="$REG" SFU_URL=http://127.0.0.1:3007 \
   ./target/debug/aerodesk-signal >/tmp/mpop-sig-b.log 2>&1 &
 SIG_B=$!

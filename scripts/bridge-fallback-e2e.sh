@@ -119,7 +119,7 @@ if [ "$REMOTE" = "0" ] || [ "${REMOTE_LOOPBACK:-}" = "1" ]; then
     "$TARGET_DIR/aerodesk-sfu" >/tmp/bfb-sfu-a.log 2>&1 &
   SFU_A=$!
   POP_ID=pop-a AUTH_TOKENS="$AUTH" SIGNAL_PORT=14801 SIGNAL_OPS_PORT="$PLAIN_A" SFU_URL="http://127.0.0.1:${INT_A}" \
-    SIP_UDP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-a.log 2>&1 &
+    SIP_UDP_PORT="$SIP_A" SIP_TCP_PORT="$SIP_A" "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-a.log 2>&1 &
   SIG_A_PID=$!
   for _ in $(seq 1 80); do grep -q "SIP/UDP 监听已起" /tmp/bfb-sig-a.log 2>/dev/null && break; sleep 0.2; done
   sleep 0.3
@@ -169,7 +169,7 @@ if [ "$REMOTE" = "0" ] || [ "${REMOTE_LOOPBACK:-}" = "1" ]; then
     BRIDGE_CMD="$BRIDGE_CMD" BRIDGE_READY_TIMEOUT_SECS=20 BRIDGE_AUTH_TOKEN="$AUTH" \
     BRIDGE_MONITOR_INTERVAL_SECS=2 \
     SIGNAL_PORT=14901 SIGNAL_OPS_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
-    SIP_UDP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b.log 2>&1 &
+    SIP_UDP_PORT="$SIP_B" SIP_TCP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b.log 2>&1 &
   SIG_B_PID=$!
   for _ in $(seq 1 80); do grep -q "SIP/UDP 监听已起" /tmp/bfb-sig-b.log 2>/dev/null && break; sleep 0.2; done
   sleep 0.3
@@ -352,7 +352,7 @@ sleep 1
 POP_ID=pop-b AUTH_TOKENS="$AUTH" ROOM_POP_MAP="bridge-=pop-a" POP_URLS="pop-a=${SIG_A_URL}" \
   BRIDGE_CMD="false" BRIDGE_READY_TIMEOUT_SECS=5 BRIDGE_FAIL_COOLDOWN_SECS=5 \
   SIGNAL_PORT=14901 SIGNAL_OPS_PORT="$PLAIN_B" SFU_URL="http://127.0.0.1:${INT_B}" \
-  SIP_UDP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b2.log 2>&1 &
+  SIP_UDP_PORT="$SIP_B" SIP_TCP_PORT="$SIP_B" "$TARGET_DIR/aerodesk-signal" >/tmp/bfb-sig-b2.log 2>&1 &
 SIG_B_PID=$!
 for _ in $(seq 1 50); do grep -q "SIP/UDP 监听已起" /tmp/bfb-sig-b2.log 2>/dev/null && break; sleep 0.2; done
 # PoP-A publisher 仍在 room（重新起）
