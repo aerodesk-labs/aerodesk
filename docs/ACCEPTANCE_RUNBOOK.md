@@ -130,6 +130,7 @@ bash scripts/input-e2e.sh   # MouseMove(0.3,0.4)/Button/Wheel/Key/修饰键坐�
 | 所有端口 TCP 通但 0 字节 | 本机代理/TUN（Clash 等）接管流量 | 关闭 TUN 或加 `IP-CIDR,<服务器IP>/32,DIRECT` |
 | signal 连不上（握手失败） | 端口不对/安全组未放行 | 用部署实际端口（默认 3003，本部署 14703）；安全组放行 TCP |
 | ICE connected 但 0 帧 | UDP 媒体端口未放行，或 SFU 未设公网通告地址 | 安全组放行 **UDP** <media_port>；SFU 设 `SFU_HOST_ADDRESS=<公网IP>` + `SFU_BIND_ADDRESS=0.0.0.0` |
+| ICE 一直超时，日志里 host candidate 是 `198.18.x.x`（或 `10.x` 的 TUN/VPN 地址） | 旧版只取**默认路由出接口**那一个地址；默认路由落在 Clash TUN / WireGuard / 企业 VPN 上时，候选就是隧道地址，两端互发到隧道里 | 升级到枚举全部接口的版本（`aerodesk-core::net_ifaces`：物理优先、隧道/网桥排后、剔除 198.18.0.0/15 fake-IP）；临时办法是关 TUN 或在客户端显式指定可达接口 |
 | 被控端无画面 | 无头/服务会话无桌面输出 | 真实桌面会话；X11 需 DISPLAY |
 | 摄像头枚举为空 | 无 /dev/video* 或权限 | 插摄像头 + 用户加入 video 组 |
 

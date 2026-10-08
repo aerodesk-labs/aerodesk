@@ -1109,16 +1109,30 @@ fn connect_inner(
     };
     // 通配绑定（0.0.0.0）的 local_addr 不能作为候选（str0m 拒绝）：探测出接口 IP
     // 作为 host 候选（与 aerodesk-core 一致；失败回退 loopback）。
-    let mut host_candidate = addr;
-    if addr.ip().is_unspecified() {
-        host_candidate = discover_egress_ip(addr.port());
-    }
-    if force_relay {
-        info!("force-relay: skip host candidate {host_candidate}");
+    // 通配绑定 → 枚举所有本机接口地址（物理优先、隧道/网桥排后、剔除 fake-IP）；
+    // 只取出接口地址在默认路由落在 TUN/VPN 时会把候选变成隧道地址，ICE 必失败。
+    let host_candidates: Vec<std::net::SocketAddr> = if addr.ip().is_unspecified() {
+        let ips = aerodesk_core::net_ifaces::local_host_candidates();
+        if ips.is_empty() {
+            vec![discover_egress_ip(addr.port())]
+        } else {
+            ips.into_iter()
+                .map(|ip| std::net::SocketAddr::new(ip, addr.port()))
+                .collect()
+        }
     } else {
-        endpoint
-            .add_local_candidate(host_candidate, Protocol::Udp)
-            .map_err(|e| format!("candidate: {e}"))?;
+        vec![addr]
+    };
+    let host_candidate = host_candidates[0];
+    if force_relay {
+        info!("force-relay: skip host candidates {host_candidates:?}");
+    } else {
+        for c in &host_candidates {
+            endpoint
+                .add_local_candidate(*c, Protocol::Udp)
+                .map_err(|e| format!("candidate: {e}"))?;
+        }
+        info!("host candidates: {host_candidates:?}");
     }
     // relayed 候选（typ relay）：ICE 按优先级直连优先、TURN 兜底。
     if let Some(tt) = socket.turn() {

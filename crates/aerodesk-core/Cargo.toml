@@ -17,6 +17,8 @@ sha2 = "0.10"
 sha1 = "0.10"
 hmac = "0.12"
 libc = "0.2"
+# P0 候选枚举：枚举本机接口地址（TUN/VPN 默认路由下不能只取出接口地址）。
+if-addrs = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "0.2"
 webpki-roots = "0.26"

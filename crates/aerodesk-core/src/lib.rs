@@ -24,6 +24,7 @@ pub mod endpoint;
 pub mod file_transfer;
 pub mod media;
 pub mod media_socket;
+pub mod net_ifaces;
 pub mod p2p_call;
 pub mod pcmu;
 pub mod platform;

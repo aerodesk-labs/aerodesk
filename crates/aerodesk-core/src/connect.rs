@@ -198,14 +198,29 @@ fn connect_sip_uac(
     );
     let mut socket = crate::media_socket::MediaSocket::new(direct, turn);
     let mut endpoint = crate::Endpoint::new();
-    let mut host_candidate = addr;
-    if addr.ip().is_unspecified() {
-        host_candidate = egress_ip(addr.port());
-    }
+    // 通配绑定 → 枚举**所有**本机接口地址（物理优先、隧道排后、剔除 fake-IP）；
+    // 只取出接口地址会在默认路由落在 TUN/VPN 时把候选变成隧道地址，ICE 必失败
+    // （2026-10-08 实测：两端候选都只有 198.18.0.1）。枚举失败回退出接口探测。
+    let host_candidates: Vec<std::net::SocketAddr> = if addr.ip().is_unspecified() {
+        let ips = crate::net_ifaces::local_host_candidates();
+        if ips.is_empty() {
+            vec![egress_ip(addr.port())]
+        } else {
+            ips.into_iter()
+                .map(|ip| std::net::SocketAddr::new(ip, addr.port()))
+                .collect()
+        }
+    } else {
+        vec![addr]
+    };
+    let host_candidate = host_candidates[0];
     if !force_relay {
-        endpoint
-            .add_local_candidate(host_candidate, Protocol::Udp)
-            .map_err(|e| format!("candidate: {e:?}"))?;
+        for c in &host_candidates {
+            endpoint
+                .add_local_candidate(*c, Protocol::Udp)
+                .map_err(|e| format!("candidate: {e:?}"))?;
+        }
+        tracing::debug!("host candidates: {host_candidates:?}");
     }
     if let Some(tt) = socket.turn() {
         let relayed = tt.relayed_addr();

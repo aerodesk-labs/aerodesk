@@ -319,24 +319,29 @@ impl P2pCall {
     }
 }
 
-/// 由绑定地址推导 ICE host candidate 候选 IP（语义与 connect 路径一致：
-/// 通配符绑定不产生 candidate，改探测出口 IP；都失败回退 127.0.0.1）。
+/// 由绑定地址推导 ICE host candidate 候选 IP。
+///
+/// 显式绑定了具体地址 → 只通告该地址。通配绑定 → **枚举所有本机接口地址**
+/// （物理优先、隧道/容器网桥排最后，剔除 fake-IP/链路本地，见
+/// [`crate::net_ifaces`]），而不是只取出接口那一个：默认路由在 TUN/VPN 上时，
+/// 「只取出接口」等于只通告隧道地址，两端会互相发到隧道里、ICE 永远连不上
+/// （2026-10-08 实测：两端候选都只有 `198.18.0.1`）。枚举失败才回退出接口探测，
+/// 再失败回退 loopback。
 fn media_candidates(bind_addr: SocketAddr, discover_external: bool) -> Vec<IpAddr> {
-    let mut candidates = Vec::new();
     let ip = bind_addr.ip();
     if !ip.is_unspecified() {
-        candidates.push(ip);
+        return vec![ip];
     }
-    if discover_external
-        && let Some(local) = discover_local_ip()
-        && !candidates.contains(&local)
-    {
-        candidates.push(local);
+    if discover_external {
+        let enumerated = crate::net_ifaces::local_host_candidates();
+        if !enumerated.is_empty() {
+            return enumerated;
+        }
+        if let Some(local) = discover_local_ip() {
+            return vec![local];
+        }
     }
-    if candidates.is_empty() {
-        candidates.push(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
-    }
-    candidates
+    vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]
 }
 
 /// 从 offer JSON 取**第一个音频 m-line** 的 mid（被叫侧发音频用；与
