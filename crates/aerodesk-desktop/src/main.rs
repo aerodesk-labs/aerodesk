@@ -4827,18 +4827,117 @@ fn add_recent(ui: &AppWindow, room: &str, server: &str) {
     save_recents(&new);
 }
 
+/// 桌面端日志目录（按平台约定；GUI 从开始菜单启动时**没有控制台**，日志必须落盘才可排查）。
+///
+/// 2026-10-08 真机教训：Windows 上窗口「无响应／透明」时**盘上一条日志都没有**，只能靠
+/// `Start-Process … -RedirectStandardOutput` 兜，用户不可能这么做。
+fn desktop_log_dir() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(|p| std::path::PathBuf::from(p).join("AeroDesk").join("logs"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME").map(|p| {
+            std::path::PathBuf::from(p)
+                .join("Library")
+                .join("Logs")
+                .join("AeroDesk")
+        })
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let base = std::env::var_os("XDG_STATE_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(|p| std::path::PathBuf::from(p).join(".local").join("state"))
+            })?;
+        Some(base.join("aerodesk"))
+    }
+}
+
+/// 日志文件超过该值就轮转成 `desktop.log.1`（只留一代：排障要的是「最近发生了什么」）。
+const LOG_ROTATE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// 需要轮转时把 `path` 改名为 `<path>.1`（已存在的 `.1` 直接覆盖）。返回是否发生了轮转。
+fn rotate_log_if_needed(path: &std::path::Path) -> bool {
+    let too_big = std::fs::metadata(path)
+        .map(|m| m.len() > LOG_ROTATE_BYTES)
+        .unwrap_or(false);
+    if !too_big {
+        return false;
+    }
+    let mut rotated = path.as_os_str().to_os_string();
+    rotated.push(".1");
+    let _ = std::fs::rename(path, std::path::PathBuf::from(rotated));
+    true
+}
+
 fn init_log() {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("aerodesk_desktop=info"));
+    // 文件层（可选）：GUI 无控制台，盘上日志是唯一可事后取证的地方。
+    let file_layer = desktop_log_dir().and_then(|dir| {
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join("desktop.log");
+        rotate_log_if_needed(&path);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok()?;
+        Some(
+            fmt::layer()
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file)),
+        )
+    });
     tracing_subscriber::registry()
-        .with(fmt::layer())
         .with(filter)
+        .with(fmt::layer())
+        .with(file_layer)
         .init();
+    if let Some(dir) = desktop_log_dir() {
+        tracing::info!(log_dir = %dir.display(), "桌面端日志已落盘（desktop.log，>4MiB 轮转为 .1）");
+    }
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// 回归（2026-10-08 真机缺口）：GUI 必须把日志写到盘上，且文件超限要被轮转。
+    #[test]
+    fn log_rotation_threshold_and_paths() {
+        let dir = std::env::temp_dir().join(format!("aerodesk-logtest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("desktop.log");
+        // 小文件不轮转
+        std::fs::write(&path, b"hello").unwrap();
+        assert!(!rotate_log_if_needed(&path), "小文件不应轮转");
+        assert!(path.exists());
+        // 超限轮转：主文件被移走，返回 true
+        std::fs::write(&path, vec![b'x'; (LOG_ROTATE_BYTES + 1) as usize]).unwrap();
+        assert!(rotate_log_if_needed(&path), "超过阈值必须轮转");
+        assert!(dir.join("desktop.log.1").exists(), "轮转后的 .1 应在");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 日志目录按平台约定（至少在目标平台上不是空路径）。
+    #[test]
+    fn log_dir_is_platform_specific() {
+        let d = desktop_log_dir().expect("应解析出日志目录");
+        let s = d.to_string_lossy().to_string();
+        #[cfg(target_os = "macos")]
+        assert!(s.contains("Library/Logs/AeroDesk"), "{s}");
+        #[cfg(target_os = "windows")]
+        assert!(s.to_lowercase().contains("aerodesk"), "{s}");
+        #[cfg(all(unix, not(target_os = "macos")))]
+        assert!(s.contains("aerodesk"), "{s}");
+    }
+
     /// #576 回归：subset 配置 JSON 可解析（修复前被 unwrap_or_default 静默
     /// 吞掉并反向覆写配置文件——e2e seed 实测踩坑）。
     #[test]
