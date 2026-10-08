@@ -292,10 +292,10 @@ cargo run -p aerodesk-agent -- --role viewer --signal ws://127.0.0.1:5060   --ro
 > `/healthz` 带 `sip.tcp`、unit 有 `SIP_TCP_PORT=15060`，而这两样在 main（`35ad688`）里都不存在
 > （只在未合并的 `feat/sip-default-tcp`）。独立评审实测：`bin/`+unit mtime **13:09**、进程 **13:09:35**
 > 启动，当前二进制 sha256 ≠ 备份里的 `sha256-after.txt`，11:47 那版已被覆盖到
-> `~/aerodesk-redeploy-20261008-b/*.prev`（该目录本节未提）。
+> `~/aerodesk-redeploy-20261008-b/*.prev`（**该目录的内容在下面「备份目录实况」里已列全**）。
 > 备份目录实况（2026-10-08 复核 `ls -la`）：
 > - `~/aerodesk-redeploy-20261008/`（11:47）= 重部署**前**的旧件：`aerodesk-signal.orig`、
->   `aerodesk-sfu.orig`、`aerodesk-signal.service.orig`（这两份 unit 的 mtime 是 **Aug 12**，不是 Aug 23）、
+>   `aerodesk-sfu.orig`、`aerodesk-signal.service.orig`（**unit 的 mtime 不同**：`aerodesk-sfu.service.orig` = Aug 12 14:05、`aerodesk-signal.service.orig` = **Aug 23 22:35**；两份**二进制**都是 Aug 23 22:33）、
 >   `aerodesk-sfu.service.orig`，另有 `healthz-before.json`、`ports-before.txt`、`sha256-before/after.txt`；
 > - `~/aerodesk-redeploy-20261008-b/`（13:09）= **11:47 那次**的二进件快照：`aerodesk-signal.prev`、
 >   `aerodesk-sfu.prev`，以及 unit 副本 `aerodesk-signal.service`（**这个没有后缀**）。
@@ -309,9 +309,11 @@ cargo run -p aerodesk-agent -- --role viewer --signal ws://127.0.0.1:5060   --ro
 >
 > ```sh
 > # 【回滚前必做】13:09 那版在跑且**无备份**——先自己留一份，否则回滚后不可逆：
+> # 目标目录必须先建（cp 到不存在的目录会 exit=1；这条保险丝曾经写坏过）。
+> sudo mkdir -p ~/aerodesk-pre-rollback-$(date +%Y%m%d-%H%M)
 > sudo cp -a /opt/aerodesk/bin/aerodesk-signal /opt/aerodesk/bin/aerodesk-sfu ~/aerodesk-pre-rollback-$(date +%Y%m%d-%H%M)/
 >
-> # A) 回到 11:47 之前（最旧的一版：Aug 23 二进制 + Aug 12 unit）
+> # A) 回到 11:47 之前（最旧的一版：二进制 Aug 23 22:33；unit 各自 Aug 12 / Aug 23 22:35）
 > sudo cp -p ~/aerodesk-redeploy-20261008/aerodesk-signal.orig         /opt/aerodesk/bin/aerodesk-signal
 > sudo cp -p ~/aerodesk-redeploy-20261008/aerodesk-sfu.orig            /opt/aerodesk/bin/aerodesk-sfu
 > sudo cp -p ~/aerodesk-redeploy-20261008/aerodesk-signal.service.orig /etc/systemd/system/aerodesk-signal.service
