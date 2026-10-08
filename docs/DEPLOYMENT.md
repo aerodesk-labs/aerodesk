@@ -260,6 +260,7 @@ cargo run -p aerodesk-agent -- --role viewer --signal ws://127.0.0.1:5060   --ro
 | 端口 | 协议 | 用途 |
 |---|---|---|
 | 15060 | UDP | signal SIP/UDP（客户端连接口，最关键；P3 单栈） |
+| 15060 | TCP | signal SIP/TCP（**当前运行中的进程在听**；2026-10-08 复核 `ss -lntu` 见 `0.0.0.0:15060 tcp LISTEN`） |
 | 5061 | TCP | signal SIP/TLS |
 | 3061 | TCP | signal SIP/WSS（RFC 7118） |
 | 14701 | TCP | signal ops HTTPS（/healthz /devices /metrics/prometheus /admin/*） |
@@ -267,14 +268,26 @@ cargo run -p aerodesk-agent -- --role viewer --signal ws://127.0.0.1:5060   --ro
 | 14779 | UDP + TCP | TURN 中继 |
 | 15449 | TCP | TURN TLS |
 
-> 2026-10-08 实测重部署：该机上另有一个 FreeSWITCH 绑在私网 `10.3.0.9:5060`，
-> 若 signal 用默认 `5060`，内核会把 REGISTER 的回包交给更具体的 `127.0.0.1:5060`，
-> 客户端收到 **403** 并误以为口令错——因此 SIP/UDP 显式用 `15060`（systemd
-> `Environment=SIP_UDP_PORT=15060`）。SIP/TLS 与 WSS 用默认 `5061`/`3061`。
-> 本次部署的内核内容 = walgit main 源码树 `e0ab71b2d101c9f8c84bab54623a433d04441e58`；
-> 旧件与 unit 备份在服务器 `~/aerodesk-redeploy-20261008/`（回滚：把 `*.orig`
-> 拷回 `/opt/aerodesk/bin/` 与 `/etc/systemd/system/`，`systemctl daemon-reload &&
-> systemctl restart aerodesk-signal aerodesk-sfu`）。
+> 2026-10-08 实测重部署：该机上另有一个 FreeSWITCH 占着 `5060`（实测绑在**私网 `10.3.0.9:5060`**
+> 与 `[::1]:5060`，TCP+UDP；**该机没有 `127.0.0.1:5060`**），因此 SIP/UDP 显式错开到 `15060`
+> （systemd `Environment=SIP_UDP_PORT=15060`）。SIP/TLS 与 WSS 用默认 `5061`/`3061`。
+>
+> 注：「内核把回包交给更具体的 `127.0.0.1:5060`」那个机制说的是**本开发机**（macOS 上 FreeSWITCH
+> 绑 `127.0.0.1:5060`），不是本服务器——服务器侧只是端口已被占。两句不要混用。
+>
+> **授权要求（评审 must_fix）**：重启/回滚这台**共享**服务器（"systemctl restart"、拷回旧件、
+> 改 unit）属影响他方的动作，**必须先经用户授权**；本节记录的是已授权的 2026-10-08 11:47 那次，
+> 与随后的 13:09 那次。
+>
+> **部署内容声明（已更正）**：本节原写「部署内容 = walgit main 源码树
+> `e0ab71b2d101c9f8c84bab54623a433d04441e58`」——对**当前**节点**不成立**：现跑的二进制的
+> `/healthz` 带 `sip.tcp`、unit 有 `SIP_TCP_PORT=15060`，而这两样在 main（`35ad688`）里都不存在
+> （只在未合并的 `feat/sip-default-tcp`）。独立评审实测：`bin/`+unit mtime **13:09**、进程 **13:09:35**
+> 启动，当前二进制 sha256 ≠ 备份里的 `sha256-after.txt`，11:47 那版已被覆盖到
+> `~/aerodesk-redeploy-20261008-b/*.prev`（该目录本节未提）。
+> 备份与回滚路径：11:47 版在 `~/aerodesk-redeploy-20261008/`、13:09 版的 `-b` 目录同上；
+> 回滚 = 把 `*.orig` / `*.prev` 拷回 `/opt/aerodesk/bin/` 与 `/etc/systemd/system/`，
+> 再 `systemctl daemon-reload && systemctl restart aerodesk-signal aerodesk-sfu`（**需授权**）。
 
 连接示例（信令地址 = SIP 形态 `ws://host:sip-udp-port`）：
 
@@ -286,7 +299,8 @@ cargo run -p aerodesk-agent -- --role publisher --signal ws://129.226.150.174:15
 ```
 
 > 注意：14703 明文 WS 已随 P3 JSON 面退役；14701（ops HTTPS）当前为开发 CA 证书，
-> 浏览器访问需手动信任（`curl -k` 亦然）。节点已重部署到 P3 单栈（2026-10-08），以本表为准。
+> 浏览器访问需手动信任（`curl -k` 亦然）。节点已重部署到 P3 单栈（2026-10-08），以本表为准；
+> **但节点上跑的不是 main 构建**（详见上节「部署内容声明」）——拿它做验收前必先确认这一点。
 > **客户端侧注意（2026-10-08 实测）**：本机 macOS 若开了 Clash TUN，`route -n get 129.226.150.174`
 > 会指向 `utun4` / fake-IP `198.18.0.1`，UDP 会被代理接管——表现为「TCP（ops 14701）通、SIP/UDP 无应答」。
 > 实测证据：服务器 `tcpdump -i any udp port 15060` 能同时看到入包与出包（源为代理出口 IP），
