@@ -688,6 +688,7 @@ fn connect(
         str0m::media::Mid,
         Option<str0m::media::Mid>,
         Option<str0m::media::Mid>,
+        Codec,
     ),
     String,
 > {
@@ -714,6 +715,7 @@ fn connect_with_port(
         str0m::media::Mid,
         Option<str0m::media::Mid>,
         Option<str0m::media::Mid>,
+        Codec,
     ),
     String,
 > {
@@ -745,6 +747,7 @@ fn connect_escalating(
         str0m::media::Mid,
         Option<str0m::media::Mid>,
         Option<str0m::media::Mid>,
+        Codec,
     ),
     String,
 > {
@@ -912,6 +915,7 @@ fn connect_h264(
         str0m::media::Mid,
         Option<str0m::media::Mid>,
         Option<str0m::media::Mid>,
+        Codec,
     ),
     String,
 > {
@@ -944,6 +948,7 @@ fn connect_codec(
         str0m::media::Mid,
         Option<str0m::media::Mid>,
         Option<str0m::media::Mid>,
+        Codec,
     ),
     String,
 > {
@@ -978,6 +983,7 @@ fn connect_camera(
         str0m::media::Mid,
         Option<str0m::media::Mid>,
         Option<str0m::media::Mid>,
+        Codec,
     ),
     String,
 > {
@@ -1005,9 +1011,13 @@ fn connect_inner(
         str0m::media::Mid,
         Option<str0m::media::Mid>,
         Option<str0m::media::Mid>,
+        Codec,
     ),
     String,
 > {
+    // 实际协商/使用的视频 codec：publisher 被叫若请求 h265 但对端 offer 无 H265
+    // （如浏览器）会降级 H264，调用方据此选编码器（web-viewer-macos-hevc-no-video）。
+    let mut actual_codec = codec.unwrap_or(Codec::H264);
     // #552 SIP 信令面（替代 WSS join）：REGISTER → viewer INVITE 目标（房间名
     // =设备 AoR 时 1:1 透明代理；无绑定时服务端会议桥入 SFU）；publisher 等
     // IncomingCall（1:1 被叫，以 --room 值为设备 AoR——e2e 脚本 viewer 呼同
@@ -1243,6 +1253,36 @@ fn connect_inner(
     } else {
         let (call_id, offer_sdp) = incoming.expect("publisher 必有来电");
         info!("incoming call {call_id}（offer {}B）", offer_sdp.len());
+        // web-viewer-macos-hevc-no-video：publisher 用 h265，但浏览器 WebRTC 无 H265
+        // （offer 视频 m-line 无 H265 rtpmap）→ 协商不出共同 codec（黑屏）。据此降级
+        // H264 并重建端点；ICE candidate 与 codec 无关，重建后重新加。
+        if codec == Some(Codec::Hevc) && !aerodesk_core::p2p_call::offer_has_h265(&offer_sdp) {
+            info!("对端 offer 无 H265（如浏览器 Web viewer），发布端降级 H264");
+            actual_codec = Codec::H264;
+            endpoint = Endpoint::new_with_codec(Codec::H264);
+            if force_relay {
+                info!("force-relay: skip host candidates {host_candidates:?}");
+            } else {
+                for c in &host_candidates {
+                    endpoint
+                        .add_local_candidate(*c, Protocol::Udp)
+                        .map_err(|e| format!("candidate: {e}"))?;
+                }
+                info!("host candidates: {host_candidates:?}");
+            }
+            if let Some(tt) = socket.turn() {
+                let relayed = tt.relayed_addr();
+                if let Ok(la) = tt.local_addr() {
+                    let local = std::net::SocketAddr::new(host_candidate.ip(), la.port());
+                    info!("relayed candidate {relayed} (local {local}) force_relay={force_relay}");
+                    if let Err(e) = endpoint.add_relay_candidate(relayed, local) {
+                        warn!("relay candidate rejected (TURN disabled): {e:?}");
+                    }
+                }
+            } else if force_relay {
+                warn!("force-relay requested but no TURN transport (AERO_TURN_* 未配置)");
+            }
+        }
         let offer: str0m::change::SdpOffer =
             serde_json::from_str(&offer_sdp).map_err(|e| format!("offer parse: {e}"))?;
         let answer = endpoint
@@ -1383,6 +1423,7 @@ fn connect_inner(
         video_mid,
         audio_mid,
         camera_mid,
+        actual_codec,
     ))
 }
 
@@ -2025,7 +2066,7 @@ fn publisher(
     audio: bool,
     audio_opus: bool,
 ) -> Result<(), String> {
-    let (session, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
+    let (session, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid, _actual_codec) =
         connect_escalating(signal_url, room, Role::Publisher, auth, audio)?;
     publisher_media_loop(
         Some(&session),
@@ -2261,7 +2302,7 @@ fn viewer(
     request_file: Option<&str>,
     send_control: Option<&str>,
 ) -> Result<(), String> {
-    let (session, mut endpoint, mut socket, _, _audio_mid, _camera_mid) = if camera {
+    let (session, mut endpoint, mut socket, _, _audio_mid, _camera_mid, _actual_codec) = if camera {
         connect_camera(signal_url, room, Role::Viewer, auth, audio, None)?
     } else {
         connect_with_port(
@@ -2929,7 +2970,7 @@ fn publisher_x264(
     const W: u32 = 640;
     const H: u32 = 360;
 
-    let (session, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
+    let (session, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid, _actual_codec) =
         match connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio) {
             Ok(v) => v,
             Err(e) => {
@@ -3101,7 +3142,7 @@ fn publisher_vt(
     use aerodesk_platform::macos::vt_encoder::VtEncoder;
     use str0m::media::Rid;
 
-    let (session, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
+    let (session, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid, _actual_codec) =
         match connect_h264(signal_url, room, Role::Publisher, auth, simulcast, audio) {
             Ok(v) => v,
             Err(e) => {
@@ -3279,7 +3320,7 @@ fn publisher_generic<
     camera_cap: Option<CC>,
     mut cursor: Option<CS>,
 ) {
-    let (session, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) =
+    let (session, mut endpoint, mut socket, video_mid, audio_mid, camera_mid, _actual_codec) =
         match if camera_cap.is_some() {
             connect_camera(signal_url, room, Role::Publisher, auth, audio, Some(codec))
         } else {
@@ -4032,7 +4073,7 @@ fn publisher_capture_ffmpeg(
     const H: u32 = 0;
     const FPS: u32 = 30;
 
-    let (session, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid) =
+    let (session, mut endpoint, mut socket, video_mid, audio_mid, _camera_mid, actual_codec) =
         match connect_codec(signal_url, room, Role::Publisher, auth, audio, codec) {
             Ok(v) => v,
             Err(e) => {
@@ -4061,7 +4102,7 @@ fn publisher_capture_ffmpeg(
         "screen capture started at {w}x{h} (display {})",
         capture.display_id()
     );
-    let mut encoder = match FfmpegEncoder::new(w, h, FPS, 8_000_000, codec) {
+    let mut encoder = match FfmpegEncoder::new(w, h, FPS, 8_000_000, actual_codec) {
         Ok(e) => e,
         Err(e) => {
             error!("ffmpeg encoder init failed ({w}x{h}): {e}");
@@ -4114,7 +4155,7 @@ fn publisher_capture_ffmpeg(
         while let Some(ev) = endpoint.poll_event() {
             match ev {
                 ClientEvent::IceConnected => {
-                    info!("ICE connected, starting screen+ffmpeg stream (codec={codec:?})");
+                    info!("ICE connected, starting screen+ffmpeg stream (codec={actual_codec:?})");
                     connected = true;
                 }
                 ClientEvent::Closed => {
@@ -4248,28 +4289,30 @@ fn publisher_capture(
     const H: u32 = 0;
     // core Codec -> videotoolbox Codec（仅 H264/HEVC 走此路径；vp9/av1 走 ffmpeg 路径）。
     use videotoolbox::Codec as VtCodec;
-    let vt_codec = match codec {
+
+    let (session, mut endpoint, mut socket, video_mid, audio_mid, camera_mid, actual_codec) =
+        match connect_inner(
+            signal_url,
+            room,
+            Role::Publisher,
+            None,
+            Some(codec),
+            simulcast,
+            audio,
+            auth,
+            camera,
+            false,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("connect failed: {e}");
+                return;
+            }
+        };
+    // 编码器用 connect_inner 返回的**实际协商 codec**（对端 offer 无 H265 时已降级 H264）。
+    let vt_codec = match actual_codec {
         Codec::Hevc => VtCodec::HEVC,
         _ => VtCodec::H264,
-    };
-
-    let (session, mut endpoint, mut socket, video_mid, audio_mid, camera_mid) = match connect_inner(
-        signal_url,
-        room,
-        Role::Publisher,
-        None,
-        Some(codec),
-        simulcast,
-        audio,
-        auth,
-        camera,
-        false,
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("connect failed: {e}");
-            return;
-        }
     };
 
     // #75 远程光标：真实光标位置（30Hz）。
@@ -4367,7 +4410,7 @@ fn publisher_capture(
         // 编码分辨率 = 采集实际尺寸（保持显示器宽高比）。
         let (cw, ch) = (capture.width(), capture.height());
         info!(
-            "screen capture started at {cw}x{ch} (display {}), codec={codec:?}",
+            "screen capture started at {cw}x{ch} (display {}), codec={actual_codec:?}",
             capture.display_id()
         );
         let encoder = match VtEncoder::new_with_codec(cw, ch, FPS, 8_000_000, vt_codec) {

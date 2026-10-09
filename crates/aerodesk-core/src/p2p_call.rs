@@ -383,6 +383,44 @@ pub fn offer_video_mid(offer_sdp: &str) -> Option<str0m::media::Mid> {
     None
 }
 
+/// 判断 offer SDP 的视频 m-line 是否含 H265（rtpmap 名称 `H265`，RFC 7798）。
+///
+/// 用途：发布端降级（`web-viewer-macos-hevc-no-video`）。浏览器 WebRTC 的
+/// `getCapabilities` 无 H265（实测 H265_SEND/RECV=false），publisher 默认 h265 时
+/// 收到浏览器 offer 会协商不出共同视频 codec（黑屏）。发布端据此检测对端能力，
+/// 不含 H265 则降级 H264。
+///
+/// offer 形如 `{"type":"offer","sdp":"<SDP 文本>"}`（与 [`offer_video_mid`] 同构）。
+/// 解析不到视频 m-line 或无 rtpmap 时返回 false（不降级）。
+pub fn offer_has_h265(offer_sdp: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(offer_sdp) else {
+        return false;
+    };
+    let Some(sdp) = v.get("sdp").and_then(|s| s.as_str()) else {
+        return false;
+    };
+    let mut in_video = false;
+    for line in sdp.lines() {
+        if let Some(rest) = line.strip_prefix("m=") {
+            in_video = rest.starts_with("video");
+            continue;
+        }
+        if !in_video {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("a=rtpmap:") {
+            // 格式：a=rtpmap:<pt> <codec>/<clock>（如 a=rtpmap:96 H265/90000）。
+            // 只取 codec 名（去 /clock 后缀），再比 H265/HEVC。
+            let codec = rest.split_whitespace().nth(1).unwrap_or("");
+            let codec_name = codec.split('/').next().unwrap_or(codec);
+            if codec_name.eq_ignore_ascii_case("H265") || codec_name.eq_ignore_ascii_case("HEVC") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,5 +633,61 @@ mod tests {
         // 畸形/纯 SDP 无视频输入：None 分支健壮性。
         assert_eq!(offer_video_mid("not-json"), None);
         assert_eq!(offer_video_mid(r#"{"type":"offer","sdp":"v=0\r\n"}"#), None);
+    }
+
+    /// 发布端降级判据：offer 视频 m-line 是否含 H265（rtpmap 名称）。
+    #[test]
+    fn offer_has_h265_detects_video_codec_in_offer() {
+        let wrap = |sdp: &str| {
+            format!(
+                "{{\"type\":\"offer\",\"sdp\":\"{}\"}}",
+                sdp.replace('\n', "\\r\\n")
+            )
+        };
+
+        // 浏览器型 offer：H264/VP8/VP9，无 H265 → false（应降级）。
+        let browser = wrap(
+            "v=0\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96 97 98\n\
+a=rtpmap:96 H264/90000\n\
+a=rtpmap:97 VP8/90000\n\
+a=rtpmap:98 VP9/90000\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\n\
+a=rtpmap:111 opus/48000/2",
+        );
+        assert!(
+            !offer_has_h265(&browser),
+            "浏览器 offer 无 H265 应返回 false"
+        );
+
+        // 原生发布端型 offer：H265 + H264 → true（不降级）。
+        let native = wrap(
+            "v=0\n\nm=video 9 UDP/TLS/RTP/SAVPF 96 102\n\
+a=rtpmap:96 H264/90000\n\
+a=rtpmap:102 H265/90000\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\n\
+a=rtpmap:111 opus/48000/2",
+        );
+        assert!(offer_has_h265(&native), "原生 offer 含 H265 应返回 true");
+
+        // 纯音频（无视频 m-line）→ false；非 JSON → false。
+        let audio_only = wrap(
+            "v=0\n\nm=audio 9 UDP/TLS/RTP/SAVPF 111\n\
+a=rtpmap:111 opus/48000/2",
+        );
+        assert!(!offer_has_h265(&audio_only));
+        assert!(!offer_has_h265("not-json"));
+
+        // 音频 m-line 里的 rtpmap 不能误判：audio 先于 video 时，in_video 门控须正确。
+        let audio_then_video = wrap(
+            "v=0\n\nm=audio 9 UDP/TLS/RTP/SAVPF 111\n\
+a=rtpmap:111 opus/48000/2\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\n\
+a=rtpmap:96 H264/90000",
+        );
+        assert!(
+            !offer_has_h265(&audio_then_video),
+            "video 无 H265，audio 的 rtpmap 不得误判"
+        );
     }
 }
