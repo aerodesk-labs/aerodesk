@@ -89,7 +89,9 @@ W --kind status --id <thread> --actor <worker> --parent <issue-oid> \
   --key ~/.walgit/keys/<worker>.ed25519 --push origin
 
 # 3) 在 worktree 里干活（基于 origin/main 开，一个单元一个 worktree/branch）
-git worktree add ../aerodesk-wt-<thread> -b feat/<thread> origin/main
+# 位置约定：一律建在仓库内 .worktrees/<unit>（与宿主 SKILL.md §2 一致），已被 .gitignore 忽略；
+# 不再用历史上的同级目录 ../aerodesk-wt-<thread>。
+git worktree add .worktrees/wt-<thread> -b feat/<thread> origin/main
 
 # 4) 挂实现 + 请审
 W --kind patch --id <thread> --actor <principal> --parent <status-oid> \
@@ -117,7 +119,7 @@ W --kind status --id <thread> --actor <coordinator> --parent <merge-result-oid> 
   --key ~/.walgit/keys/<coordinator>.ed25519 --push origin
 # 7) 收尾清理（协调者）：宿主 SKILL.md §0b 要求 closure 后删该卡的 worktree 与**本地**分支，
 #    并以 git worktree list 复核；下面的**远端分支删除是本仓附加清理**（确认已合并后执行），宿主未要求。
-git worktree remove ../aerodesk-wt-<thread>
+git worktree remove .worktrees/wt-<thread>
 git branch -d feat/<thread>
 git push origin --delete feat/<thread>
 git worktree list
