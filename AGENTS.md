@@ -31,8 +31,11 @@
   计划任务）。**症状辨识**：collab 命令变慢（本机实测 70–90 秒）看着像服务端/网络慢，其实是 inbox
   未折叠 + 本机单次进程启动昂贵——**先 gc，再怀疑网络**。实测 104 条 inbox 时 `collab ls` 要 69–80 秒，
   gc 后 inbox=0、`collab ls` 降到 20.95 秒，`collab report` 仍 104/104 verified、看板列不变（以上性能数字为协调者实测，非本批复测）。
-- 门禁：本地 `cargo fmt --check` / `cargo clippy -- -D warnings` / 相关 `cargo test`；GitHub CI 只在
-  发版节点要求全绿（`RULE_CI常规以本地门禁为准仅发版必需.md`）。
+- 门禁：本地 `cargo fmt --check` / `cargo clippy --workspace --all-targets`（与 CI 同口径；「不得新增
+  lint」用 `scripts/check-clippy-baseline.sh` 对比 `docs/clippy-baseline.txt` 基线，差集非空即新增）/ 相关
+  `cargo test`；GitHub CI 只在发版节点要求全绿（`RULE_CI常规以本地门禁为准仅发版必需.md`）。
+  说明：main 上存在历史存量 clippy 告警（基线已记录 213 条），故 `cargo clippy -- -D warnings` 在未改动
+  的 main 上就是红的，不能作为「是否新增 lint」的判据——基线对比才是（见 `docs/clippy-baseline.txt` 头注）。
 - Conventional Commits，一个提交一个逻辑变更；改动命令、路径或行为时同步更新 README / `docs/`。
 - 一个 agent 一个 principal 一把 key，审查者与被审查者必须是不同 principal。命名约定：新 agent 用
   `<proj>-<role>-N`（取该角色已注册的最大编号 +1），先看 `refs/collab/meta/principals` 再取名；
