@@ -1,5 +1,5 @@
 # clippy 存量告警基线（aerodesk）——「不得新增 lint」的对比基准
-# 生成：2026-10-09T06:09:28Z
+# 生成：2026-10-09（main 208a960，含 hevc 降级修复致 main.rs 行号漂移，重新生成）
 # 工具链：rustc 1.99.0 (b940084d7 2026-09-28)
 # 命令：cargo clippy --workspace --exclude aerodesk-ios --exclude aerodesk-android --exclude aerodesk-ohos --all-targets --message-format=json
 # 格式：<文件>:<行>: <lint>（文件相对仓库根）
@@ -19,38 +19,38 @@ crates/aerodesk-agent/src/file_transfer.rs:53: clippy::collapsible_if
 crates/aerodesk-agent/src/main.rs:590: unused_variables
 crates/aerodesk-agent/src/main.rs:677: dead_code
 crates/aerodesk-agent/src/main.rs:683: clippy::type_complexity
-crates/aerodesk-agent/src/main.rs:709: clippy::type_complexity
-crates/aerodesk-agent/src/main.rs:740: clippy::type_complexity
-crates/aerodesk-agent/src/main.rs:798: dead_code
-crates/aerodesk-agent/src/main.rs:887: clippy::collapsible_if
-crates/aerodesk-agent/src/main.rs:907: clippy::type_complexity
-crates/aerodesk-agent/src/main.rs:939: clippy::type_complexity
-crates/aerodesk-agent/src/main.rs:973: clippy::type_complexity
-crates/aerodesk-agent/src/main.rs:989: clippy::too_many_arguments
-crates/aerodesk-agent/src/main.rs:1000: clippy::type_complexity
-crates/aerodesk-agent/src/main.rs:1638: clippy::collapsible_if
-crates/aerodesk-agent/src/main.rs:1822: clippy::clone_on_copy
-crates/aerodesk-agent/src/main.rs:2176: clippy::needless_borrow
-crates/aerodesk-agent/src/main.rs:2182: clippy::needless_borrow
-crates/aerodesk-agent/src/main.rs:2185: clippy::needless_borrow
-crates/aerodesk-agent/src/main.rs:2186: clippy::needless_borrow
-crates/aerodesk-agent/src/main.rs:2192: clippy::needless_borrow
-crates/aerodesk-agent/src/main.rs:2246: clippy::too_many_arguments
-crates/aerodesk-agent/src/main.rs:2596: clippy::unnecessary_unwrap
-crates/aerodesk-agent/src/main.rs:2655: clippy::collapsible_if
-crates/aerodesk-agent/src/main.rs:2722: clippy::collapsible_if
-crates/aerodesk-agent/src/main.rs:2883: clippy::empty_line_after_doc_comments
-crates/aerodesk-agent/src/main.rs:2968: clippy::redundant_closure
-crates/aerodesk-agent/src/main.rs:3084: clippy::too_many_arguments
-crates/aerodesk-agent/src/main.rs:3140: clippy::redundant_closure
-crates/aerodesk-agent/src/main.rs:4139: clippy::unnecessary_cast
-crates/aerodesk-agent/src/main.rs:4227: clippy::too_many_arguments
-crates/aerodesk-agent/src/main.rs:4519: clippy::unnecessary_cast
-crates/aerodesk-agent/src/main.rs:4640: clippy::manual_is_multiple_of
-crates/aerodesk-agent/src/main.rs:4689: clippy::manual_is_multiple_of
-crates/aerodesk-agent/src/main.rs:4698: clippy::manual_is_multiple_of
-crates/aerodesk-agent/src/main.rs:4708: unnameable_test_items
-crates/aerodesk-agent/src/main.rs:4709: dead_code
+crates/aerodesk-agent/src/main.rs:710: clippy::type_complexity
+crates/aerodesk-agent/src/main.rs:742: clippy::type_complexity
+crates/aerodesk-agent/src/main.rs:801: dead_code
+crates/aerodesk-agent/src/main.rs:890: clippy::collapsible_if
+crates/aerodesk-agent/src/main.rs:910: clippy::type_complexity
+crates/aerodesk-agent/src/main.rs:943: clippy::type_complexity
+crates/aerodesk-agent/src/main.rs:978: clippy::type_complexity
+crates/aerodesk-agent/src/main.rs:995: clippy::too_many_arguments
+crates/aerodesk-agent/src/main.rs:1006: clippy::type_complexity
+crates/aerodesk-agent/src/main.rs:1679: clippy::collapsible_if
+crates/aerodesk-agent/src/main.rs:1863: clippy::clone_on_copy
+crates/aerodesk-agent/src/main.rs:2217: clippy::needless_borrow
+crates/aerodesk-agent/src/main.rs:2223: clippy::needless_borrow
+crates/aerodesk-agent/src/main.rs:2226: clippy::needless_borrow
+crates/aerodesk-agent/src/main.rs:2227: clippy::needless_borrow
+crates/aerodesk-agent/src/main.rs:2233: clippy::needless_borrow
+crates/aerodesk-agent/src/main.rs:2287: clippy::too_many_arguments
+crates/aerodesk-agent/src/main.rs:2637: clippy::unnecessary_unwrap
+crates/aerodesk-agent/src/main.rs:2696: clippy::collapsible_if
+crates/aerodesk-agent/src/main.rs:2763: clippy::collapsible_if
+crates/aerodesk-agent/src/main.rs:2924: clippy::empty_line_after_doc_comments
+crates/aerodesk-agent/src/main.rs:3009: clippy::redundant_closure
+crates/aerodesk-agent/src/main.rs:3125: clippy::too_many_arguments
+crates/aerodesk-agent/src/main.rs:3181: clippy::redundant_closure
+crates/aerodesk-agent/src/main.rs:4180: clippy::unnecessary_cast
+crates/aerodesk-agent/src/main.rs:4268: clippy::too_many_arguments
+crates/aerodesk-agent/src/main.rs:4562: clippy::unnecessary_cast
+crates/aerodesk-agent/src/main.rs:4683: clippy::manual_is_multiple_of
+crates/aerodesk-agent/src/main.rs:4732: clippy::manual_is_multiple_of
+crates/aerodesk-agent/src/main.rs:4741: clippy::manual_is_multiple_of
+crates/aerodesk-agent/src/main.rs:4751: unnameable_test_items
+crates/aerodesk-agent/src/main.rs:4752: dead_code
 crates/aerodesk-agent/src/privacy.rs:304: clippy::needless_range_loop
 crates/aerodesk-codec/src/decode.rs:121: clippy::unnecessary_cast
 crates/aerodesk-codec/src/encode.rs:80: clippy::manual_range_patterns
