@@ -183,7 +183,7 @@ jobs:
 
       - name: Build release (win64)
         shell: bash
-        run: cargo build --release -p aerodesk-desktop -p aerodesk-agent
+        run: cargo build --release -p aerodesk-desktop -p aerodesk-agent -p aerodesk-host
 
       - name: Package Windows (portable ZIP)
         shell: bash

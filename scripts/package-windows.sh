@@ -13,8 +13,8 @@ VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 [ -n "${FFMPEG_DIR:-}" ] || { echo "FFMPEG_DIR 未设置（需指向 FFmpeg 共享构建根目录）"; exit 1; }
 
 echo "== [1/3] 校验产物"
-for b in target/release/aerodesk-desktop.exe target/release/aerodesk-agent.exe; do
-  [ -f "$b" ] || { echo "缺少 ${b}（先 cargo build --release -p aerodesk-desktop -p aerodesk-agent）"; exit 1; }
+for b in target/release/aerodesk-desktop.exe target/release/aerodesk-agent.exe target/release/aerodesk-host.exe; do
+  [ -f "$b" ] || { echo "缺少 ${b}（先 cargo build --release -p aerodesk-desktop -p aerodesk-agent -p aerodesk-host）"; exit 1; }
 done
 [ -d "$FFMPEG_DIR/bin" ] || { echo "FFMPEG_DIR/bin 不存在: $FFMPEG_DIR"; exit 1; }
 
@@ -24,14 +24,20 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE"
 cp target/release/aerodesk-desktop.exe "$STAGE/"
 cp target/release/aerodesk-agent.exe "$STAGE/"
+# 被控系统服务宿主（无人值守：SYSTEM 常驻；需管理员 `aerodesk-host.exe --install-service`）。
+# 2026-10-08 真机发现：此前**没有**打进包 → P0-3（Windows 无人值守）在包里无从验证。
+cp target/release/aerodesk-host.exe "$STAGE/"
 # FFmpeg 共享 DLL（avcodec/avformat/avutil/avfilter/avdevice/swscale/swresample）。
 cp "$FFMPEG_DIR"/bin/*.dll "$STAGE/"
 cp app-assets/icon-1024.png "$STAGE/aerodesk.png"
 cat > "$STAGE/README.txt" <<EOF
 AeroDesk Windows 便携包（${VERSION}）
 - 观看/主控端：双击 aerodesk-desktop.exe（连接服务器/房间，支持 Windows 被控端双角色）
-- 命令行：aerodesk-agent.exe --role publisher|viewer --signal ws://<host>:3003 --room <room>
-- 被控端示例：aerodesk-agent.exe --role publisher --encoder screen --signal ws://<host>:3003 --room demo
+- 命令行：aerodesk-agent.exe --role publisher|viewer --signal ws://<host>:<sip-port> --room <room>
+  （信令端口是 **SIP** 端口；默认传输 TCP，端口由服务端 SIP_TCP_PORT 决定，如 15060）
+- 被控端示例：aerodesk-agent.exe --role publisher --encoder screen --signal ws://<host>:<sip-port> --room demo
+- 无人值守（被控常驻，需**管理员** PowerShell）：aerodesk-host.exe --install-service
+  （SYSTEM 服务；登录界面态/锁屏态采集见 docs/PRELOGIN_WINDOWS_SERVICE.md、docs/PRELOGIN_WINLOGON_CAPTURE.md）
 - 依赖：本目录内 FFmpeg 共享 DLL（avcodec/avformat/avutil/avfilter/avdevice/swscale/swresample），
   请保持 exe 与 DLL 同目录；Windows 10/11 x64。
 EOF
