@@ -266,9 +266,19 @@ pub struct SipCallLink {
     retry_at: Option<Instant>,
     retry_delay: Duration,
     events: VecDeque<SipLinkEvent>,
+    /// 服务端随 REGISTER 200 下发的 TURN 配置（`SipEvent::Registered.turn`）。
+    ///
+    /// 这是「TURN 由服务端统一管理下发」的消费端：调用方在**起呼/接听前**读它，
+    /// 有则优先于本地 `AERO_TURN_*` / settings（本地配置降级为覆盖=兜底）。
+    dispatched_turn: Option<crate::protocol::signal::TurnConfig>,
 }
 
 impl SipCallLink {
+    /// 服务端下发的 TURN 配置（未下发则为 None）。调用方在起呼/接听前读一次即可。
+    pub fn dispatched_turn(&self) -> Option<&crate::protocol::signal::TurnConfig> {
+        self.dispatched_turn.as_ref()
+    }
+
     /// 创建未启动的链路（初始 [`SipLinkStatus::Stopped`]）。
     pub fn new(config: SipLinkConfig) -> Self {
         Self {
@@ -278,6 +288,7 @@ impl SipCallLink {
             attempt: 1,
             retry_at: None,
             retry_delay: Duration::from_secs(1),
+            dispatched_turn: None,
             events: VecDeque::new(),
         }
     }
@@ -473,10 +484,17 @@ impl SipCallLink {
 
     fn on_event(&mut self, ev: SipEvent) {
         match ev {
-            SipEvent::Registered { aor, .. } => {
+            SipEvent::Registered { aor, turn, .. } => {
                 self.attempt = 1;
                 self.retry_delay = Duration::from_secs(1);
                 self.retry_at = None;
+                if turn.is_some() {
+                    tracing::info!(
+                        urls = %turn.as_ref().map(|t| t.urls.join(",")).unwrap_or_default(),
+                        "收到服务端下发的 TURN 配置"
+                    );
+                }
+                self.dispatched_turn = turn;
                 self.status = SipLinkStatus::Online { aor };
             }
             SipEvent::RegisterFailed { status, reason } => {

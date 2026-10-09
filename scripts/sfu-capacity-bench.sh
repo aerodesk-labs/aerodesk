@@ -19,11 +19,11 @@ TURN_SECRET="${TURN_SECRET:-testsecret}"
 echo "== 构建"
 cargo build -q -p aerodesk-sfu -p aerodesk-signal -p aerodesk-agent
 REC="$(mktemp -d)"
-# #218：TURN relay 变体——SFU 内嵌 TURN server + 信令下发 TURN_URLS +
+# #218：TURN relay 变体——SFU 内嵌 TURN server + 信令随 REGISTER 下发 TURN_URLS +
 # 客户端 force-relay（只通告 relayed 候选）。直连模式保持 #215 行为（无 TURN）。
 if [ "$TURN_RELAY" = "1" ]; then
   # #218：SFU 只给 TURN_SECRET+SFU_TURN_PORT（无 TURN_URLS → 启动内嵌 TURN server）；
-  # TURN_URLS 只给 signal（join 下发）。客户端 force-relay（只通告 relayed 候选）。
+  # TURN_URLS 只给 signal（由 signal 随 REGISTER 200 下发给客户端）。客户端 force-relay（只通告 relayed 候选）。
   export AERODESK_FORCE_RELAY
   AERODESK_FORCE_RELAY=1
   echo "== 启动 SFU + signal（TURN relay 模式：SFU_TURN_PORT=${TURN_PORT}，force-relay）"

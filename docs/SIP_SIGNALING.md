@@ -35,7 +35,7 @@
 |---|---|---|---|
 | 1 | `Ping` | **（消失）** | 现 Ping 是服务端发送队列 drain 的实现工件；rsipstack 传输层常活后无此需求。连接保活 = 传输层 keepalive（WSS ping/pong、RFC 5626 flow）；会话保活 = Session-Timer（§5） |
 | 2 | `Join{room,role,auth_token,dc_ready}` | `REGISTER` → `401` → `REGISTER`+Authorization → `200` | room→AoR；auth_token→Digest 口令；dc_ready 见本节末注 |
-| 3 | `Joined{peer_id,peers,turn}` | `200 OK`(REGISTER) | peers：P0 不下发 roster（在线 = 注册存在）；turn：**不进 SIP 面**——旧 `/config` HTTP 签发已随 JSON 面退役，客户端经 `AERO_TURN_URLS/USERNAME/CREDENTIAL` 静态注入（内嵌 TURN 走 `SFU_TURN_SECRET` 静态 secret） |
+| 3 | `Joined{peer_id,peers,turn}` | `200 OK`(REGISTER) | peers：P0 不下发 roster（在线 = 注册存在）；turn：**随本响应的三个头下发**——`X-AeroDesk-Turn-Urls` / `-User` / `-Cred`（值由 signal 从 SFU `GET /config` 取得，30s 缓存、按 SFU URL 分键；SFU 侧按请求现签 REST 凭证）。客户端解析进 `SipEvent::Registered.turn`，起呼/接听前经 `turn_client::resolve_turn()` 使用：**下发优先，本地 `AERO_TURN_*`／settings 为覆盖兜底**（2026-10-08 起；此前只能静态手配） |
 | 4 | `Redirect{pop,url,reason}` | `302 Moved Temporarily`（Contact = 目标 PoP） | 多 PoP：**服务端 302+Contact 已实现**（P3.1，POP_SIP_URLS）；客户端跟随（会话层换拨）尚未实现（#600 仅落地 core 层 RedirectedTo 事件透传）；亦用于 P2P→SFU 升级重定向（§4.1） |
 | 5 | `Description{from,to,description}` | `INVITE` / `200 OK` 的 SDP body；重协商 = re-INVITE | signal 透传不解析；SFU 模式 = 客户端与 SFU UAS 的对话（见 §4 注） |
 | 6 | `IceCandidate{from,to,candidate}` | `INFO`，Content-Type: `application/trickle-ice-sdpfrag`（RFC 8840） | 字段对齐 candidate / sdpMid / sdpMLineIndex |
@@ -167,9 +167,12 @@ TLS 客户端证书
   `off` 显式关闭），HTTP 仅保留运维面（/healthz /devices /metrics /admin/*）
 - `User-Agent` 携带协议版本；option-tag `Require: aerodesk.p2p` 能力协商
 - Digest 迁移：现有 token 即口令，服务端仅存 HA1（迁移期旧 token 一次性登记）
-- TURN 凭证不进 SIP 面：旧 `/config` HTTP 签发随 JSON 面退役；客户端经
+- ~~TURN 凭证不进 SIP 面：旧 `/config` HTTP 签发随 JSON 面退役；客户端经
   `AERO_TURN_URLS/USERNAME/CREDENTIAL` 静态注入（内嵌 TURN 用 `SFU_TURN_SECRET`
-  静态 secret，外部 coturn 用 `TURN_URLS`）
+  静态 secret，外部 coturn 用 `TURN_URLS`）~~
+  **2026-10-08 起改为随 SIP 下发**（见 §2 的 `Joined.turn` 一格）：`REGISTER` 的 200 OK 带
+  `X-AeroDesk-Turn-{Urls,User,Cred}` 三个头（signal 从 SFU `/config` 取，30s 缓存、按 URL 分键），
+  客户端解析进 `SipEvent::Registered.turn`，`resolve_turn()` **下发优先、本地 `AERO_TURN_*`／settings 为覆盖**
 - **媒体核心不 import SIP 类型**（#552 约束）：SIP UA 收敛在 protocol/core 信令层，
   对媒体层只暴露 SDP/ICE 参数
 

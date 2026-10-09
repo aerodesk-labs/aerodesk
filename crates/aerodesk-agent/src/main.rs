@@ -793,8 +793,8 @@ fn aor_user(aor: &str) -> String {
 /// #552 SIP 环境配置：AERO_SIP_TRANSPORT（tcp|udp|tls，**空/未设 = tcp**——与
 /// `sip_link`/desktop/host 默认一致）/
 /// AERO_SIP_PORT（0=按传输默认）/ AERO_SIP_DOMAIN / AERO_SIP_CA_PEM（TLS CA
-/// 路径，空=系统根）。TURN：AERO_TURN_URLS/USERNAME/CREDENTIAL（SIP 无 join
-/// 下发一环，须本地配置；空=直连）。
+/// 路径，空=系统根）。TURN：AERO_TURN_URLS/USERNAME/CREDENTIAL（**覆盖兜底**——服务端随
+/// REGISTER 200 下发的优先，见 `turn_client::resolve_turn`；空=直连）。
 fn sip_env_cfg(
     signal_url: &str,
     device_id: &str,
@@ -1092,8 +1092,10 @@ fn connect_inner(
     let addr = direct.local_addr().map_err(|e| e.to_string())?;
     info!("local UDP addr: {addr}");
 
-    // TURN：SIP 无 join 下发一环——AERO_TURN_* 环境配置（失败仅告警直连兜底）。
-    let turn_transport = aerodesk_core::turn_client::p2p_turn_transport(
+    // TURN：**优先用服务端随 REGISTER 200 下发的**（此前只能靠 AERO_TURN_* 手配，见
+    // `turn_client.rs` 的 resolve_turn 说明）；本地环境变量为覆盖兜底。
+    let turn_transport = aerodesk_core::turn_client::resolve_turn(
+        link.dispatched_turn(),
         &std::env::var("AERO_TURN_URLS").unwrap_or_default(),
         &std::env::var("AERO_TURN_USERNAME").unwrap_or_default(),
         &std::env::var("AERO_TURN_CREDENTIAL").unwrap_or_default(),

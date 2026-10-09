@@ -205,7 +205,10 @@ fn connect_sip_uac(
     let direct = std::net::UdpSocket::bind(if loopback { "127.0.0.1:0" } else { "0.0.0.0:0" })
         .map_err(|e| format!("bind udp: {e}"))?;
     let addr = direct.local_addr().map_err(|e| e.to_string())?;
-    let turn = crate::turn_client::p2p_turn_transport(
+    // 此处已在 `link` 等 online 之后（见上方 75s 期限那段）——服务端随 REGISTER 200 下发的
+    // TURN 已到手，故**下发优先、本地兜底**。
+    let turn = crate::turn_client::resolve_turn(
+        link.dispatched_turn(),
         &std::env::var("AERO_TURN_URLS").unwrap_or_default(),
         &std::env::var("AERO_TURN_USERNAME").unwrap_or_default(),
         &std::env::var("AERO_TURN_CREDENTIAL").unwrap_or_default(),
@@ -583,7 +586,8 @@ pub fn connect_publisher_sip(
         with_camera: false,
         force_relay,
         bind: "0.0.0.0:0".parse().unwrap(),
-        turn: crate::turn_client::p2p_turn_transport(
+        turn: crate::turn_client::resolve_turn(
+            link.dispatched_turn(),
             &std::env::var("AERO_TURN_URLS").unwrap_or_default(),
             &std::env::var("AERO_TURN_USERNAME").unwrap_or_default(),
             &std::env::var("AERO_TURN_CREDENTIAL").unwrap_or_default(),

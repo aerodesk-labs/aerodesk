@@ -6,7 +6,10 @@
 
 ```
 客户端 ──ICE 失败──▶ SFU 内嵌 TURN (UDP :3479) ──▶ 同进程媒体
-        ◀──信令下发临时凭证（/config）──────────┘
+        ◀──信令下发临时凭证─────────────────────┘
+             · Web 端：`GET /config` → iceServers
+             · native：SIP **REGISTER 的 200 OK** 带 X-AeroDesk-Turn-{Urls,User,Cred} 三个头
+               （signal 从 SFU `/config` 取、30s 缓存；SFU 侧按请求现签 REST 凭证）
 ```
 
 - **默认**：`TURN_SECRET` 设置且未显式 `TURN_URLS` 时，SFU 启动**内嵌 TURN+STUN server**
@@ -65,9 +68,11 @@ SFU/signal 设 `TURN_URLS="turn:sfu.example.com:3478?transport=udp,..."`。
 ## 2. 客户端
 
 浏览器端自动生效：`GET /config` → `RTCPeerConnection({ iceServers })`。
-native 客户端（aerodesk-core，#157 M2 已实现）：信令 `Joined` 消息携带
-`TurnConfig`，客户端在 `connect_live_role`/CLI `connect_inner` 中建立 TURN 传输
-（`TurnTransport`）并把 relayed 候选加入 offer（`typ relay`）；`MediaSocket` 双路
+native 客户端（aerodesk-core）：**注册即得**——`REGISTER` 的 `200 OK` 带
+`X-AeroDesk-Turn-Urls/-User/-Cred`（见上），客户端在 `SipEvent::Registered.turn` 收下，
+起呼/接听前经 `turn_client::resolve_turn()` 建立 TURN 传输（**下发优先**；本地
+`AERO_TURN_*`／settings 为覆盖兜底）。旧 JSON 面的 `Joined.turn` 已随 P3 退役。
+建立 `TurnTransport` 并把 relayed 候选加入 offer（`typ relay`）；`MediaSocket` 双路
 收发——ICE 直连优先、TURN 兜底，无 TURN 配置时行为不变。
 
 > **force-relay（#201）**：某些 NAT/模拟器（qemu slirp）下直连候选"假通"

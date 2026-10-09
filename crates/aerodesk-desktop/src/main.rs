@@ -954,6 +954,16 @@ pub fn focus_window_to_front(window: &slint::Window) {
     }
 }
 
+/// **所有 `show()` 之后都必须调用**：Windows 上 hide()→show() 的窗口可能不重绘/透明
+/// （Slint/winit 已知；#487 托盘实测、2026-10-08 用户真机再次复现）。非 Windows 平台为空操作。
+///
+/// 由 `repaint_after_show_guard` 单测强制：本文件里任何 `.show()` 之后 5 行内必须出现本函数名。
+fn show_and_repaint(window: &slint::Window) {
+    let _ = window;
+    #[cfg(target_os = "windows")]
+    raise_window_windows(window);
+}
+
 /// Windows：托盘单击/菜单恢复主窗口——隐藏（HideWindow 关窗）后再 show
 /// 的窗口可能不重绘/透明：强制重绘 + SW_RESTORE 置前（#487 托盘实测）。
 #[cfg(target_os = "windows")]
@@ -1312,6 +1322,7 @@ fn open_session_window(
             let kind = SessionWindow::Control(win.as_weak());
             install_session_close_handler(ui.as_weak(), kind.clone(), slot);
             win.show().map_err(|e| e.to_string())?;
+            show_and_repaint(ui.window());
             Ok(kind)
         }
         ConnectMode::View => {
@@ -1320,6 +1331,7 @@ fn open_session_window(
             let kind = SessionWindow::View(win.as_weak());
             install_session_close_handler(ui.as_weak(), kind.clone(), slot);
             win.show().map_err(|e| e.to_string())?;
+            show_and_repaint(ui.window());
             Ok(kind)
         }
         ConnectMode::Camera => {
@@ -1330,6 +1342,7 @@ fn open_session_window(
             let kind = SessionWindow::Camera(win.as_weak());
             install_session_close_handler(ui.as_weak(), kind.clone(), slot);
             win.show().map_err(|e| e.to_string())?;
+            show_and_repaint(ui.window());
             Ok(kind)
         }
     }
@@ -1501,6 +1514,8 @@ fn open_file_transfer_window(ui: &AppWindow) {
         ui.set_file_open(false);
         ui.set_status(format!("打开文件传输窗口失败：{e}").into());
     }
+    // 成功路径同样要强制重绘（Windows hide→show 可能透明）。
+    show_and_repaint(win.window());
 }
 
 /// #458 把聊天文本发送到窗口关联会话的 chat 通道，并在本地消息列表中回显。
@@ -1591,6 +1606,8 @@ fn open_message_window(ui: &AppWindow) {
         ui.set_message_open(false);
         ui.set_status(format!("打开发消息窗口失败：{e}").into());
     }
+    // 成功路径同样要强制重绘（Windows hide→show 可能透明）。
+    show_and_repaint(win.window());
 }
 
 /// #452 把命令文本发送到终端窗口关联的会话 cmd 通道。
@@ -1693,6 +1710,8 @@ fn open_terminal_window(ui: &AppWindow) {
         ui.set_terminal_open(false);
         ui.set_status(format!("打开终端窗口失败：{e}").into());
     }
+    // 成功路径同样要强制重绘（Windows hide→show 可能透明）。
+    show_and_repaint(win.window());
 }
 
 /// 发起观看/控制会话（#441 连接页功能按钮共用一个启动路径）。
@@ -1806,7 +1825,8 @@ fn open_viewer_session(
             session_cleanup_weak(&ui.as_weak(), slot, Some("信令未连接".into()));
             return;
         };
-        // #552 ICE：TURN 配置取本地设置（SIP 路径无 join 下发，须本地配置）。
+        // #552 ICE：TURN 本地配置（服务端随 REGISTER 下发优先，本项为覆盖兜底，
+        // 见 aerodesk_core::turn_client::resolve_turn）。
         let mut turn_cfg = load_settings();
         let call_id = format!(
             "c-{}-{}",
@@ -2029,7 +2049,10 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                                 with_camera: false,
                                 force_relay: false,
                                 bind: "0.0.0.0:0".parse().unwrap(),
-                                turn: aerodesk_core::turn_client::p2p_turn_transport(
+                                turn: aerodesk_core::turn_client::resolve_turn(
+                                    link.lock()
+                                        .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                        .dispatched_turn(),
                                     &turn_urls,
                                     &turn_username,
                                     &turn_credential,
@@ -2140,7 +2163,10 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                                 with_camera: false,
                                 force_relay: false,
                                 bind: "0.0.0.0:0".parse().unwrap(),
-                                turn: aerodesk_core::turn_client::p2p_turn_transport(
+                                turn: aerodesk_core::turn_client::resolve_turn(
+                                    link.lock()
+                                        .unwrap_or_else(aerodesk_core::util::lock_recover)
+                                        .dispatched_turn(),
                                     &turn_urls,
                                     &turn_username,
                                     &turn_credential,
@@ -2267,6 +2293,7 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                                             WINDOW_STATE.lock().unwrap_or_else(aerodesk_core::util::lock_recover).incoming =
                                                 Some(win.as_weak());
                                             let _ = win.show();
+                                            show_and_repaint(win.window());
                                             ui.set_status(
                                                 format!("收到 {from_device} 的远控请求，等待确认").into(),
                                             );
@@ -3102,6 +3129,7 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(weak) = weak {
                 let _ = weak.upgrade_in_event_loop(|ui| {
                     let _ = ui.show();
+                    show_and_repaint(ui.window());
                     focus_window_to_front(ui.window());
                 });
             }
@@ -4385,6 +4413,7 @@ fn main() -> Result<(), slint::PlatformError> {
         tray.on_show_window(move || {
             if let Some(ui) = win.upgrade() {
                 let _ = ui.show();
+                show_and_repaint(ui.window());
                 // “显示主窗口”：已打开时也要把窗口带到最前（含最小化还原）。
                 #[cfg(target_os = "macos")]
                 focus_window_to_front(ui.window());
@@ -4448,6 +4477,7 @@ fn main() -> Result<(), slint::PlatformError> {
             .on_close_requested(move || slint::CloseRequestResponse::HideWindow);
     }
     ui.show()?;
+    show_and_repaint(ui.window());
     if let Some(tray) = &tray {
         if let Err(e) = tray.show() {
             eprintln!("system tray unavailable: {e:?}");
@@ -4821,18 +4851,154 @@ fn add_recent(ui: &AppWindow, room: &str, server: &str) {
     save_recents(&new);
 }
 
+/// 桌面端日志目录（按平台约定；GUI 从开始菜单启动时**没有控制台**，日志必须落盘才可排查）。
+///
+/// 2026-10-08 真机教训：Windows 上窗口「无响应／透明」时**盘上一条日志都没有**，只能靠
+/// `Start-Process … -RedirectStandardOutput` 兜，用户不可能这么做。
+fn desktop_log_dir() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(|p| std::path::PathBuf::from(p).join("AeroDesk").join("logs"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME").map(|p| {
+            std::path::PathBuf::from(p)
+                .join("Library")
+                .join("Logs")
+                .join("AeroDesk")
+        })
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let base = std::env::var_os("XDG_STATE_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(|p| std::path::PathBuf::from(p).join(".local").join("state"))
+            })?;
+        Some(base.join("aerodesk"))
+    }
+}
+
+/// 日志文件超过该值就轮转成 `desktop.log.1`（只留一代：排障要的是「最近发生了什么」）。
+const LOG_ROTATE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// 需要轮转时把 `path` 改名为 `<path>.1`（已存在的 `.1` 直接覆盖）。返回是否发生了轮转。
+fn rotate_log_if_needed(path: &std::path::Path) -> bool {
+    let too_big = std::fs::metadata(path)
+        .map(|m| m.len() > LOG_ROTATE_BYTES)
+        .unwrap_or(false);
+    if !too_big {
+        return false;
+    }
+    let mut rotated = path.as_os_str().to_os_string();
+    rotated.push(".1");
+    let _ = std::fs::rename(path, std::path::PathBuf::from(rotated));
+    true
+}
+
 fn init_log() {
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("aerodesk_desktop=info"));
+    // 文件层（可选）：GUI 无控制台，盘上日志是唯一可事后取证的地方。
+    let file_layer = desktop_log_dir().and_then(|dir| {
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join("desktop.log");
+        rotate_log_if_needed(&path);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok()?;
+        Some(
+            fmt::layer()
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file)),
+        )
+    });
     tracing_subscriber::registry()
-        .with(fmt::layer())
         .with(filter)
+        .with(fmt::layer())
+        .with(file_layer)
         .init();
+    if let Some(dir) = desktop_log_dir() {
+        tracing::info!(log_dir = %dir.display(), "桌面端日志已落盘（desktop.log，>4MiB 轮转为 .1）");
+    }
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// 回归（2026-10-08 真机缺口）：GUI 必须把日志写到盘上，且文件超限要被轮转。
+    #[test]
+    fn log_rotation_threshold_and_paths() {
+        let dir = std::env::temp_dir().join(format!("aerodesk-logtest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("desktop.log");
+        // 小文件不轮转
+        std::fs::write(&path, b"hello").unwrap();
+        assert!(!rotate_log_if_needed(&path), "小文件不应轮转");
+        assert!(path.exists());
+        // 超限轮转：主文件被移走，返回 true
+        std::fs::write(&path, vec![b'x'; (LOG_ROTATE_BYTES + 1) as usize]).unwrap();
+        assert!(rotate_log_if_needed(&path), "超过阈值必须轮转");
+        assert!(dir.join("desktop.log.1").exists(), "轮转后的 .1 应在");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 日志目录按平台约定（至少在目标平台上不是空路径）。
+    #[test]
+    fn log_dir_is_platform_specific() {
+        let d = desktop_log_dir().expect("应解析出日志目录");
+        let s = d.to_string_lossy().to_string();
+        #[cfg(target_os = "macos")]
+        assert!(s.contains("Library/Logs/AeroDesk"), "{s}");
+        #[cfg(target_os = "windows")]
+        assert!(s.to_lowercase().contains("aerodesk"), "{s}");
+        #[cfg(all(unix, not(target_os = "macos")))]
+        assert!(s.contains("aerodesk"), "{s}");
+    }
+
+    /// 守卫（2026-10-08 真机缺陷「窗口变透明」）：本文件里**任何窗口 `show()`** 之后 5 行内必须
+    /// 调用 `show_and_repaint()`——Windows 上 hide()→show() 可能不重绘/透明，而这个不变量此前
+    /// 只靠人记（缓解只挂在托盘那一条路径上）。托盘图标 `tray.show()` 不属窗口，豁免。
+    ///
+    /// 用 `include_str!` 读本文件自身：**先确认真的读到了**（文件长度与含 `fn main` 自检），
+    /// 否则"扫到 0 处"会变成一个静默通过的假守卫。
+    #[test]
+    fn repaint_after_show_guard() {
+        let src = include_str!("main.rs");
+        assert!(src.len() > 10_000, "自文件读取异常（长度 {}）", src.len());
+        assert!(src.contains("fn main"), "自文件内容异常：找不到 fn main");
+        let lines: Vec<&str> = src.split('\n').collect();
+        let mut offenders: Vec<(usize, String)> = Vec::new();
+        let mut checked = 0usize;
+        for (i, ln) in lines.iter().enumerate() {
+            if !ln.contains(".show()") || ln.contains("tray.show()") || ln.contains("//") {
+                continue;
+            }
+            checked += 1;
+            let show_indent = ln.len() - ln.trim_start().len();
+            // 判据两条：① 10 行内出现调用；② **调用行的缩进不得深于 show 行**——否则说明它落在
+            // `if let Err(e) = win.show() { … }` 这类分支里，成功路径根本不会执行（评审用变异
+            // 证明过：只判"出现过"时，把调用包进 `if false {}` 仍绿）。
+            let ok = lines[i + 1..(i + 11).min(lines.len())].iter().any(|cl| {
+                cl.contains("show_and_repaint(") && cl.len() - cl.trim_start().len() <= show_indent
+            });
+            if !ok {
+                offenders.push((i + 1, ln.trim().to_string()));
+            }
+        }
+        assert!(checked >= 5, "只扫到 {checked} 处 show()，判据可能失效");
+        assert!(
+            offenders.is_empty(),
+            "以下 show() 之后 10 行内没有 show_and_repaint()：{offenders:?}"
+        );
+    }
+
     /// #576 回归：subset 配置 JSON 可解析（修复前被 unwrap_or_default 静默
     /// 吞掉并反向覆写配置文件——e2e seed 实测踩坑）。
     #[test]
