@@ -159,12 +159,13 @@ fi
 if [ -z "${TURN_TLS_CA:-}" ]; then
     export TURN_TLS_CA="$PWD/certs/cer.pem"
 fi
-# #552 SIP：TURN 须本地配置（AERO_TURN_*）——REST 凭证（TURN_SECRET）与
+# #552 SIP：TURN 凭证此处由 AERO_TURN_* 显式覆盖（服务端随 REGISTER 200 下发为优先，
+# 脚本显式传是为了让断言可复现、与下发解耦）——REST 凭证（TURN_SECRET）与
 # SFU 内嵌 TURN 一致（username=`<expiry>:<user>`，credential=base64(HMAC-SHA1)）。
 TURN_USER="$(($(date +%s) + 3600)):turn-e2e"
 TURN_CRED="$(python3 -c "import hmac,hashlib,base64; print(base64.b64encode(hmac.new(b'$TURN_SECRET', b'$TURN_USER', hashlib.sha1).digest()).decode())")"
 echo "== 3a) 发布端（TURN_PROTO=${TURN_PROTO}）：allocate + relayed 候选 + ICE"
-# #584：发布端同样需本地 AERO_TURN_* 配置（#552 SIP 化后 TURN 不随信令自动下发），
+# #584：发布端同样显式传 AERO_TURN_* 覆盖（凭证由服务端随 REGISTER 下发优先；显式传使断言与下发解耦），
 # 否则不发起 allocation，3b 的「发布端 TURN 接入」断言必失败（与 viewer 对称）。
 AERO_TURN_URLS="$SIG_TURN_URLS" AERO_TURN_USERNAME="$TURN_USER" AERO_TURN_CREDENTIAL="$TURN_CRED" \
   "$TARGET_DIR"/aerodesk-agent --role publisher --encoder x264 --noisy \

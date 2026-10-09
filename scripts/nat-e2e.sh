@@ -330,7 +330,8 @@ kill_pair() {
   VIEW_PID=""; PUB_PID=""
 }
 
-# TURN 凭证（coturn REST 规范，与 TURN_SECRET 一致；SIP 无 join 下发一环 → 本地配置 #570）。
+# TURN 凭证（coturn REST 规范，与 TURN_SECRET 一致；服务端随 REGISTER 200 下发为优先，
+# 本处 AERO_TURN_* 显式覆盖 #570）。
 # 输出为未加引号的 `VAR=value` 空格串，供 launch_agent 的 export 展开（值不含空白字符）。
 # 用户覆盖（AERO_TURN_* 环境变量）在启动期快照，因为 launch_agent 会 unset 这些
 # 环境变量来隔离各场景配置。
