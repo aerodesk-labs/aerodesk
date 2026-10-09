@@ -42,8 +42,10 @@ try {
     $env:SFU_BIND_ADDRESS = "0.0.0.0"
     $env:SFU_HOST_ADDRESS = "127.0.0.1"
     # #598 P2a：浏览器信令走 SIP-WSS 面（3061）。本脚本是双浏览器拓扑、**不启动任何 CLI 客户端**（见文件头注），
-    # 故下面的 SIP UDP 端口设置只保证 signal 的该监听可用（客户端默认传输已是 TCP，同号自洽）。
+    # 故下面的 SIP UDP 端口设置只保证 signal 的该监听可用（客户端默认传输已是 TCP）。UDP+TCP 同号显式设定，
+    # 避免 $env:SIP_PORT 覆盖时 TCP 仍落默认 5060 而与 UDP 不同号（假红）。
     $env:SIP_UDP_PORT = "$SipPort"
+    $env:SIP_TCP_PORT = "$SipPort"
     $env:SIP_WSS_PORT = "3061"
     $sfu = Start-Process -FilePath ".\target\debug\aerodesk-sfu.exe" -WindowStyle Hidden `
         -RedirectStandardOutput "$logDir\sfu.log" -RedirectStandardError "$logDir\sfu.err" -PassThru

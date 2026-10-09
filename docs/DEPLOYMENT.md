@@ -293,8 +293,8 @@ cargo run -p aerodesk-agent -- --role viewer --signal ws://127.0.0.1:5060   --ro
 >
 > **部署内容声明（已更正）**：本节原写「部署内容 = walgit main 源码树
 > `e0ab71b2d101c9f8c84bab54623a433d04441e58`」——对**当前**节点**不成立**：现跑的二进制的
-> `/healthz` 带 `sip.tcp`、unit 有 `SIP_TCP_PORT=15060`，而这两样在 main（`35ad688`）里都不存在
-> （只在未合并的 `feat/sip-default-tcp`）。独立评审 + 本轮复核的**逐文件** mtime（`stat -c '%y | %n'`）：
+> `/healthz` 带 `sip.tcp`、unit 有 `SIP_TCP_PORT=15060`，而这两样在当时的 main（`35ad688`）里都不存在
+> （只在 `feat/sip-default-tcp` 上，该分支现已并入 main）。独立评审 + 本轮复核的**逐文件** mtime（`stat -c '%y | %n'`）：
 > `bin/aerodesk-signal` = **10-08 13:09:35**、`bin/aerodesk-sfu` = **13:09:35**、
 > `systemd/aerodesk-signal.service` = **13:09:35**，而 **`systemd/aerodesk-sfu.service` 仍是 08-12 14:05:24**
 > （13:09 那次只换了 signal 的 unit）；两个进程都启于 13:09:35。当前二进制 sha256 ≠ 备份里的
@@ -357,7 +357,7 @@ cargo run -p aerodesk-agent -- --role publisher --signal ws://129.226.150.174:15
 
 > 注意：14703 明文 WS 已随 P3 JSON 面退役；14701（ops HTTPS）当前为开发 CA 证书，
 > 浏览器访问需手动信任（`curl -k` 亦然）。节点已重部署到 P3 单栈（2026-10-08），以本表为准；
-> **但节点上跑的不是 main 构建**（详见上节「部署内容声明」）——拿它做验收前必先确认这一点。
+> **但节点上跑的是旧于 main 的构建**（详见上节「部署内容声明」）——拿它做验收前必先确认这一点。
 > **客户端侧注意（2026-10-08 实测）**：本机 macOS 若开了 Clash TUN，`route -n get 129.226.150.174`
 > 会指向 `utun4` / fake-IP `198.18.0.1`，UDP 会被代理接管——表现为「TCP（ops 14701）通、SIP/UDP 无应答」。
 > 实测证据：服务器 `tcpdump -i any udp port 15060` 能同时看到入包与出包（源为代理出口 IP），
