@@ -235,6 +235,15 @@ function register(attempt) {
 // ---------- WebRTC（非 trickle：候选内联，等 gathering 完成后整体回 200） ----------
 async function startCapture() {
     // 屏幕分享（sendonly 视频源；e2e 用 --auto-select-desktop-capture-source）。
+    // 重连场景：capture 仍有效（全部 track 仍 live）时直接复用，避免重新弹采集选择器
+    // （#175 重连退避下长故障会每 8s 重弹一次 getDisplayMedia）。
+    if (capture && capture.getTracks().length > 0
+        && capture.getTracks().every((t) => t.readyState === 'live')) {
+        $('preview').srcObject = capture;
+        $('placeholder').style.display = 'none';
+        log('复用现有屏幕分享（' + capture.getTracks().length + ' track，无需重新采集）');
+        return;
+    }
     capture = await navigator.mediaDevices.getDisplayMedia({
         video: { frameRate: 30, width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: false,
@@ -544,7 +553,7 @@ function scheduleReconnect() {
     reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
         if (userDisconnected) return;
-        cleanupAll();
+        cleanupAll(false);   // 保留媒体轨：重连复用，避免重新弹采集选择器
         connect();
     }, delay);
 }
@@ -611,7 +620,7 @@ async function connect() {
         }
     } catch (e) {
         log('error: ' + e);
-        cleanupAll();
+        cleanupAll(false);   // 启动失败也保留媒体轨：马上重连时无需重新采集
         setStatus('启动失败: ' + e.message);
         // 建立前的失败（onerror，未 open）不会触发 onclose ⇒ 不在这里补排就永久停摆。
         // 用户已点「停止」时由 scheduleReconnect 内的 userDisconnected 守卫挡掉。
@@ -640,7 +649,7 @@ function cleanupCall() {
     rtc = null;
     callId = null; toTag = null;
 }
-function cleanupAll() {
+function cleanupAll(stopCapture = true) {
     cleanupCall();
     if (regTimer) { clearInterval(regTimer); regTimer = null; }
     if (ws) {
@@ -651,11 +660,15 @@ function cleanupAll() {
         try { sock.close(); } catch (_) {}
     }
     if (capture) {
-        capture.getTracks().forEach((t) => t.stop());
-        capture = null;
+        if (stopCapture) {
+            // 主动断开：真正停止媒体轨（预览清空、占位符回归）。
+            capture.getTracks().forEach((t) => t.stop());
+            capture = null;
+            $('preview').srcObject = null;
+            $('placeholder').style.display = 'flex';
+        }
+        // stopCapture=false：重连复用媒体轨（1:1 P2P 不依赖信令），preview 保持不动。
     }
-    $('preview').srcObject = null;
-    $('placeholder').style.display = 'flex';
     setIce('');
     phase = 'idle';
 }
