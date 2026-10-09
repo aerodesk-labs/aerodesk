@@ -1322,7 +1322,7 @@ fn open_session_window(
             let kind = SessionWindow::Control(win.as_weak());
             install_session_close_handler(ui.as_weak(), kind.clone(), slot);
             win.show().map_err(|e| e.to_string())?;
-            show_and_repaint(&ui.window());
+            show_and_repaint(ui.window());
             Ok(kind)
         }
         ConnectMode::View => {
@@ -1331,7 +1331,7 @@ fn open_session_window(
             let kind = SessionWindow::View(win.as_weak());
             install_session_close_handler(ui.as_weak(), kind.clone(), slot);
             win.show().map_err(|e| e.to_string())?;
-            show_and_repaint(&ui.window());
+            show_and_repaint(ui.window());
             Ok(kind)
         }
         ConnectMode::Camera => {
@@ -1342,7 +1342,7 @@ fn open_session_window(
             let kind = SessionWindow::Camera(win.as_weak());
             install_session_close_handler(ui.as_weak(), kind.clone(), slot);
             win.show().map_err(|e| e.to_string())?;
-            show_and_repaint(&ui.window());
+            show_and_repaint(ui.window());
             Ok(kind)
         }
     }
@@ -1515,7 +1515,7 @@ fn open_file_transfer_window(ui: &AppWindow) {
         ui.set_status(format!("打开文件传输窗口失败：{e}").into());
     }
     // 成功路径同样要强制重绘（Windows hide→show 可能透明）。
-    show_and_repaint(&win.window());
+    show_and_repaint(win.window());
 }
 
 /// #458 把聊天文本发送到窗口关联会话的 chat 通道，并在本地消息列表中回显。
@@ -1607,7 +1607,7 @@ fn open_message_window(ui: &AppWindow) {
         ui.set_status(format!("打开发消息窗口失败：{e}").into());
     }
     // 成功路径同样要强制重绘（Windows hide→show 可能透明）。
-    show_and_repaint(&win.window());
+    show_and_repaint(win.window());
 }
 
 /// #452 把命令文本发送到终端窗口关联的会话 cmd 通道。
@@ -1711,7 +1711,7 @@ fn open_terminal_window(ui: &AppWindow) {
         ui.set_status(format!("打开终端窗口失败：{e}").into());
     }
     // 成功路径同样要强制重绘（Windows hide→show 可能透明）。
-    show_and_repaint(&win.window());
+    show_and_repaint(win.window());
 }
 
 /// 发起观看/控制会话（#441 连接页功能按钮共用一个启动路径）。
@@ -1825,7 +1825,8 @@ fn open_viewer_session(
             session_cleanup_weak(&ui.as_weak(), slot, Some("信令未连接".into()));
             return;
         };
-        // #552 ICE：TURN 配置取本地设置（SIP 路径无 join 下发，须本地配置）。
+        // #552 ICE：TURN 本地配置（服务端随 REGISTER 下发优先，本项为覆盖兜底，
+        // 见 aerodesk_core::turn_client::resolve_turn）。
         let mut turn_cfg = load_settings();
         let call_id = format!(
             "c-{}-{}",
@@ -2292,7 +2293,7 @@ fn spawn_signal_presence(ui: &AppWindow, settings: &AppSettings) {
                                             WINDOW_STATE.lock().unwrap_or_else(aerodesk_core::util::lock_recover).incoming =
                                                 Some(win.as_weak());
                                             let _ = win.show();
-                                            show_and_repaint(&win.window());
+                                            show_and_repaint(win.window());
                                             ui.set_status(
                                                 format!("收到 {from_device} 的远控请求，等待确认").into(),
                                             );
@@ -3128,7 +3129,7 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(weak) = weak {
                 let _ = weak.upgrade_in_event_loop(|ui| {
                     let _ = ui.show();
-                    show_and_repaint(&ui.window());
+                    show_and_repaint(ui.window());
                     focus_window_to_front(ui.window());
                 });
             }
@@ -4412,7 +4413,7 @@ fn main() -> Result<(), slint::PlatformError> {
         tray.on_show_window(move || {
             if let Some(ui) = win.upgrade() {
                 let _ = ui.show();
-                show_and_repaint(&ui.window());
+                show_and_repaint(ui.window());
                 // “显示主窗口”：已打开时也要把窗口带到最前（含最小化还原）。
                 #[cfg(target_os = "macos")]
                 focus_window_to_front(ui.window());
@@ -4476,7 +4477,7 @@ fn main() -> Result<(), slint::PlatformError> {
             .on_close_requested(move || slint::CloseRequestResponse::HideWindow);
     }
     ui.show()?;
-    show_and_repaint(&ui.window());
+    show_and_repaint(ui.window());
     if let Some(tray) = &tray {
         if let Err(e) = tray.show() {
             eprintln!("system tray unavailable: {e:?}");

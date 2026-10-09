@@ -63,8 +63,8 @@ pub struct ServiceSettings {
     /// #552 SIP 迁移：TLS CA PEM 文件路径（空 = 系统根证书包）。
     #[serde(default)]
     pub sip_ca_pem: String,
-    /// #552 ICE：TURN 中继 URL（逗号分隔；空 = 直连）。SIP 路径无 join 下发
-    /// TurnConfig 一环，须本地配置。
+    /// #552 ICE：TURN 中继 URL（逗号分隔；空 = 直连）。服务端随 REGISTER 下发优先，
+    /// 本项为本地覆盖兜底（见 [`aerodesk_core::turn_client::resolve_turn`]）。
     #[serde(default)]
     pub turn_urls: String,
     /// #552 ICE：TURN 用户名。

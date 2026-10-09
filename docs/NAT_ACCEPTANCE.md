@@ -32,7 +32,7 @@
 | ICE 超时 | 连接阶段：无 TURN 5s / 有 TURN 15s；失败报 `ICE 连接超时（直连 5s / TURN 15s 未建立）` | `crates/aerodesk-agent/src/main.rs`（connect 阶段） |
 | 会话死亡 | str0m `is_alive()` 失效 → `ICE session ended` → `--reconnect` 退避重连（1s/2s/4s/8s/10s 封顶，#173） | `main.rs` run_with_reconnect |
 | force-relay | `AERODESK_FORCE_RELAY=1\|true`：跳过 host 候选、只通告 relayed（#201/#218） | `connect.rs:236` force_relay_env |
-| TURN 凭证 | SIP 无 join 下发一环 → **须本地配置** `AERO_TURN_URLS/USERNAME/CREDENTIAL`（#570）；coturn REST 规范 `username=<expiry>:<userid>`、`credential=base64(HMAC-SHA1(secret, username))` | `main.rs` connect_h264、`aerodesk-core::turn_client::p2p_turn_transport` |
+| TURN 凭证 | 服务端随 SIP `REGISTER` 的 200 OK 下发（`X-AeroDesk-Turn-{Urls,User,Cred}`）**优先**；本地 `AERO_TURN_URLS/USERNAME/CREDENTIAL` 为覆盖兜底（#570 的 `AERO_TURN_*` 现退为本地层）；coturn REST 规范 `username=<expiry>:<userid>`、`credential=base64(HMAC-SHA1(secret, username))` | `main.rs` connect_h264、`aerodesk-core::turn_client::resolve_turn` |
 | TURN 传输 | RFC 5766 Allocate/CreatePermission/ChannelBind/Send/Data/Refresh；`TURN allocation ok` 日志 | `crates/aerodesk-core/src/turn_client.rs:163` |
 | 内嵌 TURN server | `TURN_SECRET` 设置且无显式 `TURN_URLS` 时启动：`SFU_TURN_PORT`（默认 3479，UDP+TCP）+ `SFU_TURN_TLS_PORT`（5349）；relayed 地址=**`SFU_HOST_ADDRESS`:relay_port**（#216 通告地址，公网 VPS 必须显式设公网 IP） | `crates/aerodesk-sfu/src/turn_server.rs`、docs/TURN.md |
 | 信令 | CLI 走标准 SIP：`ws://`→SIP/**TCP** 5060（默认传输，`AERO_SIP_TRANSPORT=udp` 可改回 UDP）、`wss://`→SIP/TLS 5061（`AERO_SIP_TRANSPORT`/`AERO_SIP_PORT`/`AERO_SIP_DOMAIN`/`AERO_SIP_CA_PEM`） | `crates/aerodesk-core/src/sip_link.rs` SipLinkConfig::from_parts |
@@ -223,7 +223,7 @@ NAT_SKIP_BUILD=1 NAT_MODE=host ./scripts/nat-e2e.sh
 ```
 
 要点：脚本自起 signal（`SIP_UDP_PORT=16703`）+ SFU（内嵌 TURN），双端 agent 以
-`AERO_SIP_PORT=16703` + `AERO_TURN_*` 连接（SIP 无 join 下发一环，须本地配置）；
+`AERO_SIP_PORT=16703` + `AERO_TURN_*` 连接（TURN 凭证由服务端随 REGISTER 下发，`AERO_TURN_*` 仅为覆盖兜底）；
 先等被控端 `SIP registered` 再起观看端，避免 INVITE 抢跑在 REGISTER 之前被
 signal 当会议 INVITE 转 SFU 桥（无 SFU_URL → 503）。
 
@@ -292,7 +292,7 @@ S2a/S2b 的语义。S1（打洞成功直连）在 netns 下用「撤掉阻断规
 2. **发送路径锁定后不自动切 TURN**（`media_socket.rs` `send_path`）：建议后续：
    直连 socket 连续 N 秒无对端包（或收到 ICMP 不可达）时解锁，回落双路发送，
    让 TURN 兜底接管——把 S4 从「会话级恢复」降到「包级切换」。
-3. **SIP 1:1 下 TURN 凭证无信令下发**（#570 已定 AERO_TURN_* 环境变量）：
-   桌面 UI 的用户配置入口待补（当前仅 CLI 可配）。
+3. **桌面 UI 的 TURN 用户配置入口待补**（当前仅 CLI 可配）。
+   （原记的「SIP 1:1 下 TURN 凭证无信令下发」已失效：凭证随 `REGISTER` 的 200 OK 下发。）
 4. **多 PoP/跨运营商**：对称 NAT 需真实运营商网络，netns 模拟覆盖不到
    （iptables 无法做按目标端口变化的映射）；公网实测须包含一对称 NAT 客户端。

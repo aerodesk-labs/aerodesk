@@ -966,9 +966,6 @@ pub(crate) mod testutil {
     }
 }
 
-/// #552 P2P：由「逗号分隔 URL 串 + 凭证」构 TURN 传输（nil = 无 TURN 配置）。
-/// 供 desktop/host 设置字段 → P2pCallConfig.turn 复用（对 SIP 路径没有
-/// join 下发 TurnConfig 的一环，须本地配置；运行时联网建连，不要在 UI 线程调）。
 /// TURN 配置的解析优先级：**服务端下发的优先**，本地（env/settings）作覆盖兜底。
 ///
 /// 为什么这样定：TURN 属服务端资源，凭据应由服务端统一管理下发（`/config` → SIP REGISTER 200 头）；
@@ -988,6 +985,8 @@ pub fn resolve_turn(
     p2p_turn_transport(urls, username, credential)
 }
 
+/// #552 P2P：由「逗号分隔 URL 串 + 凭证」构 TURN 传输（nil = 无 TURN 配置）。
+/// 供 desktop/host 设置字段 → `P2pCallConfig.turn` 复用；运行时联网建连，不要在 UI 线程调。
 pub fn p2p_turn_transport(urls: &str, username: &str, credential: &str) -> Option<TurnTransport> {
     let urls: Vec<String> = urls
         .split(',')
